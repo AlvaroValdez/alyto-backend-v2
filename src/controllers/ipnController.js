@@ -136,9 +136,42 @@ async function notifyAdminManualPayout(transaction) {
  * @param {object} transaction
  * @returns {number}
  */
+/**
+ * Calcula el monto neto a enviar a Vita descontando los fees de Alyto.
+ *
+ * Fees descontados aquí (retenidos por Alyto antes de enviar):
+ *   payinFee       — costo del método de pago local (ej. Fintoc)
+ *   alytoCSpread   — spread cambiario de Alyto
+ *   fixedFee       — fee fijo por operación
+ *   profitRetention — margen de ganancia de Alyto
+ *
+ * El payoutFee (costo de dispersión en destino) lo descuenta Vita
+ * directamente sobre el monto que recibe — NO se descuenta aquí.
+ *
+ * @param {object} transaction — Documento Mongoose
+ * @returns {number} Monto neto en CLP a enviar a Vita
+ * @throws {Error} Si el monto neto es <= 0
+ */
 function resolveNetAmountForPayout(transaction) {
-  const totalFee = transaction.feeBreakdown?.totalFee ?? 0;
-  return transaction.originalAmount - totalFee;
+  const originAmount = transaction.originalAmount ?? 0;
+  const fees         = transaction.fees ?? transaction.feeBreakdown ?? {};
+
+  const payinFee        = Number(fees.payinFee        ?? 0);
+  const alytoCSpread    = Number(fees.alytoCSpread     ?? 0);
+  const fixedFee        = Number(fees.fixedFee        ?? 0);
+  const profitRetention = Number(fees.profitRetention  ?? 0);
+
+  const montoNeto = originAmount - payinFee - alytoCSpread - fixedFee - profitRetention;
+
+  console.log('[dispatchPayout] originAmount:', originAmount);
+  console.log('[dispatchPayout] fees:', JSON.stringify({ payinFee, alytoCSpread, fixedFee, profitRetention }));
+  console.log('[dispatchPayout] monto neto a Vita:', montoNeto);
+
+  if (montoNeto <= 0) {
+    throw new Error(`[dispatchPayout] Monto neto inválido: ${montoNeto} (originAmount=${originAmount}, totalFees=${payinFee + alytoCSpread + fixedFee + profitRetention})`);
+  }
+
+  return montoNeto;
 }
 
 // ─── dispatchPayout ───────────────────────────────────────────────────────────
