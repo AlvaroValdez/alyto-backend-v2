@@ -277,7 +277,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Ruta catch-all — 404 (debe ser la ÚLTIMA ruta registrada)
-app.use('*', (req, res) => {
+app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
 
