@@ -23,7 +23,7 @@ import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import Sentry            from '../services/sentry.js';
 import {
-  createPaymentIntent,
+  createWidgetLink,
   getPaymentIntent,
   verifyWebhookSignature,
 } from '../services/fintocService.js';
@@ -125,13 +125,16 @@ export async function initiateFintocPayin(req, res) {
   // ── 6. Crear PaymentIntent en Fintoc ──────────────────────────────────────
   let fintocResult;
   try {
-    fintocResult = await createPaymentIntent({
-      amount:      Number(amount),
-      currency:    'CLP',
-      userId:      user._id.toString(),
-      userEmail:   user.email,
-      userName:    `${user.firstName} ${user.lastName}`,
-      description: 'Alyto — Depósito para transferencia internacional',
+    fintocResult = await createWidgetLink({
+      amount:         Number(amount),
+      currency:       'CLP',
+      customer_email: user.email,
+      metadata: {
+        userId:       user._id.toString(),
+        legalEntity:  'SpA',
+      },
+      success_url: `${process.env.APP_URL}/success`,
+      cancel_url:  `${process.env.APP_URL}/send`,
     });
   } catch (error) {
     console.error('[Alyto Controller] Error creando PaymentIntent Fintoc:', {
@@ -174,17 +177,17 @@ export async function initiateFintocPayin(req, res) {
         stage:      'payin',
         provider:   'fintoc',
         status:     'pending',
-        externalId: fintocResult.paymentIntentId,
+        externalId: fintocResult.id,
       }],
 
       status:              'payin_pending',
       alytoTransactionId,
     });
   } catch (error) {
-    // El PaymentIntent ya fue creado en Fintoc — loguear para reconciliación manual
+    // El Checkout Session ya fue creado en Fintoc — loguear para reconciliación manual
     console.error('[Alyto Controller] Error persistiendo transacción Fintoc en BD:', {
       userId,
-      fintocPaymentIntentId: fintocResult.paymentIntentId,
+      fintocCheckoutSessionId: fintocResult.id,
       error: error.message,
     });
     // No interrumpir — el webhook actualizará el estado cuando llegue la confirmación
@@ -192,14 +195,13 @@ export async function initiateFintocPayin(req, res) {
 
   // ── 7. Respuesta al cliente ───────────────────────────────────────────────
   return res.status(201).json({
-    success:               true,
-    alytoTransactionId:    transaction?.alytoTransactionId,
-    fintocPaymentIntentId: fintocResult.paymentIntentId,
-    widgetUrl:             fintocResult.widgetUrl,
-    widgetToken:           fintocResult.widgetToken,
-    amount:                fintocResult.amount,
-    currency:              fintocResult.currency,
-    status:                'payin_pending',
+    success:                  true,
+    alytoTransactionId:       transaction?.alytoTransactionId,
+    fintocCheckoutSessionId:  fintocResult.id,
+    payinUrl:                 fintocResult.url,
+    amount:                   fintocResult.amount,
+    currency:                 fintocResult.currency,
+    status:                   'payin_pending',
   });
 }
 
@@ -554,16 +556,18 @@ export async function initCrossBorderPayment(req, res) {
 
     let fintocResult;
     try {
-      fintocResult = await createPaymentIntent({
-        amount:      Math.round(amount),
-        currency:    'CLP',
-        userId:      userId.toString(),
-        userEmail:   user?.email ?? '',
-        userName:    `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Usuario Alyto',
-        description: `Transferencia internacional Alyto — ${corridor.corridorId.toUpperCase()}`,
+      fintocResult = await createWidgetLink({
+        amount:         Math.round(amount),
+        currency:       'CLP',
+        metadata: {
+          corridorId: corridor.corridorId,
+        },
+        success_url:    `${process.env.APP_URL}/success`,
+        cancel_url:     `${process.env.APP_URL}/send`,
+        customer_email: user?.email,
       });
     } catch (err) {
-      console.error('[Alyto CrossBorder] Error creando PaymentIntent en Fintoc:', {
+      console.error('[Alyto CrossBorder] Error creando Checkout Session en Fintoc:', {
         corridorId, amount, error: err.message,
       });
       Sentry.captureException(err, {
@@ -573,16 +577,13 @@ export async function initCrossBorderPayment(req, res) {
       return res.status(502).json({ error: 'No se pudo crear la orden de pago. Intenta nuevamente.' });
     }
 
-    payinProviderRef = fintocResult.paymentIntentId;
-    payinUrl         = fintocResult.widgetToken;  // widget_token que abre el widget de Fintoc en el FE
+    payinProviderRef = fintocResult.id;
+    payinUrl         = fintocResult.url;   // redirect_url real de Fintoc
     payinProvider    = 'fintoc';
 
-    console.log('[Fintoc] widget_token enviado al FE:', fintocResult.widgetToken);
-    console.log('[Fintoc] fintocResult completo (mapeado):', JSON.stringify(fintocResult, null, 2));
-    console.log('[CrossBorder] Fintoc PaymentIntent creado:', {
-      paymentIntentId: fintocResult.paymentIntentId,
-      widgetToken:     fintocResult.widgetToken ? '[PRESENTE]' : '[AUSENTE]',
-      payinUrl:        payinUrl         ? '[PRESENTE]' : '[AUSENTE]',
+    console.log('[CrossBorder] Fintoc Checkout Session creado:', {
+      checkoutSessionId: fintocResult.id,
+      payinUrl:          payinUrl ? '[PRESENTE]' : '[AUSENTE]',
     });
 
   } else {

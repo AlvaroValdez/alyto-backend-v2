@@ -1,58 +1,40 @@
 /**
  * fintocService.js — Motor de Recaudación Local Chile (AV Finance SpA)
  *
- * Integración con Fintoc Open Banking para iniciación de pagos A2A
- * (Account-to-Account) desde cuentas bancarias chilenas a AV Finance SpA.
- *
- * Documentación Fintoc: https://docs.fintoc.com/reference
+ * Integración con Fintoc Open Banking usando Checkout Sessions.
+ * El usuario es redirigido a la URL de Fintoc para autorizar el pago
+ * desde su cuenta bancaria chilena.
  *
  * Flujo de un payin Fintoc:
- *   1. createPaymentIntent()  → Fintoc devuelve widget_token + payment_id
- *   2. Frontend abre el widget con el widget_token
- *   3. Usuario autoriza el pago en su banco (flujo Open Banking)
+ *   1. createWidgetLink()  → Fintoc devuelve redirect_url + id
+ *   2. Frontend redirige al usuario a redirect_url
+ *   3. Usuario autoriza el pago en su banco
  *   4. Fintoc llama al webhook /webhooks/fintoc con status del pago
  *   5. verifyWebhookSignature() valida la firma antes de procesar
  *
  * COMPLIANCE: AV Finance SpA solo opera en la jurisdicción Chile (legalEntity='SpA').
- * La validación de legalEntity se hace en el controlador, no aquí.
  */
 
 import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-const FINTOC_BASE_URL = 'https://api.fintoc.com/v1';
-
-/**
- * Obtiene la FINTOC_SECRET_KEY de las variables de entorno.
- * Lanza si no está definida — fail fast.
- * @returns {string}
- */
-const IS_DEV = process.env.NODE_ENV !== 'production';
-
-function getFintocApiKey() {
-  const key = process.env.FINTOC_SECRET_KEY;
-  if (!key || key.trim() === '') {
-    if (IS_DEV) return '__dev_mock__';
-    throw new Error('[Alyto Fintoc] Missing FINTOC_SECRET_KEY. Verificar .env o Secrets Manager.');
-  }
-  return key;
-}
+const FINTOC_API_URL = process.env.FINTOC_API_URL || 'https://api.fintoc.com/v1';
 
 /**
  * Helper interno: ejecuta una llamada a la API de Fintoc con fetch nativo.
- *
- * @param {string} endpoint  - Path relativo (ej. '/payment_intents')
- * @param {object} options   - Opciones de fetch (method, body, etc.)
- * @returns {Promise<object>} Respuesta JSON de Fintoc
- * @throws {Error} Si la respuesta no es 2xx
+ * Auth header: solo la key directamente, sin prefijo "Bearer".
  */
 async function fintocRequest(endpoint, options = {}) {
-  const apiKey  = getFintocApiKey();
-  const url     = `${FINTOC_BASE_URL}${endpoint}`;
+  const apiKey = process.env.FINTOC_SECRET_KEY;
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error('[Alyto Fintoc] Missing FINTOC_SECRET_KEY. Verificar .env o Secrets Manager.');
+  }
+
+  const url = `${FINTOC_API_URL}${endpoint}`;
 
   const headers = {
-    'Authorization': `Bearer ${apiKey}`,
+    'Authorization': apiKey,   // Sin "Bearer" — así lo requiere Fintoc
     'Content-Type':  'application/json',
     'Accept':        'application/json',
     ...(options.headers ?? {}),
@@ -73,9 +55,8 @@ async function fintocRequest(endpoint, options = {}) {
   }
 
   if (!response.ok) {
-    // Loguear sin exponer el body completo (puede contener datos sensibles)
     console.error('[Alyto Fintoc] API error:', {
-      status:   response.status,
+      status:    response.status,
       endpoint,
       errorCode: data?.error?.code ?? 'unknown',
       message:   data?.error?.message ?? 'Sin detalle',
@@ -89,118 +70,91 @@ async function fintocRequest(endpoint, options = {}) {
 // ─── Funciones Exportadas ─────────────────────────────────────────────────────
 
 /**
- * Crea un PaymentIntent en Fintoc y retorna el widget_token y el payment_id.
+ * Crea un Checkout Session en Fintoc y retorna la redirect_url y el id.
  *
- * El widget_token es lo que el frontend usa para abrir el widget de Fintoc
- * donde el usuario autoriza la transferencia desde su banco chileno.
+ * La redirect_url es la URL a la que se redirige al usuario para que
+ * autorice el pago desde su banco chileno.
  *
  * @param {object} params
- * @param {number} params.amount        - Monto en CLP (entero, sin decimales)
- * @param {string} params.currency      - Debe ser 'CLP'
- * @param {string} params.userId        - ID interno Alyto (para metadata de trazabilidad)
- * @param {string} params.userEmail     - Email del usuario para Fintoc
- * @param {string} params.userName      - Nombre completo del usuario
- * @param {string} [params.description] - Descripción de la operación (aparece en el banco)
- * @returns {Promise<FintocPaymentIntentResult>}
- *
- * @typedef {Object} FintocPaymentIntentResult
- * @property {string} paymentIntentId - ID del PaymentIntent en Fintoc
- * @property {string} widgetToken     - Token para abrir el widget en el frontend
- * @property {string} widgetUrl       - URL directa del widget (alternativa a token)
- * @property {string} status          - Estado inicial ('created')
- * @property {number} amount          - Monto confirmado
- * @property {string} currency        - Moneda confirmada ('CLP')
+ * @param {number} params.amount          - Monto en CLP (entero, sin decimales)
+ * @param {string} params.currency        - Debe ser 'CLP'
+ * @param {object} [params.metadata]      - Metadata personalizada (transactionId, etc.)
+ * @param {string} [params.success_url]   - URL de redirección tras pago exitoso
+ * @param {string} [params.cancel_url]    - URL de redirección si el usuario cancela
+ * @param {string} [params.customer_email] - Email del usuario
+ * @returns {Promise<{ id: string, url: string, status: string, amount: number, currency: string, metadata: object, created_at: string }>}
  */
-export async function createPaymentIntent({ amount, currency, userId, userEmail, userName, description }) {
-  if (currency !== 'CLP') {
-    throw new Error(`[Alyto Fintoc] Fintoc solo soporta CLP. Moneda recibida: ${currency}`);
-  }
-
-  if (!Number.isInteger(amount) || amount <= 0) {
-    throw new Error('[Alyto Fintoc] El monto debe ser un entero positivo en CLP.');
-  }
-
-  // ── Modo desarrollo: retorna respuesta simulada sin llamar a Fintoc ──────────
-  if (IS_DEV && getFintocApiKey() === '__dev_mock__') {
-    const mockId = `pi_dev_${Date.now()}`;
-    console.info('[Alyto Fintoc][DEV] Mock PaymentIntent creado:', { mockId, amount, userId });
-    return {
-      paymentIntentId: mockId,
-      widgetToken:     `wt_dev_${mockId}`,
-      widgetUrl:       `${process.env.BACKEND_URL ?? 'http://localhost:3000'}/api/v1/dev/fintoc-success?amount=${amount}&id=${mockId}`,
-      status:          'created',
-      amount,
-      currency,
-    };
+export async function createWidgetLink({ amount, currency = 'CLP', metadata = {}, success_url, cancel_url, customer_email }) {
+  if (!amount || amount <= 0) {
+    throw new Error('[Alyto Fintoc] El monto debe ser un número positivo en CLP.');
   }
 
   const payload = {
-    amount,
-    currency,
-    // Descripción visible para el usuario en su banco (sin terminología prohibida)
-    description: description ?? 'Pago Alyto — Transferencia Internacional',
-    customer: {
-      email: userEmail,
-      name:  userName,
-    },
-    metadata: {
-      // Metadata de trazabilidad interna — no aparece en el widget del usuario
-      alyto_user_id:    userId,
-      legal_entity:     'SpA',
-      corridor:         'CL',
-      operation_type:   'payin',
-    },
-    // URL donde Fintoc redirige al usuario tras completar el pago en el widget
-    redirect_url: process.env.FINTOC_REDIRECT_URL ?? 'https://app.alyto.com/payin/success',
+    amount:   Math.round(amount),
+    currency: currency.toUpperCase(),
+    metadata,
   };
 
-  console.info('[Alyto Fintoc] Creando PaymentIntent:', {
-    amount,
-    currency,
-    userId,
-    // No loguear email ni nombre completo del usuario
+  if (success_url) {
+    payload.success_url = success_url;
+    payload.cancel_url  = cancel_url ?? success_url;
+  }
+
+  if (customer_email) {
+    payload.customer_email = customer_email;
+  }
+
+  // Direct Payment: agregar cuenta receptora si está configurada
+  if (process.env.FINTOC_RECIPIENT_HOLDER_ID && process.env.FINTOC_RECIPIENT_ACCOUNT_NUMBER) {
+    payload.recipient_account = {
+      holder_id: process.env.FINTOC_RECIPIENT_HOLDER_ID,
+      number:    process.env.FINTOC_RECIPIENT_ACCOUNT_NUMBER,
+      type:      process.env.FINTOC_RECIPIENT_ACCOUNT_TYPE || 'checking_account',
+    };
+  }
+
+  console.info('[Alyto Fintoc] Creando Checkout Session:', {
+    amount:         payload.amount,
+    currency:       payload.currency,
+    customer_email: payload.customer_email,
+    success_url:    payload.success_url,
   });
 
-  const data = await fintocRequest('/payment_intents', {
+  const data = await fintocRequest('/checkout_sessions', {
     method: 'POST',
     body:   JSON.stringify(payload),
   });
 
-  // Debug: estructura completa de la respuesta de Fintoc (remover en producción estable)
-  console.log('[Fintoc] Respuesta completa crear PI:', JSON.stringify(data, null, 2));
-  console.log('[Fintoc] widget_token extraído:', data?.widget_token);
-  console.log('[Fintoc] data?.widget_token:', data?.data?.widget_token);
+  console.log('✅ [Alyto Fintoc] Checkout Session creado:', data.id);
 
   return {
-    paymentIntentId: data.id,
-    widgetToken:     data.widget_token,
-    widgetUrl:       data.widget_url ?? `https://widget.fintoc.com/?token=${data.widget_token}`,
-    status:          data.status,
-    amount:          data.amount,
-    currency:        data.currency,
+    id:         data.id,
+    url:        data.redirect_url,   // Checkout Sessions usan 'redirect_url'
+    status:     data.status,
+    amount:     data.amount,
+    currency:   data.currency,
+    metadata:   data.metadata,
+    created_at: data.created_at,
   };
 }
 
 /**
- * Consulta el estado actual de un PaymentIntent en Fintoc.
- * Útil para reconciliación o reintentos desde el orquestador.
+ * Consulta el estado de un Checkout Session en Fintoc.
  *
- * @param {string} paymentIntentId - ID retornado por createPaymentIntent
- * @returns {Promise<object>} Objeto PaymentIntent de Fintoc
+ * @param {string} checkoutSessionId - ID retornado por createWidgetLink
+ * @returns {Promise<object>}
  */
-export async function getPaymentIntent(paymentIntentId) {
-  return fintocRequest(`/payment_intents/${paymentIntentId}`);
+export async function getPaymentIntent(checkoutSessionId) {
+  return fintocRequest(`/checkout_sessions/${checkoutSessionId}`);
 }
 
 /**
  * Verifica la firma HMAC-SHA256 del webhook de Fintoc.
  * DEBE llamarse antes de procesar cualquier evento de webhook.
  *
- * Fintoc incluye el header 'fintoc-signature' con la firma del payload.
- *
- * @param {string} rawBody        - Body crudo de la request (string, no parseado)
+ * @param {string} rawBody         - Body crudo de la request (string, no parseado)
  * @param {string} signatureHeader - Valor del header 'fintoc-signature'
- * @returns {boolean} true si la firma es válida
+ * @returns {boolean}
  */
 export function verifyWebhookSignature(rawBody, signatureHeader) {
   const webhookSecret = process.env.FINTOC_WEBHOOK_SECRET;
@@ -209,18 +163,33 @@ export function verifyWebhookSignature(rawBody, signatureHeader) {
     return false;
   }
 
+  // Fintoc envía firma en formato: "t=timestamp,v1=hash"
+  let timestamp    = '';
+  let signatureHash = signatureHeader ?? '';
+
+  if (signatureHeader?.includes('t=') && signatureHeader?.includes('v1=')) {
+    const parts  = signatureHeader.split(',');
+    const tPart  = parts.find(p => p.startsWith('t='));
+    const v1Part = parts.find(p => p.startsWith('v1='));
+    timestamp     = tPart  ? tPart.replace('t=', '')   : '';
+    signatureHash = v1Part ? v1Part.replace('v1=', '') : signatureHeader;
+  }
+
+  const signedPayload = `${timestamp}.${typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody)}`;
+
   const expectedSignature = crypto
     .createHmac('sha256', webhookSecret)
-    .update(rawBody, 'utf8')
+    .update(signedPayload, 'utf8')
     .digest('hex');
 
-  // Comparación timing-safe para evitar timing attacks
   try {
     return crypto.timingSafeEqual(
-      Buffer.from(signatureHeader ?? '', 'hex'),
+      Buffer.from(signatureHash,        'hex'),
       Buffer.from(expectedSignature,    'hex'),
     );
   } catch {
     return false;
   }
 }
+
+export default { createWidgetLink, getPaymentIntent, verifyWebhookSignature };
