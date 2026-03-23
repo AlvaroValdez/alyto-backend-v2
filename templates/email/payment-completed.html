@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Pago completado — Alyto</title>
+  <!--[if mso]>
+  <noscript>
+    <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+  </noscript>
+  <![endif]-->
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; width: 100% !important; min-width: 100%; background-color: #0F1628; }
+    @media only screen and (max-width: 620px) {
+      .email-container { width: 100% !important; }
+      .mobile-padding { padding-left: 16px !important; padding-right: 16px !important; }
+      .detail-label, .detail-value { display: block !important; width: 100% !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#0F1628;font-family:'Inter',Arial,sans-serif;">
+
+  <!-- Preheader oculto -->
+  <span style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+    ¡Listo! {{beneficiaryName}} recibió {{destinationAmount}} — tu pago fue completado con éxito.
+  </span>
+
+  <!-- Wrapper externo -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color:#0F1628;">
+    <tr>
+      <td align="center" style="padding:32px 16px 48px;">
+
+        <!-- Contenedor principal 600px -->
+        <table role="presentation" class="email-container" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;border-radius:20px;overflow:hidden;">
+
+          <!-- ── HEADER con gradiente verde/navy ── -->
+          <tr>
+            <td align="center"
+                style="background:linear-gradient(135deg,#0F2A1E 0%,#1D3461 50%,#0F1628 100%);
+                       padding:36px 40px 28px;border-radius:20px 20px 0 0;">
+
+              <!-- Logo -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center">
+                    <span style="font-size:26px;font-weight:800;color:#FFFFFF;letter-spacing:-0.5px;font-family:'Inter',Arial,sans-serif;">
+                      alyto
+                    </span>
+                    <span style="font-size:22px;font-weight:400;color:#C4CBD8;margin-left:2px;">❯</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Ícono de éxito -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;">
+                <tr>
+                  <td align="center">
+                    <!-- Anillo exterior -->
+                    <div style="width:80px;height:80px;border-radius:50%;
+                                background:rgba(34,197,94,0.12);border:2px solid rgba(34,197,94,0.35);
+                                display:inline-block;text-align:center;line-height:80px;font-size:36px;">
+                      ✅
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Título -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0;font-size:24px;font-weight:800;color:#22C55E;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.3px;">
+                      ¡Pago completado!
+                    </p>
+                    <p style="margin:8px 0 0;font-size:14px;color:#8A96B8;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Hola <strong style="color:#C4CBD8;">{{userName}}</strong>,
+                      tu pago llegó exitosamente a su destino.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── BODY ── -->
+          <tr>
+            <td style="background-color:#1A2340;padding:32px 40px;" class="mobile-padding">
+
+              <!-- Tarjeta de montos -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="background:#1F2B4D;border-radius:16px;margin-bottom:20px;
+                            border:1px solid rgba(34,197,94,0.2);">
+                <tr>
+                  <td align="center" style="padding:28px 20px;">
+
+                    <!-- Monto enviado -->
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:500;color:#8A96B8;
+                               text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',Arial,sans-serif;">
+                      Tú enviaste
+                    </p>
+                    <p style="margin:0;font-size:28px;font-weight:800;color:#FFFFFF;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.5px;">
+                      {{originAmount}}
+                    </p>
+
+                    <!-- Separador -->
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                           style="margin:16px auto;width:60%;">
+                      <tr>
+                        <td style="height:1px;background:linear-gradient(90deg,transparent,#263050,transparent);"></td>
+                      </tr>
+                    </table>
+
+                    <!-- Monto recibido -->
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:500;color:#8A96B8;
+                               text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',Arial,sans-serif;">
+                      {{beneficiaryName}} recibió
+                    </p>
+                    <p style="margin:0;font-size:34px;font-weight:800;color:#22C55E;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.5px;">
+                      {{destinationAmount}}
+                    </p>
+
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Badge de completado -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto 24px;">
+                <tr>
+                  <td align="center"
+                      style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);
+                             border-radius:999px;padding:6px 18px;">
+                    <span style="font-size:12px;font-weight:600;color:#22C55E;
+                                 font-family:'Inter',Arial,sans-serif;letter-spacing:0.05em;">
+                      ✓&nbsp;&nbsp;TRANSFERENCIA EXITOSA
+                    </span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Tabla de detalles -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="border:1px solid #263050;border-radius:12px;overflow:hidden;">
+
+                <tr>
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;width:45%;
+                             border-bottom:1px solid #263050;">
+                    ID de transacción
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#C4CBD8;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;word-break:break-all;">
+                    {{transactionId}}
+                  </td>
+                </tr>
+
+                <tr style="background-color:rgba(255,255,255,0.02);">
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;">
+                    Beneficiario
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#FFFFFF;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;">
+                    {{beneficiaryName}}
+                  </td>
+                </tr>
+
+                <tr>
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;">
+                    Completado el
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#FFFFFF;
+                             font-family:'Inter',Arial,sans-serif;">
+                    {{completedAt}}
+                  </td>
+                </tr>
+
+              </table>
+
+              <!-- Divider -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="margin:28px 0;">
+                <tr>
+                  <td style="height:1px;background-color:#263050;"></td>
+                </tr>
+              </table>
+
+              <!-- Mensaje de cierre -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center"
+                      style="background:rgba(34,197,94,0.05);border-radius:12px;padding:16px 20px;
+                             border-left:3px solid #22C55E;">
+                    <p style="margin:0;font-size:13px;color:#8A96B8;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.6;text-align:left;">
+                      Gracias por usar <strong style="color:#FFFFFF;">Alyto</strong>.
+                      Si tienes preguntas sobre esta transferencia, escríbenos a
+                      <a href="mailto:{{supportEmail}}" style="color:#C4CBD8;text-decoration:none;">{{supportEmail}}</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── FOOTER ── -->
+          <tr>
+            <td style="background-color:#0F1628;border-top:1px solid #1A2340;
+                        border-radius:0 0 20px 20px;padding:24px 40px;" class="mobile-padding">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0 0 8px;font-size:12px;color:#4E5A7A;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Este es un correo transaccional enviado por Alyto. Por favor no respondas a este mensaje.
+                    </p>
+                    <p style="margin:0;font-size:12px;color:#4E5A7A;font-family:'Inter',Arial,sans-serif;">
+                      © 2026 AV Finance ·
+                      <a href="mailto:{{supportEmail}}" style="color:#8A96B8;text-decoration:none;">{{supportEmail}}</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>
