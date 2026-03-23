@@ -15,7 +15,29 @@ import mongoose from 'mongoose';
 
 const { Schema } = mongoose;
 
-// ─── Sub-esquema: Desglose de Fees ───────────────────────────────────────────
+// ─── Sub-esquema: Fees Granulares por Corredor ───────────────────────────────
+// Calculados en initCrossBorderPayment desde TransactionConfig.
+// Se desnormalizan aquí para que cambios futuros de config no alteren el historial.
+
+const feesSchema = new Schema(
+  {
+    /** Fee del proveedor de payin trasladada al usuario (ej. Fintoc %) */
+    payinFee:        { type: Number, default: 0 },
+    /** Spread cambiario de Alyto (% sobre el originAmount) */
+    alytoCSpread:    { type: Number, default: 0 },
+    /** Fee fija por operación en moneda de origen */
+    fixedFee:        { type: Number, default: 0 },
+    /** Fee fija del proveedor de payout (ej. Vita, en moneda destino) */
+    payoutFee:       { type: Number, default: 0 },
+    /** Margen de ganancia retenido por Alyto (% sobre el originAmount) */
+    profitRetention: { type: Number, default: 0 },
+    /** Total descontado del originAmount antes de enviar a Vita */
+    totalDeducted:   { type: Number, default: 0 },
+  },
+  { _id: false },
+);
+
+// ─── Sub-esquema: Desglose de Fees (legacy) ──────────────────────────────────
 
 const feeBreakdownSchema = new Schema(
   {
@@ -291,6 +313,11 @@ const transactionSchema = new Schema(
     },
 
     // ── Fees ──────────────────────────────────────────────────────────────────
+    /** Desglose granular de fees calculado desde TransactionConfig al crear la tx */
+    fees: {
+      type: feesSchema,
+    },
+    /** Desglose legacy — mantenido para compatibilidad con transacciones anteriores */
     feeBreakdown: {
       type: feeBreakdownSchema,
     },
