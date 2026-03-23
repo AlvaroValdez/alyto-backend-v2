@@ -31,37 +31,83 @@ import crypto from 'crypto';
 
 const VITA_BASE_URL = `${process.env.VITA_API_URL ?? 'https://api.stage.vitawallet.io'}/api/businesses`;
 
-// ─── HMAC-SHA256 — Generación de firma ───────────────────────────────────────
+// ─── HMAC-SHA256 — Generación de firma (portado de V1.5 vitaClient.js) ────────
+
+/**
+ * Elimina claves con valores null o undefined recursivamente.
+ * Vita rechaza la firma si se incluyen nulls en el cálculo.
+ * Portado de deepClean() del V1.5.
+ */
+function deepClean(value) {
+  if (value === undefined || value === null) return undefined;
+  if (Array.isArray(value)) return value.map(deepClean).filter(v => v !== undefined);
+  if (value && typeof value === 'object' && value.constructor === Object) {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      const cleaned = deepClean(v);
+      if (cleaned !== undefined) out[k] = cleaned;
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Serializa valores en formato Ruby-like según la especificación de firma de Vita.
+ * Vita es un backend Ruby on Rails — su spec espera este formato para objetos anidados.
+ *
+ * Ejemplo: { bank_id: "test", amount: 100 }
+ *   → '{:amount=>100, :bank_id=>"test"}'     (claves ordenadas, coma+espacio)
+ *
+ * Portado de stableStringify() del V1.5.
+ */
+function stableStringify(value) {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object' && value.constructor === Object) {
+    const keys = Object.keys(value).sort();
+    const entries = keys.map(k => {
+      const v = value[k];
+      if (typeof v === 'string')  return `:${k}=>"${v}"`;
+      if (typeof v === 'number')  return `:${k}=>${v}`;
+      if (typeof v === 'object')  return `:${k}=>${stableStringify(v)}`;
+      return `:${k}=>${v}`;
+    });
+    // IMPORTANTE: coma + espacio, igual que Ruby's .inspect
+    return `{${entries.join(', ')}}`;
+  }
+  return JSON.stringify(value);
+}
 
 /**
  * Construye el string del body ordenado para la firma Vita V2-HMAC-SHA256.
  *
- * Algoritmo:
- *  1. Tomar todas las claves del objeto body
- *  2. Ordenarlas alfabéticamente
- *  3. Concatenar key+value sin separadores
- *  4. Para valores objeto (ej. nested wallet): JSON.stringify(value)
+ * Reglas (portadas de buildSortedRequestBodyLegacy del V1.5):
+ *  1. Ordenar claves alfabéticamente
+ *  2. Saltar valores null o undefined (no incluirlos en la firma)
+ *  3. Para valores primitivos: String(v) sin comillas
+ *  4. Para objetos anidados: formato Ruby-like via stableStringify()
  *
- * Ejemplo:
- *  { "order": "xyz", "amount": 400 }  →  "amount400orderxyz"
+ * Ejemplo: { order: "xyz", amount: 400 } → "amount400orderxyz"
  *
  * @param {object|null} body
  * @returns {string}
  */
 function buildSortedBody(body = null) {
-  if (!body || Object.keys(body).length === 0) return '';
-
-  return Object.keys(body)
-    .sort()
-    .map((k) => {
-      const v = body[k];
-      // Valores objeto (nested): stringify preservando las claves ordenadas internamente
-      const strVal = (typeof v === 'object' && v !== null)
-        ? JSON.stringify(v)
-        : String(v);
-      return `${k}${strVal}`;
-    })
-    .join('');
+  if (!body || typeof body !== 'object') return '';
+  const keys = Object.keys(body).sort();
+  let out = '';
+  for (const k of keys) {
+    const v = body[k];
+    // Saltar null y undefined — igual que V1.5; incluirlos altera la firma
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'object') {
+      out += `${k}${stableStringify(v)}`;
+    } else {
+      out += `${k}${String(v)}`;
+    }
+  }
+  return out;
 }
 
 /**
@@ -69,30 +115,30 @@ function buildSortedBody(body = null) {
  *
  * message = xLogin + xDate + sortedRequestBody
  *
+ * El body se limpia con deepClean() antes de firmar — igual que V1.5 —
+ * para asegurar que ningún null/undefined altere la firma.
+ *
  * @param {string} xDate        — ISO8601 datetime (mismo valor enviado en el header)
  * @param {object|null} body    — Body de la petición (null para GET sin body)
  * @returns {string}            — Hex digest de la firma
- *
- * ⚠️  PRINT DE VALIDACIÓN (solicitado en el spec de la Fase 17):
- *      La función imprime en consola los componentes de la firma en desarrollo.
  */
 export function generateVitaSignature(xDate, body = null) {
-  const xLogin      = process.env.VITA_LOGIN;
-  const secretKey   = process.env.VITA_SECRET;
+  const xLogin    = process.env.VITA_LOGIN;
+  const secretKey = process.env.VITA_SECRET;
 
   if (!xLogin || !secretKey) {
     throw new Error('[VitaWallet] VITA_LOGIN y VITA_SECRET son obligatorios en .env');
   }
 
-  const sortedBody  = buildSortedBody(body);
-  const message     = `${xLogin}${xDate}${sortedBody}`;
+  const cleanBody  = body ? (deepClean(body) ?? {}) : null;
+  const sortedBody = buildSortedBody(cleanBody);
+  const message    = `${xLogin}${xDate}${sortedBody}`;
 
   const signature = crypto
     .createHmac('sha256', secretKey)
-    .update(message)
+    .update(message, 'utf8')
     .digest('hex');
 
-  // ── Validación en desarrollo — imprime los componentes de la firma ───────
   if (process.env.NODE_ENV !== 'production') {
     console.log('[VitaWallet HMAC-SHA256]', {
       xLogin,
