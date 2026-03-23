@@ -156,6 +156,20 @@ app.use((req, res, next) => {
 // Sentry: enriquece cada request con tags de transacción y corridorId
 app.use(sentryContext);
 
+// ─── Rutas de Redirect Fintoc ────────────────────────────────────────────────
+// Deben registrarse ANTES que cualquier ruta /api/v1 y ANTES del catch-all 404.
+// Fintoc redirige al usuario aquí tras completar o cancelar el pago en el widget.
+
+app.get('/success', (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://alyto-frontend-v2.onrender.com';
+  return res.redirect(302, `${frontendUrl}/payment-success`);
+});
+
+app.get('/cancel', (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://alyto-frontend-v2.onrender.com';
+  return res.redirect(302, `${frontendUrl}/send`);
+});
+
 // ─── Rutas Base ──────────────────────────────────────────────────────────────
 
 /**
@@ -262,8 +276,8 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// Ruta catch-all — 404
-app.use((req, res) => {
+// Ruta catch-all — 404 (debe ser la ÚLTIMA ruta registrada)
+app.use('*', (req, res) => {
   res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
 
