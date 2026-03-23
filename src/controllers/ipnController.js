@@ -330,15 +330,8 @@ export async function dispatchPayout(transaction) {
     }
 
     // Payout creado exitosamente en Vita
-    transaction.payoutReference = vitaResponse?.id ?? vitaResponse?.transaction?.id ?? null;
-    transaction.status          = 'payout_sent';
+    transaction.payoutReference = vitaResponse?.data?.id ?? vitaResponse?.id ?? vitaResponse?.transaction?.id ?? null;
     transaction.providersUsed   = [...(transaction.providersUsed ?? []), 'payout:vitaWallet'];
-
-    await appendIpnLog(transaction, 'payout_dispatched', 'vitaWallet', 'payout_sent', {
-      vitaTransactionId: transaction.payoutReference,
-      amount,
-      country: transaction.destinationCountry,
-    });
 
     console.info('[Alyto Payout] Vita withdrawal creado.', {
       transactionId:     transaction.alytoTransactionId,
@@ -346,14 +339,88 @@ export async function dispatchPayout(transaction) {
       amount,
     });
 
-    // Notificación push: pago enviado al banco
-    try {
-      await sendPushNotification(
-        transaction.userId,
-        NOTIFICATIONS.payoutSent(transaction.destinationCountry),
-      );
-    } catch (notifErr) {
-      console.error('[Alyto Payout] Error enviando push payout_sent:', notifErr.message);
+    if (process.env.NODE_ENV === 'production') {
+      // ── PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─────
+      transaction.status = 'payout_sent';
+
+      await appendIpnLog(transaction, 'payout_dispatched', 'vitaWallet', 'payout_sent', {
+        vitaTransactionId: transaction.payoutReference,
+        amount,
+        country: transaction.destinationCountry,
+      });
+
+      // Notificación push: pago enviado al banco
+      try {
+        await sendPushNotification(
+          transaction.userId,
+          NOTIFICATIONS.payoutSent(transaction.destinationCountry),
+        );
+      } catch (notifErr) {
+        console.error('[Alyto Payout] Error enviando push payout_sent:', notifErr.message);
+      }
+
+    } else {
+      // ── SANDBOX / DEVELOPMENT: Vita stage no envía IPN — auto-completar ─────
+      transaction.status      = 'completed';
+      transaction.completedAt = new Date();
+
+      transaction.ipnLog.push({
+        provider:   'system',
+        eventType:  'payout_completed_sandbox',
+        status:     'completed',
+        rawPayload: {
+          message:          'Auto-completed en sandbox — en producción espera IPN de Vita',
+          vitaWithdrawalId: transaction.payoutReference,
+        },
+        receivedAt: new Date(),
+      });
+      await transaction.save();
+
+      // Registrar audit trail en Stellar (best-effort)
+      const stellarTxId = await registerAuditTrail(transaction);
+      if (stellarTxId) {
+        transaction.stellarTxId = stellarTxId;
+        transaction.ipnLog.push({
+          provider:   'stellar',
+          eventType:  'stellar_audit_registered',
+          status:     'completed',
+          rawPayload: {
+            stellarTxId,
+            network:     process.env.STELLAR_NETWORK ?? 'testnet',
+            explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
+          },
+          receivedAt: new Date(),
+        });
+        await transaction.save().catch(err =>
+          console.error('[Alyto Payout] Error guardando stellarTxId:', err.message),
+        );
+        console.log('[Stellar] ✅ Audit trail registrado:', stellarTxId);
+      }
+
+      // Notificación push: transferencia completada
+      try {
+        await sendPushNotification(
+          transaction.userId,
+          NOTIFICATIONS.paymentCompleted(
+            transaction.originalAmount,
+            transaction.originCurrency,
+            transaction.destinationAmount,
+            transaction.destinationCurrency,
+          ),
+        );
+      } catch (notifErr) {
+        console.error('[Alyto Payout] Error enviando push paymentCompleted (sandbox):', notifErr.message);
+      }
+
+      // Email transaccional: pago completado
+      try {
+        const user = await User.findById(transaction.userId).lean();
+        if (user) await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+      } catch (emailErr) {
+        console.error('[Alyto Payout] Error enviando email paymentCompleted (sandbox):', emailErr.message);
+      }
+
+      console.log('[dispatchPayout] ✅ Transacción completada (sandbox):', transaction.alytoTransactionId);
     }
 
     return;
