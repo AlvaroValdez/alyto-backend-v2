@@ -137,6 +137,16 @@ app.post(
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
+// Request logging — registra método, ruta y latencia de cada petición
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} ${res.statusCode} +${ms}ms`);
+  });
+  next();
+});
+
 // Sentry: enriquece cada request con tags de transacción y corridorId
 app.use(sentryContext);
 
