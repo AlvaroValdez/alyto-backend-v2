@@ -68,7 +68,7 @@ Variables disponibles:
 | `{{originAmount}}` | `"$100.000 CLP"` | Monto del pago fallido |
 | `{{failedAt}}` | `"20 de marzo de 2026, 14:35 hrs"` | Fecha y hora del fallo |
 | `{{supportEmail}}` | `"soporte@alyto.io"` | Email de soporte |
-| `{{supportWhatsapp}}` | `"+56949705364"` | WhatsApp de soporte |
+| `{{supportWhatsapp}}` | `"+56988321490"` | WhatsApp de soporte |
 
 **Asunto sugerido:** `Hubo un problema con tu pago — te ayudamos, {{userName}}`
 
