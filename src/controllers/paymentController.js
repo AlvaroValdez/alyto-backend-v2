@@ -578,9 +578,11 @@ export async function initCrossBorderPayment(req, res) {
     payinProvider    = 'fintoc';
 
     console.log('[Fintoc] widget_token enviado al FE:', fintocResult.widgetToken);
+    console.log('[Fintoc] fintocResult completo (mapeado):', JSON.stringify(fintocResult, null, 2));
     console.log('[CrossBorder] Fintoc PaymentIntent creado:', {
       paymentIntentId: fintocResult.paymentIntentId,
       widgetToken:     fintocResult.widgetToken ? '[PRESENTE]' : '[AUSENTE]',
+      payinUrl:        payinUrl         ? '[PRESENTE]' : '[AUSENTE]',
     });
 
   } else {

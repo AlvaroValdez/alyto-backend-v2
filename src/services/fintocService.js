@@ -166,6 +166,11 @@ export async function createPaymentIntent({ amount, currency, userId, userEmail,
     body:   JSON.stringify(payload),
   });
 
+  // Debug: estructura completa de la respuesta de Fintoc (remover en producción estable)
+  console.log('[Fintoc] Respuesta completa crear PI:', JSON.stringify(data, null, 2));
+  console.log('[Fintoc] widget_token extraído:', data?.widget_token);
+  console.log('[Fintoc] data?.widget_token:', data?.data?.widget_token);
+
   return {
     paymentIntentId: data.id,
     widgetToken:     data.widget_token,
