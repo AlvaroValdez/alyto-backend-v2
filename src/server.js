@@ -90,12 +90,18 @@ app.use(helmet({
       frameSrc:    [
         "'self'",
         'https://wizard.fintoc.com',
+        'https://widget.fintoc.com',
         'https://js.stripe.com',
+      ],
+      frameAncestors: [
+        "'self'",
+        'https://alyto-frontend-v2.onrender.com',
       ],
       connectSrc:  [
         "'self'",
         'https://api.fintoc.com',
         'https://wizard.fintoc.com',
+        'https://widget.fintoc.com',
         'https://api.stripe.com',
         'wss://192.168.1.94:3000',
         'ws://192.168.1.94:3000',
