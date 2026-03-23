@@ -212,7 +212,7 @@ export const EMAILS = {
         originAmount:    formatCurrency(transaction.originalAmount, transaction.originCurrency),
         failedAt:        formatDate(transaction.updatedAt),
         supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
-        supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56949705364',
+        supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },
     ];
   },
