@@ -548,7 +548,22 @@ export async function initCrossBorderPayment(req, res) {
     return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado o inactivo.` });
   }
 
-  // ── 3. Crear payin según el método del corredor ───────────────────────────
+  // ── 3. Calcular fees desde TransactionConfig (configurable por corredor) ─────
+  const payinFee        = Math.round(amount * (corridor.payinFeePercent / 100));
+  const alytoCSpread    = Math.round(amount * (corridor.alytoCSpread / 100));
+  const fixedFee        = corridor.fixedFee ?? 0;
+  const profitRetention = Math.round(amount * (corridor.profitRetentionPercent / 100));
+  const payoutFee       = corridor.payoutFeeFixed ?? 0;
+
+  console.log('[CrossBorder] Fees desde TransactionConfig:');
+  console.log('  corridorId:', corridorId);
+  console.log('  alytoCSpread%:', corridor.alytoCSpread);
+  console.log('  fixedFee:', corridor.fixedFee);
+  console.log('  payinFeePercent:', corridor.payinFeePercent);
+  console.log('  profitRetentionPercent:', corridor.profitRetentionPercent);
+  console.log('  Fees calculados:', { payinFee, alytoCSpread, fixedFee, profitRetention, payoutFee });
+
+  // ── 4. Crear payin según el método del corredor ───────────────────────────
   //
   //   fintoc    → Checkout Session en Fintoc. Fondos llegan a cuenta SpA en Chile.
   //               El payout a Vita se dispara solo tras IPN de confirmación.
@@ -637,7 +652,7 @@ export async function initCrossBorderPayment(req, res) {
     console.log('[CrossBorder] Vita payinUrl extraída:', payinUrl, '| vitaPayinId:', payinProviderRef);
   }
 
-  // ── 4. Construir sub-documento de beneficiario ────────────────────────────
+  // ── 5. Construir sub-documento de beneficiario ────────────────────────────
   // beneficiaryData (nuevo formato dinámico): almacenar en dynamicFields
   // beneficiary (legado): mapear a los campos nombrados del schema
   let beneficiaryDoc = {};
@@ -663,7 +678,7 @@ export async function initCrossBorderPayment(req, res) {
     };
   }
 
-  // ── 5. Crear transacción en BD ────────────────────────────────────────────
+  // ── 6. Crear transacción en BD ────────────────────────────────────────────
   // alytoTransactionId ya fue generado antes del call a Fintoc (Fix: metadata del IPN)
 
   let transaction;
@@ -680,6 +695,15 @@ export async function initCrossBorderPayment(req, res) {
       originCountry:       corridor.originCountry,
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
+
+      fees: {
+        payinFee,
+        alytoCSpread,
+        fixedFee,
+        payoutFee,
+        profitRetention,
+        totalDeducted: payinFee + alytoCSpread + fixedFee + payoutFee,
+      },
 
       beneficiary: beneficiaryDoc,
 
@@ -702,7 +726,7 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── 6. Respuesta al cliente ───────────────────────────────────────────────
+  // ── 7. Respuesta al cliente ───────────────────────────────────────────────
   return res.status(201).json({
     transactionId: alytoTransactionId,
     payinUrl:      payinUrl ?? null,

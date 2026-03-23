@@ -153,22 +153,28 @@ async function notifyAdminManualPayout(transaction) {
  * @throws {Error} Si el monto neto es <= 0
  */
 function resolveNetAmountForPayout(transaction) {
-  const originAmount = transaction.originalAmount ?? 0;
-  const fees         = transaction.fees ?? transaction.feeBreakdown ?? {};
+  const fees = transaction.fees || {};
 
-  const payinFee        = Number(fees.payinFee        ?? 0);
-  const alytoCSpread    = Number(fees.alytoCSpread     ?? 0);
-  const fixedFee        = Number(fees.fixedFee        ?? 0);
-  const profitRetention = Number(fees.profitRetention  ?? 0);
+  const montoNeto = Math.round(
+    (transaction.originalAmount ?? 0)
+    - (fees.payinFee        || 0)
+    - (fees.alytoCSpread    || 0)
+    - (fees.fixedFee        || 0)
+    - (fees.profitRetention || 0),
+  );
 
-  const montoNeto = originAmount - payinFee - alytoCSpread - fixedFee - profitRetention;
-
-  console.log('[dispatchPayout] originAmount:', originAmount);
-  console.log('[dispatchPayout] fees:', JSON.stringify({ payinFee, alytoCSpread, fixedFee, profitRetention }));
-  console.log('[dispatchPayout] monto neto a Vita:', montoNeto);
+  console.log('[dispatchPayout] Desglose fees:');
+  console.log('  originAmount:', transaction.originalAmount);
+  console.log('  - payinFee:', fees.payinFee || 0);
+  console.log('  - alytoCSpread:', fees.alytoCSpread || 0, '(configurable desde admin por corredor)');
+  console.log('  - fixedFee:', fees.fixedFee || 0, '(configurable desde admin por corredor)');
+  console.log('  - profitRetention:', fees.profitRetention || 0, '(configurable desde admin por corredor)');
+  console.log('  = montoNeto enviado a Vita:', montoNeto);
 
   if (montoNeto <= 0) {
-    throw new Error(`[dispatchPayout] Monto neto inválido: ${montoNeto} (originAmount=${originAmount}, totalFees=${payinFee + alytoCSpread + fixedFee + profitRetention})`);
+    throw new Error(
+      `Monto neto inválido: ${montoNeto} — revisar config de fees en corredor ${transaction.corridorId}`,
+    );
   }
 
   return montoNeto;
