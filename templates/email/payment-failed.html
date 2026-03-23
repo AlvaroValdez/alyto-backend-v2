@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Problema con tu pago — Alyto</title>
+  <!--[if mso]>
+  <noscript>
+    <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+  </noscript>
+  <![endif]-->
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; width: 100% !important; min-width: 100%; background-color: #0F1628; }
+    @media only screen and (max-width: 620px) {
+      .email-container { width: 100% !important; }
+      .mobile-padding { padding-left: 16px !important; padding-right: 16px !important; }
+      .support-col { display: block !important; width: 100% !important; padding: 12px 0 !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#0F1628;font-family:'Inter',Arial,sans-serif;">
+
+  <!-- Preheader oculto -->
+  <span style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+    Hubo un problema con tu pago de {{originAmount}}. Estamos aquí para ayudarte.
+  </span>
+
+  <!-- Wrapper externo -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color:#0F1628;">
+    <tr>
+      <td align="center" style="padding:32px 16px 48px;">
+
+        <!-- Contenedor principal 600px -->
+        <table role="presentation" class="email-container" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;border-radius:20px;overflow:hidden;">
+
+          <!-- ── HEADER ── -->
+          <tr>
+            <td align="center"
+                style="background:linear-gradient(135deg,#2A0F0F 0%,#1D3461 60%,#0F1628 100%);
+                       padding:36px 40px 28px;border-radius:20px 20px 0 0;">
+
+              <!-- Logo -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center">
+                    <span style="font-size:26px;font-weight:800;color:#FFFFFF;letter-spacing:-0.5px;font-family:'Inter',Arial,sans-serif;">
+                      alyto
+                    </span>
+                    <span style="font-size:22px;font-weight:400;color:#C4CBD8;margin-left:2px;">❯</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Ícono de error -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;">
+                <tr>
+                  <td align="center">
+                    <div style="width:80px;height:80px;border-radius:50%;
+                                background:rgba(239,68,68,0.12);border:2px solid rgba(239,68,68,0.35);
+                                display:inline-block;text-align:center;line-height:80px;font-size:36px;">
+                      ⚠️
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Título -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0;font-size:22px;font-weight:800;color:#F87171;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.3px;">
+                      Hubo un problema con tu pago
+                    </p>
+                    <p style="margin:8px 0 0;font-size:14px;color:#8A96B8;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Hola <strong style="color:#C4CBD8;">{{userName}}</strong>,
+                      lamentamos informarte que tu pago no pudo completarse.
+                      Nuestro equipo está disponible para ayudarte.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── BODY ── -->
+          <tr>
+            <td style="background-color:#1A2340;padding:32px 40px;" class="mobile-padding">
+
+              <!-- Tarjeta: detalle del pago fallido -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="background:#1F2B4D;border-radius:16px;margin-bottom:24px;
+                            border:1px solid rgba(239,68,68,0.2);">
+                <tr>
+                  <td align="center" style="padding:24px 20px;">
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:500;color:#8A96B8;
+                               text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',Arial,sans-serif;">
+                      Pago intentado
+                    </p>
+                    <p style="margin:0;font-size:32px;font-weight:800;color:#F87171;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.5px;">
+                      {{originAmount}}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Tabla de detalles -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="border:1px solid #263050;border-radius:12px;overflow:hidden;margin-bottom:24px;">
+
+                <tr>
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;width:45%;
+                             border-bottom:1px solid #263050;">
+                    ID de transacción
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#C4CBD8;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;word-break:break-all;">
+                    {{transactionId}}
+                  </td>
+                </tr>
+
+                <tr style="background-color:rgba(255,255,255,0.02);">
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;">
+                    Fecha del fallo
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#FFFFFF;
+                             font-family:'Inter',Arial,sans-serif;">
+                    {{failedAt}}
+                  </td>
+                </tr>
+
+              </table>
+
+              <!-- Nota tranquilizadora -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="margin-bottom:24px;">
+                <tr>
+                  <td style="background:rgba(239,68,68,0.06);border-radius:12px;
+                              padding:16px 20px;border-left:3px solid #EF4444;">
+                    <p style="margin:0;font-size:13px;color:#8A96B8;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.6;">
+                      <strong style="color:#FFFFFF;">Tu dinero está seguro.</strong>
+                      Si ya se realizó algún cargo, será devuelto automáticamente en un plazo de
+                      1 a 3 días hábiles. No se realizó ningún débito a tu cuenta si el pago no fue confirmado.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Divider -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="margin:4px 0 24px;">
+                <tr>
+                  <td style="height:1px;background-color:#263050;"></td>
+                </tr>
+              </table>
+
+              <!-- Sección de soporte -->
+              <p style="margin:0 0 16px;font-size:14px;font-weight:700;color:#FFFFFF;
+                         font-family:'Inter',Arial,sans-serif;text-align:center;">
+                ¿Necesitas ayuda? Contáctanos
+              </p>
+
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <!-- Canal: Email -->
+                  <td class="support-col" align="center" width="50%"
+                      style="padding:0 8px 0 0;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td align="center"
+                            style="background:#1F2B4D;border:1px solid #263050;border-radius:14px;padding:18px 16px;">
+                          <div style="font-size:28px;margin-bottom:8px;">✉️</div>
+                          <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#8A96B8;
+                                     text-transform:uppercase;letter-spacing:0.06em;font-family:'Inter',Arial,sans-serif;">
+                            Email
+                          </p>
+                          <a href="mailto:{{supportEmail}}"
+                             style="font-size:13px;font-weight:600;color:#C4CBD8;
+                                    text-decoration:none;font-family:'Inter',Arial,sans-serif;">
+                            {{supportEmail}}
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+
+                  <!-- Canal: WhatsApp -->
+                  <td class="support-col" align="center" width="50%"
+                      style="padding:0 0 0 8px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                      <tr>
+                        <td align="center"
+                            style="background:#1F2B4D;border:1px solid #263050;border-radius:14px;padding:18px 16px;">
+                          <div style="font-size:28px;margin-bottom:8px;">💬</div>
+                          <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#8A96B8;
+                                     text-transform:uppercase;letter-spacing:0.06em;font-family:'Inter',Arial,sans-serif;">
+                            WhatsApp
+                          </p>
+                          <a href="https://wa.me/{{supportWhatsapp}}"
+                             style="font-size:13px;font-weight:600;color:#C4CBD8;
+                                    text-decoration:none;font-family:'Inter',Arial,sans-serif;">
+                            {{supportWhatsapp}}
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── FOOTER ── -->
+          <tr>
+            <td style="background-color:#0F1628;border-top:1px solid #1A2340;
+                        border-radius:0 0 20px 20px;padding:24px 40px;" class="mobile-padding">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0 0 8px;font-size:12px;color:#4E5A7A;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Este es un correo transaccional enviado por Alyto. Por favor no respondas a este mensaje.
+                    </p>
+                    <p style="margin:0;font-size:12px;color:#4E5A7A;font-family:'Inter',Arial,sans-serif;">
+                      © 2026 AV Finance ·
+                      <a href="mailto:{{supportEmail}}" style="color:#8A96B8;text-decoration:none;">{{supportEmail}}</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Tu pago está en camino — Alyto</title>
+  <!--[if mso]>
+  <noscript>
+    <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+  </noscript>
+  <![endif]-->
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    body { margin: 0; padding: 0; width: 100% !important; min-width: 100%; background-color: #0F1628; }
+    @media only screen and (max-width: 620px) {
+      .email-container { width: 100% !important; }
+      .mobile-padding { padding-left: 16px !important; padding-right: 16px !important; }
+      .detail-label, .detail-value { display: block !important; width: 100% !important; }
+      .detail-label { padding-bottom: 2px !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#0F1628;font-family:'Inter',Arial,sans-serif;">
+
+  <!-- Preheader oculto -->
+  <span style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+    Tu pago a {{beneficiaryName}} está siendo procesado — {{originAmount}}
+  </span>
+
+  <!-- Wrapper externo -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0F1628;">
+    <tr>
+      <td align="center" style="padding:32px 16px 48px;">
+
+        <!-- Contenedor principal 600px -->
+        <table role="presentation" class="email-container" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;border-radius:20px;overflow:hidden;">
+
+          <!-- ── HEADER con gradiente ── -->
+          <tr>
+            <td align="center"
+                style="background:linear-gradient(135deg,#1D3461 0%,#0F1628 80%);padding:36px 40px 28px;border-radius:20px 20px 0 0;">
+
+              <!-- Logo texto -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center">
+                    <span style="font-size:26px;font-weight:800;color:#FFFFFF;letter-spacing:-0.5px;font-family:'Inter',Arial,sans-serif;">
+                      alyto
+                    </span>
+                    <span style="font-size:22px;font-weight:400;color:#C4CBD8;margin-left:2px;">❯</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Ícono de estado: reloj / en proceso -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;">
+                <tr>
+                  <td align="center">
+                    <div style="width:72px;height:72px;border-radius:50%;background:rgba(196,203,216,0.12);
+                                border:2px solid rgba(196,203,216,0.3);display:inline-block;
+                                line-height:72px;text-align:center;font-size:32px;">
+                      🕐
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Título -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0;font-size:22px;font-weight:800;color:#FFFFFF;font-family:'Inter',Arial,sans-serif;
+                               letter-spacing:-0.3px;">
+                      Tu pago está en camino
+                    </p>
+                    <p style="margin:8px 0 0;font-size:14px;color:#8A96B8;font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Hola <strong style="color:#C4CBD8;">{{userName}}</strong>, recibimos tu instrucción de pago y ya está siendo procesada.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── BODY: tarjeta de detalles ── -->
+          <tr>
+            <td style="background-color:#1A2340;padding:32px 40px;" class="mobile-padding">
+
+              <!-- Chip de corredor -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+                <tr>
+                  <td align="center"
+                      style="background:rgba(196,203,216,0.1);border:1px solid rgba(196,203,216,0.2);
+                             border-radius:999px;padding:5px 16px;">
+                    <span style="font-size:12px;font-weight:600;color:#C4CBD8;font-family:'Inter',Arial,sans-serif;
+                                 letter-spacing:0.05em;">
+                      {{corridorLabel}}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Monto principal -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="background:#1F2B4D;border-radius:16px;margin-bottom:20px;">
+                <tr>
+                  <td align="center" style="padding:24px 20px;">
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:500;color:#8A96B8;
+                               text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',Arial,sans-serif;">
+                      Tú enviaste
+                    </p>
+                    <p style="margin:0;font-size:32px;font-weight:800;color:#FFFFFF;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.5px;">
+                      {{originAmount}}
+                    </p>
+                    <!-- Flecha -->
+                    <p style="margin:10px 0;font-size:20px;color:#C4CBD8;">↓</p>
+                    <p style="margin:0 0 4px;font-size:12px;font-weight:500;color:#8A96B8;
+                               text-transform:uppercase;letter-spacing:0.08em;font-family:'Inter',Arial,sans-serif;">
+                      Beneficiario recibirá
+                    </p>
+                    <p style="margin:0;font-size:28px;font-weight:800;color:#22C55E;
+                               font-family:'Inter',Arial,sans-serif;letter-spacing:-0.5px;">
+                      {{destinationAmount}}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Tabla de detalles -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="border:1px solid #263050;border-radius:12px;overflow:hidden;">
+
+                <!-- Fila: ID transacción -->
+                <tr>
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;width:45%;
+                             border-bottom:1px solid #263050;">
+                    ID de transacción
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#C4CBD8;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;word-break:break-all;">
+                    {{transactionId}}
+                  </td>
+                </tr>
+
+                <!-- Fila: Beneficiario -->
+                <tr style="background-color:rgba(255,255,255,0.02);">
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;">
+                    Beneficiario
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#FFFFFF;
+                             font-family:'Inter',Arial,sans-serif;
+                             border-bottom:1px solid #263050;">
+                    {{beneficiaryName}}
+                  </td>
+                </tr>
+
+                <!-- Fila: Entrega estimada -->
+                <tr>
+                  <td class="detail-label"
+                      style="padding:13px 16px;font-size:13px;font-weight:500;color:#8A96B8;
+                             font-family:'Inter',Arial,sans-serif;">
+                    Entrega estimada
+                  </td>
+                  <td class="detail-value"
+                      style="padding:13px 16px;font-size:13px;font-weight:600;color:#FFFFFF;
+                             font-family:'Inter',Arial,sans-serif;">
+                    {{estimatedDelivery}}
+                  </td>
+                </tr>
+
+              </table>
+
+              <!-- Divider -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+                     style="margin:28px 0;">
+                <tr>
+                  <td style="height:1px;background-color:#263050;"></td>
+                </tr>
+              </table>
+
+              <!-- Mensaje de estado -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center"
+                      style="background:rgba(196,203,216,0.06);border-radius:12px;
+                             padding:16px 20px;border-left:3px solid #C4CBD8;">
+                    <p style="margin:0;font-size:13px;color:#8A96B8;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.6;text-align:left;">
+                      Te notificaremos por email cuando el pago llegue a
+                      <strong style="color:#FFFFFF;">{{beneficiaryName}}</strong>.
+                      Si tienes alguna duda, contáctanos en
+                      <a href="mailto:{{supportEmail}}" style="color:#C4CBD8;text-decoration:none;">{{supportEmail}}</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- ── FOOTER ── -->
+          <tr>
+            <td style="background-color:#0F1628;border-top:1px solid #1A2340;
+                        border-radius:0 0 20px 20px;padding:24px 40px;" class="mobile-padding">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center">
+                    <p style="margin:0 0 8px;font-size:12px;color:#4E5A7A;
+                               font-family:'Inter',Arial,sans-serif;line-height:1.5;">
+                      Este es un correo transaccional enviado por Alyto. Por favor no respondas a este mensaje.
+                    </p>
+                    <p style="margin:0;font-size:12px;color:#4E5A7A;font-family:'Inter',Arial,sans-serif;">
+                      © 2026 AV Finance ·
+                      <a href="mailto:{{supportEmail}}" style="color:#8A96B8;text-decoration:none;">{{supportEmail}}</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+        <!-- /Contenedor principal -->
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>

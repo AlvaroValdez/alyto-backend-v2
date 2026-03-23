@@ -1,0 +1,53 @@
+{
+  "name": "alyto-backend-v2",
+  "version": "1.0.0",
+  "description": "Alyto Wallet V2.0 - Backend API",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed:corredores": "node scripts/seedCorredores.js",
+    "seed:admin": "node scripts/seedAdmin.js",
+    "check:env": "node scripts/checkEnv.js",
+    "check:production": "node scripts/checkProduction.js",
+    "sentry:test": "node scripts/sentrySmokeTest.js",
+    "vita:sandbox": "node scripts/vitaSandboxTest.js",
+    "email:test": "node scripts/testEmail.js",
+    "test": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest --runInBand",
+    "test:watch": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest --watch --runInBand",
+    "test:coverage": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest --coverage --runInBand",
+    "test:e2e": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/e2e --runInBand --forceExit",
+    "test:integration": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/integration --runInBand --forceExit",
+    "test:unit": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/unit --runInBand",
+    "kyc:approve": "node --input-type=module --eval \"import 'dotenv/config'; import mongoose from 'mongoose'; import User from './src/models/User.js'; await mongoose.connect(process.env.MONGODB_URI); const u = await User.findOneAndUpdate({ email: process.env.TEST_USER_EMAIL }, { kycStatus: 'approved', kycApprovedAt: new Date(), kycProvider: 'dev_test' }, { new: true }); if (!u) { console.error('Usuario no encontrado:', process.env.TEST_USER_EMAIL); process.exit(1); } console.log('KYC aprobado:', u.email, '→', u.kycStatus); process.exit(0);\""
+  },
+  "keywords": [],
+  "author": "AV Finance",
+  "license": "ISC",
+  "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "@sentry/node": "^10.45.0",
+    "@sentry/profiling-node": "^10.45.0",
+    "@stellar/stellar-sdk": "^14.6.1",
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.3.1",
+    "firebase-admin": "^13.7.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.3.0",
+    "multer": "^2.1.1",
+    "pdfkit": "^0.18.0",
+    "stripe": "^20.4.1",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "mongodb-memory-server": "^11.0.1",
+    "supertest": "^7.2.2"
+  }
+}
