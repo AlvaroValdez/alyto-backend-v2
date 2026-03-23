@@ -33,6 +33,7 @@ import {
   getWithdrawalRules as getVitaWithdrawalRules,
   createPayin,
 }                              from '../services/vitaWalletService.js';
+import { getAuditTrail }       from '../services/stellarService.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -1164,5 +1165,77 @@ export async function getTransactionStatus(req, res) {
     estimatedDelivery: '1 día hábil',
     createdAt:         transaction.createdAt,
     updatedAt:         transaction.updatedAt,
+  });
+}
+
+// ─── GET /api/v1/payments/:transactionId/audit ────────────────────────────────
+
+/**
+ * Verifica el audit trail blockchain de una transacción completada.
+ *
+ * Solo el usuario dueño de la transacción puede consultar su audit trail.
+ * La transacción debe estar en status "completed" y tener un stellarTxId.
+ *
+ * Auth: Bearer JWT (protect middleware)
+ * Params: transactionId — alytoTransactionId (ej. "ALY-B-1710000000000-XYZ123")
+ *
+ * Respuestas:
+ *   200 { audited: false }  — completada pero aún sin registro blockchain
+ *   200 { audited: true, stellarTxId, network, explorerUrl, registeredAt, memo }
+ *   400 — transacción no completada
+ *   404 — no encontrada o no pertenece al usuario
+ *   500 — error interno
+ */
+export async function getTransactionAudit(req, res) {
+  const { transactionId } = req.params;
+  const userId = req.user._id;
+
+  // ── 1. Buscar transacción ─────────────────────────────────────────────────
+  let transaction;
+  try {
+    transaction = await Transaction
+      .findOne({ alytoTransactionId: transactionId, userId })
+      .lean();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  // ── 2. Solo transacciones completadas tienen audit trail ──────────────────
+  if (transaction.status !== 'completed') {
+    return res.status(400).json({
+      error:  'El audit trail solo está disponible para transacciones completadas.',
+      status: transaction.status,
+    });
+  }
+
+  // ── 3. Sin stellarTxId — en proceso ──────────────────────────────────────
+  if (!transaction.stellarTxId) {
+    return res.status(200).json({
+      audited:  false,
+      message:  'Transacción aún no registrada en blockchain.',
+      network:  process.env.STELLAR_NETWORK ?? 'testnet',
+    });
+  }
+
+  // ── 4. Consultar Horizon para detalles del audit trail ────────────────────
+  const auditData = await getAuditTrail(transaction.stellarTxId);
+
+  const network = process.env.STELLAR_NETWORK ?? 'testnet';
+  const explorerUrl = `https://stellar.expert/explorer/${
+    network === 'mainnet' ? 'public' : 'testnet'
+  }/tx/${transaction.stellarTxId}`;
+
+  return res.status(200).json({
+    audited:      true,
+    stellarTxId:  transaction.stellarTxId,
+    network,
+    explorerUrl,
+    registeredAt: auditData?.createdAt ?? null,
+    memo:         auditData?.memo       ?? null,
+    ledger:       auditData?.ledger     ?? null,
   });
 }

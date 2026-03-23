@@ -22,6 +22,7 @@ import {
   getTransactionHistory,
   getWithdrawalRulesController,
   initCrossBorderPayment,
+  getTransactionAudit,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
 
@@ -126,6 +127,17 @@ router.post('/webhooks/fintoc', fintocWebhook);
  * Auth: Bearer JWT
  */
 router.get('/transactions', protect, getTransactionHistory);
+
+/**
+ * GET /api/v1/payments/:transactionId/audit
+ *
+ * Verifica el audit trail blockchain de una transacción completada.
+ * Retorna el TXID de Stellar, explorerUrl y detalles del ledger.
+ *
+ * Params: transactionId — alytoTransactionId
+ * Auth:   Bearer JWT
+ */
+router.get('/:transactionId/audit', protect, getTransactionAudit);
 
 /**
  * GET /api/v1/payments/:transactionId/status
