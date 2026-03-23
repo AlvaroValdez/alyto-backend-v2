@@ -610,6 +610,15 @@ export async function handleVitaIPN(req, res) {
  * Si no existe por payinReference, busca por paymentLegs.externalId (legacy).
  */
 export async function handleFintocIPN(req, res) {
+  // Log inmediato — ANTES de cualquier validación para confirmar que el handler es alcanzado
+  console.log('[Fintoc IPN] ⚡ Webhook recibido en /api/v1/ipn/fintoc');
+  console.log('[Fintoc IPN] Headers:', JSON.stringify({
+    'content-type':     req.headers['content-type'],
+    'fintoc-signature': req.headers['fintoc-signature'],
+    'user-agent':       req.headers['user-agent'],
+  }));
+  console.log('[Fintoc IPN] Body:', JSON.stringify(req.body));
+
   const { type, data } = req.body;
 
   console.info('[Alyto IPN/Fintoc] Evento recibido.', {

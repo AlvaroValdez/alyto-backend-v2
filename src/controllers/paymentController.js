@@ -228,13 +228,24 @@ export async function initiateFintocPayin(req, res) {
  * }
  */
 export async function fintocWebhook(req, res) {
-  // ── 1. Verificar firma del webhook ────────────────────────────────────────
-  // rawBody es el body como string sin parsear (configurado en las rutas)
-  const signature = req.headers['fintoc-signature'];
-  const rawBody   = req.rawBody;
+  // Log inmediato — ANTES de cualquier validación para confirmar que el handler es alcanzado
+  console.log('[Fintoc IPN] ⚡ Webhook recibido');
+  console.log('[Fintoc IPN] Headers:', JSON.stringify({
+    'content-type':     req.headers['content-type'],
+    'fintoc-signature': req.headers['fintoc-signature'],
+    'user-agent':       req.headers['user-agent'],
+  }));
+  console.log('[Fintoc IPN] Body:', JSON.stringify(req.body));
 
-  if (!signature || !rawBody) {
-    console.warn('[Alyto Webhook] Fintoc: petición sin firma o sin body. Rechazando.');
+  // ── 1. Verificar firma del webhook ────────────────────────────────────────
+  // express.json() ya parseó el body — usamos req.body directamente.
+  // Para la verificación HMAC reconstruimos el string desde req.body
+  // (req.rawBody estará disponible solo si captureRawBody corrió antes).
+  const signature = req.headers['fintoc-signature'];
+  const rawBody   = req.rawBody ?? JSON.stringify(req.body);
+
+  if (!signature) {
+    console.warn('[Alyto Webhook] Fintoc: petición sin firma. Rechazando.');
     return res.status(400).json({ error: 'Firma requerida.' });
   }
 

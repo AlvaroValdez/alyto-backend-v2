@@ -103,10 +103,11 @@ router.post('/payin/fintoc', protect, requireEntity(['SpA']), initiateFintocPayi
  * POST /api/v1/payments/webhooks/fintoc
  *
  * Endpoint de callback de Fintoc — llamado por sus servidores, no por el cliente.
- * Usa captureRawBody en lugar del express.json() global para poder verificar la firma.
- * Debe estar en lista blanca en el panel de Fintoc.
+ * Usa express.json() global (ya aplicado en server.js) — NO captureRawBody.
+ * Fintoc envía JSON estándar; solo Stripe requiere raw body para su HMAC.
+ * Debe estar registrado en el panel de Fintoc como webhook URL.
  */
-router.post('/webhooks/fintoc', captureRawBody, fintocWebhook);
+router.post('/webhooks/fintoc', fintocWebhook);
 
 /**
  * GET /api/v1/payments/transactions
