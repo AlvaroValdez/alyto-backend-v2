@@ -574,12 +574,13 @@ export async function initCrossBorderPayment(req, res) {
     }
 
     payinProviderRef = fintocResult.paymentIntentId;
-    payinUrl         = fintocResult.widgetUrl;  // URL completa del checkout de Fintoc
+    payinUrl         = fintocResult.widgetToken;  // widget_token que abre el widget de Fintoc en el FE
     payinProvider    = 'fintoc';
 
+    console.log('[Fintoc] widget_token enviado al FE:', fintocResult.widgetToken);
     console.log('[CrossBorder] Fintoc PaymentIntent creado:', {
       paymentIntentId: fintocResult.paymentIntentId,
-      widgetUrl:       fintocResult.widgetUrl ? '[PRESENTE]' : '[AUSENTE]',
+      widgetToken:     fintocResult.widgetToken ? '[PRESENTE]' : '[AUSENTE]',
     });
 
   } else {
