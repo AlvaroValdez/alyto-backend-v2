@@ -158,7 +158,7 @@ function resolveNetAmountForPayout(transaction) {
  *
  * @param {object} transaction — Documento Mongoose con .save() disponible
  */
-async function dispatchPayout(transaction) {
+export async function dispatchPayout(transaction) {
   // ── Obtener configuración del corredor ────────────────────────────────────
   let corridor;
   try {

@@ -27,7 +27,7 @@ import {
   getPaymentIntent,
   verifyWebhookSignature,
 } from '../services/fintocService.js';
-import { executeWeb3Transit } from '../services/stellarService.js';
+import { dispatchPayout } from './ipnController.js';
 import {
   getPrices,
   getWithdrawalRules as getVitaWithdrawalRules,
@@ -269,65 +269,62 @@ export async function fintocWebhook(req, res) {
     switch (type) {
 
       case 'payment_intent.succeeded': {
-        // ── a) Fiat recibido — actualizar estado a payin_completed ──────────
-        const updated = await Transaction.findOneAndUpdate(
-          {
-            'paymentLegs.externalId': data.id,
-            'paymentLegs.provider':   'fintoc',
-          },
-          {
-            $set: {
-              status:                      'payin_completed',   // Fiat confirmado en cuenta SpA
-              'paymentLegs.$.status':      'completed',
-              'paymentLegs.$.completedAt': new Date(),
-            },
-          },
-          { new: true },
-        );
+        // ── a) Buscar transacción por metadata.transactionId ─────────────────
+        const transactionId = data?.metadata?.transactionId;
 
-        if (!updated) {
-          // Puede ocurrir si la transacción no se guardó en el paso 6 del initiate
-          console.warn('[Alyto Webhook] Fintoc: transacción no encontrada para PaymentIntent:', data.id);
-          break;
+        if (!transactionId) {
+          console.error('[Fintoc IPN] No transactionId en metadata:', JSON.stringify(data?.metadata));
+          return res.status(200).json({ ok: true, message: 'Missing transactionId, ignoring' });
         }
 
-        console.info('[Alyto Webhook] Fintoc: fiat recibido, iniciando tránsito Web3.', {
-          alytoTransactionId: updated.alytoTransactionId,
-          amountCLP:          data.amount,
-        });
+        const transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
 
-        // ── b) Trigger del tránsito Stellar — FIRE AND FORGET ───────────────
-        // Sin await: Fintoc exige un 200 inmediato (< 5s).
-        // executeWeb3Transit corre de forma asíncrona en background.
-        // Los errores se loguean internamente — nunca colapsan el proceso.
-        executeWeb3Transit(updated._id).catch(err => {
-          console.error('[Alyto Webhook] executeWeb3Transit falló (fire-and-forget):', {
-            alytoTransactionId: updated.alytoTransactionId,
-            transactionId:      updated._id.toString(),
-            error:              err.message,
+        if (!transaction) {
+          console.warn('[Fintoc IPN] Transacción no encontrada:', transactionId);
+          return res.status(200).json({ ok: true, message: 'Transaction not found, ignoring' });
+        }
+
+        console.log('[Fintoc IPN] ✅ Transacción encontrada:', transactionId, '| status:', transaction.status);
+
+        // ── b) Confirmar payin y disparar payout ─────────────────────────────
+        if (transaction.status === 'payin_pending') {
+          transaction.status         = 'payin_confirmed';
+          transaction.payinReference = data?.id ?? transaction.payinReference;
+          transaction.ipnLog.push({
+            provider:   'fintoc',
+            eventType:  'fintoc_payin_confirmed',
+            status:     'payin_confirmed',
+            rawPayload: data,
+            receivedAt: new Date(),
           });
-        });
+          await transaction.save();
+
+          console.info('[Fintoc IPN] Payin confirmado — disparando payout.', {
+            alytoTransactionId: transactionId,
+            checkoutSessionId:  data?.id,
+          });
+
+          // dispatchPayout es async — await para capturar errores en el catch
+          await dispatchPayout(transaction);
+        } else {
+          console.info('[Fintoc IPN] Transacción no en payin_pending — ignorando.', {
+            alytoTransactionId: transactionId,
+            currentStatus:      transaction.status,
+          });
+        }
 
         break;
       }
 
       case 'payment_intent.failed': {
-        // Pago rechazado o cancelado por el usuario
-        await Transaction.findOneAndUpdate(
-          {
-            'paymentLegs.externalId': data.id,
-            'paymentLegs.provider':   'fintoc',
-          },
-          {
-            $set: {
-              status:                        'failed',
-              failureReason:                 data.error?.message ?? 'Pago rechazado por Fintoc.',
-              'paymentLegs.$.status':        'failed',
-              'paymentLegs.$.errorMessage':  data.error?.message ?? 'Fallo en autorización bancaria.',
-            },
-          },
-        );
-        console.info('[Alyto Webhook] Fintoc: payin fallido.', { paymentIntentId: data.id });
+        const transactionId = data?.metadata?.transactionId;
+        if (transactionId) {
+          await Transaction.findOneAndUpdate(
+            { alytoTransactionId: transactionId },
+            { $set: { status: 'failed', failureReason: data.error?.message ?? 'Pago rechazado por Fintoc.' } },
+          );
+        }
+        console.info('[Fintoc IPN] Payin fallido.', { checkoutSessionId: data?.id, transactionId });
         break;
       }
 
@@ -553,10 +550,15 @@ export async function initCrossBorderPayment(req, res) {
 
   // ── 3. Crear payin según el método del corredor ───────────────────────────
   //
-  //   fintoc    → PaymentIntent en Fintoc. Fondos llegan a cuenta SpA en Chile.
+  //   fintoc    → Checkout Session en Fintoc. Fondos llegan a cuenta SpA en Chile.
   //               El payout a Vita se dispara solo tras IPN de confirmación.
   //   vitaWallet → payment_order en Vita (ej. AR, BR donde el usuario paga en su país).
   //
+
+  // Generar alytoTransactionId ANTES del call a Fintoc para incluirlo en el metadata.
+  // El IPN de confirmación usará este ID para encontrar la transacción en BD.
+  const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
   let payinProviderRef = null;  // ID externo para lookup en IPN
   let payinUrl         = null;  // Token/URL que abre el widget de pago
   let payinProvider    = 'unknown';
@@ -571,10 +573,11 @@ export async function initCrossBorderPayment(req, res) {
         amount:         Math.round(amount),
         currency:       'CLP',
         metadata: {
-          corridorId: corridor.corridorId,
+          transactionId: alytoTransactionId,   // ← IPN lo usa para encontrar la tx
+          corridorId:    corridor.corridorId,
         },
         success_url:    `${process.env.APP_URL}/success`,
-        cancel_url:     `${process.env.APP_URL}/send`,
+        cancel_url:     `${process.env.APP_URL}/cancel`,
         customer_email: user?.email,
       });
     } catch (err) {
@@ -661,7 +664,7 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── 5. Crear transacción en BD ────────────────────────────────────────────
-  const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+  // alytoTransactionId ya fue generado antes del call a Fintoc (Fix: metadata del IPN)
 
   let transaction;
   try {
