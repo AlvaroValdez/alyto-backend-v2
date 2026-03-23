@@ -317,7 +317,110 @@ export async function executeStellarPayment({
   return submitTransaction(feeBumpTx);
 }
 
-// ─── 6. executeWeb3Transit — Trigger automático post-payin ───────────────────
+// ─── 6. Audit Trail — Registro inmutable de transacciones Alyto en Stellar ───
+
+/**
+ * registerAuditTrail(transaction)
+ *
+ * Registra el alytoTransactionId en Stellar como evidencia inmutable de que
+ * el pago fue completado. No mueve fondos — solo escribe datos en la blockchain.
+ *
+ * Operación: manageData('alyto_tx', alytoTransactionId) + memo text
+ * Firmante: cuenta corporativa de la entidad legal del corredor (SpA / SRL / LLC)
+ * Fees:     la cuenta corporativa paga sus propias fees (no se usa Fee Bump aquí)
+ *
+ * Resiliente: captura internamente todos los errores y retorna null en vez de lanzar.
+ * Un fallo de Stellar NUNCA bloquea el flujo del pago.
+ *
+ * @param {object} transaction — Mongoose doc con alytoTransactionId y legalEntity
+ * @returns {Promise<string|null>}  TXID de Stellar, o null si falló
+ */
+export async function registerAuditTrail(transaction) {
+  const entity = transaction.legalEntity ?? 'LLC';
+
+  const secretKeyEnvMap = {
+    SpA: 'STELLAR_SPA_SECRET_KEY',
+    SRL: 'STELLAR_SRL_SECRET_KEY',
+    LLC: 'STELLAR_LLC_SECRET_KEY',
+  };
+  const secretKey = process.env[secretKeyEnvMap[entity] ?? 'STELLAR_LLC_SECRET_KEY'];
+
+  if (!secretKey) {
+    console.warn(`[Stellar Audit] Secret key no configurada para entidad ${entity}. Audit trail omitido.`);
+    return null;
+  }
+
+  try {
+    const sourceKeypair   = Keypair.fromSecret(secretKey);
+    const sourcePublicKey = sourceKeypair.publicKey();
+    const alytoTxId       = transaction.alytoTransactionId;
+
+    console.log('[Stellar Audit] Registrando audit trail:', alytoTxId,
+      '| entidad:', entity, '| red:', NETWORK_INFO.name);
+
+    const account = await horizonServer.loadAccount(sourcePublicKey);
+
+    const auditTx = new TransactionBuilder(account, {
+      fee:               BASE_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        Operation.manageData({
+          name:  'alyto_tx',
+          value: alytoTxId,          // máx 64 bytes — IDs Alyto son ~26 chars
+        }),
+      )
+      .addMemo(Memo.text(alytoTxId.slice(0, 28)))  // memo text: máx 28 bytes
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
+
+    auditTx.sign(sourceKeypair);
+    const result = await horizonServer.submitTransaction(auditTx);
+
+    console.log('[Stellar Audit] ✅ Registrado:', result.hash,
+      '| alytoTxId:', alytoTxId);
+
+    return result.hash;
+
+  } catch (error) {
+    // NUNCA propagar — el audit trail es best-effort, nunca bloquea el pago
+    console.error('[Stellar Audit] ❌ Error registrando audit trail:', error.message);
+    if (error.response?.data?.extras) {
+      console.error('[Stellar Audit] Extras:', JSON.stringify(error.response.data.extras));
+    }
+    return null;
+  }
+}
+
+/**
+ * getAuditTrail(stellarTxId)
+ *
+ * Consulta Horizon para obtener los detalles de una transacción de audit trail
+ * previamente registrada. Usado por el endpoint GET /:transactionId/audit.
+ *
+ * @param {string} stellarTxId — Hash de la transacción Stellar
+ * @returns {Promise<object|null>}
+ */
+export async function getAuditTrail(stellarTxId) {
+  try {
+    const tx = await horizonServer.transactions().transaction(stellarTxId).call();
+
+    return {
+      hash:        tx.hash,
+      ledger:      tx.ledger,
+      createdAt:   tx.created_at,
+      memo:        tx.memo ?? null,
+      explorerUrl: NETWORK_INFO.name === 'mainnet'
+        ? `https://stellar.expert/explorer/public/tx/${tx.hash}`
+        : `https://stellar.expert/explorer/testnet/tx/${tx.hash}`,
+    };
+  } catch (error) {
+    console.error('[Stellar Audit] Error consultando audit trail:', error.message);
+    return null;
+  }
+}
+
+// ─── 7. executeWeb3Transit — Trigger automático post-payin ───────────────────
 
 /**
  * Ejecuta el tránsito Web3 de una transacción que ya recibió el fiat (payin_completed).

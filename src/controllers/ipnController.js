@@ -25,6 +25,7 @@ import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
 import { generateVitaSignature, createPayout } from '../services/vitaWalletService.js';
+import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS } from '../services/email.js';
@@ -550,7 +551,28 @@ export async function handleVitaIPN(req, res) {
         console.info('[Alyto IPN/Vita] Payout completado — transacción finalizada. ✅', {
           transactionId: transaction.alytoTransactionId,
         });
-        // TODO Fase 18B: registrar TXID en Stellar como capa de auditoría
+
+        // Registrar audit trail inmutable en Stellar (best-effort, no bloquea el flujo)
+        const stellarTxId = await registerAuditTrail(transaction);
+        if (stellarTxId) {
+          transaction.stellarTxId = stellarTxId;
+          transaction.ipnLog.push({
+            provider:   'stellar',
+            eventType:  'stellar_audit_registered',
+            status:     'completed',
+            rawPayload: {
+              stellarTxId,
+              network:     process.env.STELLAR_NETWORK ?? 'testnet',
+              explorerUrl: `https://stellar.expert/explorer/${
+                process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'
+              }/tx/${stellarTxId}`,
+            },
+            receivedAt: new Date(),
+          });
+          await transaction.save().catch(err =>
+            console.error('[Alyto IPN/Vita] Error guardando stellarTxId:', err.message),
+          );
+        }
 
         // Notificación push: transferencia completada
         try {
