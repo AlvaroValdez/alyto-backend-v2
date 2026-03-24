@@ -249,8 +249,39 @@ export async function dispatchPayout(transaction) {
 
   // ── vitaWallet: withdrawal bancario vía Vita API ──────────────────────────
   if (payoutMethod === 'vitaWallet') {
-    const ben    = transaction.beneficiary ?? {};
-    const amount = resolveNetAmountForPayout(transaction);
+    const ben            = transaction.beneficiary ?? {};
+    const netAmountNative = resolveNetAmountForPayout(transaction);
+
+    // ── Conversión BOB → USD para corredores SRL ──────────────────────────
+    // Vita no opera en BOB. Los pagos desde Bolivia se convierten a USD
+    // usando el tipo de cambio oficial ASFI fijo (configurable via BOB_USD_RATE).
+    let amount   = netAmountNative;
+    let vitaCurrency = (transaction.originCurrency ?? 'clp').toLowerCase();
+
+    if (corridor.originCurrency === 'BOB') {
+      const bobRate       = parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+      const usdAmount     = Math.round((netAmountNative / bobRate) * 100) / 100;
+
+      console.log('[dispatchPayout] Conversión BOB→USD:', {
+        netBOB: netAmountNative,
+        rate:   bobRate,
+        usdAmount,
+      });
+
+      // Guardar tasa de conversión en la transacción (best-effort)
+      transaction.conversionRate = {
+        fromCurrency:    'BOB',
+        toCurrency:      'USD',
+        rate:            bobRate,
+        convertedAmount: usdAmount,
+      };
+      await transaction.save().catch(err =>
+        console.error('[dispatchPayout] Error guardando conversionRate:', err.message),
+      );
+
+      amount       = usdAmount;
+      vitaCurrency = 'usd';
+    }
 
     // Extraer dynamicFields (Map → objeto plano)
     const dynamicFields = {};
@@ -279,12 +310,11 @@ export async function dispatchPayout(transaction) {
       const lastName  = dynamicFields.beneficiary_last_name  ?? '';
       vitaPayload = {
         country:          transaction.destinationCountry,
-        currency:         (transaction.originCurrency ?? 'clp').toLowerCase(),
+        currency:         vitaCurrency,
         amount,
         order:            transaction.alytoTransactionId,
         purpose:          'ISSAVG',
-        ...dynamicFields,                      // todos los campos del formulario dinámico
-        // fc_* obligatorios de Vita — siempre se sobreescriben
+        ...dynamicFields,
         fc_customer_type: 'natural',
         fc_legal_name:    `${firstName} ${lastName}`.trim() || 'Beneficiario Alyto',
         fc_document_type: dynamicFields.beneficiary_document_type ?? 'dni',
@@ -293,7 +323,7 @@ export async function dispatchPayout(transaction) {
       // ── Formato legado: mapeo desde campos del schema ─────────────────────
       vitaPayload = {
         country:                     transaction.destinationCountry,
-        currency:                    (transaction.originCurrency ?? 'clp').toLowerCase(),
+        currency:                    vitaCurrency,
         amount,
         order:                       transaction.alytoTransactionId,
         beneficiary_first_name:      ben.firstName  ?? '',

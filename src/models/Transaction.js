@@ -37,6 +37,20 @@ const feesSchema = new Schema(
   { _id: false },
 );
 
+// ─── Sub-esquema: Conversión de Moneda (SRL Bolivia) ─────────────────────────
+// Registra la conversión BOB→USD aplicada antes del payout a Vita.
+// Tipo de cambio fijo ASFI: 1 USD = 6.96 BOB (configurable via BOB_USD_RATE).
+
+const conversionRateSchema = new Schema(
+  {
+    fromCurrency:    { type: String },          // 'BOB'
+    toCurrency:      { type: String },          // 'USD'
+    rate:            { type: Number },          // 6.96
+    convertedAmount: { type: Number },          // monto en USD enviado a Vita
+  },
+  { _id: false },
+);
+
 // ─── Sub-esquema: Desglose de Fees (legacy) ──────────────────────────────────
 
 const feeBreakdownSchema = new Schema(
@@ -343,6 +357,18 @@ const transactionSchema = new Schema(
       type: String,
       trim: true,
     },
+
+    /**
+     * Conversión de moneda aplicada en el payout (solo corredores SRL/BOB).
+     * Registra la tasa BOB→USD utilizada al momento del payout a Vita.
+     */
+    conversionRate: { type: conversionRateSchema },
+
+    /**
+     * Instrucciones de payin manual (solo corredores con payinMethod: 'manual').
+     * Guardadas en BD para que el usuario pueda consultarlas desde TransactionDetail.
+     */
+    paymentInstructions: { type: Schema.Types.Mixed },
     /** Ledger de Stellar en que se confirmó la transacción */
     stellarLedger: {
       type: Number,
