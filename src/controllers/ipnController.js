@@ -21,10 +21,11 @@
  *     ante errores internos. Los errores se loguean para revisión manual.
  */
 
+import crypto            from 'crypto';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
-import { generateVitaSignature, createPayout } from '../services/vitaWalletService.js';
+import { createPayout } from '../services/vitaWalletService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
@@ -33,80 +34,65 @@ import { sendEmail, EMAILS } from '../services/email.js';
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
 
 /**
- * Valida la firma HMAC-SHA256 del IPN entrante de Vita.
+ * Verifica la firma HMAC-SHA256 del IPN entrante de Vita.
  *
- * Vita firma el IPN con el mismo algoritmo que nosotros usamos para
- * autenticar nuestras peticiones salientes (V2-HMAC-SHA256):
- *   message = xLogin + xDate + sortedBody
- *   signature = HMAC-SHA256(VITA_SECRET, message)
+ * Vita firma el body con:
+ *   sortedString = claves ordenadas alfabéticamente, concatenadas key+value
+ *                  (objetos anidados con sus claves también ordenadas → JSON.stringify)
+ *   signature    = HMAC-SHA256(VITA_SECRET, sortedString)
  *
- * Verificamos re-computando la firma esperada con nuestro VITA_SECRET
- * y comparando con el header Authorization del IPN recibido.
+ * NOTA: a diferencia de las peticiones salientes, el IPN NO incluye
+ * xLogin ni xDate en el mensaje a firmar — solo el sortedBody.
  *
- * @param {import('express').Request} req
+ * @param {object} body    — req.body ya parseado
+ * @param {object} headers — req.headers
  * @returns {boolean}
  */
-function validateVitaIPNSignature(req) {
-  const xDate = req.headers['x-date'];
-  if (!xDate) {
-    console.warn('[Alyto IPN/Vita] Header x-date ausente en el IPN.');
-    return false;
-  }
+function verifyVitaSignature(body, headers) {
+  const secret = process.env.VITA_SECRET;
+  if (!secret) return false;
 
-  // Verificar que el x-login del IPN corresponde a nuestra cuenta Vita
-  const xLogin = req.headers['x-login'];
-  if (xLogin && xLogin !== process.env.VITA_LOGIN) {
-    console.warn('[Alyto IPN/Vita] x-login del IPN no coincide con VITA_LOGIN.', {
-      received: xLogin,
+  // Ordena recursivamente las claves de un objeto
+  function sortObjectKeys(obj) {
+    if (typeof obj !== 'object' || obj === null) return obj;
+    const sorted = {};
+    Object.keys(obj).sort().forEach(key => {
+      sorted[key] = sortObjectKeys(obj[key]);
     });
-    return false;
+    return sorted;
   }
 
-  // Extraer firma recibida del header Authorization
-  // Formato: "V2-HMAC-SHA256, Signature: {hex}"
-  const authHeader  = req.headers['authorization'] ?? '';
-  const sigMatch    = authHeader.match(/Signature:\s*([a-f0-9]+)/i);
-  if (!sigMatch) {
-    console.warn('[Alyto IPN/Vita] Header Authorization sin firma parseable:', authHeader);
-    return false;
-  }
-  const receivedSig = sigMatch[1].toLowerCase();
-
-  // Debug logs — diagnóstico firma Vita IPN
-  console.log('[Vita IPN] Body raw para firma:', JSON.stringify(req.body));
-  console.log('[Vita IPN] VITA_SECRET primeros 8 chars:', process.env.VITA_SECRET?.substring(0, 8));
-  console.log('[Vita IPN] VITA_LOGIN:', process.env.VITA_LOGIN);
-  console.log('[Vita IPN] x-date recibido:', xDate);
-  // Sorted string para diagnóstico: claves ordenadas, concatenadas key+value
-  try {
-    const body = req.body ?? {};
-    const sortedString = Object.keys(body).sort()
-      .filter(k => body[k] !== null && body[k] !== undefined)
-      .map(k => `${k}${typeof body[k] === 'object' ? JSON.stringify(body[k]) : String(body[k])}`)
-      .join('');
-    console.log('[Vita IPN] Sorted string para firma (primeros 150 chars):', sortedString.substring(0, 150));
-    console.log('[Vita IPN] Mensaje completo (login+date+sorted):', `${process.env.VITA_LOGIN}${xDate}${sortedString}`.substring(0, 200));
-  } catch (debugErr) {
-    console.warn('[Vita IPN] Error construyendo debug sorted string:', debugErr.message);
+  // Construye el string a firmar: key + value concatenados, claves ordenadas
+  function sortAndStringify(obj) {
+    if (typeof obj !== 'object' || obj === null) return String(obj);
+    return Object.keys(obj).sort().map(key => {
+      const val = obj[key];
+      if (typeof val === 'object' && val !== null) {
+        return key + JSON.stringify(sortObjectKeys(val));
+      }
+      return key + val;
+    }).join('');
   }
 
-  // Recomputar la firma esperada con nuestro secreto compartido
-  let expectedSig;
-  try {
-    expectedSig = generateVitaSignature(xDate, req.body);
-  } catch (err) {
-    console.error('[Alyto IPN/Vita] Error calculando firma esperada:', err.message);
-    return false;
-  }
+  const sortedString = sortAndStringify(body);
 
-  const isValid = receivedSig === expectedSig.toLowerCase();
-  if (!isValid) {
-    console.warn('[Alyto IPN/Vita] Firma inválida en IPN.', {
-      received: receivedSig,
-      expected: expectedSig,
-    });
-  }
-  return isValid;
+  console.log('[Vita IPN] Body raw:', JSON.stringify(body));
+  console.log('[Vita IPN] VITA_SECRET primeros 8 chars:', secret.substring(0, 8));
+  console.log('[Vita IPN] Sorted string:', sortedString);
+
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(sortedString)
+    .digest('hex');
+
+  const receivedSignature = headers['authorization']
+    ?.replace('V2-HMAC-SHA256, Signature: ', '')
+    ?.trim();
+
+  console.log('[Vita IPN] Expected:', expectedSignature);
+  console.log('[Vita IPN] Received:', receivedSignature);
+
+  return expectedSignature === receivedSignature;
 }
 
 /**
@@ -521,7 +507,7 @@ export async function dispatchPayout(transaction) {
  */
 export async function handleVitaIPN(req, res) {
   // ── 1. Validar firma HMAC-SHA256 ──────────────────────────────────────────
-  if (!validateVitaIPNSignature(req)) {
+  if (!verifyVitaSignature(req.body, req.headers)) {
     console.warn('[Alyto IPN/Vita] Firma inválida — rechazando petición.', {
       ip:   req.ip,
       body: JSON.stringify(req.body)?.slice(0, 200),
