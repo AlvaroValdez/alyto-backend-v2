@@ -25,7 +25,8 @@ import crypto            from 'crypto';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
-import { createPayout } from '../services/vitaWalletService.js';
+import { createPayout }       from '../services/vitaWalletService.js';
+import { createDisbursement } from '../services/owlPayService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
@@ -185,20 +186,118 @@ function resolveNetAmountForPayout(transaction) {
   return montoNeto;
 }
 
+// ─── Helpers de Payout por Proveedor ─────────────────────────────────────────
+
+/**
+ * Construye el payload de beneficiario normalizado para Vita o OwlPay.
+ * Soporta tanto formato dinámico (campos de withdrawal_rules de Vita)
+ * como formato legado (campos nombrados del schema de Transaction).
+ *
+ * @param {object} ben         — transaction.beneficiary
+ * @param {number} amount      — monto ya convertido a moneda del proveedor
+ * @param {string} currency    — moneda del proveedor (ej. 'usd', 'clp')
+ * @param {object} transaction
+ * @returns {{ vitaPayload: object, beneficiaryFlat: object }}
+ */
+function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
+  const dynamicFields = {};
+  if (ben.dynamicFields instanceof Map) {
+    for (const [k, v] of ben.dynamicFields.entries()) dynamicFields[k] = v;
+  } else if (ben.dynamicFields && typeof ben.dynamicFields === 'object') {
+    Object.assign(dynamicFields, ben.dynamicFields);
+  }
+
+  const isDynamicFormat = Boolean(
+    dynamicFields.beneficiary_first_name ??
+    dynamicFields.beneficiary_email      ??
+    dynamicFields.bank_code,
+  );
+
+  let vitaPayload;
+  if (isDynamicFormat) {
+    const firstName = dynamicFields.beneficiary_first_name ?? '';
+    const lastName  = dynamicFields.beneficiary_last_name  ?? '';
+    vitaPayload = {
+      country:          transaction.destinationCountry,
+      currency,
+      amount,
+      order:            transaction.alytoTransactionId,
+      purpose:          'ISSAVG',
+      ...dynamicFields,
+      fc_customer_type: 'natural',
+      fc_legal_name:    `${firstName} ${lastName}`.trim() || 'Beneficiario Alyto',
+      fc_document_type: dynamicFields.beneficiary_document_type ?? 'dni',
+    };
+  } else {
+    vitaPayload = {
+      country:                     transaction.destinationCountry,
+      currency,
+      amount,
+      order:                       transaction.alytoTransactionId,
+      beneficiary_first_name:      ben.firstName  ?? '',
+      beneficiary_last_name:       ben.lastName   ?? '',
+      beneficiary_email:           ben.email      ?? '',
+      beneficiary_address:         ben.address    ?? '',
+      beneficiary_document_type:   ben.documentType   ?? 'dni',
+      beneficiary_document_number: ben.documentNumber ?? '',
+      purpose:                     'ISSAVG',
+      ...(ben.bankCode    ? { bank_code:         ben.bankCode    } : {}),
+      ...(ben.accountBank ? { account_bank:       ben.accountBank } : {}),
+      ...(ben.accountType ? { account_type_bank:  ben.accountType } : {}),
+      fc_customer_type: 'natural',
+      fc_legal_name:    `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+      fc_document_type: ben.documentType ?? 'dni',
+      ...dynamicFields,
+    };
+  }
+
+  // Beneficiario plano para OwlPay (campos estándar)
+  const beneficiaryFlat = {
+    firstName:      vitaPayload.beneficiary_first_name ?? ben.firstName ?? '',
+    lastName:       vitaPayload.beneficiary_last_name  ?? ben.lastName  ?? '',
+    email:          vitaPayload.beneficiary_email      ?? ben.email     ?? '',
+    documentType:   vitaPayload.beneficiary_document_type   ?? ben.documentType   ?? 'dni',
+    documentNumber: vitaPayload.beneficiary_document_number ?? ben.documentNumber ?? '',
+    bankCode:       vitaPayload.bank_code        ?? ben.bankCode    ?? '',
+    accountNumber:  vitaPayload.account_bank     ?? ben.accountBank ?? '',
+    accountType:    vitaPayload.account_type_bank ?? ben.accountType ?? 'savings',
+    address:        vitaPayload.beneficiary_address ?? ben.address  ?? '',
+    dynamicFields,
+  };
+
+  return { vitaPayload, beneficiaryFlat };
+}
+
+/**
+ * Calcula la conversión BOB→USD para corredores SRL.
+ * Prioriza la tasa del corredor; usa BOB_USD_RATE como fallback.
+ *
+ * @param {number} netAmountBOB
+ * @param {object} corridor
+ * @returns {{ usdAmount: number, bobPerUsd: number }}
+ */
+function convertBobToUsd(netAmountBOB, corridor) {
+  const bobPerUsd = corridor.manualExchangeRate > 0
+    ? corridor.manualExchangeRate
+    : parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+
+  const usdAmount = Math.round((netAmountBOB / bobPerUsd) * 100) / 100;
+  return { usdAmount, bobPerUsd };
+}
+
 // ─── dispatchPayout ───────────────────────────────────────────────────────────
 
 /**
  * Dispara el payout al beneficiario después de que el payin fue confirmado.
  * Se invoca desde ambos handlers (vita y fintoc) cuando el payin queda confirmado.
  *
- * El payoutMethod del corredor determina qué proveedor ejecuta el payout:
- *   vitaWallet   → POST /transactions (withdrawal) a Vita API
- *   anchorBolivia → Notificación email al admin + status "processing"
- *   rampNetwork  → TODO Fase 18B
- *   stellar      → TODO Fase 18B
+ * Proveedores soportados (payoutMethod en TransactionConfig):
+ *   vitaWallet    → Vita withdrawal API (CLP/USD → banco LatAm)
+ *   owlPay        → Harbor/OwlPay disbursement (USD → banco LatAm)
+ *   anchorBolivia → Payout manual — notifica al admin vía email
  *
- * Errores: capturados internamente — nunca lanzan excepción al caller.
- * Los fallos quedan registrados en ipnLog y el status pasa a "failed".
+ * Fallback: si el proveedor principal falla, intenta corridor.fallbackPayoutMethod.
+ * En sandbox (VITA_ENVIRONMENT=sandbox): auto-completa sin esperar IPN.
  *
  * @param {object} transaction — Documento Mongoose con .save() disponible
  */
@@ -242,141 +341,137 @@ export async function dispatchPayout(transaction) {
 
   const payoutMethod = corridor.payoutMethod;
   console.info('[Alyto Payout] Despachando payout.', {
-    transactionId: transaction.alytoTransactionId,
+    transactionId:      transaction.alytoTransactionId,
     payoutMethod,
+    fallbackMethod:     corridor.fallbackPayoutMethod ?? 'none',
     destinationCountry: transaction.destinationCountry,
+    originCurrency:     transaction.originCurrency,
   });
 
-  // ── vitaWallet: withdrawal bancario vía Vita API ──────────────────────────
-  if (payoutMethod === 'vitaWallet') {
-    const ben            = transaction.beneficiary ?? {};
-    const netAmountNative = resolveNetAmountForPayout(transaction);
+  // ─────────────────────────────────────────────────────────────────────────
+  // ── vitaWallet | owlPay: ambos proveedores bancarios con lógica común ────
+  // ─────────────────────────────────────────────────────────────────────────
+  if (payoutMethod === 'vitaWallet' || payoutMethod === 'owlPay') {
+    const ben              = transaction.beneficiary ?? {};
+    const netAmountNative  = resolveNetAmountForPayout(transaction);
 
-    // ── Conversión BOB → USD para corredores SRL ──────────────────────────
-    // Vita no opera en BOB. Los pagos desde Bolivia se convierten a USD
-    // usando el tipo de cambio oficial ASFI fijo (configurable via BOB_USD_RATE).
-    let amount   = netAmountNative;
-    let vitaCurrency = (transaction.originCurrency ?? 'clp').toLowerCase();
+    // ── Conversión BOB → USD para corredores SRL ─────────────────────────
+    // Vita y OwlPay operan en USD (no en BOB). Usar tasa ASFI del corredor.
+    let payoutAmountUSD = netAmountNative;
+    let vitaCurrency    = (transaction.originCurrency ?? 'clp').toLowerCase();
 
     if (corridor.originCurrency === 'BOB') {
-      const bobRate       = parseFloat(process.env.BOB_USD_RATE ?? '6.96');
-      const usdAmount     = Math.round((netAmountNative / bobRate) * 100) / 100;
+      const { usdAmount, bobPerUsd } = convertBobToUsd(netAmountNative, corridor);
 
       console.log('[dispatchPayout] Conversión BOB→USD:', {
-        netBOB: netAmountNative,
-        rate:   bobRate,
-        usdAmount,
+        netBOB: netAmountNative, bobPerUsd, usdAmount,
       });
 
-      // Guardar tasa de conversión en la transacción (best-effort)
       transaction.conversionRate = {
         fromCurrency:    'BOB',
         toCurrency:      'USD',
-        rate:            bobRate,
+        rate:            bobPerUsd,
         convertedAmount: usdAmount,
       };
       await transaction.save().catch(err =>
         console.error('[dispatchPayout] Error guardando conversionRate:', err.message),
       );
 
-      amount       = usdAmount;
-      vitaCurrency = 'usd';
+      payoutAmountUSD = usdAmount;
+      vitaCurrency    = 'usd';
     }
 
-    // Extraer dynamicFields (Map → objeto plano)
-    const dynamicFields = {};
-    if (ben.dynamicFields instanceof Map) {
-      for (const [k, v] of ben.dynamicFields.entries()) {
-        dynamicFields[k] = v;
-      }
-    } else if (ben.dynamicFields && typeof ben.dynamicFields === 'object') {
-      Object.assign(dynamicFields, ben.dynamicFields);
-    }
-
-    // ── Detección de formato ────────────────────────────────────────────────
-    // Si dynamicFields contiene keys de Vita (beneficiary_first_name, bank_code, etc.),
-    // usarlos directamente (formato dinámico del formulario de withdrawal_rules).
-    // Si no, construir el payload desde los campos nombrados del schema (formato legado).
-    const isDynamicFormat = Boolean(
-      dynamicFields.beneficiary_first_name ??
-      dynamicFields.beneficiary_email      ??
-      dynamicFields.bank_code,
+    const { vitaPayload, beneficiaryFlat } = buildBeneficiaryPayloads(
+      ben, payoutAmountUSD, vitaCurrency, transaction,
     );
 
-    let vitaPayload;
-    if (isDynamicFormat) {
-      // ── Formato dinámico: spread directo de los campos de Vita ─────────────
-      const firstName = dynamicFields.beneficiary_first_name ?? '';
-      const lastName  = dynamicFields.beneficiary_last_name  ?? '';
-      vitaPayload = {
-        country:          transaction.destinationCountry,
-        currency:         vitaCurrency,
-        amount,
-        order:            transaction.alytoTransactionId,
-        purpose:          'ISSAVG',
-        ...dynamicFields,
-        fc_customer_type: 'natural',
-        fc_legal_name:    `${firstName} ${lastName}`.trim() || 'Beneficiario Alyto',
-        fc_document_type: dynamicFields.beneficiary_document_type ?? 'dni',
-      };
-    } else {
-      // ── Formato legado: mapeo desde campos del schema ─────────────────────
-      vitaPayload = {
-        country:                     transaction.destinationCountry,
-        currency:                    vitaCurrency,
-        amount,
-        order:                       transaction.alytoTransactionId,
-        beneficiary_first_name:      ben.firstName  ?? '',
-        beneficiary_last_name:       ben.lastName   ?? '',
-        beneficiary_email:           ben.email      ?? '',
-        beneficiary_address:         ben.address    ?? '',
-        beneficiary_document_type:   ben.documentType   ?? 'dni',
-        beneficiary_document_number: ben.documentNumber ?? '',
-        purpose:                     'ISSAVG',
-        ...(ben.bankCode    ? { bank_code:         ben.bankCode    } : {}),
-        ...(ben.accountBank ? { account_bank:       ben.accountBank } : {}),
-        ...(ben.accountType ? { account_type_bank:  ben.accountType } : {}),
-        fc_customer_type: 'natural',
-        fc_legal_name:    `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
-        fc_document_type: ben.documentType ?? 'dni',
-        ...dynamicFields,
-      };
+    // ── Función interna: intentar payout con un proveedor específico ──────
+    async function tryProvider(method) {
+      if (method === 'vitaWallet') {
+        return createPayout(vitaPayload);
+      }
+      if (method === 'owlPay') {
+        return createDisbursement({
+          amount:              payoutAmountUSD,
+          destinationCountry:  transaction.destinationCountry,
+          destinationCurrency: transaction.destinationCurrency,
+          beneficiary:         beneficiaryFlat,
+          alytoTransactionId:  transaction.alytoTransactionId,
+          userId:              transaction.userId,
+        });
+      }
+      throw new Error(`Proveedor desconocido: ${method}`);
     }
 
-    let vitaResponse;
+    // ── Intento con proveedor primario ───────────────────────────────────
+    let providerUsed    = payoutMethod;
+    let providerResponse;
+    let primaryError;
+
     try {
-      vitaResponse = await createPayout(vitaPayload);
+      providerResponse = await tryProvider(payoutMethod);
     } catch (err) {
-      console.error('[Alyto Payout] Error en createPayout (Vita):', {
+      primaryError = err;
+      console.error(`[Alyto Payout] ${payoutMethod} falló:`, {
         transactionId: transaction.alytoTransactionId,
-        error:         err.message,
-        vitaCode:      err.vitaCode,
-        detail:        err.data,
+        error: err.message,
       });
       Sentry.captureException(err, {
-        tags:  { component: 'dispatchPayout', corridorId: transaction.corridorId?.toString() },
-        extra: { transactionId: transaction.alytoTransactionId, beneficiary: transaction.beneficiary },
+        tags:  { component: 'dispatchPayout', provider: payoutMethod },
+        extra: { transactionId: transaction.alytoTransactionId },
       });
-      transaction.status        = 'failed';
-      transaction.failureReason = `Vita withdrawal falló: ${err.message}`;
-      await appendIpnLog(transaction, 'payout_dispatch_failed', 'vitaWallet', 'failed', {
-        error:    err.message,
-        vitaCode: err.vitaCode ?? null,
-        detail:   err.data    ?? null,
-      });
-      return;
+
+      // ── Fallback al proveedor secundario (si configurado) ────────────
+      const fallback = corridor.fallbackPayoutMethod;
+      if (fallback && fallback !== payoutMethod) {
+        console.warn(`[Alyto Payout] Intentando fallback: ${fallback}`);
+        try {
+          providerResponse = await tryProvider(fallback);
+          providerUsed     = fallback;
+          await appendIpnLog(transaction, 'payout_fallback_used', fallback, 'processing', {
+            primaryProvider: payoutMethod,
+            primaryError:    primaryError.message,
+            fallbackProvider: fallback,
+          });
+        } catch (fallbackErr) {
+          console.error(`[Alyto Payout] Fallback ${fallback} también falló:`, fallbackErr.message);
+          transaction.status        = 'failed';
+          transaction.failureReason = `Primary (${payoutMethod}): ${primaryError.message} | Fallback (${fallback}): ${fallbackErr.message}`;
+          await appendIpnLog(transaction, 'payout_all_providers_failed', 'system', 'failed', {
+            primaryProvider: payoutMethod, primaryError: primaryError.message,
+            fallbackProvider: fallback,    fallbackError: fallbackErr.message,
+          });
+          return;
+        }
+      } else {
+        // Sin fallback — marcar como fallido
+        transaction.status        = 'failed';
+        transaction.failureReason = `${payoutMethod} falló: ${primaryError.message}`;
+        await appendIpnLog(transaction, 'payout_dispatch_failed', payoutMethod, 'failed', {
+          error: primaryError.message,
+        });
+        return;
+      }
     }
 
-    // Payout creado exitosamente en Vita
-    console.log('[dispatchPayout] Vita aceptó withdrawal ✅');
-    console.log('[dispatchPayout] Respuesta Vita:', JSON.stringify(vitaResponse?.data || vitaResponse));
-    transaction.payoutReference = vitaResponse?.data?.id ?? vitaResponse?.id ?? vitaResponse?.transaction?.id ?? null;
-    transaction.providersUsed   = [...(transaction.providersUsed ?? []), 'payout:vitaWallet'];
+    // ── Payout aceptado por el proveedor ─────────────────────────────────
+    console.log(`[dispatchPayout] ${providerUsed} aceptó payout ✅`);
 
-    console.info('[Alyto Payout] Vita withdrawal creado.', {
-      transactionId:     transaction.alytoTransactionId,
-      vitaTransactionId: transaction.payoutReference,
-      amount,
+    // Extraer referencia externa según proveedor
+    if (providerUsed === 'vitaWallet') {
+      console.log('[dispatchPayout] Respuesta Vita:', JSON.stringify(providerResponse?.data || providerResponse));
+      transaction.payoutReference = providerResponse?.data?.id ?? providerResponse?.id ?? providerResponse?.transaction?.id ?? null;
+    } else {
+      // OwlPay
+      transaction.payoutReference = providerResponse?.disbursementId ?? providerResponse?.id ?? null;
+    }
+    transaction.providersUsed = [...(transaction.providersUsed ?? []), `payout:${providerUsed}`];
+
+    console.info(`[Alyto Payout] Payout creado (${providerUsed}).`, {
+      transactionId:  transaction.alytoTransactionId,
+      payoutReference: transaction.payoutReference,
+      amount:          payoutAmountUSD,
+      provider:        providerUsed,
     });
 
     console.log('[dispatchPayout] VITA_ENVIRONMENT check:', process.env.VITA_ENVIRONMENT);
@@ -464,10 +559,11 @@ export async function dispatchPayout(transaction) {
       // ── VITA PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─
       transaction.status = 'payout_sent';
 
-      await appendIpnLog(transaction, 'payout_dispatched', 'vitaWallet', 'payout_sent', {
-        vitaTransactionId: transaction.payoutReference,
-        amount,
-        country: transaction.destinationCountry,
+      await appendIpnLog(transaction, 'payout_dispatched', providerUsed, 'payout_sent', {
+        payoutReference: transaction.payoutReference,
+        amount:          payoutAmountUSD,
+        country:         transaction.destinationCountry,
+        provider:        providerUsed,
       });
 
       // Notificación push: pago enviado al banco

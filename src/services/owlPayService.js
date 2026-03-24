@@ -185,6 +185,131 @@ export async function getOnRampOrderStatus(orderId) {
 }
 
 /**
+ * Crea un desembolso (off-ramp) B2B a cuenta bancaria local vía Harbor/OwlPay.
+ *
+ * OwlPay recibe USD institucionales y los dispersa a una cuenta bancaria
+ * en el país de destino. Ideal como proveedor primario o fallback de Vita
+ * para los corredores SRL Bolivia → LatAm.
+ *
+ * Flujo:
+ *   1. AV Finance SRL/LLC tiene fondos en USD en la cuenta Harbor
+ *   2. createDisbursement() instruye a OwlPay a debitar esos fondos
+ *   3. OwlPay convierte USD → moneda local y acredita en la cuenta del beneficiario
+ *   4. OwlPay notifica vía webhook cuando el desembolso se completa
+ *
+ * @param {object} params
+ * @param {number} params.amount                - Monto en USD (ya convertido de BOB si aplica)
+ * @param {string} params.destinationCountry    - ISO alpha-2 (ej. 'CO', 'PE', 'AR')
+ * @param {string} params.destinationCurrency   - ISO 4217 (ej. 'COP', 'PEN', 'ARS')
+ * @param {object} params.beneficiary           - Datos del destinatario
+ * @param {string} params.beneficiary.firstName
+ * @param {string} params.beneficiary.lastName
+ * @param {string} params.beneficiary.email
+ * @param {string} params.beneficiary.documentType
+ * @param {string} params.beneficiary.documentNumber
+ * @param {string} params.beneficiary.bankCode          - Código del banco destino
+ * @param {string} params.beneficiary.accountNumber     - Número de cuenta
+ * @param {string} params.beneficiary.accountType       - 'checking' | 'savings'
+ * @param {string} [params.beneficiary.address]
+ * @param {object} [params.beneficiary.dynamicFields]   - Campos adicionales por país
+ * @param {string} params.alytoTransactionId   - ID Alyto para correlación y auditoría
+ * @param {string} params.userId               - ID del usuario Alyto
+ * @returns {Promise<DisbursementResult>}
+ *
+ * @typedef {Object} DisbursementResult
+ * @property {string}  disbursementId   - ID del desembolso en OwlPay
+ * @property {string}  status           - Estado inicial ('pending' | 'processing')
+ * @property {number}  amount           - Monto en USD confirmado
+ * @property {string}  currency         - 'USD'
+ * @property {string|null} trackingUrl  - URL de seguimiento Harbor (si disponible)
+ */
+export async function createDisbursement({
+  amount,
+  destinationCountry,
+  destinationCurrency,
+  beneficiary,
+  alytoTransactionId,
+  userId,
+}) {
+  if (!amount || amount <= 0) {
+    throw new Error('[Alyto OwlPay] createDisbursement: amount debe ser un número positivo en USD.');
+  }
+  if (!destinationCountry || !destinationCurrency) {
+    throw new Error('[Alyto OwlPay] createDisbursement: destinationCountry y destinationCurrency son requeridos.');
+  }
+  if (!beneficiary?.firstName || !beneficiary?.accountNumber) {
+    throw new Error('[Alyto OwlPay] createDisbursement: beneficiary.firstName y accountNumber son requeridos.');
+  }
+
+  const ben = beneficiary;
+
+  // Merge dynamicFields (campos específicos por país: clabe, pix_key, etc.)
+  const extraFields = {};
+  if (ben.dynamicFields instanceof Map) {
+    for (const [k, v] of ben.dynamicFields.entries()) extraFields[k] = v;
+  } else if (ben.dynamicFields && typeof ben.dynamicFields === 'object') {
+    Object.assign(extraFields, ben.dynamicFields);
+  }
+
+  const payload = {
+    source_currency:      'USD',
+    source_amount:        amount,
+    destination_country:  destinationCountry.toUpperCase(),
+    destination_currency: destinationCurrency.toUpperCase(),
+    beneficiary: {
+      first_name:      ben.firstName ?? ben.beneficiary_first_name ?? '',
+      last_name:       ben.lastName  ?? ben.beneficiary_last_name  ?? '',
+      email:           ben.email     ?? ben.beneficiary_email       ?? '',
+      document_type:   ben.documentType   ?? ben.beneficiary_document_type   ?? 'dni',
+      document_number: ben.documentNumber ?? ben.beneficiary_document_number ?? '',
+      bank_code:       ben.bankCode   ?? ben.bank_code    ?? '',
+      account_number:  ben.accountNumber ?? ben.account_bank ?? '',
+      account_type:    ben.accountType   ?? ben.account_type_bank ?? 'savings',
+      ...(ben.address ? { address: ben.address } : {}),
+      ...extraFields,
+    },
+    metadata: {
+      alyto_transaction_id: alytoTransactionId,
+      alyto_user_id:        String(userId ?? ''),
+      legal_entity:         'SRL',
+      corridor:             'C',
+      operation_type:       'manualPayinPayout',
+    },
+  };
+
+  console.info('[Alyto OwlPay] Creando desembolso:', {
+    amount,
+    destinationCountry,
+    destinationCurrency,
+    alytoTransactionId,
+    beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+  });
+
+  const data = await owlPayRequest('/v1/disbursements', {
+    method: 'POST',
+    body:   JSON.stringify(payload),
+  });
+
+  return {
+    disbursementId: data.id ?? data.disbursement_id,
+    status:         data.status   ?? 'pending',
+    amount:         data.source_amount ?? amount,
+    currency:       'USD',
+    trackingUrl:    data.tracking_url ?? null,
+  };
+}
+
+/**
+ * Consulta el estado de un desembolso en OwlPay.
+ *
+ * @param {string} disbursementId
+ * @returns {Promise<object>} Objeto Disbursement de OwlPay
+ */
+export async function getDisbursementStatus(disbursementId) {
+  return owlPayRequest(`/v1/disbursements/${disbursementId}`);
+}
+
+/**
  * Verifica la firma HMAC-SHA256 del webhook de OwlPay/Harbor.
  * DEBE llamarse antes de procesar cualquier evento de webhook.
  *
