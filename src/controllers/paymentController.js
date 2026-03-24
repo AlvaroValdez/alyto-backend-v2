@@ -549,6 +549,17 @@ export async function initCrossBorderPayment(req, res) {
     return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado o inactivo.` });
   }
 
+  // Validar que el corredor corresponde a la moneda origen del usuario
+  const ENTITY_CURRENCY_MAP_CBP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+  const userOriginCurrency = ENTITY_CURRENCY_MAP_CBP[req.user?.legalEntity] ?? 'USD';
+  if (corridor.originCurrency !== userOriginCurrency) {
+    return res.status(403).json({
+      error: 'Este corredor no está disponible para tu cuenta.',
+      expected: userOriginCurrency,
+      corridorCurrency: corridor.originCurrency,
+    });
+  }
+
   // ── 3. Calcular fees desde TransactionConfig (configurable por corredor) ─────
   const payinFee        = Math.round(amount * (corridor.payinFeePercent / 100));
   const alytoCSpread    = Math.round(amount * (corridor.alytoCSpread / 100));
@@ -840,18 +851,24 @@ export async function getQuote(req, res) {
   const origin = originCountry.toUpperCase();
   const dest   = destinationCountry.toUpperCase();
 
+  // Determinar moneda origen según entidad del usuario autenticado
+  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+  const userOriginCurrency  = ENTITY_CURRENCY_MAP[req.user?.legalEntity] ?? 'USD';
+
   // ── 2. Buscar corredor activo en TransactionConfig ─────────────────────────
   let corridor;
   try {
     corridor = await TransactionConfig.findOne({
       originCountry:      origin,
       destinationCountry: dest,
+      originCurrency:     userOriginCurrency,
       isActive:           true,
     }).lean();
   } catch (err) {
     console.error('[Alyto Quote] Error buscando corredor en BD:', {
       originCountry: origin,
       destinationCountry: dest,
+      originCurrency: userOriginCurrency,
       userId,
       error: err.message,
     });
@@ -862,11 +879,12 @@ export async function getQuote(req, res) {
     console.warn('[Alyto Quote] Corredor no encontrado:', {
       originCountry: origin,
       destinationCountry: dest,
+      originCurrency: userOriginCurrency,
       userId,
       legalEntity: req.user?.legalEntity,
     });
     return res.status(404).json({
-      error: `Corredor no disponible para ${origin} → ${dest}.`,
+      error: `Corredor no disponible para tu país de origen (${origin} → ${dest}).`,
     });
   }
 
@@ -1237,5 +1255,78 @@ export async function getTransactionAudit(req, res) {
     registeredAt: auditData?.createdAt ?? null,
     memo:         auditData?.memo       ?? null,
     ledger:       auditData?.ledger     ?? null,
+  });
+}
+
+// ─── GET /api/v1/payments/corridors ─────────────────────────────────────────
+
+/**
+ * Retorna los corredores disponibles para el usuario autenticado,
+ * filtrados por su entidad legal (SpA→CLP, SRL→BOB, LLC→USD).
+ *
+ * Auth: Bearer JWT
+ *
+ * Respuesta:
+ * {
+ *   originCurrency: "CLP",
+ *   originCountry: "CL",
+ *   corridors: [{ corridorId, destinationCountry, destinationCurrency,
+ *                 destinationCountryName, destinationFlag }]
+ * }
+ */
+
+const COUNTRY_META = {
+  CO: { name: 'Colombia',       flag: '🇨🇴' },
+  PE: { name: 'Perú',           flag: '🇵🇪' },
+  AR: { name: 'Argentina',      flag: '🇦🇷' },
+  MX: { name: 'México',         flag: '🇲🇽' },
+  BR: { name: 'Brasil',         flag: '🇧🇷' },
+  EC: { name: 'Ecuador',        flag: '🇪🇨' },
+  UY: { name: 'Uruguay',        flag: '🇺🇾' },
+  PY: { name: 'Paraguay',       flag: '🇵🇾' },
+  US: { name: 'Estados Unidos', flag: '🇺🇸' },
+  BO: { name: 'Bolivia',        flag: '🇧🇴' },
+  CL: { name: 'Chile',          flag: '🇨🇱' },
+  VE: { name: 'Venezuela',      flag: '🇻🇪' },
+};
+
+export async function getAvailableCorridors(req, res) {
+  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+  const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
+
+  const legalEntity        = req.user?.legalEntity ?? 'LLC';
+  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'US';
+
+  let corridors;
+  try {
+    corridors = await TransactionConfig.find({
+      originCurrency: userOriginCurrency,
+      isActive:       true,
+      originCountry:  { $ne: 'ANY' },           // excluir corredores comodín
+      destinationCountry: { $ne: 'CRYPTO' },    // excluir wallets crypto
+    })
+      .select('corridorId destinationCountry destinationCurrency')
+      .lean();
+  } catch (err) {
+    console.error('[Alyto Corridors] Error:', err.message);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  const result = corridors.map((c) => {
+    const meta = COUNTRY_META[c.destinationCountry] ?? {};
+    return {
+      corridorId:              c.corridorId,
+      destinationCountry:      c.destinationCountry,
+      destinationCurrency:     c.destinationCurrency,
+      destinationCountryName:  meta.name ?? c.destinationCountry,
+      destinationFlag:         meta.flag ?? '',
+    };
+  });
+
+  return res.json({
+    originCurrency: userOriginCurrency,
+    originCountry:  userOriginCountry,
+    corridors:      result,
   });
 }
