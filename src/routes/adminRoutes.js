@@ -27,7 +27,11 @@ import {
   getTransaction,
   updateTransactionStatus,
   listCorridors,
+  createCorridor,
   updateCorridor,
+  deactivateCorridor,
+  getCorridorAnalytics,
+  getGlobalAnalytics,
 } from '../controllers/adminController.js';
 
 const router = Router();
@@ -97,12 +101,39 @@ router.patch('/transactions/:transactionId/status', updateTransactionStatus);
 router.get('/corridors', listCorridors);
 
 /**
+ * POST /api/v1/admin/corridors
+ * Crea un corredor nuevo. Valida que corridorId no exista.
+ * Body: todos los campos requeridos de TransactionConfig.
+ */
+router.post('/corridors', createCorridor);
+
+/**
  * PATCH /api/v1/admin/corridors/:corridorId
- *
- * Actualiza parámetros de un corredor. corridorId es inmutable.
- * Campos comunes: alytoCSpread, fixedFee, isActive, profitRetentionPercent
- * Body: cualquier campo del modelo TransactionConfig excepto corridorId
+ * Actualiza parámetros de un corredor con registro en changeLog.
+ * corridorId es inmutable.
  */
 router.patch('/corridors/:corridorId', updateCorridor);
+
+/**
+ * DELETE /api/v1/admin/corridors/:corridorId
+ * Baja lógica: isActive: false + deletedAt. No elimina físicamente.
+ */
+router.delete('/corridors/:corridorId', deactivateCorridor);
+
+/**
+ * GET /api/v1/admin/corridors/:corridorId/analytics
+ * Rentabilidad del corredor en el periodo indicado.
+ * Query params: startDate, endDate (ISO)
+ */
+router.get('/corridors/:corridorId/analytics', getCorridorAnalytics);
+
+// ─── Analytics Global ─────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/analytics
+ * Analytics global: volumen, revenue, desglose por entidad y corredor.
+ * Query params: startDate, endDate (ISO)
+ */
+router.get('/analytics', getGlobalAnalytics);
 
 export default router;

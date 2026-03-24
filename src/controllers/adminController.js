@@ -4,13 +4,17 @@
  * Endpoints exclusivos para usuarios con role = 'admin'.
  * Protegidos con protect + checkAdmin en las rutas.
  *
- * getAllUsers             → Lista todos los usuarios con KYC y entidad legal.
- * getGlobalLedger        → Últimas 100 operaciones con populate del usuario origen.
- * listTransactions       → Backoffice Ledger: lista paginada + filtros + resumen.
- * getTransaction         → Detalle completo de una transacción (incluye ipnLog).
+ * getAllUsers              → Lista todos los usuarios con KYC y entidad legal.
+ * getGlobalLedger         → Últimas 100 operaciones con populate del usuario origen.
+ * listTransactions        → Backoffice Ledger: lista paginada + filtros + resumen.
+ * getTransaction          → Detalle completo de una transacción (incluye ipnLog).
  * updateTransactionStatus → Actualización manual de status con auditoría en ipnLog.
- * listCorridors          → Lista todos los corredores (TransactionConfig).
- * updateCorridor         → Actualiza parámetros económicos de un corredor.
+ * listCorridors           → Lista todos los corredores (TransactionConfig).
+ * createCorridor          → Crea un corredor nuevo.
+ * updateCorridor          → Actualiza parámetros económicos con changeLog.
+ * deactivateCorridor      → Baja lógica (isActive: false + deletedAt).
+ * getCorridorAnalytics    → Rentabilidad de un corredor en un periodo.
+ * getGlobalAnalytics      → Analytics global: entidades, corredores, volumen.
  */
 
 import User              from '../models/User.js';
@@ -380,24 +384,65 @@ export async function listCorridors(req, res) {
   }
 }
 
+// ─── createCorridor ───────────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/admin/corridors
+ *
+ * Crea un corredor nuevo. Valida que corridorId no exista previamente.
+ * Body: todos los campos requeridos de TransactionConfig.
+ */
+export async function createCorridor(req, res) {
+  const { corridorId } = req.body;
+
+  if (!corridorId) {
+    return res.status(400).json({ error: 'El campo corridorId es requerido.' });
+  }
+
+  try {
+    const exists = await TransactionConfig.findOne({ corridorId: corridorId.toLowerCase() }).lean();
+    if (exists) {
+      return res.status(409).json({ error: `Ya existe un corredor con corridorId "${corridorId}".` });
+    }
+
+    const corridor = await TransactionConfig.create({
+      ...req.body,
+      corridorId: corridorId.toLowerCase(),
+    });
+
+    console.info('[Admin] Corredor creado:', {
+      corridorId: corridor.corridorId,
+      adminId: req.user._id.toString(),
+    });
+
+    return res.status(201).json({ corridor });
+
+  } catch (err) {
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err.code === 11000) {
+      return res.status(409).json({ error: `Ya existe un corredor con corridorId "${corridorId}".` });
+    }
+    console.error('[Admin createCorridor] Error:', err.message);
+    return res.status(500).json({ error: 'Error al crear el corredor.' });
+  }
+}
+
 // ─── updateCorridor ───────────────────────────────────────────────────────────
 
 /**
  * PATCH /api/v1/admin/corridors/:corridorId
  *
  * Actualiza los parámetros económicos u operativos de un corredor.
- * El campo corridorId (slug) y los metadatos internos (_id, __v, timestamps)
- * son protegidos y se ignoran aunque vengan en el body.
- *
- * Campos típicamente actualizados desde el backoffice:
- *   alytoCSpread, fixedFee, isActive, profitRetentionPercent,
- *   payinFeePercent, payoutFeeFixed, minAmountOrigin, maxAmountOrigin
+ * Registra cada campo modificado en changeLog con el valor anterior y nuevo.
  *
  * Params:
  *   corridorId — slug del corredor (ej. "cl-bo-fintoc-anchorbolivia")
  */
 export async function updateCorridor(req, res) {
   const { corridorId } = req.params;
+  const adminId = req.user._id;
 
   // ── 1. Construir objeto de actualización (sin campos protegidos) ──────────
   const updates = {};
@@ -411,32 +456,356 @@ export async function updateCorridor(req, res) {
     return res.status(400).json({ error: 'No se proporcionaron campos válidos para actualizar.' });
   }
 
-  // ── 2. Actualizar y retornar el documento actualizado ─────────────────────
+  // ── 2. Cargar el documento actual para registrar oldValues en changeLog ───
+  let corridor;
   try {
-    const corridor = await TransactionConfig.findOneAndUpdate(
-      { corridorId: corridorId.toLowerCase() },
-      { $set: updates },
-      { new: true, runValidators: true },
-    ).lean();
+    corridor = await TransactionConfig.findOne({ corridorId: corridorId.toLowerCase() });
+  } catch (err) {
+    console.error('[Admin updateCorridor] Error buscando corredor:', err.message);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!corridor) {
+    return res.status(404).json({ error: 'Corredor no encontrado.' });
+  }
+
+  const oldValues = corridor.toObject();
+
+  // ── 3. Aplicar cambios y registrar en changeLog ───────────────────────────
+  const now = new Date();
+  for (const [field, newValue] of Object.entries(updates)) {
+    if (String(oldValues[field]) !== String(newValue)) {
+      corridor.changeLog.push({
+        field,
+        oldValue:  oldValues[field],
+        newValue,
+        changedBy: adminId,
+        changedAt: now,
+      });
+    }
+    corridor[field] = newValue;
+  }
+
+  // ── 4. Guardar con validación ─────────────────────────────────────────────
+  try {
+    await corridor.save();
+  } catch (err) {
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[Admin updateCorridor] Error guardando:', { corridorId, error: err.message });
+    return res.status(500).json({ error: 'Error al actualizar el corredor.' });
+  }
+
+  console.info('[Admin] Corredor actualizado:', {
+    corridorId,
+    updatedFields: Object.keys(updates),
+    adminId: adminId.toString(),
+  });
+
+  return res.json({ corridor });
+}
+
+// ─── deactivateCorridor ───────────────────────────────────────────────────────
+
+/**
+ * DELETE /api/v1/admin/corridors/:corridorId
+ *
+ * Baja lógica: marca isActive: false y registra deletedAt.
+ * No elimina el documento físicamente para preservar historial.
+ */
+export async function deactivateCorridor(req, res) {
+  const { corridorId } = req.params;
+  const adminId = req.user._id;
+
+  try {
+    const corridor = await TransactionConfig.findOne({ corridorId: corridorId.toLowerCase() });
 
     if (!corridor) {
       return res.status(404).json({ error: 'Corredor no encontrado.' });
     }
 
-    console.info('[Admin] Corredor actualizado:', {
-      corridorId,
-      updatedFields: Object.keys(updates),
-      adminId: req.user._id.toString(),
+    if (!corridor.isActive) {
+      return res.status(400).json({ error: 'El corredor ya está desactivado.' });
+    }
+
+    corridor.isActive  = false;
+    corridor.deletedAt = new Date();
+    corridor.changeLog.push({
+      field:     'isActive',
+      oldValue:  true,
+      newValue:  false,
+      changedBy: adminId,
+      changedAt: new Date(),
     });
 
-    return res.json({ corridor });
+    await corridor.save();
+
+    console.info('[Admin] Corredor desactivado:', {
+      corridorId,
+      adminId: adminId.toString(),
+    });
+
+    return res.json({ message: 'Corredor desactivado.', corridorId: corridor.corridorId });
 
   } catch (err) {
-    // Mongoose ValidationError — campos fuera de rango o tipo incorrecto
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ error: err.message });
+    console.error('[Admin deactivateCorridor] Error:', err.message);
+    return res.status(500).json({ error: 'Error al desactivar el corredor.' });
+  }
+}
+
+// ─── getCorridorAnalytics ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/corridors/:corridorId/analytics
+ *
+ * Rentabilidad de un corredor en el periodo indicado.
+ * Query params: startDate, endDate (ISO)
+ */
+export async function getCorridorAnalytics(req, res) {
+  const { corridorId } = req.params;
+  const { startDate, endDate } = req.query;
+
+  try {
+    const corridor = await TransactionConfig
+      .findOne({ corridorId: corridorId.toLowerCase() })
+      .lean();
+
+    if (!corridor) {
+      return res.status(404).json({ error: 'Corredor no encontrado.' });
     }
-    console.error('[Admin updateCorridor] Error:', { corridorId, error: err.message });
-    return res.status(500).json({ error: 'Error al actualizar el corredor.' });
+
+    const matchFilter = { corridorId: corridor._id };
+    if (startDate || endDate) {
+      matchFilter.createdAt = {};
+      if (startDate) matchFilter.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setUTCHours(23, 59, 59, 999);
+        matchFilter.createdAt.$lte = end;
+      }
+    }
+
+    const [result] = await Transaction.aggregate([
+      { $match: matchFilter },
+      {
+        $group: {
+          _id:                     null,
+          totalTransactions:       { $sum: 1 },
+          completedTransactions:   { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          totalOriginAmount:       { $sum: '$originalAmount' },
+          totalDestinationAmount:  { $sum: '$destinationAmount' },
+          totalSpread:             { $sum: '$fees.alytoCSpread' },
+          totalFixedFees:          { $sum: '$fees.fixedFee' },
+          totalProfitRetention:    { $sum: '$fees.profitRetention' },
+          totalRevenue:            {
+            $sum: {
+              $add: [
+                { $ifNull: ['$fees.alytoCSpread',    0] },
+                { $ifNull: ['$fees.fixedFee',         0] },
+                { $ifNull: ['$fees.profitRetention',  0] },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+
+    const d = result ?? {
+      totalTransactions: 0, completedTransactions: 0,
+      totalOriginAmount: 0, totalDestinationAmount: 0,
+      totalSpread: 0, totalFixedFees: 0, totalProfitRetention: 0, totalRevenue: 0,
+    };
+
+    const avgTx      = d.completedTransactions > 0 ? d.totalOriginAmount / d.completedTransactions : 0;
+    const avgRevenue = d.completedTransactions > 0 ? d.totalRevenue / d.completedTransactions : 0;
+    const spreadPct  = d.totalOriginAmount > 0 ? (d.totalRevenue / d.totalOriginAmount) * 100 : 0;
+
+    return res.json({
+      corridorId:  corridor.corridorId,
+      period:      { startDate: startDate ?? null, endDate: endDate ?? null },
+      volume: {
+        totalTransactions:      d.totalTransactions,
+        completedTransactions:  d.completedTransactions,
+        totalOriginAmount:      d.totalOriginAmount,
+        totalDestinationAmount: d.totalDestinationAmount,
+      },
+      revenue: {
+        totalSpread:           d.totalSpread,
+        totalFixedFees:        d.totalFixedFees,
+        totalProfitRetention:  d.totalProfitRetention,
+        totalRevenue:          d.totalRevenue,
+      },
+      averages: {
+        avgTransactionAmount:      Math.round(avgTx),
+        avgRevenuePerTransaction:  Math.round(avgRevenue),
+        spreadEffectivePercent:    parseFloat(spreadPct.toFixed(2)),
+      },
+    });
+
+  } catch (err) {
+    console.error('[Admin getCorridorAnalytics] Error:', err.message);
+    return res.status(500).json({ error: 'Error al obtener analytics del corredor.' });
+  }
+}
+
+// ─── getGlobalAnalytics ───────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/analytics
+ *
+ * Analytics global: volumen total, revenue, desglose por entidad y corredor.
+ * Query params: startDate, endDate (ISO)
+ */
+export async function getGlobalAnalytics(req, res) {
+  const { startDate, endDate } = req.query;
+
+  const dateFilter = {};
+  if (startDate || endDate) {
+    dateFilter.createdAt = {};
+    if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setUTCHours(23, 59, 59, 999);
+      dateFilter.createdAt.$lte = end;
+    }
+  }
+
+  try {
+    const [globalResult, byEntityResult, byCorridorResult] = await Promise.all([
+
+      // ── Global totals ────────────────────────────────────────────────────
+      Transaction.aggregate([
+        { $match: dateFilter },
+        {
+          $group: {
+            _id:                  null,
+            totalTransactions:    { $sum: 1 },
+            completedTransactions:{ $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            failedTransactions:   { $sum: { $cond: [{ $eq: ['$status', 'failed'] },    1, 0] } },
+            totalVolumeCLP:       { $sum: '$originalAmount' },
+            totalRevenueCLP: {
+              $sum: {
+                $add: [
+                  { $ifNull: ['$fees.alytoCSpread',   0] },
+                  { $ifNull: ['$fees.fixedFee',        0] },
+                  { $ifNull: ['$fees.profitRetention', 0] },
+                ],
+              },
+            },
+          },
+        },
+      ]),
+
+      // ── By entity ────────────────────────────────────────────────────────
+      Transaction.aggregate([
+        { $match: dateFilter },
+        {
+          $group: {
+            _id:          '$legalEntity',
+            transactions: { $sum: 1 },
+            volume:       { $sum: '$originalAmount' },
+            revenue: {
+              $sum: {
+                $add: [
+                  { $ifNull: ['$fees.alytoCSpread',   0] },
+                  { $ifNull: ['$fees.fixedFee',        0] },
+                  { $ifNull: ['$fees.profitRetention', 0] },
+                ],
+              },
+            },
+          },
+        },
+      ]),
+
+      // ── By corridor ──────────────────────────────────────────────────────
+      Transaction.aggregate([
+        { $match: dateFilter },
+        {
+          $group: {
+            _id:          '$corridorId',
+            transactions: { $sum: 1 },
+            volume:       { $sum: '$originalAmount' },
+            revenue: {
+              $sum: {
+                $add: [
+                  { $ifNull: ['$fees.alytoCSpread',   0] },
+                  { $ifNull: ['$fees.fixedFee',        0] },
+                  { $ifNull: ['$fees.profitRetention', 0] },
+                ],
+              },
+            },
+          },
+        },
+        { $sort: { volume: -1 } },
+      ]),
+    ]);
+
+    // ── Resolver corridorId ObjectId → slug ──────────────────────────────
+    const corridorIds = byCorridorResult
+      .map(r => r._id)
+      .filter(Boolean);
+
+    const corridorDocs = await TransactionConfig
+      .find({ _id: { $in: corridorIds } })
+      .select('_id corridorId')
+      .lean();
+
+    const corridorSlugMap = {};
+    for (const doc of corridorDocs) {
+      corridorSlugMap[doc._id.toString()] = doc.corridorId;
+    }
+
+    // ── Construir respuesta ───────────────────────────────────────────────
+    const g = globalResult[0] ?? {
+      totalTransactions: 0, completedTransactions: 0, failedTransactions: 0,
+      totalVolumeCLP: 0, totalRevenueCLP: 0,
+    };
+
+    const avgRevenuePct = g.totalVolumeCLP > 0
+      ? parseFloat(((g.totalRevenueCLP / g.totalVolumeCLP) * 100).toFixed(2))
+      : 0;
+
+    // Construir mapa por entidad
+    const byEntity = { SpA: null, LLC: null, SRL: null };
+    for (const row of byEntityResult) {
+      if (row._id) byEntity[row._id] = {
+        transactions: row.transactions,
+        volume:       row.volume,
+        revenue:      row.revenue,
+      };
+    }
+    for (const entity of ['SpA', 'LLC', 'SRL']) {
+      if (!byEntity[entity]) byEntity[entity] = { transactions: 0, volume: 0, revenue: 0 };
+    }
+
+    const byCorridor = byCorridorResult.map(row => ({
+      corridorId:      corridorSlugMap[row._id?.toString()] ?? row._id?.toString() ?? 'unknown',
+      transactions:    row.transactions,
+      volume:          row.volume,
+      revenue:         row.revenue,
+      revenuePercent:  row.volume > 0
+        ? parseFloat(((row.revenue / row.volume) * 100).toFixed(2))
+        : 0,
+    }));
+
+    return res.json({
+      period: { startDate: startDate ?? null, endDate: endDate ?? null },
+      global: {
+        totalTransactions:     g.totalTransactions,
+        completedTransactions: g.completedTransactions,
+        failedTransactions:    g.failedTransactions,
+        totalVolumeCLP:        g.totalVolumeCLP,
+        totalRevenueCLP:       g.totalRevenueCLP,
+        avgRevenuePercent:     avgRevenuePct,
+      },
+      byEntity,
+      byCorridor,
+      topCorridors: byCorridor.slice(0, 3),
+    });
+
+  } catch (err) {
+    console.error('[Admin getGlobalAnalytics] Error:', err.message);
+    return res.status(500).json({ error: 'Error al obtener analytics globales.' });
   }
 }

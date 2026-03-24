@@ -228,6 +228,27 @@ const transactionConfigSchema = new Schema(
       type:  String,
       trim:  true,
     },
+
+    /** Timestamp de baja lógica (null = corredor vigente) */
+    deletedAt: {
+      type:    Date,
+      default: null,
+    },
+
+    /**
+     * Historial inmutable de cambios realizados desde el backoffice.
+     * Cada entrada registra qué campo cambió, quién lo cambió y cuándo.
+     */
+    changeLog: [
+      {
+        field:     { type: String },
+        oldValue:  { type: Schema.Types.Mixed },
+        newValue:  { type: Schema.Types.Mixed },
+        changedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        changedAt: { type: Date, default: Date.now },
+        _id:       false,
+      },
+    ],
   },
   {
     timestamps: true, // createdAt, updatedAt automáticos
