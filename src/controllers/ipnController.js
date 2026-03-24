@@ -345,35 +345,21 @@ export async function dispatchPayout(transaction) {
       amount,
     });
 
-    console.log('[dispatchPayout] NODE_ENV check:', process.env.NODE_ENV);
-    console.log('[dispatchPayout] ¿Es sandbox?:', process.env.NODE_ENV !== 'production');
+    console.log('[dispatchPayout] VITA_ENVIRONMENT check:', process.env.VITA_ENVIRONMENT);
+    console.log('[dispatchPayout] ¿Es sandbox?:', process.env.VITA_ENVIRONMENT === 'sandbox');
 
-    if (process.env.NODE_ENV === 'production') {
-      // ── PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─────
-      transaction.status = 'payout_sent';
+    if (process.env.VITA_ENVIRONMENT === 'sandbox') {
+      // ── VITA SANDBOX: no envía IPN — auto-completar inmediatamente ────────────
+      console.log('[dispatchPayout] 🧪 Vita sandbox — auto-completing...');
 
-      await appendIpnLog(transaction, 'payout_dispatched', 'vitaWallet', 'payout_sent', {
-        vitaTransactionId: transaction.payoutReference,
-        amount,
-        country: transaction.destinationCountry,
-      });
-
-      // Notificación push: pago enviado al banco
-      try {
-        await sendPushNotification(
-          transaction.userId,
-          NOTIFICATIONS.payoutSent(transaction.destinationCountry),
-        );
-      } catch (notifErr) {
-        console.error('[Alyto Payout] Error enviando push payout_sent:', notifErr.message);
-      }
-
-    } else {
-      // ── SANDBOX / DEVELOPMENT: Vita stage no envía IPN — auto-completar ─────
-      console.log('[dispatchPayout] 🧪 Modo sandbox — auto-completing...');
-
-      transaction.status      = 'completed';
-      transaction.completedAt = new Date();
+      transaction.status         = 'completed';
+      transaction.completedAt    = new Date();
+      transaction.payoutReference =
+        vitaResponse?.transaction?.id
+        || vitaResponse?.transaction?.attributes?.vita_transaction_id
+        || vitaResponse?.data?.id
+        || vitaResponse?.id
+        || transaction.payoutReference;
 
       transaction.ipnLog.push({
         provider:   'system',
@@ -386,12 +372,12 @@ export async function dispatchPayout(transaction) {
         receivedAt: new Date(),
       });
       await transaction.save();
-      console.log('[dispatchPayout] ✅ Status actualizado a completed');
+      console.log('[dispatchPayout] ✅ Status: completed');
 
-      // Registrar audit trail en Stellar (best-effort)
-      console.log('[dispatchPayout] Llamando Stellar...');
+      // Stellar audit trail (best-effort)
       try {
         const { registerAuditTrail: _registerAuditTrail } = await import('../services/stellarService.js');
+        console.log('[dispatchPayout] Llamando Stellar...');
         const stellarTxId = await _registerAuditTrail(transaction);
         console.log('[dispatchPayout] Stellar resultado:', stellarTxId);
         if (stellarTxId) {
@@ -413,7 +399,7 @@ export async function dispatchPayout(transaction) {
           console.log('[Stellar] ✅ Audit trail registrado:', stellarTxId);
         }
       } catch (stellarError) {
-        console.error('[dispatchPayout] Error Stellar:', stellarError.message);
+        console.error('[Stellar] Error:', stellarError.message);
       }
 
       // Notificación push: transferencia completada
@@ -440,6 +426,28 @@ export async function dispatchPayout(transaction) {
       }
 
       console.log('[dispatchPayout] ✅ Transacción completada (sandbox):', transaction.alytoTransactionId);
+
+    } else {
+      // ── VITA PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─
+      transaction.status = 'payout_sent';
+
+      await appendIpnLog(transaction, 'payout_dispatched', 'vitaWallet', 'payout_sent', {
+        vitaTransactionId: transaction.payoutReference,
+        amount,
+        country: transaction.destinationCountry,
+      });
+
+      // Notificación push: pago enviado al banco
+      try {
+        await sendPushNotification(
+          transaction.userId,
+          NOTIFICATIONS.payoutSent(transaction.destinationCountry),
+        );
+      } catch (notifErr) {
+        console.error('[Alyto Payout] Error enviando push payout_sent:', notifErr.message);
+      }
+
+      console.log('[dispatchPayout] Producción — esperando IPN de Vita');
     }
 
     return;
