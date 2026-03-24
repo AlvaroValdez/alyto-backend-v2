@@ -336,6 +336,8 @@ export async function executeStellarPayment({
  * @returns {Promise<string|null>}  TXID de Stellar, o null si falló
  */
 export async function registerAuditTrail(transaction) {
+  console.log('[Stellar] registerAuditTrail llamado para:', transaction?.alytoTransactionId,
+    '| entity:', transaction?.legalEntity);
   const entity = transaction.legalEntity ?? 'LLC';
 
   const secretKeyEnvMap = {

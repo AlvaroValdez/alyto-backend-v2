@@ -199,6 +199,10 @@ function resolveNetAmountForPayout(transaction) {
  * @param {object} transaction — Documento Mongoose con .save() disponible
  */
 export async function dispatchPayout(transaction) {
+  console.log('[dispatchPayout] Iniciando para:', transaction.alytoTransactionId,
+    '| status:', transaction.status,
+    '| NODE_ENV:', process.env.NODE_ENV);
+
   // ── Obtener configuración del corredor ────────────────────────────────────
   let corridor;
   try {
@@ -330,6 +334,8 @@ export async function dispatchPayout(transaction) {
     }
 
     // Payout creado exitosamente en Vita
+    console.log('[dispatchPayout] Vita aceptó withdrawal ✅');
+    console.log('[dispatchPayout] Respuesta Vita:', JSON.stringify(vitaResponse?.data || vitaResponse));
     transaction.payoutReference = vitaResponse?.data?.id ?? vitaResponse?.id ?? vitaResponse?.transaction?.id ?? null;
     transaction.providersUsed   = [...(transaction.providersUsed ?? []), 'payout:vitaWallet'];
 
@@ -377,7 +383,11 @@ export async function dispatchPayout(transaction) {
       await transaction.save();
 
       // Registrar audit trail en Stellar (best-effort)
+      console.log('[dispatchPayout] Llamando registerAuditTrail...');
+      console.log('[dispatchPayout] entity:', transaction.legalEntity);
+      console.log('[dispatchPayout] NODE_ENV:', process.env.NODE_ENV);
       const stellarTxId = await registerAuditTrail(transaction);
+      console.log('[dispatchPayout] registerAuditTrail resultado:', stellarTxId);
       if (stellarTxId) {
         transaction.stellarTxId = stellarTxId;
         transaction.ipnLog.push({
