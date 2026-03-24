@@ -828,39 +828,52 @@ export async function initCrossBorderPayment(req, res) {
  * }
  *
  * Lógica de lookup:
- *   priceKey  = "{originCurrency_lowercase}_sell"  →  ej. "clp_sell"
- *   countryKey = destinationCountry.toLowerCase()  →  ej. "co"
- *   rate       = withdrawal.prices.attributes[priceKey][countryKey]
- *   fixedCost  = withdrawal[countryKey].fixed_cost
+ * Estructura real de la respuesta de Vita /prices (solo existe clp_sell):
+ *   withdrawal.prices.attributes.clp_sell[countryKey]          → tasa CLP→destino
+ *   withdrawal.prices.attributes.fixed_cost[countryKey]        → costo fijo en moneda destino
+ *   withdrawal.prices.attributes.valid_until                   → expiración ISO8601
+ *
+ * Para originCurrency USD/USDC: Vita NO tiene usd_sell. Se deriva via cross-rate:
+ *   usd_to_dest = clp_sell[dest] / clp_sell["us"]
+ *   Ejemplo: clp_sell.co=4.343071 / clp_sell.us=0.001035 ≈ 4196 COP/USD
  *
  * @param {object} vitaPricesResponse  — Respuesta cruda de getPrices()
- * @param {string} originCurrency      — ISO 4217 mayúsculas (ej. 'CLP', 'USD')
- * @param {string} destinationCountry  — ISO alpha-2 mayúsculas (ej. 'CO', 'PE')
+ * @param {string} originCurrency      — 'CLP' | 'USD' | 'USDC'
+ * @param {string} destinationCountry  — ISO alpha-2 mayúsculas (ej. 'CO', 'CL')
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
- *   null si la respuesta no contiene la tasa para este par.
  */
 function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
-  // Log completo en desarrollo para facilitar debugging de nuevas rutas
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('[Alyto Quote] Respuesta completa de Vita /prices:',
-      JSON.stringify(vitaPricesResponse, null, 2));
+  const attrs = vitaPricesResponse?.withdrawal?.prices?.attributes;
+  if (!attrs) return null;
+
+  const countryKey = destinationCountry.toLowerCase();
+  const origin     = originCurrency.toUpperCase();
+  let rate;
+
+  if (origin === 'CLP') {
+    // Tasa directa de Vita: 1 CLP → N unidades de moneda destino
+    const raw = attrs.clp_sell?.[countryKey];
+    if (raw == null) return null;
+    rate = Number(raw);
+  } else if (origin === 'USD' || origin === 'USDC') {
+    // Vita solo provee clp_sell. Derivamos la tasa USD via cross-rate CLP:
+    //   1 USD = (clp_sell[dest] / clp_sell["us"]) unidades de moneda destino
+    // Ejemplo BO→CO: 4.343071 / 0.001035 ≈ 4196 COP/USD
+    // Ejemplo BO→CL: 1.0      / 0.001035 ≈ 966  CLP/USD
+    // Ejemplo BO→US: 0.001035 / 0.001035 = 1.0  USD/USD ✓
+    const clpToDest = Number(attrs.clp_sell?.[countryKey] ?? NaN);
+    const clpToUsd  = Number(attrs.clp_sell?.['us']       ?? NaN);
+    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+    rate = clpToDest / clpToUsd;
+  } else {
+    return null;  // moneda origen no soportada
   }
 
-  const withdrawal = vitaPricesResponse?.withdrawal;
-  if (!withdrawal) return null;
-
-  const priceKey   = `${originCurrency.toLowerCase()}_sell`;
-  const countryKey = destinationCountry.toLowerCase();
-
-  const rateRaw = withdrawal?.prices?.attributes?.[priceKey]?.[countryKey];
-  if (rateRaw == null) return null;
-
-  const rate = Number(rateRaw);
   if (!isFinite(rate) || rate <= 0) return null;
 
-  // fixed_cost puede no existir para todos los países — fallback a 0
-  const fixedCost  = Number(withdrawal?.[countryKey]?.fixed_cost ?? 0);
-  const validUntil = vitaPricesResponse?.valid_until ?? null;
+  // fixed_cost está en attributes.fixed_cost[countryKey] (en moneda destino)
+  const fixedCost  = Number(attrs.fixed_cost?.[countryKey] ?? 0);
+  const validUntil = attrs.valid_until ?? null;
 
   return { rate, fixedCost, validUntil };
 }
