@@ -72,6 +72,24 @@ function validateVitaIPNSignature(req) {
   }
   const receivedSig = sigMatch[1].toLowerCase();
 
+  // Debug logs — diagnóstico firma Vita IPN
+  console.log('[Vita IPN] Body raw para firma:', JSON.stringify(req.body));
+  console.log('[Vita IPN] VITA_SECRET primeros 8 chars:', process.env.VITA_SECRET?.substring(0, 8));
+  console.log('[Vita IPN] VITA_LOGIN:', process.env.VITA_LOGIN);
+  console.log('[Vita IPN] x-date recibido:', xDate);
+  // Sorted string para diagnóstico: claves ordenadas, concatenadas key+value
+  try {
+    const body = req.body ?? {};
+    const sortedString = Object.keys(body).sort()
+      .filter(k => body[k] !== null && body[k] !== undefined)
+      .map(k => `${k}${typeof body[k] === 'object' ? JSON.stringify(body[k]) : String(body[k])}`)
+      .join('');
+    console.log('[Vita IPN] Sorted string para firma (primeros 150 chars):', sortedString.substring(0, 150));
+    console.log('[Vita IPN] Mensaje completo (login+date+sorted):', `${process.env.VITA_LOGIN}${xDate}${sortedString}`.substring(0, 200));
+  } catch (debugErr) {
+    console.warn('[Vita IPN] Error construyendo debug sorted string:', debugErr.message);
+  }
+
   // Recomputar la firma esperada con nuestro secreto compartido
   let expectedSig;
   try {
