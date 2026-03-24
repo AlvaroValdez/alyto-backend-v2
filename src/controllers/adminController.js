@@ -20,6 +20,7 @@
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import { dispatchPayout } from './ipnController.js';
 
 // ─── getAllUsers ──────────────────────────────────────────────────────────────
 
@@ -347,6 +348,20 @@ export async function updateTransactionStatus(req, res) {
     newStatus,
     adminId,
   });
+
+  // ── Trigger automático de payout cuando el admin confirma un payin manual ─
+  // Para corredores SRL Bolivia el payin es manual — el admin verifica la
+  // transferencia bancaria y cambia el status a 'payin_confirmed'.
+  // En ese momento se dispara automáticamente el payout a Vita.
+  if (newStatus === 'payin_confirmed') {
+    console.info('[Admin] Disparando dispatchPayout para payin manual confirmado:', transactionId);
+    dispatchPayout(transaction).catch(err => {
+      console.error('[Admin] Error en dispatchPayout tras confirmación manual:', {
+        transactionId,
+        error: err.message,
+      });
+    });
+  }
 
   return res.json({ transaction });
 }

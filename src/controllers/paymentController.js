@@ -34,6 +34,7 @@ import {
   createPayin,
 }                              from '../services/vitaWalletService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
+import { sendEmail, EMAILS }  from '../services/email.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -586,9 +587,10 @@ export async function initCrossBorderPayment(req, res) {
   // El IPN de confirmación usará este ID para encontrar la transacción en BD.
   const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
-  let payinProviderRef = null;  // ID externo para lookup en IPN
-  let payinUrl         = null;  // Token/URL que abre el widget de pago
-  let payinProvider    = 'unknown';
+  let payinProviderRef         = null;  // ID externo para lookup en IPN
+  let payinUrl                 = null;  // Token/URL que abre el widget de pago
+  let payinProvider            = 'unknown';
+  let manualPaymentInstructions = null; // Solo para payinMethod === 'manual'
 
   if (corridor.payinMethod === 'fintoc') {
     // ── Payin Fintoc (Chile — AV Finance SpA) ─────────────────────────────
@@ -600,7 +602,7 @@ export async function initCrossBorderPayment(req, res) {
         amount:         Math.round(amount),
         currency:       'CLP',
         metadata: {
-          transactionId: alytoTransactionId,   // ← IPN lo usa para encontrar la tx
+          transactionId: alytoTransactionId,
           corridorId:    corridor.corridorId,
         },
         success_url:    `${process.env.APP_URL}/success`,
@@ -619,13 +621,34 @@ export async function initCrossBorderPayment(req, res) {
     }
 
     payinProviderRef = fintocResult.id;
-    payinUrl         = fintocResult.url;   // redirect_url real de Fintoc
+    payinUrl         = fintocResult.url;
     payinProvider    = 'fintoc';
 
     console.log('[CrossBorder] Fintoc Checkout Session creado:', {
       checkoutSessionId: fintocResult.id,
       payinUrl:          payinUrl ? '[PRESENTE]' : '[AUSENTE]',
     });
+
+  } else if (corridor.payinMethod === 'manual') {
+    // ── Payin Manual (Bolivia — AV Finance SRL) ───────────────────────────
+    // No se llama a ningún proveedor externo. El usuario transfiere a la
+    // cuenta bancaria de SRL y el admin confirma manualmente desde el ledger.
+    payinProvider    = 'manual';
+    payinProviderRef = null;
+    payinUrl         = null;
+
+    manualPaymentInstructions = {
+      bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
+      accountHolder: process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
+      accountNumber: process.env.SRL_ACCOUNT_NUMBER ?? '',
+      accountType:   'Cuenta Corriente',
+      currency:      corridor.originCurrency,
+      amount,
+      reference:     alytoTransactionId,
+      instructions:  'Realizar transferencia bancaria indicando el número de referencia en el concepto del pago. El pago será verificado manualmente en un plazo de 2-4 horas hábiles.',
+    };
+
+    console.log('[CrossBorder] Payin manual SRL — instrucciones generadas para:', alytoTransactionId);
 
   } else {
     // ── Payin Vita (países donde el usuario paga localmente via Vita) ──────
@@ -648,7 +671,6 @@ export async function initCrossBorderPayment(req, res) {
       return res.status(502).json({ error: 'No se pudo crear la orden de pago. Intenta nuevamente.' });
     }
 
-    // Vita devuelve JSON-API: { data: { id, attributes: { url, ... } } }
     payinProviderRef =
       vitaPayinResult?.data?.id ??
       vitaPayinResult?.id ??
@@ -727,18 +749,40 @@ export async function initCrossBorderPayment(req, res) {
         externalId: payinProviderRef ? String(payinProviderRef) : undefined,
       }],
 
-      payinReference: payinProviderRef ? String(payinProviderRef) : undefined,
-      status:         'payin_pending',
+      payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
+      paymentInstructions: manualPaymentInstructions ?? undefined,
+      status:              corridor.payinMethod === 'manual' ? 'pending' : 'payin_pending',
       alytoTransactionId,
     });
   } catch (err) {
-    // La payment_order ya fue creada en Vita — loguear para reconciliación
-    console.error('[Alyto CrossBorder] Error persitiendo transacción en BD:', {
-      corridorId, vitaPayinId, error: err.message,
+    console.error('[Alyto CrossBorder] Error persistiendo transacción en BD:', {
+      corridorId, error: err.message,
     });
   }
 
-  // ── 7. Respuesta al cliente ───────────────────────────────────────────────
+  // ── 7. Emails para payin manual ───────────────────────────────────────────
+  if (corridor.payinMethod === 'manual' && transaction) {
+    const user = await User.findById(userId).select('email firstName').lean();
+    if (user) {
+      // Email al usuario con instrucciones de transferencia
+      sendEmail(...EMAILS.manualPayinInstructions(user, transaction, manualPaymentInstructions))
+        .catch(err => console.error('[CrossBorder] Error email instrucciones:', err.message));
+    }
+    // Email al admin notificando payin pendiente
+    sendEmail(...EMAILS.adminManualPayinAlert(transaction, manualPaymentInstructions))
+      .catch(err => console.error('[CrossBorder] Error email admin payin manual:', err.message));
+  }
+
+  // ── 8. Respuesta al cliente ───────────────────────────────────────────────
+  if (corridor.payinMethod === 'manual') {
+    return res.status(201).json({
+      transactionId:       alytoTransactionId,
+      status:              'pending',
+      payinMethod:         'manual',
+      paymentInstructions: manualPaymentInstructions,
+    });
+  }
+
   return res.status(201).json({
     transactionId: alytoTransactionId,
     payinUrl:      payinUrl ?? null,

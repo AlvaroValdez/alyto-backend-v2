@@ -329,51 +329,43 @@ const CORREDORES = [
     adminNotes:             'Corredor CL→UY. fixed_cost dinámico desde Vita /prices.',
   },
 
-  // ── SRL Bolivia → Chile ────────────────────────────────────────────────────
-  {
-    corridorId:             'bo-cl',
-    originCountry:          'BO',
-    destinationCountry:     'CL',
-    originCurrency:         'BOB',
-    destinationCurrency:    'CLP',
-    payinMethod:            'manual',
-    payoutMethod:           'vitaWallet',
-    stellarAsset:           'USDC',
-    alytoCSpread:           2,
-    fixedFee:               10,
-    payinFeePercent:        0,
-    payoutFeeFixed:         0,
-    profitRetentionPercent: 1,
-    minAmountOrigin:        50,
-    maxAmountOrigin:        null,
-    legalEntity:            'SRL',
-    routingScenario:        'C',
-    isActive:               true,
-    adminNotes:             'Corredor BO→CL. Payin manual por AV Finance SRL. Payout vía Vita.',
-  },
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SRL Bolivia — Payin manual (BOB) → Payout vía Vita (USD convertido)
+  // ══════════════════════════════════════════════════════════════════════════
 
-  // ── SRL Bolivia → Argentina ────────────────────────────────────────────────
-  {
-    corridorId:             'bo-ar',
+  ...[
+    { corridorId: 'bo-co', dest: 'CO', destCurrency: 'COP', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-pe', dest: 'PE', destCurrency: 'PEN', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-cl', dest: 'CL', destCurrency: 'CLP', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-ar', dest: 'AR', destCurrency: 'ARS', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-mx', dest: 'MX', destCurrency: 'MXN', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-br', dest: 'BR', destCurrency: 'BRL', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-us', dest: 'US', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },
+    { corridorId: 'bo-ec', dest: 'EC', destCurrency: 'USD', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-ve', dest: 'VE', destCurrency: 'USD', spread: 3, fixed: 8, retention: 1.5 },
+    { corridorId: 'bo-py', dest: 'PY', destCurrency: 'PYG', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-uy', dest: 'UY', destCurrency: 'UYU', spread: 2, fixed: 5, retention: 1 },
+  ].map(({ corridorId, dest, destCurrency, spread, fixed, retention }) => ({
+    corridorId,
     originCountry:          'BO',
-    destinationCountry:     'AR',
+    destinationCountry:     dest,
     originCurrency:         'BOB',
-    destinationCurrency:    'ARS',
+    destinationCurrency:    destCurrency,
     payinMethod:            'manual',
     payoutMethod:           'vitaWallet',
     stellarAsset:           'USDC',
-    alytoCSpread:           2,
-    fixedFee:               10,
+    alytoCSpread:           spread,
+    fixedFee:               fixed,
     payinFeePercent:        0,
     payoutFeeFixed:         0,
-    profitRetentionPercent: 1,
+    profitRetentionPercent: retention,
     minAmountOrigin:        50,
     maxAmountOrigin:        null,
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             'Corredor BO→AR. Payin manual por AV Finance SRL. Payout vía Vita.',
-  },
+    adminNotes:             `Corredor BO→${dest}. Payin manual AV Finance SRL. Payout vía Vita en USD (tipo de cambio BOB_USD_RATE).`,
+  })),
 
   // ── LLC Global (USD) → Colombia ────────────────────────────────────────────
   {

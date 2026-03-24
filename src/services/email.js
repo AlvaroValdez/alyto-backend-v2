@@ -218,6 +218,62 @@ export const EMAILS = {
   },
 
   /**
+   * Envía al usuario las instrucciones de transferencia bancaria para su payin manual.
+   * Usado cuando el corredor tiene payinMethod: 'manual' (SRL Bolivia).
+   *
+   * @param {object} user
+   * @param {object} transaction
+   * @param {object} instructions — Objeto con datos bancarios
+   * @returns {[string, string, object]}
+   */
+  manualPayinInstructions(user, transaction, instructions) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN,
+      {
+        userName:         user.firstName,
+        transactionId:    transaction.alytoTransactionId,
+        originAmount:     formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        destinationCountry: transaction.destinationCountry,
+        bankName:         instructions.bankName,
+        accountHolder:    instructions.accountHolder,
+        accountNumber:    instructions.accountNumber,
+        accountType:      instructions.accountType,
+        currency:         instructions.currency,
+        reference:        instructions.reference,
+        instructions:     instructions.instructions,
+        supportEmail:     process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:  process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+      },
+    ];
+  },
+
+  /**
+   * Alerta al admin que hay un payin manual pendiente de verificar (SRL Bolivia).
+   *
+   * @param {object} transaction
+   * @param {object} instructions
+   * @returns {[string, string, object]}
+   */
+  adminManualPayinAlert(transaction, instructions) {
+    return [
+      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+      process.env.SENDGRID_TEMPLATE_ADMIN_MANUAL_PAYIN ?? process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
+      {
+        transactionId:     transaction.alytoTransactionId,
+        originAmount:      formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        destinationCountry: transaction.destinationCountry,
+        userId:            transaction.userId?.toString(),
+        bankName:          instructions.bankName,
+        accountNumber:     instructions.accountNumber,
+        reference:         instructions.reference,
+        createdAt:         formatDate(transaction.createdAt),
+        ledgerUrl:         `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`,
+      },
+    ];
+  },
+
+  /**
    * Alerta al equipo admin que hay un payout manual pendiente en Bolivia.
    * Reemplaza el email HTML inline de notifyAdminManualPayout().
    *
