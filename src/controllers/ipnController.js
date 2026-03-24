@@ -345,6 +345,9 @@ export async function dispatchPayout(transaction) {
       amount,
     });
 
+    console.log('[dispatchPayout] NODE_ENV check:', process.env.NODE_ENV);
+    console.log('[dispatchPayout] ¿Es sandbox?:', process.env.NODE_ENV !== 'production');
+
     if (process.env.NODE_ENV === 'production') {
       // ── PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─────
       transaction.status = 'payout_sent';
@@ -367,6 +370,8 @@ export async function dispatchPayout(transaction) {
 
     } else {
       // ── SANDBOX / DEVELOPMENT: Vita stage no envía IPN — auto-completar ─────
+      console.log('[dispatchPayout] 🧪 Modo sandbox — auto-completing...');
+
       transaction.status      = 'completed';
       transaction.completedAt = new Date();
 
@@ -381,30 +386,34 @@ export async function dispatchPayout(transaction) {
         receivedAt: new Date(),
       });
       await transaction.save();
+      console.log('[dispatchPayout] ✅ Status actualizado a completed');
 
       // Registrar audit trail en Stellar (best-effort)
-      console.log('[dispatchPayout] Llamando registerAuditTrail...');
-      console.log('[dispatchPayout] entity:', transaction.legalEntity);
-      console.log('[dispatchPayout] NODE_ENV:', process.env.NODE_ENV);
-      const stellarTxId = await registerAuditTrail(transaction);
-      console.log('[dispatchPayout] registerAuditTrail resultado:', stellarTxId);
-      if (stellarTxId) {
-        transaction.stellarTxId = stellarTxId;
-        transaction.ipnLog.push({
-          provider:   'stellar',
-          eventType:  'stellar_audit_registered',
-          status:     'completed',
-          rawPayload: {
-            stellarTxId,
-            network:     process.env.STELLAR_NETWORK ?? 'testnet',
-            explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
-          },
-          receivedAt: new Date(),
-        });
-        await transaction.save().catch(err =>
-          console.error('[Alyto Payout] Error guardando stellarTxId:', err.message),
-        );
-        console.log('[Stellar] ✅ Audit trail registrado:', stellarTxId);
+      console.log('[dispatchPayout] Llamando Stellar...');
+      try {
+        const { registerAuditTrail: _registerAuditTrail } = await import('../services/stellarService.js');
+        const stellarTxId = await _registerAuditTrail(transaction);
+        console.log('[dispatchPayout] Stellar resultado:', stellarTxId);
+        if (stellarTxId) {
+          transaction.stellarTxId = stellarTxId;
+          transaction.ipnLog.push({
+            provider:   'stellar',
+            eventType:  'stellar_audit_registered',
+            status:     'completed',
+            rawPayload: {
+              stellarTxId,
+              network:     process.env.STELLAR_NETWORK ?? 'testnet',
+              explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
+            },
+            receivedAt: new Date(),
+          });
+          await transaction.save().catch(err =>
+            console.error('[Alyto Payout] Error guardando stellarTxId:', err.message),
+          );
+          console.log('[Stellar] ✅ Audit trail registrado:', stellarTxId);
+        }
+      } catch (stellarError) {
+        console.error('[dispatchPayout] Error Stellar:', stellarError.message);
       }
 
       // Notificación push: transferencia completada
