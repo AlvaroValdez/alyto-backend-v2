@@ -39,8 +39,10 @@ import {
   horizonServer,
   NETWORK_PASSPHRASE,
   PRIORITY_FEE_STROOPS,
+  BASE_FEE_STROOPS,
   TX_TIMEOUT_SECONDS,
   ASSETS,
+  NETWORK_INFO,
 } from '../config/stellar.js';
 
 import { requireEnvSecret }  from '../utils/secrets.js';

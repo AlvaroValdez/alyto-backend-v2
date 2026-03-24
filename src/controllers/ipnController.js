@@ -376,9 +376,8 @@ export async function dispatchPayout(transaction) {
 
       // Stellar audit trail (best-effort)
       try {
-        const { registerAuditTrail: _registerAuditTrail } = await import('../services/stellarService.js');
         console.log('[dispatchPayout] Llamando Stellar...');
-        const stellarTxId = await _registerAuditTrail(transaction);
+        const stellarTxId = await registerAuditTrail(transaction);
         console.log('[dispatchPayout] Stellar resultado:', stellarTxId);
         if (stellarTxId) {
           transaction.stellarTxId = stellarTxId;
