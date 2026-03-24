@@ -58,6 +58,10 @@ export async function getDashboard(req, res) {
     const userId = req.user._id;
     const { firstName, lastName, legalEntity, kycStatus } = req.user;
 
+    // Moneda de origen según entidad del usuario
+    const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+    const userOriginCurrency  = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
+
     // Ejecutar todas las consultas en paralelo para minimizar latencia
     const [
       totalSentAgg,
@@ -88,10 +92,15 @@ export async function getDashboard(req, res) {
         .select('alytoTransactionId status originalAmount originCurrency destinationAmount destinationCurrency beneficiary createdAt')
         .lean(),
 
-      // Corredores activos — sin filtrar por entidad para mostrar toda la red
+      // Corredores activos filtrados por moneda de origen del usuario
       TransactionConfig
-        .find({ isActive: true })
-        .select('_id originCountry destinationCountry originCurrency destinationCurrency legalEntity routingScenario')
+        .find({
+          originCurrency: userOriginCurrency,
+          isActive:       true,
+          originCountry:  { $ne: 'ANY' },
+          destinationCountry: { $ne: 'CRYPTO' },
+        })
+        .select('_id corridorId originCountry destinationCountry originCurrency destinationCurrency')
         .lean(),
     ]);
 

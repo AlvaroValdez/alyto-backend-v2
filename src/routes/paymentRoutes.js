@@ -23,6 +23,7 @@ import {
   getWithdrawalRulesController,
   initCrossBorderPayment,
   getTransactionAudit,
+  getAvailableCorridors,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
 
@@ -64,6 +65,17 @@ function captureRawBody(req, res, next) {
  *   GET /api/v1/payments/quote?originCountry=CL&destinationCountry=CO&originAmount=500000
  */
 router.get('/quote', protect, getQuote);
+
+/**
+ * GET /api/v1/payments/corridors
+ *
+ * Corredores disponibles para el usuario autenticado, filtrados por su
+ * entidad legal (SpA→CLP, SRL→BOB, LLC→USD).
+ * Incluye nombre del país destino y emoji de bandera para el frontend.
+ *
+ * Auth: Bearer JWT
+ */
+router.get('/corridors', protect, getAvailableCorridors);
 
 /**
  * GET /api/v1/payments/withdrawal-rules/:countryCode
