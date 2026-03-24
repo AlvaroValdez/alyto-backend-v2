@@ -269,20 +269,29 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
 }
 
 /**
- * Calcula la conversión BOB→USD para corredores SRL.
- * Prioriza la tasa del corredor; usa BOB_USD_RATE como fallback.
+ * Calcula la conversión BOB→USDC para corredores SRL Bolivia.
  *
- * @param {number} netAmountBOB
- * @param {object} corridor
- * @returns {{ usdAmount: number, bobPerUsd: number }}
+ * La tasa (bobPerUsdc) proviene exclusivamente de corridor.manualExchangeRate,
+ * que el admin fija desde PATCH /admin/corridors/:corridorId/rate.
+ * USDC es el activo de tránsito en Stellar (≈ 1:1 con USD para Vita/OwlPay).
+ *
+ * @param {number} netAmountBOB  — monto neto en BOB (después de descontar fees)
+ * @param {object} corridor      — TransactionConfig del corredor
+ * @returns {{ usdcAmount: number, bobPerUsdc: number }}
+ * @throws {Error} si manualExchangeRate no está configurada (= 0)
  */
-function convertBobToUsd(netAmountBOB, corridor) {
-  const bobPerUsd = corridor.manualExchangeRate > 0
-    ? corridor.manualExchangeRate
-    : parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+function convertBobToUsdc(netAmountBOB, corridor) {
+  const bobPerUsdc = corridor.manualExchangeRate;
 
-  const usdAmount = Math.round((netAmountBOB / bobPerUsd) * 100) / 100;
-  return { usdAmount, bobPerUsd };
+  if (!bobPerUsdc || bobPerUsdc <= 0) {
+    throw new Error(
+      `Corredor ${corridor.corridorId}: manualExchangeRate no configurada. ` +
+      'Usar PATCH /admin/corridors/:corridorId/rate para fijar la tasa BOB/USDC.',
+    );
+  }
+
+  const usdcAmount = Math.round((netAmountBOB / bobPerUsdc) * 10000) / 10000; // 4 decimales para USDC
+  return { usdcAmount, bobPerUsdc };
 }
 
 // ─── dispatchPayout ───────────────────────────────────────────────────────────
@@ -355,29 +364,53 @@ export async function dispatchPayout(transaction) {
     const ben              = transaction.beneficiary ?? {};
     const netAmountNative  = resolveNetAmountForPayout(transaction);
 
-    // ── Conversión BOB → USD para corredores SRL ─────────────────────────
-    // Vita y OwlPay operan en USD (no en BOB). Usar tasa ASFI del corredor.
+    // ── Conversión BOB → USDC para corredores SRL Bolivia ───────────────────
+    // Vita y OwlPay operan en USD (USDC ≈ 1:1 USD). Tasa fijada por admin
+    // en corridor.manualExchangeRate vía PATCH /admin/corridors/:id/rate.
+    // USDC es el activo de tránsito en Stellar — se registra en digitalAsset.
     let payoutAmountUSD = netAmountNative;
     let vitaCurrency    = (transaction.originCurrency ?? 'clp').toLowerCase();
 
     if (corridor.originCurrency === 'BOB') {
-      const { usdAmount, bobPerUsd } = convertBobToUsd(netAmountNative, corridor);
+      let convResult;
+      try {
+        convResult = convertBobToUsdc(netAmountNative, corridor);
+      } catch (rateErr) {
+        // Sin tasa configurada no se puede despachar — dejar en payin_confirmed
+        // para que el admin configure la tasa y reintente manualmente.
+        console.error('[dispatchPayout] Tasa BOB/USDC no configurada:', {
+          transactionId: transaction.alytoTransactionId,
+          corridorId:    corridor.corridorId,
+          error:         rateErr.message,
+        });
+        await appendIpnLog(transaction, 'payout_rate_missing', 'system', 'payin_confirmed', {
+          error: rateErr.message,
+          action: 'Configurar manualExchangeRate en el corredor y reintentar.',
+        });
+        return; // No marcar como failed — es recuperable con setCorridorRate
+      }
 
-      console.log('[dispatchPayout] Conversión BOB→USD:', {
-        netBOB: netAmountNative, bobPerUsd, usdAmount,
+      const { usdcAmount, bobPerUsdc } = convResult;
+
+      console.log('[dispatchPayout] Conversión BOB→USDC:', {
+        netBOB: netAmountNative, bobPerUsdc, usdcAmount,
       });
 
+      // Registrar conversión + activo Stellar en la transacción
       transaction.conversionRate = {
         fromCurrency:    'BOB',
-        toCurrency:      'USD',
-        rate:            bobPerUsd,
-        convertedAmount: usdAmount,
+        toCurrency:      'USDC',
+        rate:            bobPerUsdc,
+        convertedAmount: usdcAmount,
       };
+      transaction.digitalAsset       = 'USDC';
+      transaction.digitalAssetAmount = usdcAmount;
+
       await transaction.save().catch(err =>
-        console.error('[dispatchPayout] Error guardando conversionRate:', err.message),
+        console.error('[dispatchPayout] Error guardando conversionRate/USDC:', err.message),
       );
 
-      payoutAmountUSD = usdAmount;
+      payoutAmountUSD = usdcAmount;
       vitaCurrency    = 'usd';
     }
 

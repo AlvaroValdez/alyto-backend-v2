@@ -29,6 +29,7 @@ import {
   listCorridors,
   createCorridor,
   updateCorridor,
+  setCorridorRate,
   deactivateCorridor,
   getCorridorAnalytics,
   getGlobalAnalytics,
@@ -106,6 +107,20 @@ router.get('/corridors', listCorridors);
  * Body: todos los campos requeridos de TransactionConfig.
  */
 router.post('/corridors', createCorridor);
+
+/**
+ * PATCH /api/v1/admin/corridors/:corridorId/rate
+ *
+ * Actualiza la tasa de cambio manual (BOB/USDC) de un corredor SRL Bolivia.
+ * Solo aplica a corredores con payinMethod: 'manual'.
+ *
+ * Body: { manualExchangeRate: number, note: string }
+ *   manualExchangeRate — unidades de originCurrency por 1 USDC (ej. 6.96 para BOB)
+ *   note               — descripción obligatoria del ajuste (mín. 10 chars)
+ *
+ * Esta ruta DEBE registrarse ANTES de /:corridorId para que Express no la capture.
+ */
+router.patch('/corridors/:corridorId/rate', setCorridorRate);
 
 /**
  * PATCH /api/v1/admin/corridors/:corridorId

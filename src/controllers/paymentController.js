@@ -737,6 +737,9 @@ export async function initCrossBorderPayment(req, res) {
       originCountry:       corridor.originCountry,
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
+      // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
+      // El monto exacto de USDC se calcula y guarda en dispatchPayout al confirmar payin.
+      ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
       // Montos y tasa de la cotización previa (desnormalizados para historial)
       ...(quotedDestAmount    != null ? { destinationAmount: quotedDestAmount }       : {}),
       ...(quotedExchangeRate  != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
@@ -989,16 +992,39 @@ export async function getQuote(req, res) {
     });
   }
 
-  // ── 3a. Corredores manuales (SRL Bolivia): BOB → USD → destino ─────────────
+  // ── 3a. Corredores manuales (SRL Bolivia): BOB → USDC → destino ────────────
+  //
+  // Ruta de conversión: BOB → USDC (tasa configurada por admin en corredor)
+  //                     USDC → destino (tasa USD en tiempo real de Vita)
+  //
+  // La tasa admin (manualExchangeRate) debe haberse fijado previamente vía:
+  //   PATCH /admin/corridors/:corridorId/rate
+  //
+  // Sin tasa configurada (manualExchangeRate === 0): la cotización no puede procesarse.
   if (corridor.payinMethod === 'manual') {
-    // Tasa ASFI fija: 1 USD = N BOB. Fuente de verdad: corredor config > env var.
-    const bobPerUsd = corridor.manualExchangeRate > 0
-      ? corridor.manualExchangeRate
-      : parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+    const bobPerUsdc = corridor.manualExchangeRate;
 
-    const amountInUSD = amountAfterFees / bobPerUsd;
+    if (!bobPerUsdc || bobPerUsdc <= 0) {
+      console.error('[Alyto Quote] Corredor manual sin tasa configurada:', {
+        corridorId: corridor.corridorId, userId,
+      });
+      return res.status(503).json({
+        error:   'La tasa de cambio de este corredor aún no ha sido configurada por el operador.',
+        code:    'RATE_NOT_CONFIGURED',
+        action:  'El administrador debe fijar la tasa BOB/USDC desde el panel de configuración.',
+      });
+    }
 
-    // Tasa USD→destino en tiempo real desde Vita
+    // ── Paso 1: BOB → USDC (tasa fijada por admin, refleja tasa ASFI) ────────
+    // amountAfterFees ya descuenta: alytoCSpread + fixedFee + profitRetention
+    const usdcTransitAmount = round2(amountAfterFees / bobPerUsdc);
+
+    if (usdcTransitAmount <= 0) {
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
+
+    // ── Paso 2: USDC → destino (tasa USD en tiempo real de Vita) ─────────────
+    // USDC ≈ 1:1 USD, por lo que usamos las tasas USD de Vita directamente.
     const vitaPricingUSD = extractVitaPricing(vitaResponse, 'USD', dest);
 
     if (!vitaPricingUSD) {
@@ -1010,25 +1036,38 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+
+    // payoutFee: costo fijo de Vita para este destino (en moneda destino)
     const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
-    const destinationAmount = round2((amountInUSD * usdToDestRate) - payoutFee);
+    const destinationAmount = round2((usdcTransitAmount * usdcToDestRate) - payoutFee);
 
     if (destinationAmount <= 0) {
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
     }
 
-    // Tasa efectiva BOB→destino (compuesta: BOB→USD→destino)
-    const effectiveExchangeRate = round2(usdToDestRate / bobPerUsd);
+    // ── Tasa efectiva compuesta: BOB → dest ───────────────────────────────────
+    // effectiveRate = destAmount / originAmount = cuántas unidades dest recibe por 1 BOB
+    const effectiveExchangeRate = round2(destinationAmount / amount);
+
+    // ── Ganancia de Alyto en USDC ─────────────────────────────────────────────
+    // La ganancia es la diferencia entre el BOB bruto y el neto, convertida a USDC.
+    const alytoProfitBOB  = payinFee + alytoCSpread + fixedFee + profitRetention;
+    const alytoProfitUSDC = round2(alytoProfitBOB / bobPerUsdc);
 
     const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
     const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
-    console.info('[Alyto Quote] Cotización manual (BOB):', {
-      corridorId: corridor.corridorId, userId,
-      amount, bobPerUsd, amountInUSD: round2(amountInUSD),
-      usdToDestRate, destinationAmount,
+    console.info('[Alyto Quote] Cotización manual BOB→USDC→' + dest + ':', {
+      corridorId:       corridor.corridorId,
+      userId,
+      originAmount:     amount,
+      bobPerUsdc,
+      usdcTransitAmount,
+      usdcToDestRate,
+      destinationAmount,
+      alytoProfitUSDC,
     });
 
     return res.status(200).json({
@@ -1038,10 +1077,14 @@ export async function getQuote(req, res) {
       destinationAmount,
       destinationCurrency:  corridor.destinationCurrency,
       exchangeRate:         effectiveExchangeRate,
+      // ── Ruta de conversión ───────────────────────────────────────────────
       isManualCorridor:     true,
-      conversionPath:       `${corridor.originCurrency}→USD→${corridor.destinationCurrency}`,
-      bobToUsdRate:         bobPerUsd,
-      usdToDestRate:        round2(usdToDestRate),
+      conversionPath:       `${corridor.originCurrency} → USDC → ${corridor.destinationCurrency}`,
+      stellarAsset:         'USDC',
+      usdcTransitAmount,     // USDC que viajan por Stellar como highway
+      bobPerUsdc,            // Tasa admin: 1 USDC = N BOB
+      usdcToDestRate,        // Tasa Vita: 1 USDC → N dest
+      // ── Fees desglosados ─────────────────────────────────────────────────
       fees: {
         payinFee:        round2(payinFee),
         alytoCSpread:    round2(alytoCSpread),
@@ -1049,6 +1092,7 @@ export async function getQuote(req, res) {
         payoutFee:       round2(payoutFee),
         profitRetention: round2(profitRetention),
         total:           round2(payinFee + alytoCSpread + fixedFee + profitRetention),
+        alytoProfitUSDC,  // Ganancia total Alyto expresada en USDC
       },
       quoteExpiresAt,
       payinMethod:  corridor.payinMethod,
