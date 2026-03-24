@@ -272,6 +272,11 @@ const transactionConfigSchema = new Schema(
         newValue:  { type: Schema.Types.Mixed },
         changedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         changedAt: { type: Date, default: Date.now },
+        /**
+         * Nota descriptiva obligatoria cuando se modifica manualExchangeRate.
+         * Registra el motivo del ajuste (ej. "Tasa ASFI 24/03/2026: 1 USDC = 6.96 BOB").
+         */
+        note:      { type: String, trim: true },
         _id:       false,
       },
     ],

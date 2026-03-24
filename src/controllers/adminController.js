@@ -399,6 +399,105 @@ export async function listCorridors(req, res) {
   }
 }
 
+// ─── setCorridorRate ──────────────────────────────────────────────────────────
+
+/**
+ * PATCH /api/v1/admin/corridors/:corridorId/rate
+ *
+ * Actualiza la tasa de cambio manual (BOB/USDC) de un corredor SRL Bolivia.
+ * Solo aplica a corredores con payinMethod: 'manual'.
+ *
+ * La tasa expresa cuántas unidades de originCurrency equivalen a 1 USDC.
+ * Ejemplo: manualExchangeRate: 6.96 → 1 USDC = 6.96 BOB (tasa ASFI)
+ *
+ * Esta tasa es la fuente de verdad para:
+ *   getQuote:      netBOB / manualExchangeRate = USDC en tránsito
+ *   dispatchPayout: misma conversión, USDC se envía a Vita/OwlPay como USD
+ *
+ * Exige nota descriptiva obligatoria (mín. 10 chars) para auditoría.
+ * Registra el cambio en corridor.changeLog con el campo `note`.
+ *
+ * Body: { manualExchangeRate: number, note: string }
+ */
+export async function setCorridorRate(req, res) {
+  const { corridorId }                      = req.params;
+  const { manualExchangeRate, note }        = req.body;
+  const adminId                             = req.user._id;
+
+  // ── 1. Validar entrada ────────────────────────────────────────────────────
+  const rate = Number(manualExchangeRate);
+  if (!isFinite(rate) || rate <= 0) {
+    return res.status(400).json({
+      error: 'manualExchangeRate debe ser un número positivo. Ejemplo: 6.96 (1 USDC = 6.96 BOB).',
+    });
+  }
+  if (!note || note.trim().length < 10) {
+    return res.status(400).json({
+      error: 'Se requiere una nota descriptiva del ajuste (mín. 10 caracteres). Ej: "Tasa ASFI 24/03/2026".',
+    });
+  }
+
+  // ── 2. Buscar corredor ────────────────────────────────────────────────────
+  let corridor;
+  try {
+    corridor = await TransactionConfig.findOne({ corridorId: corridorId.toLowerCase() });
+  } catch (err) {
+    console.error('[Admin setCorridorRate] Error:', err.message);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!corridor) {
+    return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado.` });
+  }
+
+  if (corridor.payinMethod !== 'manual') {
+    return res.status(400).json({
+      error:        `setCorridorRate solo aplica a corredores manuales (payinMethod: 'manual'). Este corredor usa '${corridor.payinMethod}'.`,
+      payinMethod:  corridor.payinMethod,
+      corridorId:   corridor.corridorId,
+    });
+  }
+
+  // ── 3. Actualizar tasa con registro en changeLog ──────────────────────────
+  const oldRate = corridor.manualExchangeRate ?? 0;
+  const now     = new Date();
+
+  corridor.manualExchangeRate = rate;
+  corridor.changeLog.push({
+    field:     'manualExchangeRate',
+    oldValue:  oldRate,
+    newValue:  rate,
+    changedBy: adminId,
+    changedAt: now,
+    note:      note.trim(),
+  });
+
+  try {
+    await corridor.save();
+  } catch (err) {
+    console.error('[Admin setCorridorRate] Error guardando:', { corridorId, error: err.message });
+    return res.status(500).json({ error: 'Error al guardar la tasa.' });
+  }
+
+  console.info('[Admin] Tasa BOB/USDC actualizada:', {
+    corridorId,
+    oldRate,
+    newRate:  rate,
+    adminId:  adminId.toString(),
+    note:     note.trim(),
+  });
+
+  return res.json({
+    corridorId:         corridor.corridorId,
+    originCurrency:     corridor.originCurrency,
+    manualExchangeRate: rate,
+    rateLabel:          `1 USDC = ${rate} ${corridor.originCurrency}`,
+    previousRate:       oldRate,
+    changedAt:          now,
+    note:               note.trim(),
+  });
+}
+
 // ─── createCorridor ───────────────────────────────────────────────────────────
 
 /**

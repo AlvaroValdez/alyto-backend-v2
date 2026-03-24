@@ -330,14 +330,21 @@ const CORREDORES = [
   },
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  SRL Bolivia — Payin manual (BOB) → Payout vía Vita (USD convertido)
+  //  SRL Bolivia — Payin manual (BOB) → USDC (Stellar) → Payout LatAm
   // ══════════════════════════════════════════════════════════════════════════
 
   // ── Corredores SRL Bolivia ─────────────────────────────────────────────────
-  // manualExchangeRate: 6.96 = tasa ASFI oficial (1 USD = 6.96 BOB).
-  // Usado en getQuote para calcular BOB→USD antes de obtener tasa USD→destino de Vita.
-  // Usado en dispatchPayout para la conversión auditada antes del withdrawal.
-  // fallbackPayoutMethod: 'owlPay' — si Vita falla, Harbor/OwlPay intenta el payout.
+  //
+  // manualExchangeRate: CONFIGURAR desde admin ANTES de activar operaciones.
+  //   Endpoint: PATCH /api/v1/admin/corridors/:corridorId/rate
+  //   Body: { "manualExchangeRate": 6.96, "note": "Tasa ASFI DD/MM/YYYY" }
+  //
+  //   Representa: 1 USDC = N BOB (activo de tránsito Stellar = USDC).
+  //   Referencia: tasa ASFI oficial Bolivia = 6.96 BOB/USD (fija desde 2011).
+  //   Sin esta tasa: getQuote devuelve error RATE_NOT_CONFIGURED.
+  //
+  // Flujo: BOB (banco SRL) → USDC (Stellar highway) → COP/PEN/USD (Vita/OwlPay)
+  // fallbackPayoutMethod: 'owlPay' — Harbor/OwlPay si Vita no está disponible.
   ...[
     { corridorId: 'bo-co', dest: 'CO', destCurrency: 'COP', spread: 2, fixed: 5, retention: 1 },
     { corridorId: 'bo-pe', dest: 'PE', destCurrency: 'PEN', spread: 2, fixed: 5, retention: 1 },
@@ -359,7 +366,7 @@ const CORREDORES = [
     payinMethod:            'manual',
     payoutMethod:           'vitaWallet',
     fallbackPayoutMethod:   'owlPay',         // Harbor/OwlPay como respaldo si Vita falla
-    manualExchangeRate:     6.96,             // Tasa ASFI: 1 USD = 6.96 BOB
+    manualExchangeRate:     0,                // CONFIGURAR vía: PATCH /api/v1/admin/corridors/:corridorId/rate
     stellarAsset:           'USDC',
     alytoCSpread:           spread,
     fixedFee:               fixed,
@@ -371,7 +378,7 @@ const CORREDORES = [
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             `Corredor BO→${dest}. Payin manual AV Finance SRL. Payout vía Vita USD (tasa ASFI 6.96). Fallback: OwlPay.`,
+    adminNotes:             `Corredor BO→${dest}. Payin manual SRL. Tránsito USDC vía Stellar. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`,
   })),
 
   // ── LLC Global (USD) → Colombia ────────────────────────────────────────────
