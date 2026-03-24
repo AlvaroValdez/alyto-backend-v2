@@ -333,6 +333,11 @@ const CORREDORES = [
   //  SRL Bolivia — Payin manual (BOB) → Payout vía Vita (USD convertido)
   // ══════════════════════════════════════════════════════════════════════════
 
+  // ── Corredores SRL Bolivia ─────────────────────────────────────────────────
+  // manualExchangeRate: 6.96 = tasa ASFI oficial (1 USD = 6.96 BOB).
+  // Usado en getQuote para calcular BOB→USD antes de obtener tasa USD→destino de Vita.
+  // Usado en dispatchPayout para la conversión auditada antes del withdrawal.
+  // fallbackPayoutMethod: 'owlPay' — si Vita falla, Harbor/OwlPay intenta el payout.
   ...[
     { corridorId: 'bo-co', dest: 'CO', destCurrency: 'COP', spread: 2, fixed: 5, retention: 1 },
     { corridorId: 'bo-pe', dest: 'PE', destCurrency: 'PEN', spread: 2, fixed: 5, retention: 1 },
@@ -353,6 +358,8 @@ const CORREDORES = [
     destinationCurrency:    destCurrency,
     payinMethod:            'manual',
     payoutMethod:           'vitaWallet',
+    fallbackPayoutMethod:   'owlPay',         // Harbor/OwlPay como respaldo si Vita falla
+    manualExchangeRate:     6.96,             // Tasa ASFI: 1 USD = 6.96 BOB
     stellarAsset:           'USDC',
     alytoCSpread:           spread,
     fixedFee:               fixed,
@@ -364,7 +371,7 @@ const CORREDORES = [
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             `Corredor BO→${dest}. Payin manual AV Finance SRL. Payout vía Vita en USD (tipo de cambio BOB_USD_RATE).`,
+    adminNotes:             `Corredor BO→${dest}. Payin manual AV Finance SRL. Payout vía Vita USD (tasa ASFI 6.96). Fallback: OwlPay.`,
   })),
 
   // ── LLC Global (USD) → Colombia ────────────────────────────────────────────

@@ -524,7 +524,15 @@ export async function getWithdrawalRulesController(req, res) {
  * Auth: Bearer JWT (protect middleware)
  */
 export async function initCrossBorderPayment(req, res) {
-  const { corridorId, originAmount, beneficiaryData, beneficiary: legacyBeneficiary } = req.body;
+  const {
+    corridorId,
+    originAmount,
+    beneficiaryData,
+    beneficiary: legacyBeneficiary,
+    // Datos de la cotización previa (opcionales — si el frontend los pasa se guardan)
+    destinationAmount: quotedDestAmount,
+    exchangeRate:      quotedExchangeRate,
+  } = req.body;
   const userId = req.user?._id;
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
@@ -729,6 +737,9 @@ export async function initCrossBorderPayment(req, res) {
       originCountry:       corridor.originCountry,
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
+      // Montos y tasa de la cotización previa (desnormalizados para historial)
+      ...(quotedDestAmount    != null ? { destinationAmount: quotedDestAmount }       : {}),
+      ...(quotedExchangeRate  != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
 
       fees: {
         payinFee,
@@ -950,26 +961,107 @@ export async function getQuote(req, res) {
   }
 
   // ── 3. Obtener precios en tiempo real desde Vita ──────────────────────────
+  // Para corredores manuales (BOB): primero convertir BOB→USD (tasa ASFI del corredor),
+  // luego consultar Vita por la tasa USD→destino. Vita no tiene precios para BOB.
+  // Para corredores estándar: consultar Vita directamente con la moneda de origen.
+
+  const round2 = n => Math.round(n * 100) / 100;
+
+  const payinFee        = amount * (corridor.payinFeePercent / 100);
+  const alytoCSpread    = amount * (corridor.alytoCSpread / 100);
+  const fixedFee        = corridor.fixedFee;
+  const profitRetention = amount * (corridor.profitRetentionPercent / 100);
+  const amountAfterFees = amount - payinFee - alytoCSpread - fixedFee - profitRetention;
+
+  if (amountAfterFees <= 0) {
+    return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+  }
+
   let vitaResponse;
   try {
     vitaResponse = await getPrices();
   } catch (err) {
     console.error('[Alyto Quote] Vita /prices no disponible:', {
-      corridorId: corridor.corridorId,
-      userId,
-      error: err.message,
+      corridorId: corridor.corridorId, userId, error: err.message,
     });
     return res.status(503).json({
       error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
     });
   }
 
-  // destinationCountry (ej. "CO") se pasa al helper — Vita usa el país, no la moneda,
-  // como clave del country-level (co, pe, ar...) en la respuesta de /prices
+  // ── 3a. Corredores manuales (SRL Bolivia): BOB → USD → destino ─────────────
+  if (corridor.payinMethod === 'manual') {
+    // Tasa ASFI fija: 1 USD = N BOB. Fuente de verdad: corredor config > env var.
+    const bobPerUsd = corridor.manualExchangeRate > 0
+      ? corridor.manualExchangeRate
+      : parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+
+    const amountInUSD = amountAfterFees / bobPerUsd;
+
+    // Tasa USD→destino en tiempo real desde Vita
+    const vitaPricingUSD = extractVitaPricing(vitaResponse, 'USD', dest);
+
+    if (!vitaPricingUSD) {
+      console.error('[Alyto Quote] Vita no tiene tasa USD→' + dest + ' para corredor manual.', {
+        corridorId: corridor.corridorId, userId,
+      });
+      return res.status(503).json({
+        error: 'Tasa de cambio no disponible para este corredor. Intenta nuevamente.',
+      });
+    }
+
+    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+    const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
+    const destinationAmount = round2((amountInUSD * usdToDestRate) - payoutFee);
+
+    if (destinationAmount <= 0) {
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
+
+    // Tasa efectiva BOB→destino (compuesta: BOB→USD→destino)
+    const effectiveExchangeRate = round2(usdToDestRate / bobPerUsd);
+
+    const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+    const vitaExpiry     = validUntil ? new Date(validUntil) : null;
+    const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
+
+    console.info('[Alyto Quote] Cotización manual (BOB):', {
+      corridorId: corridor.corridorId, userId,
+      amount, bobPerUsd, amountInUSD: round2(amountInUSD),
+      usdToDestRate, destinationAmount,
+    });
+
+    return res.status(200).json({
+      corridorId:           corridor.corridorId,
+      originAmount:         amount,
+      originCurrency:       corridor.originCurrency,
+      destinationAmount,
+      destinationCurrency:  corridor.destinationCurrency,
+      exchangeRate:         effectiveExchangeRate,
+      isManualCorridor:     true,
+      conversionPath:       `${corridor.originCurrency}→USD→${corridor.destinationCurrency}`,
+      bobToUsdRate:         bobPerUsd,
+      usdToDestRate:        round2(usdToDestRate),
+      fees: {
+        payinFee:        round2(payinFee),
+        alytoCSpread:    round2(alytoCSpread),
+        fixedFee:        round2(fixedFee),
+        payoutFee:       round2(payoutFee),
+        profitRetention: round2(profitRetention),
+        total:           round2(payinFee + alytoCSpread + fixedFee + profitRetention),
+      },
+      quoteExpiresAt,
+      payinMethod:  corridor.payinMethod,
+      payoutMethod: corridor.payoutMethod,
+      legalEntity:  corridor.legalEntity,
+    });
+  }
+
+  // ── 3b. Corredores estándar: tasa directa desde Vita ──────────────────────
   const vitaPricing = extractVitaPricing(
     vitaResponse,
     corridor.originCurrency,
-    dest,   // ISO alpha-2 del país destino, en mayúsculas — el helper lo pasa a minúsculas
+    dest,
   );
 
   if (!vitaPricing) {
@@ -986,16 +1078,7 @@ export async function getQuote(req, res) {
 
   const { rate: exchangeRate, fixedCost: vitaFixedCost, validUntil } = vitaPricing;
 
-  // ── 4. Calcular desglose de fees ───────────────────────────────────────────
-  const round2 = n => Math.round(n * 100) / 100;
-
-  const payinFee        = amount * (corridor.payinFeePercent / 100);
-  const alytoCSpread    = amount * (corridor.alytoCSpread / 100);
-  const fixedFee        = corridor.fixedFee;
-  const profitRetention = amount * (corridor.profitRetentionPercent / 100);
-  const totalFees       = payinFee + alytoCSpread + fixedFee;
-  const amountAfterFees = amount - totalFees - profitRetention;
-
+  // ── 4. Calcular desglose de fees (corredores estándar) ────────────────────
   // payoutFee: usar fixed_cost de Vita si está disponible; si no, el valor
   // estático del TransactionConfig actúa como fallback (ej. en mantenimiento de Vita)
   const payoutFee = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;

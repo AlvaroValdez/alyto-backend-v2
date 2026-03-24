@@ -170,6 +170,32 @@ const transactionConfigSchema = new Schema(
       default: 80,
     },
 
+    /**
+     * Tipo de cambio manual fijo para corredores con payinMethod: 'manual'.
+     * Expresa cuántas unidades de originCurrency equivalen a 1 USD.
+     * Ejemplo para Bolivia: 6.96 (1 USD = 6.96 BOB — tasa oficial ASFI).
+     * Se usa en getQuote para calcular BOB→USD antes de aplicar la tasa Vita USD→destino.
+     * También se usa en dispatchPayout como referencia de conversión auditada.
+     * 0 = no configurado (el sistema usa la variable de entorno BOB_USD_RATE como fallback).
+     */
+    manualExchangeRate: {
+      type:    Number,
+      min:     0,
+      default: 0,
+    },
+
+    /**
+     * Proveedor de payout secundario (fallback) si el primario falla.
+     * El sistema intenta el payoutMethod principal primero;
+     * si lanza excepción, reintenta con este fallback antes de marcar como 'failed'.
+     * null = sin fallback configurado (falla directamente).
+     */
+    fallbackPayoutMethod: {
+      type:    String,
+      enum:    ['vitaWallet', 'owlPay', 'stellar_direct', 'manual', null],
+      default: null,
+    },
+
     // ── Límites Operativos ────────────────────────────────────────────────────
 
     /**
