@@ -879,6 +879,19 @@ function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCount
     const clpToUsd  = Number(attrs.clp_sell?.['us']       ?? NaN);
     if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
     rate = clpToDest / clpToUsd;
+  } else if (origin === 'BOB') {
+    // Bolivia: Vita no tiene bob_sell. Dos pasos:
+    //   PASO 1 — tasa USD→destino via cross-rate CLP
+    //   PASO 2 — dividir por BOB_USD_RATE (tasa oficial ASFI = 6.96)
+    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
+    const clpToDest    = Number(attrs.clp_sell?.[countryKey] ?? NaN);
+    const clpToUsd     = Number(attrs.clp_sell?.['us']       ?? NaN);
+    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+    const usdToDestRate = clpToDest / clpToUsd;
+    rate = usdToDestRate / BOB_USD_RATE;
+    console.info('[Alyto Quote] Cotización BOB→' + destinationCountry + ' via cross-rate:', {
+      clpToDest, clpToUsd, usdToDestRate, BOB_USD_RATE, bobToDestRate: rate,
+    });
   } else {
     return null;  // moneda origen no soportada
   }
@@ -1029,18 +1042,19 @@ export async function getQuote(req, res) {
   //
   // Sin tasa configurada (manualExchangeRate === 0): la cotización no puede procesarse.
   if (corridor.payinMethod === 'manual') {
-    const bobPerUsdc = corridor.manualExchangeRate;
+    // bobPerUsdc: tasa configurada por admin (BOB por 1 USDC).
+    // Fallback a BOB_USD_RATE cuando el admin aún no la ha fijado (USDC ≈ 1:1 USD).
+    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
+    const bobPerUsdc   = (corridor.manualExchangeRate && corridor.manualExchangeRate > 0)
+      ? corridor.manualExchangeRate
+      : BOB_USD_RATE;
 
-    if (!bobPerUsdc || bobPerUsdc <= 0) {
-      console.error('[Alyto Quote] Corredor manual sin tasa configurada:', {
-        corridorId: corridor.corridorId, userId,
-      });
-      return res.status(503).json({
-        error:   'La tasa de cambio de este corredor aún no ha sido configurada por el operador.',
-        code:    'RATE_NOT_CONFIGURED',
-        action:  'El administrador debe fijar la tasa BOB/USDC desde el panel de configuración.',
-      });
-    }
+    console.info('[Alyto Quote] Corredor manual BOB — tasa aplicada:', {
+      corridorId:          corridor.corridorId,
+      userId,
+      source:              corridor.manualExchangeRate > 0 ? 'admin_configured' : 'env_BOB_USD_RATE',
+      bobPerUsdc,
+    });
 
     // ── Paso 1: BOB → USDC (tasa fijada por admin, refleja tasa ASFI) ────────
     // amountAfterFees ya descuenta: alytoCSpread + fixedFee + profitRetention
