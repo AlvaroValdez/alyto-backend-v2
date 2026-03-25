@@ -474,6 +474,17 @@ export async function dispatchPayout(transaction) {
             primaryProvider: payoutMethod, primaryError: primaryError.message,
             fallbackProvider: fallback,    fallbackError: fallbackErr.message,
           });
+          try {
+            await sendPushNotification(transaction.userId,
+              NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
+          } catch (e) { console.error('[Email] Error push failed (all providers):', e.message); }
+          try {
+            const user = await User.findById(transaction.userId).lean();
+            if (user?.email) {
+              await sendEmail(...EMAILS.paymentFailed(user, transaction));
+              console.log('[Email] ✅ Fallido (todos los providers) →', user.email);
+            }
+          } catch (e) { console.error('[Email] Error failed (all providers):', e.message); }
           return;
         }
       } else {
@@ -483,6 +494,17 @@ export async function dispatchPayout(transaction) {
         await appendIpnLog(transaction, 'payout_dispatch_failed', payoutMethod, 'failed', {
           error: primaryError.message,
         });
+        try {
+          await sendPushNotification(transaction.userId,
+            NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
+        } catch (e) { console.error('[Email] Error push failed (no fallback):', e.message); }
+        try {
+          const user = await User.findById(transaction.userId).lean();
+          if (user?.email) {
+            await sendEmail(...EMAILS.paymentFailed(user, transaction));
+            console.log('[Email] ✅ Fallido →', user.email);
+          }
+        } catch (e) { console.error('[Email] Error failed (no fallback):', e.message); }
         return;
       }
     }
@@ -581,9 +603,12 @@ export async function dispatchPayout(transaction) {
       // Email transaccional: pago completado
       try {
         const user = await User.findById(transaction.userId).lean();
-        if (user) await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+        if (user?.email) {
+          await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+          console.log('[Email] ✅ Completado →', user.email);
+        }
       } catch (emailErr) {
-        console.error('[Alyto Payout] Error enviando email paymentCompleted (sandbox):', emailErr.message);
+        console.error('[Email] Error completado:', emailErr.message);
       }
 
       console.log('[dispatchPayout] ✅ Transacción completada (sandbox):', transaction.alytoTransactionId);
@@ -848,9 +873,12 @@ export async function handleVitaIPN(req, res) {
         // Email transaccional: pago completado
         try {
           const user = await User.findById(transaction.userId).lean();
-          if (user) await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+          if (user?.email) {
+            await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+            console.log('[Email] ✅ Completado →', user.email);
+          }
         } catch (emailErr) {
-          console.error('[Alyto IPN/Vita] Error enviando email paymentCompleted:', emailErr.message);
+          console.error('[Email] Error completado:', emailErr.message);
         }
 
       } else if (vitaStatus === 'denied') {
