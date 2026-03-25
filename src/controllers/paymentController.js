@@ -27,8 +27,23 @@ import {
   getPaymentIntent,
   verifyWebhookSignature,
 } from '../services/fintocService.js';
-import { dispatchPayout } from './ipnController.js';
+import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
+import multer               from 'multer';
+
+// ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
+export const uploadComprobante = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },   // 5 MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Solo se permiten archivos JPG, PNG o PDF.'));
+    }
+  },
+});
 import {
   getPrices,
   getWithdrawalRules as getVitaWithdrawalRules,
@@ -906,6 +921,114 @@ function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCount
 }
 
 /**
+ * calculateBOBQuote — Cotización para corredores manuales SRL Bolivia.
+ *
+ * Ruta de conversión: BOB → USDC (tasa admin o BOB_USD_RATE env) → destino (Vita cross-rate CLP).
+ * Vita no tiene tasas BOB nativas. Se deriva: usd_to_dest = clp_sell[dest] / clp_sell["us"]
+ *
+ * @param {object} req
+ * @param {object} res
+ * @param {object} corridor  — TransactionConfig activo
+ * @param {number} amount    — originAmount en BOB
+ * @param {string} dest      — destinationCountry ISO alpha-2 mayúsculas
+ */
+async function calculateBOBQuote(req, res, corridor, amount, dest) {
+  const round2      = n => Math.round(n * 100) / 100;
+  const userId      = req.user?._id?.toString();
+
+  // ── 1. Tasa BOB/USDC ───────────────────────────────────────────────────────
+  const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+  const bobPerUsdc   = (corridor.manualExchangeRate > 0)
+    ? corridor.manualExchangeRate
+    : BOB_USD_RATE;
+
+  const rateSource = corridor.manualExchangeRate > 0 ? 'admin_configured' : 'env_BOB_USD_RATE';
+  console.log('[Quote BOB] BOB_USD_RATE:', bobPerUsdc, '| source:', rateSource);
+
+  // ── 2. Obtener precios Vita (USD→dest via cross-rate CLP) ─────────────────
+  let vitaResponse;
+  try {
+    vitaResponse = await getPrices();
+  } catch (err) {
+    console.error('[Quote BOB] Vita /prices no disponible:', err.message);
+    return res.status(503).json({
+      error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
+    });
+  }
+
+  const vitaPricingUSD = extractVitaPricing(vitaResponse, 'USD', dest);
+  if (!vitaPricingUSD) {
+    console.error('[Quote BOB] No hay tasa USD→' + dest + ' en Vita para corredor:', corridor.corridorId);
+    return res.status(503).json({
+      error: `No hay tasa USD→${dest} disponible. Intenta nuevamente.`,
+    });
+  }
+
+  const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+
+  // ── 3. Calcular fees en BOB ───────────────────────────────────────────────
+  const payinFee        = amount * (corridor.payinFeePercent    / 100);
+  const alytoCSpread    = amount * (corridor.alytoCSpread       / 100);
+  const fixedFee        = corridor.fixedFee ?? 0;
+  const profitRetention = amount * (corridor.profitRetentionPercent / 100);
+  const netBOB          = amount - payinFee - alytoCSpread - fixedFee - profitRetention;
+
+  if (netBOB <= 0) {
+    return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+  }
+
+  // ── 4. Conversión BOB → USDC → destino ────────────────────────────────────
+  const usdcTransitAmount = round2(netBOB / bobPerUsdc);
+  const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
+  const destinationAmount = round2((usdcTransitAmount * usdToDestRate) - payoutFee);
+
+  if (destinationAmount <= 0) {
+    return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+  }
+
+  // tasa efectiva: cuántas unidades de destino por 1 BOB
+  const effectiveRate   = round2(destinationAmount / amount);
+  const alytoProfitBOB  = payinFee + alytoCSpread + fixedFee + profitRetention;
+  const alytoProfitUSDC = round2(alytoProfitBOB / bobPerUsdc);
+
+  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate);
+  console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', effectiveRate);
+  console.log('[Quote BOB] netBOB:', netBOB, '| usdcTransit:', usdcTransitAmount, '| dest:', destinationAmount);
+
+  const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+  const vitaExpiry     = validUntil ? new Date(validUntil) : null;
+  const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
+
+  return res.status(200).json({
+    corridorId:          corridor.corridorId,
+    originAmount:        amount,
+    originCurrency:      'BOB',
+    destinationAmount,
+    destinationCurrency: corridor.destinationCurrency,
+    exchangeRate:        effectiveRate,
+    conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
+    isManualCorridor:    true,
+    stellarAsset:        'USDC',
+    usdcTransitAmount,
+    bobPerUsdc,
+    usdcToDestRate:      usdToDestRate,
+    fees: {
+      payinFee:        round2(payinFee),
+      alytoCSpread:    round2(alytoCSpread),
+      fixedFee:        round2(fixedFee),
+      payoutFee:       round2(payoutFee),
+      profitRetention: round2(profitRetention),
+      totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention + payoutFee),
+      alytoProfitUSDC,
+    },
+    payinMethod:   corridor.payinMethod,
+    payoutMethod:  corridor.payoutMethod,
+    entity:        'SRL',
+    quoteExpiresAt,
+  });
+}
+
+/**
  * GET /api/v1/payments/quote
  *
  * Cotización en tiempo real para un crossBorderPayment.
@@ -1003,11 +1126,15 @@ export async function getQuote(req, res) {
     });
   }
 
-  // ── 3. Obtener precios en tiempo real desde Vita ──────────────────────────
-  // Para corredores manuales (BOB): primero convertir BOB→USD (tasa ASFI del corredor),
-  // luego consultar Vita por la tasa USD→destino. Vita no tiene precios para BOB.
-  // Para corredores estándar: consultar Vita directamente con la moneda de origen.
+  // ── 3. Cotización BOB: early exit antes de llamar a Vita ─────────────────
+  // Para corredores manuales Bolivia, entramos al flujo BOB inmediatamente.
+  // Vita se llama dentro de calculateBOBQuote (siempre necesitamos USD→dest).
+  if (corridor.originCurrency === 'BOB') {
+    console.log('[Quote BOB] Activando flujo Bolivia para:', corridor.corridorId);
+    return await calculateBOBQuote(req, res, corridor, amount, dest);
+  }
 
+  // ── 4. Obtener precios en tiempo real desde Vita (corredores no-BOB) ─────
   const round2 = n => Math.round(n * 100) / 100;
 
   const payinFee        = amount * (corridor.payinFeePercent / 100);
@@ -1516,6 +1643,94 @@ export async function getTransactionQR(req, res) {
     amount:              transaction.originalAmount,
     currency:            transaction.originCurrency,
     status:              transaction.status,
+  });
+}
+
+// ─── POST /api/v1/payments/:transactionId/comprobante ────────────────────────
+
+/**
+ * El usuario sube su comprobante de transferencia bancaria (JPG, PNG o PDF).
+ * Se persiste en base64 en Transaction.paymentProof y se notifica al admin.
+ *
+ * Auth: Bearer JWT
+ * Content-Type: multipart/form-data  (campo: 'comprobante')
+ */
+export async function uploadPaymentProof(req, res) {
+  const { transactionId } = req.params;
+  const userId = req.user._id;
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'No se recibió ningún archivo.' });
+  }
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId, userId });
+  } catch {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  if (transaction.paymentInstructions == null) {
+    return res.status(400).json({ error: 'Esta transacción no requiere comprobante.' });
+  }
+
+  const file = req.file;
+
+  transaction.paymentProof = {
+    data:       file.buffer.toString('base64'),
+    mimetype:   file.mimetype,
+    filename:   file.originalname,
+    size:       file.size,
+    uploadedAt: new Date(),
+  };
+
+  transaction.ipnLog.push({
+    provider:   'manual',
+    eventType:  'payment_proof_uploaded',
+    status:     transaction.status,
+    rawPayload: {
+      filename: file.originalname,
+      size:     file.size,
+      mimetype: file.mimetype,
+    },
+    receivedAt: new Date(),
+  });
+
+  try {
+    await transaction.save();
+  } catch (err) {
+    console.error('[Comprobante] Error guardando en BD:', err.message);
+    return res.status(500).json({ error: 'Error guardando el comprobante.' });
+  }
+
+  // Notificar al admin
+  try {
+    const user = await User.findById(userId).select('firstName lastName').lean();
+    const adminEmail = process.env.SENDGRID_ADMIN_EMAIL;
+    if (adminEmail) {
+      await sendEmail({
+        to:         adminEmail,
+        templateId: process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
+        dynamicTemplateData: {
+          transactionId: transaction.alytoTransactionId,
+          userName:      user ? `${user.firstName} ${user.lastName}` : 'Usuario',
+          amount:        `${transaction.originalAmount} BOB`,
+          ledgerUrl:     `${process.env.APP_URL ?? ''}/admin/ledger/${transaction.alytoTransactionId}`,
+        },
+      });
+      console.log('[Comprobante] Admin notificado →', adminEmail);
+    }
+  } catch (emailErr) {
+    console.error('[Comprobante] Error notificando admin:', emailErr.message);
+  }
+
+  return res.status(200).json({
+    message:       'Comprobante recibido correctamente.',
+    transactionId: transaction.alytoTransactionId,
   });
 }
 

@@ -25,6 +25,8 @@ import {
   getTransactionAudit,
   getAvailableCorridors,
   getTransactionQR,
+  uploadPaymentProof,
+  uploadComprobante,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
 
@@ -149,6 +151,16 @@ router.get('/transactions', protect, getTransactionHistory);
  * Auth: Bearer JWT
  */
 router.get('/:transactionId/qr', protect, getTransactionQR);
+
+/**
+ * POST /api/v1/payments/:transactionId/comprobante
+ *
+ * El usuario sube su comprobante de transferencia bancaria.
+ * Content-Type: multipart/form-data — campo: 'comprobante'
+ * Formatos: JPG, PNG, PDF — máximo 5 MB.
+ * Auth: Bearer JWT
+ */
+router.post('/:transactionId/comprobante', protect, uploadComprobante.single('comprobante'), uploadPaymentProof);
 
 /**
  * GET /api/v1/payments/:transactionId/audit

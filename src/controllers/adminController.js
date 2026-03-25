@@ -89,7 +89,7 @@ export async function getGlobalLedger(req, res) {
 
 // Status válidos según el enum del modelo Transaction
 const VALID_STATUSES = [
-  'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed',
+  'pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed',
   'processing', 'in_transit', 'payout_pending', 'payout_sent',
   'completed', 'failed', 'refunded',
 ];
@@ -934,4 +934,50 @@ export async function getGlobalAnalytics(req, res) {
     console.error('[Admin getGlobalAnalytics] Error:', err.message);
     return res.status(500).json({ error: 'Error al obtener analytics globales.' });
   }
+}
+
+// ─── getTransactionComprobante ────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/comprobante
+ *
+ * Retorna el comprobante de pago subido por el usuario, como base64.
+ * Solo disponible para transacciones con paymentProof guardado.
+ *
+ * Requiere: protect + checkAdmin
+ */
+export async function getTransactionComprobante(req, res) {
+  const { transactionId } = req.params;
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId })
+      .select('alytoTransactionId paymentProof originalAmount originCurrency status userId')
+      .populate('userId', 'firstName lastName email')
+      .lean();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  if (!transaction.paymentProof?.data) {
+    return res.status(404).json({ error: 'Esta transacción no tiene comprobante subido.' });
+  }
+
+  return res.status(200).json({
+    transactionId:  transaction.alytoTransactionId,
+    amount:         `${transaction.originalAmount} ${transaction.originCurrency}`,
+    status:         transaction.status,
+    user:           transaction.userId,
+    comprobante: {
+      data:       transaction.paymentProof.data,
+      mimetype:   transaction.paymentProof.mimetype,
+      filename:   transaction.paymentProof.filename,
+      size:       transaction.paymentProof.size,
+      uploadedAt: transaction.paymentProof.uploadedAt,
+    },
+  });
 }
