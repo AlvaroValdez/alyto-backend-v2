@@ -15,6 +15,9 @@
  *   PATCH /transactions/:transactionId/status — Actualización manual de status
  *   GET   /corridors                          — Lista todos los corredores
  *   PATCH /corridors/:corridorId              — Actualiza parámetros de un corredor
+ *   POST  /funding                            — Registra fondeo de liquidez (USDC/P2P)
+ *   GET   /funding                            — Lista fondeos paginados con resumen
+ *   GET   /funding/balance                    — Balance estimado de liquidez por entidad
  */
 
 import { Router }    from 'express';
@@ -35,6 +38,15 @@ import {
   getGlobalAnalytics,
   getTransactionComprobante,
 } from '../controllers/adminController.js';
+import {
+  createFunding,
+  listFunding,
+  getFundingBalance,
+} from '../controllers/fundingController.js';
+import {
+  upsertExchangeRate,
+  listExchangeRates,
+} from '../controllers/exchangeRateController.js';
 
 const router = Router();
 
@@ -149,6 +161,47 @@ router.delete('/corridors/:corridorId', deactivateCorridor);
  * Query params: startDate, endDate (ISO)
  */
 router.get('/corridors/:corridorId/analytics', getCorridorAnalytics);
+
+// ─── Fondeo Manual de Liquidez ────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/admin/funding
+ * Registra una operación de fondeo (compra USDC Binance P2P, exchange, etc.)
+ * Body: { entity, type, asset, amount, sourceCurrency?, sourceAmount?,
+ *         stellarTxId?, binanceOrderId?, bankReference?, note?, status? }
+ */
+router.post('/funding', createFunding);
+
+/**
+ * GET /api/v1/admin/funding
+ * Lista fondeos paginados con resumen agregado por asset.
+ * Query: entity?, asset?, type?, status?, startDate?, endDate?, page?, limit?
+ * IMPORTANTE: Esta ruta DEBE ir ANTES de /funding/balance para que Express
+ * no confunda "balance" con un ID de registro.
+ */
+router.get('/funding', listFunding);
+
+/**
+ * GET /api/v1/admin/funding/balance
+ * Balance estimado de liquidez por entidad (totalFunded, totalPaidOut, available).
+ * Query: entity? — filtra por LLC | SpA | SRL
+ */
+router.get('/funding/balance', getFundingBalance);
+
+// ─── Tasas de Cambio ──────────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/admin/exchange-rates
+ * Crea o actualiza la tasa para un par (upsert). Guarda previousRate automáticamente.
+ * Body: { pair, rate, source?, note? }
+ */
+router.post('/exchange-rates', upsertExchangeRate);
+
+/**
+ * GET /api/v1/admin/exchange-rates
+ * Lista todas las tasas activas con quién las actualizó.
+ */
+router.get('/exchange-rates', listExchangeRates);
 
 // ─── Analytics Global ─────────────────────────────────────────────────────────
 

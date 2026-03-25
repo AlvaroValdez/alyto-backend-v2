@@ -14,6 +14,7 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
 import TransactionConfig from '../src/models/TransactionConfig.js';
+import ExchangeRate      from '../src/models/ExchangeRate.js';
 
 // ─── Definición de corredores ─────────────────────────────────────────────────
 
@@ -518,6 +519,35 @@ async function seedCorredores() {
   console.log(`  Corredores seedeados: ${activos} activos, ${inactivos} inactivos`);
   console.log(`  Nuevos: ${creados} | Actualizados: ${actualizados}`);
   console.log('────────────────────────────────────────────────────────\n');
+
+  // ─── Seed tasas de cambio iniciales ────────────────────────────────────────
+  console.log('\n[seedCorredores] Seeding tasas de cambio iniciales...');
+
+  await ExchangeRate.findOneAndUpdate(
+    { pair: 'BOB-USDT' },
+    {
+      pair:   'BOB-USDT',
+      rate:   9.31,
+      source: 'manual',
+      note:   'Tasa inicial — actualizar desde panel admin (POST /api/v1/admin/exchange-rates)',
+    },
+    { upsert: true, new: true },
+  );
+  console.log('  ✅ BOB-USDT: 9.31 BOB/USDT (tasa inicial)');
+
+  await ExchangeRate.findOneAndUpdate(
+    { pair: 'CLP-USD' },
+    {
+      pair:   'CLP-USD',
+      rate:   966,
+      source: 'manual',
+      note:   'Tasa referencial — Vita la actualiza automáticamente en cada cotización',
+    },
+    { upsert: true, new: true },
+  );
+  console.log('  ✅ CLP-USD: 966 CLP/USD (tasa referencial)');
+
+  console.log('[seedCorredores] ✅ Tasas iniciales seedeadas\n');
 
   await mongoose.connection.close();
   console.log('[seedCorredores] Conexión cerrada. Script finalizado.');

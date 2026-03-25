@@ -31,6 +31,7 @@ import { registerAuditTrail }                  from '../services/stellarService.
 import Sentry from '../services/sentry.js';
 import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS } from '../services/email.js';
+import { getBOBRate }        from '../services/exchangeRateService.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
 
@@ -280,14 +281,13 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
  * @returns {{ usdcAmount: number, bobPerUsdc: number }}
  * @throws {Error} si manualExchangeRate no está configurada (= 0)
  */
-function convertBobToUsdc(netAmountBOB, corridor) {
-  const bobPerUsdc = corridor.manualExchangeRate;
+async function convertBobToUsdc(netAmountBOB, corridor) {
+  // Prioridad: manualExchangeRate del corredor → MongoDB (ExchangeRate) → .env
+  let bobPerUsdc = corridor.manualExchangeRate;
 
   if (!bobPerUsdc || bobPerUsdc <= 0) {
-    throw new Error(
-      `Corredor ${corridor.corridorId}: manualExchangeRate no configurada. ` +
-      'Usar PATCH /admin/corridors/:corridorId/rate para fijar la tasa BOB/USDC.',
-    );
+    bobPerUsdc = await getBOBRate();
+    console.log('[convertBobToUsdc] manualExchangeRate no configurada en corredor — usando getBOBRate():', bobPerUsdc);
   }
 
   const usdcAmount = Math.round((netAmountBOB / bobPerUsdc) * 10000) / 10000; // 4 decimales para USDC
@@ -372,23 +372,8 @@ export async function dispatchPayout(transaction) {
     let vitaCurrency    = (transaction.originCurrency ?? 'clp').toLowerCase();
 
     if (corridor.originCurrency === 'BOB') {
-      let convResult;
-      try {
-        convResult = convertBobToUsdc(netAmountNative, corridor);
-      } catch (rateErr) {
-        // Sin tasa configurada no se puede despachar — dejar en payin_confirmed
-        // para que el admin configure la tasa y reintente manualmente.
-        console.error('[dispatchPayout] Tasa BOB/USDC no configurada:', {
-          transactionId: transaction.alytoTransactionId,
-          corridorId:    corridor.corridorId,
-          error:         rateErr.message,
-        });
-        await appendIpnLog(transaction, 'payout_rate_missing', 'system', 'payin_confirmed', {
-          error: rateErr.message,
-          action: 'Configurar manualExchangeRate en el corredor y reintentar.',
-        });
-        return; // No marcar como failed — es recuperable con setCorridorRate
-      }
+      // convertBobToUsdc es async: resuelve manualExchangeRate → MongoDB → .env
+      const convResult = await convertBobToUsdc(netAmountNative, corridor);
 
       const { usdcAmount, bobPerUsdc } = convResult;
 
