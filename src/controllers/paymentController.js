@@ -51,6 +51,7 @@ import {
 }                              from '../services/vitaWalletService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
+import { getBOBRate }          from '../services/exchangeRateService.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -871,7 +872,7 @@ export async function initCrossBorderPayment(req, res) {
  * @param {string} destinationCountry  — ISO alpha-2 mayúsculas (ej. 'CO', 'CL')
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
-function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
+async function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
   const attrs = vitaPricesResponse?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
@@ -897,8 +898,8 @@ function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCount
   } else if (origin === 'BOB') {
     // Bolivia: Vita no tiene bob_sell. Dos pasos:
     //   PASO 1 — tasa USD→destino via cross-rate CLP
-    //   PASO 2 — dividir por BOB_USD_RATE (tasa oficial ASFI = 6.96)
-    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
+    //   PASO 2 — dividir por BOB_USD_RATE (desde MongoDB o .env)
+    const BOB_USD_RATE = await getBOBRate();
     const clpToDest    = Number(attrs.clp_sell?.[countryKey] ?? NaN);
     const clpToUsd     = Number(attrs.clp_sell?.['us']       ?? NaN);
     if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
@@ -937,12 +938,13 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   const userId      = req.user?._id?.toString();
 
   // ── 1. Tasa BOB/USDC ───────────────────────────────────────────────────────
-  const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE ?? '6.96');
+  // Prioridad: manualExchangeRate del corredor → MongoDB (ExchangeRate) → .env
+  const BOB_USD_RATE = await getBOBRate();
   const bobPerUsdc   = (corridor.manualExchangeRate > 0)
     ? corridor.manualExchangeRate
     : BOB_USD_RATE;
 
-  const rateSource = corridor.manualExchangeRate > 0 ? 'admin_configured' : 'env_BOB_USD_RATE';
+  const rateSource = corridor.manualExchangeRate > 0 ? 'corridor_manualRate' : 'exchangeRate_db_or_env';
   console.log('[Quote BOB] BOB_USD_RATE:', bobPerUsdc, '| source:', rateSource);
 
   // ── 2. Obtener precios Vita (USD→dest via cross-rate CLP) ─────────────────
@@ -956,7 +958,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     });
   }
 
-  const vitaPricingUSD = extractVitaPricing(vitaResponse, 'USD', dest);
+  const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
   if (!vitaPricingUSD) {
     console.error('[Quote BOB] No hay tasa USD→' + dest + ' en Vita para corredor:', corridor.corridorId);
     return res.status(503).json({
@@ -1171,7 +1173,7 @@ export async function getQuote(req, res) {
   if (corridor.payinMethod === 'manual') {
     // bobPerUsdc: tasa configurada por admin (BOB por 1 USDC).
     // Fallback a BOB_USD_RATE cuando el admin aún no la ha fijado (USDC ≈ 1:1 USD).
-    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
+    const BOB_USD_RATE = await getBOBRate();
     const bobPerUsdc   = (corridor.manualExchangeRate && corridor.manualExchangeRate > 0)
       ? corridor.manualExchangeRate
       : BOB_USD_RATE;
@@ -1179,7 +1181,7 @@ export async function getQuote(req, res) {
     console.info('[Alyto Quote] Corredor manual BOB — tasa aplicada:', {
       corridorId:          corridor.corridorId,
       userId,
-      source:              corridor.manualExchangeRate > 0 ? 'admin_configured' : 'env_BOB_USD_RATE',
+      source:              corridor.manualExchangeRate > 0 ? 'corridor_manualRate' : 'exchangeRate_db_or_env',
       bobPerUsdc,
     });
 
@@ -1193,7 +1195,7 @@ export async function getQuote(req, res) {
 
     // ── Paso 2: USDC → destino (tasa USD en tiempo real de Vita) ─────────────
     // USDC ≈ 1:1 USD, por lo que usamos las tasas USD de Vita directamente.
-    const vitaPricingUSD = extractVitaPricing(vitaResponse, 'USD', dest);
+    const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
 
     if (!vitaPricingUSD) {
       console.error('[Alyto Quote] Vita no tiene tasa USD→' + dest + ' para corredor manual.', {
@@ -1270,7 +1272,7 @@ export async function getQuote(req, res) {
   }
 
   // ── 3b. Corredores estándar: tasa directa desde Vita ──────────────────────
-  const vitaPricing = extractVitaPricing(
+  const vitaPricing = await extractVitaPricing(
     vitaResponse,
     corridor.originCurrency,
     dest,

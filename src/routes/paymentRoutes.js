@@ -29,6 +29,7 @@ import {
   uploadComprobante,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
+import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
 
 const router = Router();
 
@@ -68,6 +69,17 @@ function captureRawBody(req, res, next) {
  *   GET /api/v1/payments/quote?originCountry=CL&destinationCountry=CO&originAmount=500000
  */
 router.get('/quote', protect, getQuote);
+
+/**
+ * GET /api/v1/payments/exchange-rates/:pair
+ *
+ * Tasa de cambio pública para un par de monedas (sin auth).
+ * Permite al frontend mostrar la tasa BOB/USDT en tiempo real.
+ * Fallback a .env si el par no existe en MongoDB.
+ *
+ * Params: pair — "BOB-USDT" | "BOB-USD" | "CLP-USD"
+ */
+router.get('/exchange-rates/:pair', getPublicExchangeRate);
 
 /**
  * GET /api/v1/payments/corridors
