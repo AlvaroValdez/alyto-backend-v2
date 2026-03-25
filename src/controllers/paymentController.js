@@ -897,6 +897,30 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
   const origin     = originCurrency.toUpperCase();
   let rate;
 
+  // ── Destino Bolivia (BO): Vita no tiene clp_sell['bo'] — derivar via BOB_USD_RATE ──
+  // AV Finance SRL es el anchor manual: paga en BOB directamente.
+  // No se llama a Vita para el payout BOB — la tasa se construye desde la tasa admin.
+  if (countryKey === 'bo') {
+    const clpToUsd = Number(attrs.clp_sell?.['us'] ?? NaN);
+    if (!isFinite(clpToUsd) || clpToUsd <= 0) return null;
+    const BOB_USD_RATE = await getBOBRate();
+    if (origin === 'CLP') {
+      // 1 CLP = clpToUsd USD; 1 USD = BOB_USD_RATE BOB → 1 CLP = clpToUsd * BOB_USD_RATE BOB
+      rate = clpToUsd * BOB_USD_RATE;
+    } else if (origin === 'USD' || origin === 'USDC') {
+      // 1 USD = BOB_USD_RATE BOB (tasa admin o MongoDB)
+      rate = BOB_USD_RATE;
+    } else {
+      return null;
+    }
+    // fixedCost para BO no existe en Vita — anchor manual no cobra fee adicional
+    const validUntil = attrs.valid_until ?? null;
+    console.info('[Alyto Quote] Cotización ' + origin + '→BOB via BOB_USD_RATE:', {
+      BOB_USD_RATE, clpToUsd, rate,
+    });
+    return { rate, fixedCost: 0, validUntil };
+  }
+
   if (origin === 'CLP') {
     // Tasa directa de Vita: 1 CLP → N unidades de moneda destino
     const raw = attrs.clp_sell?.[countryKey];
