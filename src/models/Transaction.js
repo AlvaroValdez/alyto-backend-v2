@@ -369,6 +369,23 @@ const transactionSchema = new Schema(
      * Guardadas en BD para que el usuario pueda consultarlas desde TransactionDetail.
      */
     paymentInstructions: { type: Schema.Types.Mixed },
+    /**
+     * QR de pago generado para corredores manuales (SRL Bolivia).
+     * Base64 data URL (image/png) — incrustar directo en <img src="..."> o email.
+     */
+    paymentQR: { type: String },
+    /**
+     * Detalles de la confirmación manual del payin (rellenado por el admin).
+     * Solo en corredores con payinMethod: 'manual'.
+     */
+    confirmationDetails: {
+      type: new Schema({
+        confirmedBy:      { type: Schema.Types.ObjectId, ref: 'User' },
+        confirmedAt:      { type: Date },
+        confirmationNote: { type: String, trim: true },
+        bankReference:    { type: String, trim: true }, // Nro de transacción del banco
+      }, { _id: false }),
+    },
     /** Ledger de Stellar en que se confirmó la transacción */
     stellarLedger: {
       type: Number,

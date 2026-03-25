@@ -282,7 +282,7 @@ export async function getTransaction(req, res) {
  */
 export async function updateTransactionStatus(req, res) {
   const { transactionId } = req.params;
-  const { status: newStatus, note } = req.body;
+  const { status: newStatus, note, bankReference } = req.body;
   const adminId = req.user._id.toString();
 
   // ── 1. Validar body ───────────────────────────────────────────────────────
@@ -318,15 +318,27 @@ export async function updateTransactionStatus(req, res) {
 
   // ── 3. Actualizar status y registrar en ipnLog ────────────────────────────
   transaction.status = newStatus;
+
+  // Si el admin confirma un payin manual: guardar confirmationDetails
+  if (newStatus === 'payin_confirmed') {
+    transaction.confirmationDetails = {
+      confirmedBy:      req.user._id,
+      confirmedAt:      new Date(),
+      confirmationNote: note.trim(),
+      bankReference:    bankReference?.trim() ?? null,
+    };
+  }
+
   transaction.ipnLog.push({
     provider:   'manual',
-    eventType:  'manual_status_update',
+    eventType:  'manual_payin_confirmed',
     status:     newStatus,
     rawPayload: {
       previousStatus,
       newStatus,
-      note:    note.trim(),
+      note:          note.trim(),
       adminId,
+      bankReference: bankReference?.trim() ?? null,
     },
     receivedAt: new Date(),
   });
