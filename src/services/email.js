@@ -295,4 +295,130 @@ export const EMAILS = {
       },
     ];
   },
+
+  // ── KYB — Cuentas Business ────────────────────────────────────────────────
+
+  /**
+   * Notifica al usuario que su solicitud KYB fue recibida y está en revisión.
+   *
+   * @param {object} user    — Documento User
+   * @param {object} profile — Documento BusinessProfile
+   * @returns {[string, string, object]}
+   */
+  kybReceived(user, profile) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_KYB_RECEIVED,
+      {
+        userName:    user.firstName,
+        businessId:  profile.businessId,
+        legalName:   profile.legalName ?? profile.tradeName ?? 'tu empresa',
+        submittedAt: formatDate(profile.createdAt ?? new Date()),
+        statusUrl:   `${process.env.APP_URL ?? 'https://alyto.app'}/business/kyb-status`,
+        supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+      },
+    ];
+  },
+
+  /**
+   * Notifica al usuario que su cuenta Business fue aprobada.
+   *
+   * @param {object} user
+   * @param {object} profile
+   * @returns {[string, string, object]}
+   */
+  kybApproved(user, profile) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_KYB_APPROVED,
+      {
+        userName:              user.firstName,
+        businessId:            profile.businessId,
+        legalName:             profile.legalName ?? profile.tradeName,
+        maxSingleTransaction:  formatCurrency(
+          profile.transactionLimits?.maxSingleTransaction ?? 50_000, 'USD',
+        ),
+        maxMonthlyVolume:      formatCurrency(
+          profile.transactionLimits?.maxMonthlyVolume ?? 80_000, 'USD',
+        ),
+        kybNote:     profile.kybNote ?? null,
+        approvedAt:  formatDate(profile.kybReviewedAt ?? new Date()),
+        dashboardUrl: `${process.env.APP_URL ?? 'https://alyto.app'}/dashboard`,
+        supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+      },
+    ];
+  },
+
+  /**
+   * Notifica al usuario que su solicitud KYB fue rechazada.
+   *
+   * @param {object} user
+   * @param {object} profile
+   * @returns {[string, string, object]}
+   */
+  kybRejected(user, profile) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_KYB_REJECTED,
+      {
+        userName:          user.firstName,
+        businessId:        profile.businessId,
+        legalName:         profile.legalName ?? profile.tradeName,
+        rejectionReason:   profile.kybRejectionReason ?? 'No especificada.',
+        kybNote:           profile.kybNote ?? null,
+        rejectedAt:        formatDate(profile.kybReviewedAt ?? new Date()),
+        supportEmail:      process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:   process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+      },
+    ];
+  },
+
+  /**
+   * Notifica al usuario que se requiere información adicional para su KYB.
+   *
+   * @param {object} user
+   * @param {object} profile
+   * @returns {[string, string, object]}
+   */
+  kybMoreInfo(user, profile) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_KYB_MORE_INFO,
+      {
+        userName:          user.firstName,
+        businessId:        profile.businessId,
+        legalName:         profile.legalName ?? profile.tradeName,
+        kybNote:           profile.kybNote ?? 'Por favor sube los documentos faltantes.',
+        uploadUrl:         `${process.env.APP_URL ?? 'https://alyto.app'}/business/kyb-documents`,
+        supportEmail:      process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:   process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+      },
+    ];
+  },
+
+  /**
+   * Alerta al admin que hay una nueva solicitud KYB para revisar.
+   *
+   * @param {object} user    — Usuario que envió la solicitud
+   * @param {object} profile — BusinessProfile creado
+   * @returns {[string, string, object]}
+   */
+  adminKybAlert(user, profile) {
+    return [
+      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+      process.env.SENDGRID_TEMPLATE_ADMIN_KYB,
+      {
+        userName:              `${user.firstName} ${user.lastName}`,
+        userEmail:             user.email,
+        businessId:            profile.businessId,
+        legalName:             profile.legalName ?? profile.tradeName ?? 'Sin razón social',
+        country:               profile.countryOfIncorporation ?? profile.country ?? '—',
+        estimatedMonthlyVolume: profile.estimatedMonthlyVolume ?? '—',
+        businessType:          profile.businessType ?? '—',
+        documentsCount:        profile.documents?.length ?? 0,
+        submittedAt:           formatDate(profile.createdAt ?? new Date()),
+        reviewUrl:             `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/kyb/${profile.businessId}`,
+      },
+    ];
+  },
 };

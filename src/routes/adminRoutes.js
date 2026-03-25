@@ -47,6 +47,11 @@ import {
   upsertExchangeRate,
   listExchangeRates,
 } from '../controllers/exchangeRateController.js';
+import {
+  listKYBApplications,
+  getKYBApplication,
+  reviewKYBApplication,
+} from '../controllers/kybController.js';
 
 const router = Router();
 
@@ -211,5 +216,46 @@ router.get('/exchange-rates', listExchangeRates);
  * Query params: startDate, endDate (ISO)
  */
 router.get('/analytics', getGlobalAnalytics);
+
+// ─── KYB — Cuentas Business ───────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/kyb
+ *
+ * Lista todas las solicitudes KYB con filtros y paginación.
+ *
+ * Query params:
+ *   status                 — pending | under_review | approved | rejected | more_info
+ *   country                — ISO 3166-1 alpha-2 (país de incorporación)
+ *   estimatedMonthlyVolume — under_5k | 5k_20k | 20k_60k | over_60k
+ *   page                   — default 1
+ *   limit                  — default 20, máx 100
+ */
+router.get('/kyb', listKYBApplications);
+
+/**
+ * GET /api/v1/admin/kyb/:businessId
+ *
+ * Detalle completo de una solicitud KYB.
+ * Incluye documentos en base64 para descarga y visualización.
+ * Params: businessId — ej. "BIZ-A1B2C3D4"
+ *
+ * IMPORTANTE: esta ruta DEBE ir ANTES de /:businessId/review para evitar
+ * que Express interprete "review" como un businessId.
+ */
+router.get('/kyb/:businessId', getKYBApplication);
+
+/**
+ * PATCH /api/v1/admin/kyb/:businessId/review
+ *
+ * Aprobar, rechazar o solicitar más información en una solicitud KYB.
+ *
+ * Body:
+ *   status             {string}  — 'approved' | 'rejected' | 'more_info' | 'under_review'
+ *   note               {string}  — Comentario visible al usuario
+ *   rejectionReason    {string}  — Solo si status === 'rejected'
+ *   transactionLimits  {object}  — { maxSingleTransaction, maxMonthlyVolume } — solo si approved
+ */
+router.patch('/kyb/:businessId/review', reviewKYBApplication);
 
 export default router;
