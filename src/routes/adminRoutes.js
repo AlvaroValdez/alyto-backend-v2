@@ -33,6 +33,7 @@ import {
   deactivateCorridor,
   getCorridorAnalytics,
   getGlobalAnalytics,
+  getTransactionComprobante,
 } from '../controllers/adminController.js';
 
 const router = Router();
@@ -84,6 +85,13 @@ router.get('/transactions', listTransactions);
  * Params: transactionId — alytoTransactionId (ej. "ALY-B-1710000000000-XYZ123")
  */
 router.get('/transactions/:transactionId', getTransaction);
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/comprobante
+ * Retorna el comprobante de pago subido por el usuario (base64).
+ * Esta ruta DEBE ir ANTES de /:transactionId/status para evitar conflicto.
+ */
+router.get('/transactions/:transactionId/comprobante', getTransactionComprobante);
 
 /**
  * PATCH /api/v1/admin/transactions/:transactionId/status

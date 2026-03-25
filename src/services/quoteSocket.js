@@ -67,11 +67,12 @@ function isCacheStale() {
 async function refreshVitaCache() {
   try {
     const data        = await getPrices();
-    vitaCache.prices  = data;
+    vitaCache.prices    = data;
     vitaCache.fetchedAt = new Date();
-    // valid_until puede estar ausente en sandbox — fallback a 10 min
-    vitaCache.validUntil = data?.valid_until
-      ? new Date(data.valid_until)
+    // valid_until está en withdrawal.prices.attributes.valid_until (no en raíz)
+    const vitaValidUntil = data?.withdrawal?.prices?.attributes?.valid_until;
+    vitaCache.validUntil = vitaValidUntil
+      ? new Date(vitaValidUntil)
       : new Date(Date.now() + 10 * 60 * 1000);
     return true;
   } catch (err) {
@@ -129,8 +130,9 @@ function extractPricing(originCurrency, destinationCountry) {
 
   if (!isFinite(rate) || rate <= 0) return null;
 
-  const fixedCost  = Number(withdrawal?.[countryKey]?.fixed_cost ?? 0);
-  const validUntil = vitaCache.prices?.valid_until ?? null;
+  // fixed_cost en withdrawal.prices.attributes.fixed_cost[country] (moneda destino)
+  const fixedCost  = Number(attrs?.fixed_cost?.[countryKey] ?? 0);
+  const validUntil = attrs?.valid_until ?? null;
 
   return { rate, fixedCost, validUntil };
 }

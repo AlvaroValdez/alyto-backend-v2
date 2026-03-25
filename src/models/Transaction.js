@@ -383,7 +383,21 @@ const transactionSchema = new Schema(
         confirmedBy:      { type: Schema.Types.ObjectId, ref: 'User' },
         confirmedAt:      { type: Date },
         confirmationNote: { type: String, trim: true },
-        bankReference:    { type: String, trim: true }, // Nro de transacción del banco
+        bankReference:    { type: String, trim: true },
+      }, { _id: false }),
+    },
+    /**
+     * Comprobante de pago subido por el usuario (solo corredores manuales SRL).
+     * Guardado en BD como base64 para no requerir almacenamiento externo.
+     * Máximo 5 MB — solo JPG, PNG o PDF.
+     */
+    paymentProof: {
+      type: new Schema({
+        data:       { type: String },       // base64
+        mimetype:   { type: String },       // 'image/jpeg' | 'image/png' | 'application/pdf'
+        filename:   { type: String, trim: true },
+        size:       { type: Number },       // bytes
+        uploadedAt: { type: Date, default: Date.now },
       }, { _id: false }),
     },
     /** Ledger de Stellar en que se confirmó la transacción */
@@ -428,8 +442,8 @@ const transactionSchema = new Schema(
     // ── Estado Global de la Transacción ──────────────────────────────────────
     status: {
       type:    String,
-      enum:    ['initiated', 'payin_pending', 'payin_confirmed', 'payin_completed', 'processing', 'in_transit', 'payout_pending', 'payout_sent', 'completed', 'failed', 'refunded'],
-      default: 'initiated',
+      enum:    ['pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed', 'processing', 'in_transit', 'payout_pending', 'payout_sent', 'completed', 'failed', 'refunded'],
+      default: 'pending',
       index:   true,
     },
     /** Mensaje de error si status = 'failed' */
