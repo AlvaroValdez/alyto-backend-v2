@@ -9,37 +9,43 @@
  *   await sendPushNotification(userId, NOTIFICATIONS.payinConfirmed(50000, 'CLP'))
  */
 
-import admin from 'firebase-admin';
-import User  from '../models/User.js';
+import User from '../models/User.js';
 
-// ─── Inicialización ───────────────────────────────────────────────────────────
+// ─── Inicialización lazy (dinámica) de Firebase ───────────────────────────────
+// Se usa import() dinámico para que un fallo de Firebase NO bloquee el arranque
+// del servidor ni impida el envío de emails transaccionales.
 
-// Inicializar solo si las variables están configuradas — en tests/dev sin Firebase
-// el SDK queda en modo stub para no bloquear el arranque.
-let firebaseReady = false;
+let firebaseAdmin = null;
 
-if (
-  process.env.FIREBASE_PROJECT_ID &&
-  process.env.FIREBASE_CLIENT_EMAIL &&
-  process.env.FIREBASE_PRIVATE_KEY
-) {
+const initFirebase = async () => {
   try {
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId:   process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        // Las variables de entorno escapan los \n literalmente — revertirlos
-        privateKey:  process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-      }),
-    });
-    firebaseReady = true;
-    console.info('[Alyto FCM] Firebase Admin SDK inicializado.');
-  } catch (err) {
-    console.warn('[Alyto FCM] No se pudo inicializar Firebase Admin SDK:', err.message);
+    if (
+      process.env.FIREBASE_PROJECT_ID &&
+      process.env.FIREBASE_CLIENT_EMAIL &&
+      process.env.FIREBASE_PRIVATE_KEY
+    ) {
+      const admin = (await import('firebase-admin')).default;
+      if (!admin.apps.length) {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId:   process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey:  process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+          }),
+        });
+      }
+      firebaseAdmin = admin;
+      console.log('[FCM] Firebase inicializado ✅');
+    } else {
+      console.warn('[FCM] Variables Firebase no configuradas — push deshabilitado');
+    }
+  } catch (error) {
+    console.warn('[FCM] Firebase no disponible:', error.message);
+    firebaseAdmin = null;
   }
-} else {
-  console.warn('[Alyto FCM] Variables FIREBASE_* no configuradas — notificaciones push deshabilitadas.');
-}
+};
+
+initFirebase();
 
 // ─── Tokens inválidos (códigos FCM que indican expiración o registro borrado) ─
 
@@ -61,7 +67,10 @@ const INVALID_TOKEN_ERRORS = new Set([
  * @returns {Promise<void>}
  */
 export async function sendPushNotification(userId, notification) {
-  if (!firebaseReady) return;
+  if (!firebaseAdmin) {
+    console.log('[FCM] Push deshabilitado — omitiendo para userId:', userId?.toString());
+    return null;
+  }
 
   // ── 1. Buscar usuario y sus tokens FCM ───────────────────────────────────
   let user;
@@ -110,7 +119,7 @@ export async function sendPushNotification(userId, notification) {
       };
 
       try {
-        await admin.messaging().send(message);
+        await firebaseAdmin.messaging().send(message);
         return { token: fcmToken, ok: true };
       } catch (err) {
         const errorCode = err.code ?? err.errorInfo?.code ?? '';
