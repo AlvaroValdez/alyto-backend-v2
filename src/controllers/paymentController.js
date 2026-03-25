@@ -28,6 +28,7 @@ import {
   verifyWebhookSignature,
 } from '../services/fintocService.js';
 import { dispatchPayout } from './ipnController.js';
+import { generatePaymentQR } from '../services/qrService.js';
 import {
   getPrices,
   getWithdrawalRules as getVitaWithdrawalRules,
@@ -649,11 +650,12 @@ export async function initCrossBorderPayment(req, res) {
       bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
       accountHolder: process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
       accountNumber: process.env.SRL_ACCOUNT_NUMBER ?? '',
-      accountType:   'Cuenta Corriente',
+      accountType:   process.env.SRL_ACCOUNT_TYPE   ?? 'Cuenta Corriente',
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,
-      instructions:  'Realizar transferencia bancaria indicando el número de referencia en el concepto del pago. El pago será verificado manualmente en un plazo de 2-4 horas hábiles.',
+      concept:       `Alyto - ${alytoTransactionId}`,
+      instructions:  'Escanea el QR desde tu app bancaria o realiza una transferencia indicando el número de referencia en el concepto del pago. El pago será verificado en un plazo de 2-4 horas hábiles.',
     };
 
     console.log('[CrossBorder] Payin manual SRL — instrucciones generadas para:', alytoTransactionId);
@@ -774,15 +776,26 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── 7. Emails para payin manual ───────────────────────────────────────────
+  // ── 7. QR + Emails para payin manual ─────────────────────────────────────
+  let paymentQR = null;
+
   if (corridor.payinMethod === 'manual' && transaction) {
+    // Generar QR y persistir en la transacción
+    try {
+      const { qrBase64 } = await generatePaymentQR(transaction);
+      paymentQR = qrBase64;
+      transaction.paymentQR = qrBase64;
+      await transaction.save();
+      console.log('[CrossBorder] QR generado para:', alytoTransactionId);
+    } catch (qrErr) {
+      console.error('[CrossBorder] Error generando QR:', qrErr.message);
+    }
+
     const user = await User.findById(userId).select('email firstName').lean();
     if (user) {
-      // Email al usuario con instrucciones de transferencia
       sendEmail(...EMAILS.manualPayinInstructions(user, transaction, manualPaymentInstructions))
         .catch(err => console.error('[CrossBorder] Error email instrucciones:', err.message));
     }
-    // Email al admin notificando payin pendiente
     sendEmail(...EMAILS.adminManualPayinAlert(transaction, manualPaymentInstructions))
       .catch(err => console.error('[CrossBorder] Error email admin payin manual:', err.message));
   }
@@ -794,6 +807,7 @@ export async function initCrossBorderPayment(req, res) {
       status:              'pending',
       payinMethod:         'manual',
       paymentInstructions: manualPaymentInstructions,
+      paymentQR,
     });
   }
 
@@ -1439,6 +1453,55 @@ export async function getTransactionAudit(req, res) {
     registeredAt: auditData?.createdAt ?? null,
     memo:         auditData?.memo       ?? null,
     ledger:       auditData?.ledger     ?? null,
+  });
+}
+
+// ─── GET /api/v1/payments/:transactionId/qr ──────────────────────────────────
+
+/**
+ * Retorna el código QR de pago de una transacción manual (Bolivia).
+ * Si el QR no existe en BD (transacciones antiguas), lo genera y lo persiste.
+ *
+ * Auth: Bearer JWT — el usuario solo puede ver sus propias transacciones.
+ */
+export async function getTransactionQR(req, res) {
+  const { transactionId } = req.params;
+  const userId = req.user._id;
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId, userId });
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  if (transaction.paymentInstructions == null) {
+    return res.status(404).json({ error: 'Esta transacción no requiere pago manual.' });
+  }
+
+  // Si no hay QR guardado (tx antigua), generarlo y persistirlo
+  if (!transaction.paymentQR) {
+    try {
+      const { qrBase64 } = await generatePaymentQR(transaction);
+      transaction.paymentQR = qrBase64;
+      await transaction.save();
+    } catch (err) {
+      console.error('[QR] Error generando QR para tx antigua:', err.message);
+      return res.status(500).json({ error: 'Error generando código QR.' });
+    }
+  }
+
+  return res.status(200).json({
+    transactionId:       transaction.alytoTransactionId,
+    qrBase64:            transaction.paymentQR,
+    paymentInstructions: transaction.paymentInstructions,
+    amount:              transaction.originalAmount,
+    currency:            transaction.originCurrency,
+    status:              transaction.status,
   });
 }
 

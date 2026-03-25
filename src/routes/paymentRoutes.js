@@ -24,6 +24,7 @@ import {
   initCrossBorderPayment,
   getTransactionAudit,
   getAvailableCorridors,
+  getTransactionQR,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
 
@@ -139,6 +140,15 @@ router.post('/webhooks/fintoc', fintocWebhook);
  * Auth: Bearer JWT
  */
 router.get('/transactions', protect, getTransactionHistory);
+
+/**
+ * GET /api/v1/payments/:transactionId/qr
+ *
+ * Retorna el código QR de pago (base64) y las instrucciones bancarias.
+ * Solo disponible para transacciones con payinMethod: 'manual' (Bolivia SRL).
+ * Auth: Bearer JWT
+ */
+router.get('/:transactionId/qr', protect, getTransactionQR);
 
 /**
  * GET /api/v1/payments/:transactionId/audit
