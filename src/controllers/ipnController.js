@@ -26,7 +26,7 @@ import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
 import { createPayout }       from '../services/vitaWalletService.js';
-import { createDisbursement } from '../services/owlPayService.js';
+import { createDisbursement, verifyOwlPayWebhookSignature } from '../services/owlPayService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
@@ -518,17 +518,12 @@ export async function dispatchPayout(transaction) {
     console.log('[dispatchPayout] ¿Es sandbox?:', process.env.VITA_ENVIRONMENT === 'sandbox');
 
     if (process.env.VITA_ENVIRONMENT === 'sandbox') {
-      // ── VITA SANDBOX: no envía IPN — auto-completar inmediatamente ────────────
-      console.log('[dispatchPayout] 🧪 Vita sandbox — auto-completing...');
+      // ── SANDBOX: proveedores no envían IPN — auto-completar inmediatamente ────
+      console.log(`[dispatchPayout] 🧪 Sandbox (${providerUsed}) — auto-completing...`);
 
-      transaction.status         = 'completed';
-      transaction.completedAt    = new Date();
-      transaction.payoutReference =
-        vitaResponse?.transaction?.id
-        || vitaResponse?.transaction?.attributes?.vita_transaction_id
-        || vitaResponse?.data?.id
-        || vitaResponse?.id
-        || transaction.payoutReference;
+      transaction.status      = 'completed';
+      transaction.completedAt = new Date();
+      // payoutReference ya fue asignado arriba desde providerResponse
 
       transaction.ipnLog.push({
         provider:   'system',
@@ -1027,6 +1022,184 @@ export async function handleFintocIPN(req, res) {
     console.error('[Alyto IPN/Fintoc] Error procesando confirmación:', {
       transactionId: transaction?.alytoTransactionId,
       error:         err.message,
+    });
+  }
+
+  return res.status(200).json({ received: true });
+}
+
+// ─── POST /api/v1/ipn/owlpay ──────────────────────────────────────────────────
+
+/**
+ * Recibe y procesa los webhooks de OwlPay Harbor para desembolsos institucionales.
+ *
+ * OwlPay notifica cuando un disbursement cambia de estado.
+ * Este handler finaliza el ciclo del payout bancario en la transacción Alyto.
+ *
+ * Body esperado de OwlPay:
+ * {
+ *   "event": "disbursement.completed" | "disbursement.failed",
+ *   "data": { "id": "disb_...", "status": "completed"|"failed", "failure_reason": "..." }
+ * }
+ */
+export async function handleOwlPayIPN(req, res) {
+  // ── 1. Verificar firma HMAC-SHA256 ────────────────────────────────────────
+  const signature = req.headers['x-owlpay-signature'];
+  const rawBody   = req.rawBody ?? JSON.stringify(req.body);
+
+  if (!verifyOwlPayWebhookSignature(rawBody, signature)) {
+    console.warn('[Alyto IPN/OwlPay] Firma inválida — rechazando petición.', {
+      ip: req.ip,
+    });
+    Sentry.captureMessage('OwlPay IPN firma inválida', {
+      level: 'warning',
+      extra: { ip: req.ip, body: req.body },
+    });
+    return res.status(401).json({ error: 'Firma inválida.' });
+  }
+
+  const { event, data } = req.body;
+  const disbursementId     = data?.id ?? data?.disbursement_id;
+  const disbursementStatus = data?.status;
+
+  console.info('[Alyto IPN/OwlPay] Webhook recibido.', { event, disbursementId, disbursementStatus });
+
+  // ── 2. Buscar transacción por payoutReference ─────────────────────────────
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ payoutReference: disbursementId });
+  } catch (err) {
+    console.error('[Alyto IPN/OwlPay] Error buscando transacción:', {
+      disbursementId,
+      error: err.message,
+    });
+    return res.status(200).json({ received: true });
+  }
+
+  if (!transaction) {
+    console.warn('[Alyto IPN/OwlPay] Transacción no encontrada para disbursementId:', disbursementId);
+    return res.status(200).json({ received: true });
+  }
+
+  // ── 3. Registrar webhook en ipnLog ────────────────────────────────────────
+  await appendIpnLog(transaction, 'owlpay_webhook_received', 'owlPay', disbursementStatus, req.body);
+
+  try {
+    // ── Caso A: desembolso completado ─────────────────────────────────────
+    if (disbursementStatus === 'completed' && transaction.status === 'payout_sent') {
+      transaction.status      = 'completed';
+      transaction.completedAt = new Date();
+      await transaction.save();
+
+      await appendIpnLog(transaction, 'payout_completed', 'owlPay', 'completed', req.body);
+
+      console.info('[Alyto IPN/OwlPay] Payout completado — transacción finalizada. ✅', {
+        transactionId: transaction.alytoTransactionId,
+        disbursementId,
+      });
+
+      // Stellar audit trail (best-effort)
+      try {
+        const stellarTxId = await registerAuditTrail(transaction);
+        if (stellarTxId) {
+          transaction.stellarTxId = stellarTxId;
+          transaction.ipnLog.push({
+            provider:   'stellar',
+            eventType:  'stellar_audit_registered',
+            status:     'completed',
+            rawPayload: {
+              stellarTxId,
+              network:     process.env.STELLAR_NETWORK ?? 'testnet',
+              explorerUrl: `https://stellar.expert/explorer/${
+                process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'
+              }/tx/${stellarTxId}`,
+            },
+            receivedAt: new Date(),
+          });
+          await transaction.save().catch(err =>
+            console.error('[Alyto IPN/OwlPay] Error guardando stellarTxId:', err.message),
+          );
+          console.log('[Stellar] ✅ Audit trail registrado (OwlPay):', stellarTxId);
+        }
+      } catch (stellarErr) {
+        console.error('[Alyto IPN/OwlPay] Error Stellar audit:', stellarErr.message);
+      }
+
+      // Push notification
+      try {
+        await sendPushNotification(
+          transaction.userId,
+          NOTIFICATIONS.paymentCompleted(
+            transaction.originalAmount,
+            transaction.originCurrency,
+            transaction.destinationAmount,
+            transaction.destinationCurrency,
+          ),
+        );
+      } catch (notifErr) {
+        console.error('[Alyto IPN/OwlPay] Error push payment_completed:', notifErr.message);
+      }
+
+      // Email transaccional
+      try {
+        const user = await User.findById(transaction.userId).lean();
+        if (user?.email) {
+          await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+          console.log('[Email] ✅ Completado (OwlPay) →', user.email);
+        }
+      } catch (emailErr) {
+        console.error('[Email] Error completado (OwlPay):', emailErr.message);
+      }
+
+    // ── Caso B: desembolso fallido ────────────────────────────────────────
+    } else if (disbursementStatus === 'failed' && transaction.status === 'payout_sent') {
+      transaction.status        = 'failed';
+      transaction.failureReason = `Payout OwlPay denegado: ${data?.failure_reason ?? 'Sin detalle'}`;
+      await transaction.save();
+
+      await appendIpnLog(transaction, 'payout_failed', 'owlPay', 'failed', req.body);
+
+      console.error('[Alyto IPN/OwlPay] Payout denegado — requiere revisión manual.', {
+        transactionId: transaction.alytoTransactionId,
+        disbursementId,
+        failureReason: data?.failure_reason,
+      });
+
+      notifyAdminManualPayout(transaction).catch(() => {});
+
+      try {
+        await sendPushNotification(
+          transaction.userId,
+          NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
+        );
+      } catch (notifErr) {
+        console.error('[Alyto IPN/OwlPay] Error push payment_failed:', notifErr.message);
+      }
+
+      try {
+        const user = await User.findById(transaction.userId).lean();
+        if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
+      } catch (emailErr) {
+        console.error('[Email] Error fallido (OwlPay):', emailErr.message);
+      }
+
+    } else {
+      // Evento no accionable en el estado actual (ej. duplicado o estado inesperado)
+      console.info('[Alyto IPN/OwlPay] Evento no accionable — ignorando.', {
+        transactionId:   transaction.alytoTransactionId,
+        currentStatus:   transaction.status,
+        disbursementStatus,
+        event,
+      });
+    }
+  } catch (err) {
+    console.error('[Alyto IPN/OwlPay] Error procesando webhook:', {
+      transactionId: transaction?.alytoTransactionId,
+      error:         err.message,
+    });
+    Sentry.captureException(err, {
+      tags:  { component: 'handleOwlPayIPN' },
+      extra: { transactionId: transaction?.alytoTransactionId, disbursementId },
     });
   }
 

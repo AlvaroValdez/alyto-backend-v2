@@ -21,7 +21,7 @@
  */
 
 import { Router }                               from 'express';
-import { handleVitaIPN, handleFintocIPN }       from '../controllers/ipnController.js';
+import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN } from '../controllers/ipnController.js';
 
 const router = Router();
 
@@ -75,5 +75,16 @@ router.post('/vita', captureRawBody, handleVitaIPN);
  *     Este handler pertenece al motor cross-border y llama a dispatchPayout().
  */
 router.post('/fintoc', captureRawBody, handleFintocIPN);
+
+/**
+ * POST /api/v1/ipn/owlpay
+ *
+ * Webhook de OwlPay Harbor para desembolsos institucionales.
+ * OwlPay firma el body con HMAC-SHA256 en el header 'x-owlpay-signature'.
+ *
+ * Registrar URL en el panel Harbor de OwlPay:
+ *   https://[dominio]/api/v1/ipn/owlpay
+ */
+router.post('/owlpay', captureRawBody, handleOwlPayIPN);
 
 export default router;
