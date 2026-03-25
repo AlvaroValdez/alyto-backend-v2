@@ -382,6 +382,118 @@ const CORREDORES = [
     adminNotes:             `Corredor BO→${dest}. Payin manual SRL. Tránsito USDC vía Stellar. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`,
   })),
 
+  // ══════════════════════════════════════════════════════════════════════════
+  //  OwlPay Harbor — Corredores Institucionales B2B
+  //  Payout primario vía OwlPay. Entidad LLC para corredores globales.
+  //  Entidad SRL para bo-us (USD directo desde Bolivia).
+  //
+  //  Diferencia vs corredores SRL BO→LatAm:
+  //    - SRL vitaWallet (primario) + owlPay (fallback)  → dispersión regional
+  //    - Estos usan owlPay como PRIMARIO → destinos globales/institucionales
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── BO → USA (USD institucional — SRL, OwlPay primario) ───────────────────
+  // Override del corredor bo-us: owlPay como primario (vs vitaWallet en SRL LatAm)
+  {
+    corridorId:             'bo-us-owlpay',
+    originCountry:          'BO',
+    destinationCountry:     'US',
+    originCurrency:         'BOB',
+    destinationCurrency:    'USD',
+    payinMethod:            'manual',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   'vitaWallet',
+    manualExchangeRate:     0,            // CONFIGURAR: PATCH /api/v1/admin/corridors/bo-us-owlpay/rate
+    stellarAsset:           'USDC',
+    alytoCSpread:           1,            // 0.5% OwlPay fee + 0.5% Alyto
+    fixedFee:               3,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.5,
+    minAmountOrigin:        50,
+    maxAmountOrigin:        null,
+    legalEntity:            'SRL',
+    routingScenario:        'C',
+    isActive:               true,
+    adminNotes:             'Corredor BO→US institucional. OwlPay Harbor como primario. Configurar tasa BOB/USDC.',
+  },
+
+  // ── BO → Eurozona (EUR — LLC, OwlPay) ─────────────────────────────────────
+  {
+    corridorId:             'bo-eu',
+    originCountry:          'BO',
+    destinationCountry:     'EU',
+    originCurrency:         'BOB',
+    destinationCurrency:    'EUR',
+    payinMethod:            'manual',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   null,
+    manualExchangeRate:     0,            // CONFIGURAR: PATCH /api/v1/admin/corridors/bo-eu/rate
+    stellarAsset:           'USDC',
+    alytoCSpread:           1.5,
+    fixedFee:               5,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.8,
+    minAmountOrigin:        50,
+    maxAmountOrigin:        null,
+    legalEntity:            'LLC',
+    routingScenario:        'A',
+    isActive:               true,
+    adminNotes:             'Corredor BO→EU (EUR). OwlPay Harbor LLC. Nuevo destino — verificar cobertura SEPA con OwlPay antes de activar en producción.',
+  },
+
+  // ── BO → México (MXN institucional — LLC, OwlPay) ─────────────────────────
+  // Corredor LLC/institucional independiente del bo-mx (SRL/vitaWallet)
+  {
+    corridorId:             'bo-mx-llc',
+    originCountry:          'BO',
+    destinationCountry:     'MX',
+    originCurrency:         'BOB',
+    destinationCurrency:    'MXN',
+    payinMethod:            'manual',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   'vitaWallet',
+    manualExchangeRate:     0,            // CONFIGURAR: PATCH /api/v1/admin/corridors/bo-mx-llc/rate
+    stellarAsset:           'USDC',
+    alytoCSpread:           1,
+    fixedFee:               5,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.5,
+    minAmountOrigin:        50,
+    maxAmountOrigin:        null,
+    legalEntity:            'LLC',
+    routingScenario:        'A',
+    isActive:               true,
+    adminNotes:             'Corredor BO→MX institucional (LLC). OwlPay primario, Vita fallback. Distinto de bo-mx (SRL/vitaWallet).',
+  },
+
+  // ── BO → Brasil (BRL institucional — LLC, OwlPay) ─────────────────────────
+  {
+    corridorId:             'bo-br-llc',
+    originCountry:          'BO',
+    destinationCountry:     'BR',
+    originCurrency:         'BOB',
+    destinationCurrency:    'BRL',
+    payinMethod:            'manual',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   'vitaWallet',
+    manualExchangeRate:     0,            // CONFIGURAR: PATCH /api/v1/admin/corridors/bo-br-llc/rate
+    stellarAsset:           'USDC',
+    alytoCSpread:           1,
+    fixedFee:               5,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.5,
+    minAmountOrigin:        50,
+    maxAmountOrigin:        null,
+    legalEntity:            'LLC',
+    routingScenario:        'A',
+    isActive:               true,
+    adminNotes:             'Corredor BO→BR institucional (LLC). OwlPay primario + PIX via Harbor. Distinto de bo-br (SRL/vitaWallet).',
+  },
+
   // ── LLC Global (USD) → Colombia ────────────────────────────────────────────
   {
     corridorId:             'us-co',
