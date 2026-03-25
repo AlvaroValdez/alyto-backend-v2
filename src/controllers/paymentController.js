@@ -29,6 +29,7 @@ import {
 } from '../services/fintocService.js';
 import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
+import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -793,10 +794,11 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── 7. QR + Emails para payin manual ─────────────────────────────────────
-  let paymentQR = null;
+  let paymentQR      = null;
+  let paymentQRStatic = [];   // QR estáticos subidos por el admin (Tigo Money, Banco, etc.)
 
   if (corridor.payinMethod === 'manual' && transaction) {
-    // Generar QR y persistir en la transacción
+    // Generar QR dinámico (codifica datos bancarios para lectura por app bancaria)
     try {
       const { qrBase64 } = await generatePaymentQR(transaction);
       paymentQR = qrBase64;
@@ -805,6 +807,17 @@ export async function initCrossBorderPayment(req, res) {
       console.log('[CrossBorder] QR generado para:', alytoTransactionId);
     } catch (qrErr) {
       console.error('[CrossBorder] Error generando QR:', qrErr.message);
+    }
+
+    // Obtener QR estáticos configurados por el admin (Tigo Money, Banco Bisa, etc.)
+    try {
+      const srlConfig = await SRLConfig.getActive();
+      paymentQRStatic = (srlConfig.qrImages ?? []).map(q => ({
+        label:       q.label,
+        imageBase64: q.imageBase64,
+      }));
+    } catch (srlErr) {
+      console.error('[CrossBorder] Error obteniendo QR estáticos SRL:', srlErr.message);
     }
 
     const user = await User.findById(userId).select('email firstName').lean();
@@ -823,7 +836,11 @@ export async function initCrossBorderPayment(req, res) {
       status:              'pending',
       payinMethod:         'manual',
       paymentInstructions: manualPaymentInstructions,
+      // QR dinámico: codifica datos bancarios para apps de homebanking
       paymentQR,
+      // QR estáticos: imágenes subidas por el admin (Tigo Money, Banco Bisa, etc.)
+      // Array de { label, imageBase64 } — mostrar cada uno con su etiqueta
+      paymentQRStatic,
     });
   }
 
@@ -1638,9 +1655,22 @@ export async function getTransactionQR(req, res) {
     }
   }
 
+  // Incluir QR estáticos del admin (Tigo Money, Banco Bisa, etc.)
+  let paymentQRStatic = [];
+  try {
+    const srlConfig = await SRLConfig.getActive();
+    paymentQRStatic = (srlConfig.qrImages ?? []).map(q => ({
+      label:       q.label,
+      imageBase64: q.imageBase64,
+    }));
+  } catch (srlErr) {
+    console.error('[QR] Error obteniendo QR estáticos SRL:', srlErr.message);
+  }
+
   return res.status(200).json({
     transactionId:       transaction.alytoTransactionId,
     qrBase64:            transaction.paymentQR,
+    paymentQRStatic,
     paymentInstructions: transaction.paymentInstructions,
     amount:              transaction.originalAmount,
     currency:            transaction.originCurrency,

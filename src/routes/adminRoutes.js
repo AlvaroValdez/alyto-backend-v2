@@ -52,11 +52,29 @@ import {
   getKYBApplication,
   reviewKYBApplication,
 } from '../controllers/kybController.js';
+import {
+  getSRLConfig,
+  uploadSRLQR,
+  toggleSRLQR,
+  deleteSRLQR,
+} from '../controllers/srlConfigController.js';
+import multer from 'multer';
 
 const router = Router();
 
 // Aplicar protect + checkAdmin a TODAS las rutas de este router
 router.use(protect, checkAdmin);
+
+// multer para upload de imágenes QR (solo en rutas que lo necesitan)
+const qrUpload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 2 * 1024 * 1024, files: 1 },  // 2 MB máx.
+  fileFilter(_req, file, cb) {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error(`Tipo no permitido: ${file.mimetype}. Use PNG, JPG o WebP.`));
+  },
+});
 
 // ─── Usuarios ─────────────────────────────────────────────────────────────────
 
@@ -216,6 +234,50 @@ router.get('/exchange-rates', listExchangeRates);
  * Query params: startDate, endDate (ISO)
  */
 router.get('/analytics', getGlobalAnalytics);
+
+// ─── SRL Bolivia — Configuración QR de pago ──────────────────────────────────
+
+/**
+ * GET /api/v1/admin/srl-config
+ *
+ * Devuelve la configuración SRL Bolivia completa:
+ * todos los QR subidos (activos e inactivos) con metadatos del admin que los subió.
+ */
+router.get('/srl-config', getSRLConfig);
+
+/**
+ * POST /api/v1/admin/srl-config/qr
+ *
+ * Sube un nuevo código QR de pago para Bolivia.
+ * Content-Type: multipart/form-data
+ *
+ * Campos:
+ *   label  {string}  — Nombre visible al usuario ("Tigo Money", "Banco Bisa QR", etc.)
+ *   qr     {File}    — Imagen PNG/JPG del QR (máx. 2 MB)
+ *
+ * El QR activo se incluye automáticamente en las instrucciones de todos los
+ * corredores SRL con payinMethod === 'manual'.
+ *
+ * IMPORTANTE: esta ruta DEBE ir ANTES de /srl-config/qr/:qrId para que Express
+ * no confunda el path con un qrId.
+ */
+router.post('/srl-config/qr', qrUpload.single('qr'), uploadSRLQR);
+
+/**
+ * PATCH /api/v1/admin/srl-config/qr/:qrId
+ *
+ * Activa o desactiva un QR sin eliminarlo.
+ * Body: { "isActive": true | false }
+ */
+router.patch('/srl-config/qr/:qrId', toggleSRLQR);
+
+/**
+ * DELETE /api/v1/admin/srl-config/qr/:qrId
+ *
+ * Elimina permanentemente un QR de la configuración.
+ * No afecta transacciones ya creadas.
+ */
+router.delete('/srl-config/qr/:qrId', deleteSRLQR);
 
 // ─── KYB — Cuentas Business ───────────────────────────────────────────────────
 
