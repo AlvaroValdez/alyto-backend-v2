@@ -95,12 +95,38 @@ function extractPricing(originCurrency, destinationCountry) {
   const withdrawal = vitaCache.prices?.withdrawal;
   if (!withdrawal) return null;
 
-  const priceKey   = `${originCurrency.toLowerCase()}_sell`;
+  const attrs      = withdrawal?.prices?.attributes;
   const countryKey = destinationCountry.toLowerCase();
-  const rateRaw    = withdrawal?.prices?.attributes?.[priceKey]?.[countryKey];
+  const origin     = originCurrency.toUpperCase();
+  let rate;
 
-  if (rateRaw == null) return null;
-  const rate = Number(rateRaw);
+  if (origin === 'CLP') {
+    const raw = attrs?.clp_sell?.[countryKey];
+    if (raw == null) return null;
+    rate = Number(raw);
+  } else if (origin === 'USD' || origin === 'USDC') {
+    // Vita no tiene usd_sell — derivamos via cross-rate CLP
+    const clpToDest = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
+    const clpToUsd  = Number(attrs?.clp_sell?.['us']       ?? NaN);
+    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+    rate = clpToDest / clpToUsd;
+  } else if (origin === 'BOB') {
+    // Bolivia: Vita no tiene bob_sell. Dos pasos:
+    //   PASO 1 — tasa USD→destino via cross-rate CLP
+    //   PASO 2 — dividir por BOB_USD_RATE (tasa oficial ASFI = 6.96)
+    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
+    const clpToDest    = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
+    const clpToUsd     = Number(attrs?.clp_sell?.['us']       ?? NaN);
+    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+    const usdToDestRate = clpToDest / clpToUsd;
+    rate = usdToDestRate / BOB_USD_RATE;
+    console.info('[Alyto WS] Cotización BOB→' + destinationCountry + ':', {
+      clpToDest, clpToUsd, usdToDestRate, BOB_USD_RATE, bobToDestRate: rate,
+    });
+  } else {
+    return null;
+  }
+
   if (!isFinite(rate) || rate <= 0) return null;
 
   const fixedCost  = Number(withdrawal?.[countryKey]?.fixed_cost ?? 0);
