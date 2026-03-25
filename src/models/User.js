@@ -242,6 +242,35 @@ const userSchema = new Schema(
       default: null,
     },
 
+    // ── Tipo de cuenta y KYB ────────────────────────────────────────────────
+    /**
+     * Tipo de cuenta del usuario.
+     *   'personal' → Wallet personal (solo KYC)
+     *   'business' → Cuenta Business con KYB aprobado — accede a corredores
+     *                institucionales (OwlPay, tickets altos)
+     */
+    accountType: {
+      type:    String,
+      enum:    ['personal', 'business'],
+      default: 'personal',
+    },
+    /**
+     * Estado del proceso KYB (Know Your Business).
+     * Solo relevante cuando el usuario solicita activar su cuenta Business.
+     * Sincronizado con BusinessProfile.kybStatus.
+     */
+    kybStatus: {
+      type:    String,
+      enum:    ['not_started', 'pending', 'under_review', 'approved', 'rejected', 'more_info'],
+      default: 'not_started',
+    },
+    /** Referencia al perfil KYB — solo existe si accountType === 'business' */
+    businessProfileId: {
+      type:    mongoose.Schema.Types.ObjectId,
+      ref:     'BusinessProfile',
+      default: null,
+    },
+
     // ── Rol de la cuenta ────────────────────────────────────────────────────
     /**
      * Rol del usuario dentro del sistema Alyto.
@@ -315,6 +344,8 @@ const userSchema = new Schema(
 
 userSchema.index({ legalEntity: 1 });
 userSchema.index({ kycStatus: 1 });
+userSchema.index({ kybStatus: 1 });
+userSchema.index({ accountType: 1 });
 userSchema.index({ 'stellarAccount.publicKey': 1 }, { sparse: true });
 
 // ─── Virtual: nombre completo ─────────────────────────────────────────────────
