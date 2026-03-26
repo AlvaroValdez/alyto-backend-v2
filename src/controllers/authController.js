@@ -105,8 +105,8 @@ export async function registerUser(req, res) {
       });
     }
 
-    // ── Hash de contraseña (cost factor 12 — balance seg/rendimiento) ──────
-    const passwordHash = await bcrypt.hash(password, 12);
+    // ── Hash de contraseña (cost factor 10 — balance seg/rendimiento) ──────
+    const passwordHash = await bcrypt.hash(password, 10);
 
     // ── Asignación automática de entidad legal ─────────────────────────────
     const legalEntity = resolveEntity(countryCode);
@@ -207,8 +207,15 @@ export async function loginUser(req, res) {
       return res.status(401).json({ error: 'Cuenta suspendida. Contacta soporte.' });
     }
 
-    // Actualizar lastLoginAt en background — no bloquear la respuesta
-    User.findByIdAndUpdate(user._id, { lastLoginAt: new Date() }).exec();
+    // Re-hash progresivo: si el hash tiene un cost > 10, actualizar silenciosamente
+    // Esto migra automáticamente hashes antiguos (cost 12) al nuevo estándar (cost 10)
+    const currentRounds = parseInt(user.password.split('$')[2], 10);
+    const TARGET_COST   = 10;
+    const updates       = { lastLoginAt: new Date() };
+    if (currentRounds > TARGET_COST) {
+      updates.password = await bcrypt.hash(password, TARGET_COST);
+    }
+    User.findByIdAndUpdate(user._id, updates).exec();
 
     // rememberMe: true → 30 días; false → 24 horas; ausente → default del entorno
     let jwtExpiry
@@ -354,7 +361,7 @@ export async function resetPassword(req, res) {
     }
 
     // Actualizar contraseña y limpiar campos de reset
-    user.password             = await bcrypt.hash(newPassword, 12)
+    user.password             = await bcrypt.hash(newPassword, 10)
     user.passwordResetToken   = undefined
     user.passwordResetExpires = undefined
     await user.save()

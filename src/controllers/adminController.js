@@ -968,16 +968,10 @@ export async function getTransactionComprobante(req, res) {
   }
 
   return res.status(200).json({
-    transactionId:  transaction.alytoTransactionId,
-    amount:         `${transaction.originalAmount} ${transaction.originCurrency}`,
-    status:         transaction.status,
-    user:           transaction.userId,
-    comprobante: {
-      data:       transaction.paymentProof.data,
-      mimetype:   transaction.paymentProof.mimetype,
-      filename:   transaction.paymentProof.filename,
-      size:       transaction.paymentProof.size,
-      uploadedAt: transaction.paymentProof.uploadedAt,
-    },
+    base64:     transaction.paymentProof.data,
+    mimeType:   transaction.paymentProof.mimetype,
+    filename:   transaction.paymentProof.filename,
+    size:       transaction.paymentProof.size,
+    uploadedAt: transaction.paymentProof.uploadedAt,
   });
 }
