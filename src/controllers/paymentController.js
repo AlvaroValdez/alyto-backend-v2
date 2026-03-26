@@ -845,6 +845,9 @@ export async function initCrossBorderPayment(req, res) {
       status:              'pending',
       payinMethod:         'manual',
       paymentInstructions: manualPaymentInstructions,
+      destinationAmount:   transaction.destinationAmount   ?? quotedDestAmount   ?? null,
+      destinationCurrency: transaction.destinationCurrency ?? null,
+      exchangeRate:        transaction.exchangeRate        ?? quotedExchangeRate ?? null,
       // QR dinámico: codifica datos bancarios para apps de homebanking
       paymentQR,
       // QR estáticos: imágenes subidas por el admin (Tigo Money, Banco Bisa, etc.)
@@ -1462,7 +1465,7 @@ export async function getTransactionHistory(req, res) {
       },
       payinMethod:       corridor.payinMethod ?? (tx.paymentLegs?.[0]?.provider ?? null),
       corridorId:        corridor.corridorId  ?? null,
-      estimatedDelivery: '1 día hábil',
+      estimatedDelivery: corridor.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
       createdAt:         tx.createdAt,
       updatedAt:         tx.updatedAt,
     };
@@ -1571,7 +1574,7 @@ export async function getTransactionStatus(req, res) {
       accountNumber: maskedAccount,
     },
     payinMethod:       transaction.corridorId?.payinMethod ?? null,
-    estimatedDelivery: '1 día hábil',
+    estimatedDelivery: transaction.corridorId?.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
     createdAt:         transaction.createdAt,
     updatedAt:         transaction.updatedAt,
   });
