@@ -57,6 +57,7 @@ import {
   uploadSRLQR,
   toggleSRLQR,
   deleteSRLQR,
+  updateBankData,
 } from '../controllers/srlConfigController.js';
 import multer from 'multer';
 
@@ -278,6 +279,16 @@ router.patch('/srl-config/qr/:qrId', toggleSRLQR);
  * No afecta transacciones ya creadas.
  */
 router.delete('/srl-config/qr/:qrId', deleteSRLQR);
+
+/**
+ * PATCH /api/v1/admin/srl-config/bank-data
+ *
+ * Actualiza los datos bancarios de AV Finance SRL mostrados en las instrucciones de pago.
+ * Body: { bankName, accountHolder, accountNumber, accountType }
+ *
+ * IMPORTANTE: esta ruta DEBE ir DESPUÉS de /srl-config/qr/:qrId para evitar conflictos.
+ */
+router.patch('/srl-config/bank-data', updateBankData);
 
 // ─── KYB — Cuentas Business ───────────────────────────────────────────────────
 
