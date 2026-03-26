@@ -24,6 +24,7 @@
  */
 
 import 'dotenv/config';
+import mongoose from 'mongoose';
 
 const args      = process.argv.slice(2);
 const ENV       = args.includes('--env') ? args[args.indexOf('--env') + 1] : 'local';
@@ -83,6 +84,41 @@ function mockBlob(name = 'documento.pdf') {
 
 const state = { userToken: null, adminToken: null, businessId: null };
 
+/**
+ * Limpia el estado KYB del usuario de prueba antes de cada run.
+ * Conecta directamente a MongoDB para garantizar una pizarra limpia.
+ * Solo aplica en entorno local (no production).
+ */
+async function cleanupTestKYB() {
+  if (ENV === 'production') return;
+  const uri = process.env.MONGODB_URI;
+  if (!uri) { logWarn('MONGODB_URI no configurado — saltando cleanup.'); return; }
+
+  log('\n  🧹 Limpiando estado KYB previo...', 'dim');
+
+  try {
+    await mongoose.connect(uri);
+    const User = mongoose.model('User', new mongoose.Schema({}, { strict: false }), 'users');
+    const BP   = mongoose.model('BusinessProfile', new mongoose.Schema({}, { strict: false }), 'business_profiles');
+
+    const user = await User.findOne({ email: CREDS.user.email }).lean();
+    if (!user) { logWarn(`Usuario ${CREDS.user.email} no encontrado en DB.`); return; }
+
+    const deleted = await BP.deleteMany({ userId: user._id });
+    await User.updateOne({ _id: user._id }, { $unset: { businessProfileId: '' }, $set: { kybStatus: 'not_started', accountType: 'personal' } });
+
+    if (deleted.deletedCount > 0) {
+      logInfo(`Eliminados ${deleted.deletedCount} BusinessProfile(s) del usuario de prueba.`);
+    } else {
+      logInfo('Sin BusinessProfiles previos — estado limpio.');
+    }
+  } catch (err) {
+    logWarn(`Cleanup falló (no crítico): ${err.message}`);
+  } finally {
+    await mongoose.disconnect().catch(() => {});
+  }
+}
+
 const steps = [
 
   async function step1_loginUser() {
@@ -116,16 +152,10 @@ const steps = [
     form.append('documentos', f1.blob, f1.name);
     form.append('documentos', f2.blob, f2.name);
     const { status, data } = await request('POST', '/api/v1/kyb/apply', { token: state.userToken, formData: form });
-    if (status === 409) {
-      logWarn(`Solicitud KYB ya existe (409) — reutilizando businessId: ${data.businessId}`);
-      if (data.businessId) state.businessId = data.businessId;
-      passed++; passed++; passed++;  // contar los 3 asserts como OK
-    } else {
-      assert(status === 201, `Solicitud creada (201) — recibido: ${status}`);
-      assert(data.kybStatus === 'pending', `kybStatus: pending — recibido: ${data.kybStatus}`);
-      assert(!!data.businessId, `businessId recibido: ${data.businessId}`);
-      if (data.businessId) state.businessId = data.businessId;
-    }
+    assert(status === 201, `Solicitud creada (201) — recibido: ${status}`);
+    assert(data.kybStatus === 'pending', `kybStatus: pending — recibido: ${data.kybStatus}`);
+    assert(!!data.businessId, `businessId recibido: ${data.businessId}`);
+    if (data.businessId) state.businessId = data.businessId;
     logInfo('📧 Emails esperados: kybReceived (usuario) + adminKybAlert (admin)');
   },
 
@@ -217,6 +247,9 @@ async function run() {
   log(`  Base URL: ${BASE_URL}`, 'cyan');
   log(`  Usuario : ${CREDS.user.email}`, 'cyan');
   log(`  Admin   : ${CREDS.admin.email}\n`, 'cyan');
+
+  // Limpiar estado previo a menos que se ejecute un solo paso específico
+  if (!ONLY_STEP) await cleanupTestKYB();
 
   const stepsToRun = ONLY_STEP ? steps.filter((_, i) => i + 1 === ONLY_STEP) : steps;
 
