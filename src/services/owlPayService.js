@@ -22,7 +22,10 @@ import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-const OWLPAY_BASE_URL = process.env.OWLPAY_BASE_URL ?? 'https://harbor-api.owlpay.com';
+const OWLPAY_BASE_URL =
+  process.env.OWLPAY_BASE_URL ??
+  process.env.OWLPAY_API_URL  ??
+  'https://harbor-sandbox.owlpay.com/api/v1';
 
 /**
  * Obtiene el OWLPAY_API_KEY desde variables de entorno.
@@ -50,10 +53,9 @@ async function owlPayRequest(endpoint, options = {}) {
   const url    = `${OWLPAY_BASE_URL}${endpoint}`;
 
   const headers = {
-    'Authorization': `Bearer ${apiKey}`,
-    'Content-Type':  'application/json',
-    'Accept':        'application/json',
-    'X-Client-Id':   'alyto-v2',           // Identificador del cliente en Harbor
+    'X-API-KEY':    apiKey,
+    'Content-Type': 'application/json',
+    'Accept':       'application/json',
     ...(options.headers ?? {}),
   };
 
@@ -132,21 +134,24 @@ export async function createOnRampOrder({
     throw new Error('[Alyto OwlPay] El monto debe ser un número positivo en USD.');
   }
 
+  // Harbor Transfer v2 — POST /transfers
   const payload = {
-    amount,
-    source_currency:       currency,
-    destination_asset:     'USDC',
-    destination_network:   'stellar',
-    destination_address:   destinationWallet,
-    // Metadata de trazabilidad interna — visible en el panel Harbor
-    metadata: {
-      alyto_transaction_id: alytoTransactionId,
-      alyto_user_id:        userId,
-      legal_entity:         'LLC',
-      corridor:             'A',
-      operation_type:       'institutionalOnRamp',
+    type: 'on_ramp',
+    source: {
+      asset:          currency,      // 'USD'
+      amount,
+      payment_method: 'wire',        // método institucional por defecto
     },
-    ...(memo ? { memo } : {}),
+    destination: {
+      asset:   'USDC',
+      chain:   'stellar',
+      address: destinationWallet,
+      ...(memo ? { memo } : {}),
+    },
+    // Idempotency key — Harbor idempotentiza por application_transfer_uuid
+    application_transfer_uuid: alytoTransactionId,
+    // customer_uuid del cliente en Harbor (si ya está onboarded)
+    ...(userId ? { customer_uuid: String(userId) } : {}),
   };
 
   console.info('[Alyto OwlPay] Creando orden de on-ramp institucional:', {
@@ -157,19 +162,19 @@ export async function createOnRampOrder({
     walletPrefix: destinationWallet.substring(0, 8) + '...',
   });
 
-  const data = await owlPayRequest('/v1/orders', {
+  const data = await owlPayRequest('/transfers', {
     method: 'POST',
     body:   JSON.stringify(payload),
   });
 
   return {
-    orderId:          data.id,
-    status:           data.status,
-    amount:           data.source_amount ?? amount,
-    currency:         data.source_currency ?? currency,
-    destinationWallet: data.destination_address ?? destinationWallet,
-    estimatedUSDC:    data.destination_amount ?? null,
-    paymentUrl:       data.payment_url ?? null,
+    orderId:           data.uuid          ?? data.id,
+    status:            data.status        ?? 'pending',
+    amount:            data.source?.amount ?? amount,
+    currency:          data.source?.asset  ?? currency,
+    destinationWallet: data.destination?.address ?? destinationWallet,
+    estimatedUSDC:     data.destination?.amount  ?? null,
+    paymentUrl:        data.payment_url ?? data.transfer_instructions?.url ?? null,
   };
 }
 
@@ -181,7 +186,7 @@ export async function createOnRampOrder({
  * @returns {Promise<object>} Objeto Order de OwlPay
  */
 export async function getOnRampOrderStatus(orderId) {
-  return owlPayRequest(`/v1/orders/${orderId}`);
+  return owlPayRequest(`/transfers/${orderId}`);
 }
 
 /**
@@ -310,11 +315,16 @@ export async function getDisbursementStatus(disbursementId) {
 }
 
 /**
- * Verifica la firma HMAC-SHA256 del webhook de OwlPay/Harbor.
+ * Verifica la firma HMAC-SHA256 del webhook de Harbor/OwlPay.
  * DEBE llamarse antes de procesar cualquier evento de webhook.
  *
+ * Harbor envía el header 'harbor-signature' con el formato:
+ *   "t=1689066169,v1=e997b87453fb8923..."
+ *
+ * El signed_payload es: "<timestamp>.<rawBody>"
+ *
  * @param {string} rawBody         - Body crudo de la request (string, no parseado)
- * @param {string} signatureHeader - Valor del header 'x-owlpay-signature'
+ * @param {string} signatureHeader - Valor del header 'harbor-signature'
  * @returns {boolean} true si la firma es válida
  */
 export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
@@ -324,17 +334,38 @@ export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
     return false;
   }
 
-  const expectedSig = crypto
+  if (!signatureHeader) return false;
+
+  // Parsear: "t=1689066169,v1=e997b87453fb8923..."
+  const parts = {};
+  signatureHeader.split(',').forEach(part => {
+    const [key, ...rest] = part.trim().split('=');
+    parts[key] = rest.join('=');
+  });
+
+  const timestamp = parts['t'];
+  const signature = parts['v1'];
+
+  if (!timestamp || !signature) {
+    console.warn('[Alyto OwlPay] Formato de harbor-signature inválido:', signatureHeader);
+    return false;
+  }
+
+  // signed_payload = "timestamp.rawBody"
+  const signedPayload = `${timestamp}.${rawBody}`;
+
+  const expected = crypto
     .createHmac('sha256', webhookSecret)
-    .update(rawBody, 'utf8')
+    .update(signedPayload, 'utf8')
     .digest('hex');
 
   try {
     return crypto.timingSafeEqual(
-      Buffer.from(signatureHeader ?? '', 'hex'),
-      Buffer.from(expectedSig,         'hex'),
+      Buffer.from(expected,  'hex'),
+      Buffer.from(signature, 'hex'),
     );
   } catch {
+    // timingSafeEqual lanza si los buffers no tienen el mismo tamaño
     return false;
   }
 }
