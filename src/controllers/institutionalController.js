@@ -244,7 +244,7 @@ export async function initiateCorporateOnRamp(req, res) {
  */
 export async function owlPayWebhook(req, res) {
   // ── 1. Verificar firma del webhook ────────────────────────────────────────
-  const signature = req.headers['x-owlpay-signature'];
+  const signature = req.headers['harbor-signature'];
   const rawBody   = req.rawBody;
 
   if (!signature || !rawBody) {
