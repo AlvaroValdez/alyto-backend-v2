@@ -104,6 +104,7 @@ async function run() {
     first_name:                  'Test',
     last_name:                   'Alyto',
     email:                       'test@alyto.app',
+    birth_date:                  '1990-01-01',
     application_customer_uuid:   'test-alyto-harbor-001',
   });
 
@@ -115,7 +116,8 @@ async function run() {
   );
 
   if (s2 === 201) {
-    logInfo(`customer_uuid: ${d2.uuid ?? d2.id ?? '—'}`);
+    const uuid = d2.data?.uuid ?? d2.uuid ?? d2.id ?? '—';
+    logInfo(`customer_uuid: ${uuid}`);
   }
 
   printSummary();
