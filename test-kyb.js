@@ -31,7 +31,7 @@ const ONLY_STEP = args.includes('--step') ? Number(args[args.indexOf('--step') +
 
 const BASE_URL = ENV === 'production'
   ? 'https://alyto-backend-v2.onrender.com'
-  : (process.env.API_URL ?? 'http://localhost:5000');
+  : (process.env.API_URL || 'http://localhost:3000');
 
 const CREDS = {
   user: {
