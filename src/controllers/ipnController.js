@@ -25,7 +25,7 @@ import crypto            from 'crypto';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
-import { createPayout }       from '../services/vitaWalletService.js';
+import { createPayout, getPrices } from '../services/vitaWalletService.js';
 import { createDisbursement, verifyOwlPayWebhookSignature } from '../services/owlPayService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
@@ -406,6 +406,10 @@ export async function dispatchPayout(transaction) {
     // ── Función interna: intentar payout con un proveedor específico ──────
     async function tryProvider(method) {
       if (method === 'vitaWallet') {
+        // Vita requiere llamar GET /prices justo antes de POST /transactions
+        // para bloquear el tipo de cambio. Sin este paso retorna "Los precios caducaron",
+        // especialmente en corredores manuales donde el payin se confirma horas después.
+        await getPrices();
         return createPayout(vitaPayload);
       }
       if (method === 'owlPay') {
