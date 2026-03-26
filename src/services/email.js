@@ -72,16 +72,24 @@ function formatDate(date) {
 }
 
 /**
- * Resuelve el nombre completo del beneficiario soportando ambos formatos
- * del schema (campos nombrados del schema y campos dinámicos de Vita).
+ * Resuelve el nombre completo del beneficiario soportando todos los formatos:
+ *   - dynamicFields (Bolivia manual / Vita)
+ *   - campos nombrados del schema (formato legado)
+ *   - fullName explícito
  *
- * @param {object} beneficiary
+ * @param {object} beneficiary — sub-documento del beneficiario
  * @returns {string}
  */
 function resolveBeneficiaryName(beneficiary) {
   if (!beneficiary) return '';
 
-  // Formato dinámico (Vita withdrawal_rules)
+  // Formato Bolivia / Vita: campos en dynamicFields
+  const df = beneficiary.dynamicFields ?? {};
+  if (df.beneficiary_first_name || df.beneficiary_last_name) {
+    return `${df.beneficiary_first_name ?? ''} ${df.beneficiary_last_name ?? ''}`.trim();
+  }
+
+  // Formato dinámico plano (llaves al nivel del objeto)
   if (beneficiary.beneficiary_first_name || beneficiary.beneficiary_last_name) {
     return `${beneficiary.beneficiary_first_name ?? ''} ${beneficiary.beneficiary_last_name ?? ''}`.trim();
   }
@@ -91,6 +99,34 @@ function resolveBeneficiaryName(beneficiary) {
 
   // Formato schema nombrado
   return `${beneficiary.firstName ?? ''} ${beneficiary.lastName ?? ''}`.trim();
+}
+
+/**
+ * Enmascara el nombre para privacidad: "Carlos García" → "C***** G*****"
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function maskName(name) {
+  if (!name) return '—';
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .map(word => word[0] + '*'.repeat(Math.max(word.length - 1, 2)))
+    .join(' ');
+}
+
+/**
+ * Enmascara un documento de identidad: "12345678" → "123*****"
+ *
+ * @param {string} doc
+ * @returns {string}
+ */
+function maskDocument(doc) {
+  if (!doc) return '—';
+  const s = String(doc);
+  const visible = Math.min(3, Math.floor(s.length / 2));
+  return s.slice(0, visible) + '*'.repeat(s.length - visible);
 }
 
 // ─── Función principal ────────────────────────────────────────────────────────
@@ -156,6 +192,10 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   paymentInitiated(user, transaction) {
+    const destAmount = transaction.destinationAmount != null
+      ? formatCurrency(transaction.destinationAmount, transaction.destinationCurrency)
+      : null;
+
     return [
       user.email,
       process.env.SENDGRID_TEMPLATE_INITIATED,
@@ -163,11 +203,14 @@ export const EMAILS = {
         userName:            user.firstName,
         transactionId:       transaction.alytoTransactionId,
         originAmount:        formatCurrency(transaction.originalAmount, transaction.originCurrency),
-        destinationAmount:   formatCurrency(transaction.destinationAmount, transaction.destinationCurrency),
+        destinationAmount:   destAmount,
+        destinationCurrency: transaction.destinationCurrency,
         beneficiaryName:     resolveBeneficiaryName(transaction.beneficiary),
         corridorLabel:       `${transaction.originCurrency} → ${transaction.destinationCurrency}`,
         estimatedDelivery:   '1 día hábil',
+        createdAt:           formatDate(transaction.createdAt),
         supportEmail:        process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:     process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },
     ];
   },
@@ -180,17 +223,24 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   paymentCompleted(user, transaction) {
+    const destAmount = transaction.destinationAmount != null
+      ? formatCurrency(transaction.destinationAmount, transaction.destinationCurrency)
+      : null;
+
     return [
       user.email,
       process.env.SENDGRID_TEMPLATE_COMPLETED,
       {
-        userName:          user.firstName,
-        transactionId:     transaction.alytoTransactionId,
-        originAmount:      formatCurrency(transaction.originalAmount, transaction.originCurrency),
-        destinationAmount: formatCurrency(transaction.destinationAmount, transaction.destinationCurrency),
-        beneficiaryName:   resolveBeneficiaryName(transaction.beneficiary),
-        completedAt:       formatDate(transaction.updatedAt),
-        supportEmail:      process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        userName:            user.firstName,
+        transactionId:       transaction.alytoTransactionId,
+        originAmount:        formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        destinationAmount:   destAmount,
+        destinationCurrency: transaction.destinationCurrency,
+        beneficiaryName:     resolveBeneficiaryName(transaction.beneficiary),
+        corridorLabel:       `${transaction.originCurrency} → ${transaction.destinationCurrency}`,
+        completedAt:         formatDate(transaction.updatedAt),
+        supportEmail:        process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:     process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },
     ];
   },
@@ -227,23 +277,40 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   manualPayinInstructions(user, transaction, instructions) {
+    const destAmount = transaction.destinationAmount != null
+      ? formatCurrency(transaction.destinationAmount, transaction.destinationCurrency)
+      : null;
+
     return [
       user.email,
       process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN,
       {
-        userName:         user.firstName,
-        transactionId:    transaction.alytoTransactionId,
-        originAmount:     formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        userName:           user.firstName,
+        transactionId:      transaction.alytoTransactionId,
+
+        // Monto que el usuario debe transferir
+        originAmount:       formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        // Monto que recibirá el beneficiario en destino
+        destinationAmount:  destAmount,
+        destinationCurrency: transaction.destinationCurrency ?? 'BOB',
         destinationCountry: transaction.destinationCountry,
-        bankName:         instructions.bankName,
-        accountHolder:    instructions.accountHolder,
-        accountNumber:    instructions.accountNumber,
-        accountType:      instructions.accountType,
-        currency:         instructions.currency,
-        reference:        instructions.reference,
-        instructions:     instructions.instructions,
-        supportEmail:     process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
-        supportWhatsapp:  process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+
+        // Datos bancarios de AV Finance SRL (cuenta receptora)
+        bankName:           instructions.bankName,
+        accountHolder:      instructions.accountHolder,
+        accountNumber:      instructions.accountNumber,
+        accountType:        instructions.accountType,
+        currency:           instructions.currency,
+
+        // Referencia obligatoria en el concepto de la transferencia
+        reference:          instructions.reference,
+        concept:            instructions.concept ?? instructions.reference,
+        instructions:       instructions.instructions,
+
+        // Fecha y soporte
+        createdAt:          formatDate(transaction.createdAt),
+        supportEmail:       process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp:    process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },
     ];
   },
@@ -277,21 +344,60 @@ export const EMAILS = {
    * Alerta al equipo admin que hay un payout manual pendiente en Bolivia.
    * Reemplaza el email HTML inline de notifyAdminManualPayout().
    *
+   * Los datos del beneficiario Bolivia se almacenan en transaction.beneficiary.dynamicFields
+   * (formato beneficiaryData dinámico). Este método los aplana para el template.
+   *
    * @param {object} transaction
    * @returns {[string, string, object]}
    */
   adminBoliviaAlert(transaction) {
+    const ben = transaction.beneficiary ?? {};
+    const df  = ben.dynamicFields ?? {};
+
+    // Nombre completo desde dynamicFields o campos nombrados
+    const fullName = resolveBeneficiaryName(transaction.beneficiary);
+    const maskedName = maskName(fullName);
+
+    // Documento (CI Bolivia)
+    const docRaw = df.beneficiary_document ?? df.beneficiary_document_number
+      ?? ben.documentNumber ?? '';
+    const maskedDoc = maskDocument(docRaw);
+
+    // Email del beneficiario (si existe)
+    const beneficiaryEmail = df.beneficiary_email ?? ben.email ?? '';
+
+    // Banco / cuenta: Bolivia manual no tiene banco del beneficiario (pago en efectivo / Tigo)
+    const bankName     = df.beneficiary_bank ?? ben.bankCode ?? '—';
+    const accountInfo  = df.beneficiary_account ?? ben.accountBank ?? '';
+
+    // Teléfono
+    const phone = df.beneficiary_phone ?? ben.phone ?? '';
+
+    // Monto destino — puede estar como quotedDestAmount o calculado
+    const destAmount = transaction.destinationAmount != null
+      ? formatCurrency(transaction.destinationAmount, transaction.destinationCurrency)
+      : `— ${transaction.destinationCurrency ?? 'BOB'}`;
+
     return [
       process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
       process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
       {
         transactionId:     transaction.alytoTransactionId,
         originAmount:      formatCurrency(transaction.originalAmount, transaction.originCurrency),
-        destinationAmount: formatCurrency(transaction.destinationAmount, transaction.destinationCurrency),
-        beneficiary:       transaction.beneficiary,
-        userId:            transaction.userId?.toString(),
-        createdAt:         formatDate(transaction.createdAt),
-        ledgerUrl:         `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`,
+        destinationAmount: destAmount,
+        destinationCurrency: transaction.destinationCurrency ?? 'BOB',
+
+        // Beneficiario — datos enmascarados
+        beneficiaryName:    maskedName,
+        beneficiaryDoc:     maskedDoc,
+        beneficiaryBank:    bankName,
+        beneficiaryAccount: accountInfo || '—',
+        beneficiaryEmail:   beneficiaryEmail || '—',
+        beneficiaryPhone:   phone || '—',
+
+        userId:    transaction.userId?.toString(),
+        createdAt: formatDate(transaction.createdAt),
+        ledgerUrl: `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`,
       },
     ];
   },
