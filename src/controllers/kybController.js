@@ -146,9 +146,12 @@ export async function applyKYB(req, res) {
     });
 
   } catch (err) {
-    console.error('[KYB] Error en applyKYB:', err.message);
+    console.error('[KYB] Error en applyKYB:', err.message, err.errors ?? '');
     Sentry.captureException(err, { tags: { controller: 'kybController', action: 'applyKYB' } });
-    return res.status(500).json({ error: 'Error interno al procesar la solicitud KYB.' });
+    return res.status(500).json({
+      error: 'Error interno al procesar la solicitud KYB.',
+      ...(process.env.NODE_ENV !== 'production' ? { detail: err.message, validationErrors: err.errors } : {}),
+    });
   }
 }
 

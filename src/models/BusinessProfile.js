@@ -174,12 +174,11 @@ businessProfileSchema.index({ countryOfIncorporation: 1 });
 
 // ─── Hook: generar businessId antes de guardar ────────────────────────────────
 
-businessProfileSchema.pre('save', function (next) {
+businessProfileSchema.pre('save', async function () {
   if (!this.businessId) {
     const suffix = crypto.randomBytes(4).toString('hex').toUpperCase();
     this.businessId = `BIZ-${suffix}`;
   }
-  next();
 });
 
 const BusinessProfile = mongoose.model('BusinessProfile', businessProfileSchema);
