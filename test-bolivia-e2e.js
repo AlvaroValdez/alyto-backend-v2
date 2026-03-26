@@ -29,16 +29,16 @@ const ONLY_STEP = args.includes('--step') ? Number(args[args.indexOf('--step') +
 
 const BASE_URL = ENV === 'production'
   ? 'https://alyto-backend-v2.onrender.com'
-  : (process.env.API_URL ?? 'http://localhost:5000');
+  : (process.env.API_URL ?? 'http://localhost:3000');
 
 const CREDS = {
   srl: {
-    email:    process.env.TEST_SRL_EMAIL    ?? 'test@avfinance.net',
-    password: process.env.TEST_SRL_PASSWORD ?? 'Test1234!',
+    email:    process.env.TEST_SRL_EMAIL?.trim()    || process.env.TEST_USER_EMAIL?.trim()    || 'test@avfinance.net',
+    password: process.env.TEST_SRL_PASSWORD?.trim() || process.env.TEST_USER_PASSWORD?.trim() || 'Test1234!',
   },
   admin: {
-    email:    process.env.TEST_ADMIN_EMAIL    ?? 'admin@alyto.app',
-    password: process.env.TEST_ADMIN_PASSWORD ?? 'Admin1234!',
+    email:    process.env.TEST_ADMIN_EMAIL?.trim()    || 'admin@alyto.app',
+    password: process.env.TEST_ADMIN_PASSWORD?.trim() || 'Admin1234!',
   },
 };
 
@@ -176,7 +176,7 @@ const steps = [
     assert(status === 200, `Login admin (200) — recibido: ${status}`);
     assert(!!data.token, 'Token admin recibido');
     if (data.token) state.adminToken = data.token;
-    if (!data.user?.isAdmin) logWarn('El usuario no tiene flag isAdmin');
+    if (data.user?.role !== 'admin') logWarn(`role: "${data.user?.role}" — se esperaba "admin"`);
   },
 
   async function step5_listTransactions() {
