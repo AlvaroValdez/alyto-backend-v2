@@ -631,7 +631,8 @@ export async function dispatchPayout(transaction) {
       note: 'Payout manual Bolivia — admin debe confirmar transferencia.',
     });
 
-    await notifyAdminManualPayout(transaction);
+    notifyAdminManualPayout(transaction)
+      .catch(err => console.error('[Alyto Payout] Error email admin Bolivia payout:', err.message));
     console.info('[Alyto Payout] Payout manual Bolivia — admin notificado.', {
       transactionId: transaction.alytoTransactionId,
     });
