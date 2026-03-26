@@ -171,6 +171,44 @@ const steps = [
     if (data.transactionId) state.transactionId = data.transactionId;
   },
 
+  // ── Paso 3b — Login admin temprano para asegurar payoutMethod del corredor ──
+  async function step3b_ensureCorridorPayoutMethod() {
+    logStep('3b', 'Login admin + asegurar payoutMethod: anchorBolivia en corredor BO→CO');
+    // Login admin
+    const loginRes = await request('POST', '/api/v1/auth/login', {
+      body: { email: CREDS.admin.email, password: CREDS.admin.password },
+    });
+    if (loginRes.status !== 200 || !loginRes.data.token) {
+      logWarn('Admin login falló en paso 3b — no se puede verificar corredor'); return;
+    }
+    const adminToken = loginRes.data.token;
+
+    // Leer corredor del quote
+    const corridorId = state.quote?.corridorId;
+    if (!corridorId) { logWarn('corridorId no disponible — omitiendo verificación de corredor'); return; }
+
+    const readRes = await request('GET', `/api/v1/admin/corridors/${corridorId}`, { token: adminToken });
+    const corridor = readRes.data?.corridor ?? readRes.data;
+    logInfo(`Corredor actual: payoutMethod=${corridor?.payoutMethod ?? '(vacío)'} payinMethod=${corridor?.payinMethod}`);
+
+    if (corridor?.payoutMethod !== 'anchorBolivia') {
+      logWarn(`payoutMethod="${corridor?.payoutMethod}" — actualizando a anchorBolivia...`);
+      const patchRes = await request('PATCH', `/api/v1/admin/corridors/${corridorId}`, {
+        token: adminToken,
+        body:  { payoutMethod: 'anchorBolivia' },
+      });
+      if (patchRes.status === 200) {
+        logOk('payoutMethod actualizado a anchorBolivia ✓');
+        passed++;
+      } else {
+        logWarn(`No se pudo actualizar: ${JSON.stringify(patchRes.data)}`);
+      }
+    } else {
+      logOk('payoutMethod: anchorBolivia ya configurado ✓');
+      passed++;
+    }
+  },
+
   async function step4_loginAdmin() {
     logStep(4, 'Login admin');
     const { status, data } = await request('POST', '/api/v1/auth/login', {
