@@ -626,9 +626,9 @@ export async function dispatchPayout(transaction) {
 
   // ── anchorBolivia: payout manual (Escenario C — Bolivia) ─────────────────
   if (payoutMethod === 'anchorBolivia') {
-    transaction.status = 'processing';
-    await appendIpnLog(transaction, 'anchor_manual_required', 'anchorBolivia', 'processing', {
-      note: 'Payout manual Bolivia — se notificó al admin.',
+    transaction.status = 'payout_pending';
+    await appendIpnLog(transaction, 'anchor_bolivia_payout_pending', 'anchorBolivia', 'payout_pending', {
+      note: 'Payout manual Bolivia — admin debe confirmar transferencia.',
     });
 
     await notifyAdminManualPayout(transaction);
