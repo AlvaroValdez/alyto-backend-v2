@@ -793,7 +793,7 @@ export async function initCrossBorderPayment(req, res) {
 
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
-      status:              corridor.payinMethod === 'manual' ? 'pending' : 'payin_pending',
+      status:              corridor.payinMethod === 'manual' ? 'initiated' : 'payin_pending',
       alytoTransactionId,
     });
   } catch (err) {
@@ -834,15 +834,15 @@ export async function initCrossBorderPayment(req, res) {
       sendEmail(...EMAILS.manualPayinInstructions(user, transaction, manualPaymentInstructions))
         .catch(err => console.error('[CrossBorder] Error email instrucciones:', err.message));
     }
-    sendEmail(...EMAILS.adminManualPayinAlert(transaction, manualPaymentInstructions))
-      .catch(err => console.error('[CrossBorder] Error email admin payin manual:', err.message));
+    sendEmail(...EMAILS.adminBoliviaAlert(transaction))
+      .catch(err => console.error('[CrossBorder] Error email admin Bolivia alert:', err.message));
   }
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────
   if (corridor.payinMethod === 'manual') {
     return res.status(201).json({
       transactionId:       alytoTransactionId,
-      status:              'pending',
+      status:              'initiated',
       payinMethod:         'manual',
       paymentInstructions: manualPaymentInstructions,
       destinationAmount:   transaction.destinationAmount   ?? quotedDestAmount   ?? null,
