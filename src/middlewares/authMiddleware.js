@@ -46,7 +46,8 @@ export async function protect(req, res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // Cargar usuario fresco de DB — detecta cuentas desactivadas post-emisión
-    const user = await User.findById(decoded.id).select('-password');
+    const user = await User.findById(decoded.id)
+      .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId');
 
     if (!user) {
       return res.status(401).json({
