@@ -9,6 +9,7 @@
  *   POST   /qr               — Subir nuevo QR (multipart: label + file)
  *   PATCH  /qr/:qrId         — Activar / desactivar un QR
  *   DELETE /qr/:qrId         — Eliminar un QR permanentemente
+ *   PATCH  /bank-data        — Actualizar datos bancarios de AV Finance SRL
  */
 
 import SRLConfig from '../models/SRLConfig.js';
@@ -29,7 +30,8 @@ export async function getSRLConfig(req, res) {
     ).populate('qrImages.uploadedBy', 'firstName lastName email').lean();
 
     return res.status(200).json({
-      qrImages: doc.qrImages ?? [],
+      qrImages:  doc.qrImages ?? [],
+      bankData:  doc.bankData  ?? {},
       updatedAt: doc.updatedAt,
       total:    (doc.qrImages ?? []).length,
       active:   (doc.qrImages ?? []).filter(q => q.isActive).length,
@@ -203,5 +205,49 @@ export async function deleteSRLQR(req, res) {
     console.error('[SRLConfig] Error en deleteSRLQR:', err.message);
     Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'deleteSRLQR' } });
     return res.status(500).json({ error: 'Error al eliminar el QR.' });
+  }
+}
+
+// ─── PATCH /api/v1/admin/srl-config/bank-data ────────────────────────────────
+
+/**
+ * Actualiza los datos bancarios de AV Finance SRL.
+ * Estos datos se muestran al usuario en las instrucciones de pago manual Bolivia.
+ *
+ * Body: { bankName, accountHolder, accountNumber, accountType }
+ */
+export async function updateBankData(req, res) {
+  try {
+    const { bankName, accountHolder, accountNumber, accountType } = req.body;
+
+    if (!bankName?.trim() || !accountHolder?.trim() || !accountNumber?.trim() || !accountType?.trim()) {
+      return res.status(400).json({ error: 'Todos los campos bancarios son requeridos.' });
+    }
+
+    const doc = await SRLConfig.findOneAndUpdate(
+      { key: 'srl_bolivia' },
+      {
+        $setOnInsert: { key: 'srl_bolivia' },
+        $set: {
+          'bankData.bankName':      bankName.trim(),
+          'bankData.accountHolder': accountHolder.trim(),
+          'bankData.accountNumber': accountNumber.trim(),
+          'bankData.accountType':   accountType.trim(),
+        },
+      },
+      { upsert: true, new: true },
+    ).lean();
+
+    console.info('[SRLConfig] Datos bancarios actualizados.', { adminId: req.user._id });
+
+    return res.status(200).json({
+      bankData: doc.bankData,
+      message:  'Datos bancarios actualizados correctamente.',
+    });
+
+  } catch (err) {
+    console.error('[SRLConfig] Error en updateBankData:', err.message);
+    Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'updateBankData' } });
+    return res.status(500).json({ error: 'Error al actualizar los datos bancarios.' });
   }
 }

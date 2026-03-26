@@ -663,11 +663,20 @@ export async function initCrossBorderPayment(req, res) {
     payinProviderRef = null;
     payinUrl         = null;
 
+    // Leer datos bancarios desde DB (admin los configura); fallback a env vars
+    let dbBankData = {};
+    try {
+      const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' }).select('bankData').lean();
+      dbBankData = srlCfg?.bankData ?? {};
+    } catch (cfgErr) {
+      console.warn('[CrossBorder] No se pudo leer bankData de SRLConfig, usando env vars:', cfgErr.message);
+    }
+
     manualPaymentInstructions = {
-      bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
-      accountHolder: process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
-      accountNumber: process.env.SRL_ACCOUNT_NUMBER ?? '',
-      accountType:   process.env.SRL_ACCOUNT_TYPE   ?? 'Cuenta Corriente',
+      bankName:      dbBankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+      accountHolder: dbBankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
+      accountNumber: dbBankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
+      accountType:   dbBankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,

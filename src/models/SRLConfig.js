@@ -77,6 +77,13 @@ const srlConfigSchema = new Schema(
       type:    [qrImageSchema],
       default: [],
     },
+    /** Datos bancarios de AV Finance SRL — se usan en las instrucciones de pago */
+    bankData: {
+      bankName:      { type: String, default: '' },
+      accountHolder: { type: String, default: '' },
+      accountNumber: { type: String, default: '' },
+      accountType:   { type: String, default: '' },
+    },
   },
   {
     timestamps: true,
