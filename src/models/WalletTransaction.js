@@ -9,12 +9,16 @@
  */
 
 import mongoose from 'mongoose'
-import { nanoid } from 'nanoid'
+import crypto  from 'crypto'
+
+function shortId(len = 6) {
+  return crypto.randomBytes(len).toString('base64url').slice(0, len).toUpperCase()
+}
 
 const walletTransactionSchema = new mongoose.Schema({
   wtxId: {
     type:    String,
-    default: () => `WTX-${Date.now()}-${nanoid(6).toUpperCase()}`,
+    default: () => `WTX-${Date.now()}-${shortId(6)}`,
     unique:  true,
     index:   true,
   },

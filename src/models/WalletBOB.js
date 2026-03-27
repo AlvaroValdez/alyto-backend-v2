@@ -16,12 +16,16 @@
  */
 
 import mongoose from 'mongoose'
-import { nanoid } from 'nanoid'
+import crypto  from 'crypto'
+
+function shortId(len = 6) {
+  return crypto.randomBytes(len).toString('base64url').slice(0, len).toUpperCase()
+}
 
 const walletBOBSchema = new mongoose.Schema({
   walletId: {
     type:    String,
-    default: () => `WAL-SRL-${Date.now()}-${nanoid(6).toUpperCase()}`,
+    default: () => `WAL-SRL-${Date.now()}-${shortId(6)}`,
     unique:  true,
     index:   true,
   },
