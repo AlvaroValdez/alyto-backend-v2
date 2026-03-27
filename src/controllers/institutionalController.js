@@ -162,6 +162,7 @@ export async function initiateCorporateOnRamp(req, res) {
       userId:            user._id.toString(),
       alytoTransactionId,
       memo,
+      customerUuid:      user.harborCustomerUuid ?? user._id.toString(),
     });
   } catch (error) {
     // Marcar la transacción como fallida antes de responder
@@ -206,14 +207,14 @@ export async function initiateCorporateOnRamp(req, res) {
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────
   return res.status(201).json({
-    success:            true,
-    alytoTransactionId: transaction.alytoTransactionId,
-    owlPayOrderId:      owlPayResult.orderId,
-    paymentUrl:         owlPayResult.paymentUrl,
-    estimatedUSDC:      owlPayResult.estimatedUSDC,
-    amount:             owlPayResult.amount,
-    currency:           owlPayResult.currency,
-    status:             'initiated',
+    success:              true,
+    alytoTransactionId:   transaction.alytoTransactionId,
+    owlPayOrderId:        owlPayResult.orderId,
+    transferInstructions: owlPayResult.transferInstructions,
+    estimatedUSDC:        owlPayResult.estimatedUSDC,
+    amount:               owlPayResult.amount,
+    currency:             owlPayResult.currency,
+    status:               'initiated',
   });
 }
 
