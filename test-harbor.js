@@ -15,10 +15,10 @@
 
 import 'dotenv/config';
 
-const HARBOR_BASE =
-  process.env.OWLPAY_BASE_URL ??
-  process.env.OWLPAY_API_URL  ??
-  'https://harbor-sandbox.owlpay.com/api/v1';
+const HARBOR_BASE = (() => {
+  const raw = process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL ?? '';
+  return raw.replace(/\/v\d+$/, '') || 'https://harbor-sandbox.owlpay.com/api';
+})();
 
 const API_KEY = process.env.OWLPAY_API_KEY || '';
 
@@ -84,7 +84,7 @@ async function run() {
   // ── Paso 1: Verificar autenticación ────────────────────────────────────────
   logStep(1, 'Autenticación Harbor (GET /customers)');
 
-  const { status: s1, data: d1 } = await harborRequest('GET', '/customers');
+  const { status: s1, data: d1 } = await harborRequest('GET', '/v1/customers');
 
   const authOk = assert(s1 === 200, `Autenticación correcta (status ${s1})`);
   assert(s1 !== 401, 'API key aceptada por Harbor (no 401 Unauthorized)');
@@ -99,7 +99,7 @@ async function run() {
   // ── Paso 2: Crear customer de prueba ───────────────────────────────────────
   logStep(2, 'Crear customer de prueba (POST /customers)');
 
-  const { status: s2, data: d2 } = await harborRequest('POST', '/customers', {
+  const { status: s2, data: d2 } = await harborRequest('POST', '/v1/customers', {
     type:                        'individual',
     first_name:                  'Test',
     last_name:                   'Alyto',
@@ -108,10 +108,12 @@ async function run() {
     application_customer_uuid:   'test-alyto-harbor-001',
   });
 
+  // 201 = creado, 409 = duplicado por uuid, 422 con "email taken" = también ya existe
+  const emailTaken = s2 === 422 && d2?.errors?.email?.some(e => e.includes('already been taken'));
   assert(
-    s2 === 201 || s2 === 409,
+    s2 === 201 || s2 === 409 || emailTaken,
     `Customer creado o ya existe (status ${s2}) — ${
-      s2 === 201 ? 'creado nuevo' : s2 === 409 ? 'ya existía (OK)' : 'inesperado'
+      s2 === 201 ? 'creado nuevo' : (s2 === 409 || emailTaken) ? 'ya existía (OK)' : 'inesperado'
     }`,
   );
 
