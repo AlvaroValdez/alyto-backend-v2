@@ -32,6 +32,7 @@ import ipnRoutes           from './routes/ipn.js';
 import dashboardRoutes     from './routes/dashboardRoutes.js';
 import kycRoutes           from './routes/kycRoutes.js';
 import kybRoutes           from './routes/kybRoutes.js';
+import walletRoutes        from './routes/walletRoutes.js';
 import { sentryContext }   from './middlewares/sentryContext.js';
 import { handleStripeWebhook }     from './webhooks/stripeWebhook.js';
 import { createQuoteSocketServer }  from './services/quoteSocket.js';
@@ -217,6 +218,7 @@ app.use('/api/v1/regional',      regionalRoutes);
 app.use('/api/v1/ipn',           ipnRoutes);
 app.use('/api/v1/kyc',           kycRoutes);
 app.use('/api/v1/kyb',           kybRoutes);
+app.use('/api/v1/wallet',        walletRoutes);         // Fase 25 — Wallet BOB (SRL Bolivia)
 
 // ─── Rutas de Desarrollo (solo disponibles fuera de producción) ──────────────
 
