@@ -91,28 +91,33 @@ async function owlPayRequest(endpoint, options = {}) {
 // ─── Funciones Exportadas ─────────────────────────────────────────────────────
 
 /**
- * Crea una orden de on-ramp (fiat → cripto) en Harbor/OwlPay.
+ * Crea una orden de on-ramp (fiat → USDC) en Harbor/OwlPay usando el flujo Transfer v2.
  *
- * OwlPay recibe los fondos institucionales en USD y los convierte a USDC,
- * enviándolos directamente a la wallet Stellar de destino.
+ * Flujo de 3 pasos:
+ *   1. POST /v2/transfers/quotes    → obtener quote_id y pricing
+ *   2. (requirements omitido — schema conocido para Stellar on-ramp desde US)
+ *   3. POST /v2/transfers           → crear el transfer con on_behalf_of
  *
  * @param {object} params
- * @param {number} params.amount              - Monto en moneda fiat (USD)
- * @param {string} params.currency            - ISO 4217, debe ser 'USD' para Escenario A
+ * @param {number} params.amount              - Monto en USD
+ * @param {string} params.currency            - ISO 4217, debe ser 'USD'
  * @param {string} params.destinationWallet   - Stellar public key del cliente destino
- * @param {string} params.userId              - ID interno Alyto (para metadata y trazabilidad)
- * @param {string} params.alytoTransactionId  - ID de transacción Alyto para correlación
- * @param {string} [params.memo]              - Memo para la transacción Stellar (opcional)
+ * @param {string} params.userId              - ID interno Alyto (metadata y fallback)
+ * @param {string} params.alytoTransactionId  - Idempotency key
+ * @param {string} [params.memo]              - Memo Stellar (opcional)
+ * @param {string} [params.customerUuid]      - UUID del customer en Harbor (on_behalf_of)
+ * @param {object} [params.beneficiary]       - Datos del beneficiario para Harbor
  * @returns {Promise<OnRampOrderResult>}
  *
  * @typedef {Object} OnRampOrderResult
- * @property {string} orderId           - ID de la orden en OwlPay/Harbor
- * @property {string} status            - Estado inicial ('pending' | 'processing')
- * @property {number} amount            - Monto confirmado en USD
- * @property {string} currency          - Moneda confirmada
- * @property {string} destinationWallet - Wallet Stellar de destino
- * @property {number} estimatedUSDC     - Estimado de USDC a entregar (informativo)
- * @property {string} [paymentUrl]      - URL para instruir el wire transfer institucional
+ * @property {string}      orderId               - UUID del transfer en Harbor
+ * @property {string}      status                - Estado inicial
+ * @property {number}      amount                - Monto confirmado en USD
+ * @property {string}      currency              - Moneda ('USD')
+ * @property {string}      destinationWallet     - Stellar public key destino
+ * @property {number|null} estimatedUSDC         - USDC estimado a entregar
+ * @property {null}        paymentUrl            - No aplica en Harbor v2
+ * @property {object|null} transferInstructions  - Instrucciones wire transfer de Harbor
  */
 export async function createOnRampOrder({
   amount,
@@ -121,60 +126,95 @@ export async function createOnRampOrder({
   userId,
   alytoTransactionId,
   memo,
+  customerUuid,
+  beneficiary = {},
 }) {
-  if (currency !== 'USD') {
-    throw new Error(`[Alyto OwlPay] El on-ramp institucional opera en USD. Moneda recibida: ${currency}`);
-  }
-
+  if (currency !== 'USD') throw new Error('[Alyto OwlPay] El on-ramp opera en USD.');
   if (!destinationWallet || !/^G[A-Z2-7]{55}$/.test(destinationWallet)) {
-    throw new Error('[Alyto OwlPay] destinationWallet debe ser una Stellar public key válida (G...).');
+    throw new Error('[Alyto OwlPay] destinationWallet debe ser una Stellar public key válida.');
   }
+  if (!amount || amount <= 0) throw new Error('[Alyto OwlPay] amount debe ser positivo en USD.');
 
-  if (!amount || amount <= 0) {
-    throw new Error('[Alyto OwlPay] El monto debe ser un número positivo en USD.');
-  }
-
-  // Harbor Transfer v2 — POST /transfers
-  const payload = {
-    type: 'on_ramp',
+  // ── PASO 1: Obtener quote ─────────────────────────────────────────────────
+  const quotePayload = {
     source: {
-      asset:          currency,      // 'USD'
-      amount,
-      payment_method: 'wire',        // método institucional por defecto
+      country: 'US',
+      asset:   'USD',
+      type:    'individual',
     },
     destination: {
-      asset:   'USDC',
-      chain:   'stellar',
-      address: destinationWallet,
-      ...(memo ? { memo } : {}),
+      chain:  'stellar',
+      asset:  'USDC',
+      amount,
+      type:   'individual',
     },
-    // Idempotency key — Harbor idempotentiza por application_transfer_uuid
-    application_transfer_uuid: alytoTransactionId,
-    // customer_uuid del cliente en Harbor (si ya está onboarded)
-    ...(userId ? { customer_uuid: String(userId) } : {}),
+    commission: { amount: 0, percentage: 0 },
   };
 
-  console.info('[Alyto OwlPay] Creando orden de on-ramp institucional:', {
-    amount,
-    currency,
-    alytoTransactionId,
-    // No loguear destinationWallet completa — es dato sensible del cliente
-    walletPrefix: destinationWallet.substring(0, 8) + '...',
+  const quoteRes = await owlPayRequest('/v2/transfers/quotes', {
+    method: 'POST',
+    body:   JSON.stringify(quotePayload),
   });
 
-  const data = await owlPayRequest('/transfers', {
-    method: 'POST',
-    body:   JSON.stringify(payload),
+  const quote   = quoteRes.data?.[0] ?? quoteRes.data ?? quoteRes;
+  const quoteId = quote.id ?? quote.quote_id;
+  if (!quoteId) throw new Error('[Alyto OwlPay] No se obtuvo quote_id de Harbor.');
+
+  console.info('[Alyto OwlPay] Quote obtenido:', {
+    quoteId,
+    sourceAmount:      quote.source_amount,
+    destinationAmount: quote.destination_amount,
+    alytoTransactionId,
+    walletPrefix:      destinationWallet.substring(0, 8) + '...',
   });
+
+  // ── PASO 2: Requirements (omitido — schema conocido para Stellar on-ramp) ─
+
+  // ── PASO 3: Crear el transfer ─────────────────────────────────────────────
+  const transferPayload = {
+    on_behalf_of:              customerUuid ?? userId,
+    quote_id:                  quoteId,
+    application_transfer_uuid: alytoTransactionId,
+    destination: {
+      beneficiary_info: {
+        beneficiary_name:          beneficiary.name        ?? 'AV Finance LLC',
+        beneficiary_dob:           beneficiary.dob         ?? '1990-01-01',
+        beneficiary_id_doc_number: beneficiary.idDocNumber ?? 'LLC-001',
+        beneficiary_address: {
+          street:         beneficiary.street  ?? '1201 N Market St',
+          city:           beneficiary.city    ?? 'Wilmington',
+          state_province: beneficiary.state   ?? 'DE',
+          postal_code:    beneficiary.postal  ?? '19801',
+          country:        beneficiary.country ?? 'US',
+        },
+      },
+      payout_instrument: {
+        address:      destinationWallet,
+        address_memo: memo ?? null,
+      },
+      transfer_purpose:                  'TRANSFER_TO_OWN_ACCOUNT',
+      is_self_transfer:                  true,
+      beneficiary_receiving_wallet_type: 'businessWallet',
+      beneficiary_institution_name:      'Stellar Network',
+    },
+  };
+
+  const transferRes = await owlPayRequest('/v2/transfers', {
+    method: 'POST',
+    body:   JSON.stringify(transferPayload),
+  });
+
+  const transfer = transferRes.data ?? transferRes;
 
   return {
-    orderId:           data.uuid          ?? data.id,
-    status:            data.status        ?? 'pending',
-    amount:            data.source?.amount ?? amount,
-    currency:          data.source?.asset  ?? currency,
-    destinationWallet: data.destination?.address ?? destinationWallet,
-    estimatedUSDC:     data.destination?.amount  ?? null,
-    paymentUrl:        data.payment_url ?? data.transfer_instructions?.url ?? null,
+    orderId:              transfer.uuid          ?? transfer.id,
+    status:               transfer.status        ?? 'pending',
+    amount:               Number(transfer.source?.amount)      || amount,
+    currency:             transfer.source?.asset               ?? 'USD',
+    destinationWallet:    transfer.destination?.payout_instrument?.address ?? destinationWallet,
+    estimatedUSDC:        Number(transfer.destination?.amount) || null,
+    paymentUrl:           null,
+    transferInstructions: transfer.transfer_instructions       ?? null,
   };
 }
 
