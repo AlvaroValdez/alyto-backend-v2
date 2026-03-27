@@ -22,10 +22,14 @@ import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-const OWLPAY_BASE_URL =
-  process.env.OWLPAY_BASE_URL ??
-  process.env.OWLPAY_API_URL  ??
-  'https://harbor-sandbox.owlpay.com/api/v1';
+// Base URL sin versión — cada endpoint incluye su prefijo /v1/ o /v2/ explícitamente.
+// Correcto: https://harbor-sandbox.owlpay.com/api + /v2/transfers = /api/v2/transfers
+// Incorrecto: .../api/v1 + /v2/transfers = /api/v1/v2/transfers (doble versión)
+const OWLPAY_BASE_URL = (() => {
+  const raw = process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL ?? '';
+  // Eliminar sufijo /v1 o /v2 si viene en la env var (compat. con configs antiguas)
+  return raw.replace(/\/v\d+$/, '') || 'https://harbor-sandbox.owlpay.com/api';
+})();
 
 /**
  * Obtiene el OWLPAY_API_KEY desde variables de entorno.
@@ -51,6 +55,8 @@ function getOwlPayApiKey() {
 async function owlPayRequest(endpoint, options = {}) {
   const apiKey = getOwlPayApiKey();
   const url    = `${OWLPAY_BASE_URL}${endpoint}`;
+
+  console.info(`[OwlPay] ${options.method ?? 'GET'} ${url}`);
 
   const headers = {
     'X-API-KEY':    apiKey,
@@ -226,7 +232,7 @@ export async function createOnRampOrder({
  * @returns {Promise<object>} Objeto Order de OwlPay
  */
 export async function getOnRampOrderStatus(orderId) {
-  return owlPayRequest(`/transfers/${orderId}`);
+  return owlPayRequest(`/v2/transfers/${orderId}`);
 }
 
 /**
