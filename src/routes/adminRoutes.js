@@ -59,6 +59,13 @@ import {
   deleteSRLQR,
   updateBankData,
 } from '../controllers/srlConfigController.js';
+import {
+  adminListWallets,
+  adminListPendingDeposits,
+  adminConfirmDeposit,
+  adminFreezeWallet,
+  adminUnfreezeWallet,
+} from '../controllers/walletController.js';
 import multer from 'multer';
 
 const router = Router();
@@ -330,5 +337,43 @@ router.get('/kyb/:businessId', getKYBApplication);
  *   transactionLimits  {object}  — { maxSingleTransaction, maxMonthlyVolume } — solo si approved
  */
 router.patch('/kyb/:businessId/review', reviewKYBApplication);
+
+// ─── Wallet BOB — Fase 25 ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/wallet
+ * Lista paginada de todas las WalletBOB con usuario y saldo.
+ * Query: status?, page?, limit?
+ * IMPORTANTE: esta ruta DEBE ir ANTES de /wallet/deposits/pending y /wallet/:userId/*
+ */
+router.get('/wallet',                    adminListWallets);
+
+/**
+ * GET /api/v1/admin/wallet/deposits/pending
+ * Lista depósitos BOB pendientes de confirmación manual.
+ * IMPORTANTE: esta ruta DEBE ir ANTES de /wallet/:userId/* para que Express
+ * no interprete "deposits" como un userId.
+ */
+router.get('/wallet/deposits/pending',   adminListPendingDeposits);
+
+/**
+ * POST /api/v1/admin/wallet/deposit/confirm
+ * Admin confirma que recibió la transferencia bancaria y acredita el saldo.
+ * Body: { wtxId, bankReference, note? }
+ */
+router.post('/wallet/deposit/confirm',   adminConfirmDeposit);
+
+/**
+ * PATCH /api/v1/admin/wallet/:userId/freeze
+ * Congela la wallet de un usuario por compliance ASFI/UIF.
+ * Body: { reason (requerido), reportNumber? }
+ */
+router.patch('/wallet/:userId/freeze',   adminFreezeWallet);
+
+/**
+ * PATCH /api/v1/admin/wallet/:userId/unfreeze
+ * Descongela la wallet de un usuario.
+ */
+router.patch('/wallet/:userId/unfreeze', adminUnfreezeWallet);
 
 export default router;
