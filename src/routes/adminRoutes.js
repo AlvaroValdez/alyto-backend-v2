@@ -66,6 +66,12 @@ import {
   adminFreezeWallet,
   adminUnfreezeWallet,
 } from '../controllers/walletController.js';
+import {
+  adminListarReclamos,
+  adminReclamosVencimientos,
+  adminGetReclamo,
+  adminResponderReclamo,
+} from '../controllers/reclamosController.js';
 import multer from 'multer';
 
 const router = Router();
@@ -375,5 +381,24 @@ router.patch('/wallet/:userId/freeze',   adminFreezeWallet);
  * Descongela la wallet de un usuario.
  */
 router.patch('/wallet/:userId/unfreeze', adminUnfreezeWallet);
+
+// ─── PRILI — Reclamos ASFI (Fase 27) ─────────────────────────────────────────
+
+/**
+ * IMPORTANTE: /reclamos/vencimientos debe ir ANTES de /reclamos/:reclamoId
+ * para que Express no interprete "vencimientos" como un reclamoId.
+ */
+
+/** GET /api/v1/admin/reclamos — Lista paginada con diasRestantes y flag urgente */
+router.get('/reclamos',              adminListarReclamos);
+
+/** GET /api/v1/admin/reclamos/vencimientos — Reclamos con plazo <= 3 días */
+router.get('/reclamos/vencimientos', adminReclamosVencimientos);
+
+/** GET /api/v1/admin/reclamos/:reclamoId — Detalle completo con documentos base64 */
+router.get('/reclamos/:reclamoId',   adminGetReclamo);
+
+/** PATCH /api/v1/admin/reclamos/:reclamoId — Responder o actualizar status */
+router.patch('/reclamos/:reclamoId', adminResponderReclamo);
 
 export default router;
