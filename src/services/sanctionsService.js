@@ -57,12 +57,15 @@ export async function screenUser({ firstName, lastName, documentNumber } = {}) {
     }
 
     const hits = await SanctionsList.find({ isActive: true, $or: orConditions })
-      .select('entryId fullName listSource reason type')
+      .select('entryId fullName listSource reason type documentNumbers')
       .lean()
 
-    // Filtro adicional por similitud de apellido para reducir falsos positivos
-    // Solo confirmar si el hit contiene tanto firstName como lastName (cuando ambos disponibles)
+    // Filtro adicional para reducir falsos positivos:
+    // - Hits por documento exacto → siempre confirmados (match preciso, sin ambigüedad)
+    // - Hits por nombre/alias → requieren que al menos firstName o lastName aparezca en fullName
+    const docQuery = documentNumber?.trim()
     const confirmed = hits.filter(hit => {
+      if (docQuery && hit.documentNumbers?.includes(docQuery)) return true
       const hitName = normalize(hit.fullName)
       const hasFirst = !firstName || hitName.includes(normalize(firstName))
       const hasLast  = !lastName  || hitName.includes(normalize(lastName))
