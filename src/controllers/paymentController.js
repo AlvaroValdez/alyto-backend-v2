@@ -1838,18 +1838,29 @@ export async function getAvailableCorridors(req, res) {
   const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
   const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
 
-  const legalEntity        = req.user?.legalEntity ?? 'LLC';
-  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
-  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'US';
+  const legalEntity        = req.user?.legalEntity ?? 'SpA';
+  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'CLP';
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'CL';
+
+  // Filtrar por legalEntity directamente para que LLC vea todos sus corredores
+  // (el filtro anterior por originCurrency excluía corredores bo-* de LLC)
+  const baseFilter = {
+    isActive:           true,
+    destinationCountry: { $ne: 'CRYPTO' },   // excluir wallets crypto
+    originCountry:      { $ne: 'ANY' },       // excluir corredores comodín
+  };
+
+  let corridorFilter;
+  if (legalEntity === 'SpA') {
+    // SpA: corredores propios + legacy sin legalEntity
+    corridorFilter = { ...baseFilter, $or: [{ legalEntity: 'SpA' }, { legalEntity: { $exists: false } }] };
+  } else {
+    corridorFilter = { ...baseFilter, legalEntity };
+  }
 
   let corridors;
   try {
-    corridors = await TransactionConfig.find({
-      originCurrency: userOriginCurrency,
-      isActive:       true,
-      originCountry:  { $ne: 'ANY' },           // excluir corredores comodín
-      destinationCountry: { $ne: 'CRYPTO' },    // excluir wallets crypto
-    })
+    corridors = await TransactionConfig.find(corridorFilter)
       .select('corridorId destinationCountry destinationCurrency')
       .lean();
   } catch (err) {
