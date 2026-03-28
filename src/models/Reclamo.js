@@ -79,9 +79,9 @@ const reclamoSchema = new mongoose.Schema({
 
 // ─── Pre-save: calcular plazoVence (10 días hábiles) ─────────────────────────
 
-reclamoSchema.pre('save', function (next) {
+reclamoSchema.pre('save', async function () {
   if (this.isNew) {
-    const fecha = new Date(this.createdAt ?? Date.now())
+    const fecha = new Date()
     let diasHabiles = 0
     while (diasHabiles < 10) {
       fecha.setDate(fecha.getDate() + 1)
@@ -90,7 +90,6 @@ reclamoSchema.pre('save', function (next) {
     }
     this.plazoVence = fecha
   }
-  next()
 })
 
 // ─── Índices ──────────────────────────────────────────────────────────────────
