@@ -29,6 +29,7 @@ import {
   uploadComprobante,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
+import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
 import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
 
 const router = Router();
@@ -115,7 +116,7 @@ router.get('/withdrawal-rules/:countryCode', protect, getWithdrawalRulesControll
  * Body: { corridorId, originAmount, beneficiaryData | beneficiary }
  * Auth: Bearer JWT
  */
-router.post('/crossborder', protect, initCrossBorderPayment);
+router.post('/crossborder', protect, checkSanctions, initCrossBorderPayment);
 
 /**
  * POST /api/v1/payments/payin/fintoc

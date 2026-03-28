@@ -72,6 +72,12 @@ import {
   adminGetReclamo,
   adminResponderReclamo,
 } from '../controllers/reclamosController.js';
+import {
+  listSanctions,
+  addSanction,
+  removeSanction,
+  screenUserManual,
+} from '../controllers/sanctionsController.js';
 import multer from 'multer';
 
 const router = Router();
@@ -400,5 +406,24 @@ router.get('/reclamos/:reclamoId',   adminGetReclamo);
 
 /** PATCH /api/v1/admin/reclamos/:reclamoId — Responder o actualizar status */
 router.patch('/reclamos/:reclamoId', adminResponderReclamo);
+
+// ─── Sanciones AML (Fase 28) ──────────────────────────────────────────────────
+
+/** GET  /api/v1/admin/sanctions — Lista entradas con filtros y paginación */
+router.get('/sanctions',               listSanctions);
+
+/** POST /api/v1/admin/sanctions — Agregar nueva entrada a la lista */
+router.post('/sanctions',              addSanction);
+
+/**
+ * IMPORTANTE: /sanctions/screen debe ir ANTES de /sanctions/:entryId
+ * para evitar que Express interprete "screen" como un entryId.
+ */
+
+/** POST /api/v1/admin/sanctions/screen — Verificación manual de persona/empresa */
+router.post('/sanctions/screen',       screenUserManual);
+
+/** DELETE /api/v1/admin/sanctions/:entryId — Desactivar entrada (baja lógica) */
+router.delete('/sanctions/:entryId',   removeSanction);
 
 export default router;
