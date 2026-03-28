@@ -649,3 +649,150 @@ export async function executeWeb3Transit(transactionId) {
     });
   }
 }
+
+// ─── 8. Trustline Freeze / Unfreeze — Compliance ASFI/UIF (Fase 26) ──────────
+
+/**
+ * freezeUserTrustline(stellarPublicKey, assetCode)
+ *
+ * Registra en Stellar un evento de congelamiento por compliance ASFI/UIF.
+ * Actual implementación: manageData con clave 'alyto_freeze' firmado por la
+ * cuenta SRL corporativa → evidencia inmutable en blockchain.
+ *
+ * Ruta de actualización (cuando SRL emita su propio asset Stellar):
+ *   Reemplazar el manageData por:
+ *   Operation.setTrustLineFlags({ trustor: stellarPublicKey, asset, flags: { authorized: false } })
+ *   firmado por el issuer del asset SRL. Requiere AUTH_REQUIRED + AUTH_REVOCABLE
+ *   en la cuenta emisora.
+ *
+ * FIRE-AND-FORGET: nunca bloquea el congelamiento MongoDB. Los errores
+ * se loguean pero no propagan.
+ *
+ * @param {string} stellarPublicKey - Public key del usuario a congelar
+ * @param {string} [assetCode]      - Código del asset (referencia para el registro)
+ * @returns {Promise<string|null>}  TXID de Stellar, o null si falló / no configurado
+ */
+export async function freezeUserTrustline(stellarPublicKey, assetCode = 'USDC') {
+  if (!stellarPublicKey) {
+    console.warn('[Stellar Compliance] freezeUserTrustline: sin stellarPublicKey — evento omitido.');
+    return null;
+  }
+
+  const secretKey = process.env.STELLAR_SRL_SECRET_KEY;
+  if (!secretKey) {
+    console.warn('[Stellar Compliance] STELLAR_SRL_SECRET_KEY no configurada — freeze omitido.');
+    return null;
+  }
+
+  try {
+    const srlKeypair  = Keypair.fromSecret(secretKey);
+    const srlPublic   = srlKeypair.publicKey();
+    const account     = await horizonServer.loadAccount(srlPublic);
+
+    // Valor del manageData: «FREEZE:<publicKey_recortada>:<asset>:<timestamp>»
+    // Se recorta la public key para mantenerse dentro del límite de 64 bytes de Stellar
+    const freezeValue = `FREEZE:${stellarPublicKey.slice(0, 20)}:${assetCode}:${Date.now()}`;
+
+    const freezeTx = new TransactionBuilder(account, {
+      fee:               BASE_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        Operation.manageData({
+          name:  'alyto_freeze',
+          value: freezeValue.slice(0, 64),
+        }),
+      )
+      .addMemo(Memo.text(`FREEZE ${stellarPublicKey.slice(0, 22)}`))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
+
+    freezeTx.sign(srlKeypair);
+    const result = await horizonServer.submitTransaction(freezeTx);
+
+    console.info('[Stellar Compliance] ✅ Freeze registrado en Stellar:', {
+      txHash:         result.hash,
+      stellarPublicKey,
+      assetCode,
+    });
+
+    return result.hash;
+
+  } catch (error) {
+    // NUNCA propagar — el congelamiento MongoDB ya se ejecutó; Stellar es auditoría
+    console.error('[Stellar Compliance] ❌ Error registrando freeze en Stellar:', error.message);
+    if (error.response?.data?.extras) {
+      console.error('[Stellar Compliance] Extras:', JSON.stringify(error.response.data.extras));
+    }
+    return null;
+  }
+}
+
+/**
+ * unfreezeUserTrustline(stellarPublicKey, assetCode)
+ *
+ * Registra en Stellar un evento de descongelamiento por compliance ASFI.
+ * Mismo patrón que freezeUserTrustline — manageData 'alyto_unfreeze'.
+ *
+ * Ruta de actualización futura:
+ *   Operation.setTrustLineFlags({ trustor: stellarPublicKey, asset, flags: { authorized: true } })
+ *
+ * FIRE-AND-FORGET: nunca bloquea el descongelamiento MongoDB.
+ *
+ * @param {string} stellarPublicKey - Public key del usuario a descongelar
+ * @param {string} [assetCode]      - Código del asset
+ * @returns {Promise<string|null>}  TXID de Stellar, o null si falló / no configurado
+ */
+export async function unfreezeUserTrustline(stellarPublicKey, assetCode = 'USDC') {
+  if (!stellarPublicKey) {
+    console.warn('[Stellar Compliance] unfreezeUserTrustline: sin stellarPublicKey — evento omitido.');
+    return null;
+  }
+
+  const secretKey = process.env.STELLAR_SRL_SECRET_KEY;
+  if (!secretKey) {
+    console.warn('[Stellar Compliance] STELLAR_SRL_SECRET_KEY no configurada — unfreeze omitido.');
+    return null;
+  }
+
+  try {
+    const srlKeypair  = Keypair.fromSecret(secretKey);
+    const srlPublic   = srlKeypair.publicKey();
+    const account     = await horizonServer.loadAccount(srlPublic);
+
+    const unfreezeValue = `UNFREEZE:${stellarPublicKey.slice(0, 20)}:${assetCode}:${Date.now()}`;
+
+    const unfreezeTx = new TransactionBuilder(account, {
+      fee:               BASE_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        Operation.manageData({
+          name:  'alyto_unfreeze',
+          value: unfreezeValue.slice(0, 64),
+        }),
+      )
+      .addMemo(Memo.text(`UNFREEZE ${stellarPublicKey.slice(0, 20)}`))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
+
+    unfreezeTx.sign(srlKeypair);
+    const result = await horizonServer.submitTransaction(unfreezeTx);
+
+    console.info('[Stellar Compliance] ✅ Unfreeze registrado en Stellar:', {
+      txHash:         result.hash,
+      stellarPublicKey,
+      assetCode,
+    });
+
+    return result.hash;
+
+  } catch (error) {
+    // NUNCA propagar — el descongelamiento MongoDB ya se ejecutó
+    console.error('[Stellar Compliance] ❌ Error registrando unfreeze en Stellar:', error.message);
+    if (error.response?.data?.extras) {
+      console.error('[Stellar Compliance] Extras:', JSON.stringify(error.response.data.extras));
+    }
+    return null;
+  }
+}

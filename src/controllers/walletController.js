@@ -30,7 +30,7 @@ import WalletTransaction from '../models/WalletTransaction.js'
 import User             from '../models/User.js'
 import Sentry           from '../services/sentry.js'
 import { sendEmail, EMAILS } from '../services/email.js'
-import { registerAuditTrail } from '../services/stellarService.js'
+import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
 
@@ -604,7 +604,7 @@ export async function adminListPendingDeposits(req, res) {
 /**
  * Congela la wallet de un usuario.
  * Mueve balance → balanceFrozen.
- * TODO Fase 26: llamar freezeUserTrustline() en Stellar (skill trustlines-stellar).
+ * Fase 26: registra evento de congelamiento en Stellar (fire-and-forget).
  */
 export async function adminFreezeWallet(req, res) {
   const session = await mongoose.startSession()
@@ -656,7 +656,10 @@ export async function adminFreezeWallet(req, res) {
 
     await session.commitTransaction()
 
-    // TODO Fase 26: await freezeUserTrustline(wallet.stellarPublicKey, 'USDC')
+    // Fase 26: registrar congelamiento en Stellar como evidencia ASFI (fire-and-forget)
+    if (wallet.stellarPublicKey) {
+      freezeUserTrustline(wallet.stellarPublicKey, 'USDC').catch(() => {})
+    }
 
     // Notificar al usuario
     const frozenUser = await User.findById(userId).lean()
@@ -738,7 +741,10 @@ export async function adminUnfreezeWallet(req, res) {
 
     await session.commitTransaction()
 
-    // TODO Fase 26: await unfreezeUserTrustline(wallet.stellarPublicKey, 'USDC')
+    // Fase 26: registrar descongelamiento en Stellar como evidencia ASFI (fire-and-forget)
+    if (wallet.stellarPublicKey) {
+      unfreezeUserTrustline(wallet.stellarPublicKey, 'USDC').catch(() => {})
+    }
 
     // Notificar al usuario
     const unfrozenUser = await User.findById(userId).lean()
