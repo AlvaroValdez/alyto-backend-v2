@@ -32,7 +32,9 @@ export async function createKycSession(req, res) {
     const user   = req.user;
     const userId = user._id.toString();
 
-    const returnUrl = `${process.env.APP_URL ?? 'http://localhost:5173'}/kyc/return`;
+    // FRONTEND_URL debe apuntar al frontend (https://alyto-frontend-v2.onrender.com).
+    // NO usar APP_URL — esa variable puede apuntar al backend (ngrok tunnel en dev).
+    const returnUrl = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/kyc/return`;
 
     const session = await getStripe().identity.verificationSessions.create({
       type: 'document',
