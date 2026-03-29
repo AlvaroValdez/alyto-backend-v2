@@ -162,20 +162,25 @@ async function notifyAdminManualPayout(transaction) {
 function resolveNetAmountForPayout(transaction) {
   const fees = transaction.fees || {};
 
-  const montoNeto = Math.round(
-    (transaction.originalAmount ?? 0)
-    - (fees.payinFee        || 0)
-    - (fees.alytoCSpread    || 0)
-    - (fees.fixedFee        || 0)
-    - (fees.profitRetention || 0),
-  );
+  // Usar totalDeductedReal si está disponible (transacciones nuevas).
+  // Fallback explícito para transacciones anteriores que no tienen el campo.
+  const totalReal = fees.totalDeductedReal
+    ?? Math.round(
+      (fees.payinFee        || 0)
+      + (fees.alytoCSpread  || 0)
+      + (fees.fixedFee      || 0)
+      + (fees.profitRetention || 0),
+    );
+
+  const montoNeto = Math.round((transaction.originalAmount ?? 0) - totalReal);
 
   console.log('[dispatchPayout] Desglose fees:');
   console.log('  originAmount:', transaction.originalAmount);
   console.log('  - payinFee:', fees.payinFee || 0);
-  console.log('  - alytoCSpread:', fees.alytoCSpread || 0, '(configurable desde admin por corredor)');
-  console.log('  - fixedFee:', fees.fixedFee || 0, '(configurable desde admin por corredor)');
-  console.log('  - profitRetention:', fees.profitRetention || 0, '(configurable desde admin por corredor)');
+  console.log('  - alytoCSpread:', fees.alytoCSpread || 0);
+  console.log('  - fixedFee:', fees.fixedFee || 0);
+  console.log('  - profitRetention:', fees.profitRetention || 0);
+  console.log('  totalDeductedReal (usado):', totalReal);
   console.log('  = montoNeto enviado a Vita:', montoNeto);
 
   if (montoNeto <= 0) {

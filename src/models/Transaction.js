@@ -31,8 +31,12 @@ const feesSchema = new Schema(
     payoutFee:       { type: Number, default: 0 },
     /** Margen de ganancia retenido por Alyto (% sobre el originAmount) */
     profitRetention: { type: Number, default: 0 },
-    /** Total descontado del originAmount antes de enviar a Vita */
-    totalDeducted:   { type: Number, default: 0 },
+    /** Total visible para el usuario (sin profitRetention) */
+    totalDeducted:     { type: Number, default: 0 },
+    /** Total real descontado incluyendo profitRetention (uso interno/auditoría) */
+    totalDeductedReal: { type: Number, default: 0 },
+    /** Moneda en que se expresan los fees */
+    feeCurrency:       { type: String, default: 'CLP' },
   },
   { _id: false },
 );
