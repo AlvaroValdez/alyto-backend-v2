@@ -53,6 +53,7 @@ import {
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate }          from '../services/exchangeRateService.js';
+import { calculateFintocFee } from '../utils/fintocFees.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -588,7 +589,19 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── 3. Calcular fees desde TransactionConfig (configurable por corredor) ─────
-  const payinFee        = Math.round(amount * (corridor.payinFeePercent / 100));
+  // Fintoc cobra fee fijo en UF — usar cálculo dinámico si fintocConfig está presente.
+  // Corredores no-Fintoc (SRL, LLC) usan payinFeePercent como siempre.
+  let payinFee;
+  if (corridor.payinMethod === 'fintoc' && corridor.fintocConfig?.ufValue) {
+    const fintocResult = calculateFintocFee(amount, corridor.fintocConfig);
+    payinFee = fintocResult.fixedFee;
+    console.log('[CrossBorder] Fintoc UF fee:', {
+      ufValue: fintocResult.ufValue, tier: fintocResult.tier,
+      fixedFee: fintocResult.fixedFee, effectivePercent: fintocResult.percentage.toFixed(3) + '%',
+    });
+  } else {
+    payinFee = Math.round(amount * (corridor.payinFeePercent / 100));
+  }
   const alytoCSpread    = Math.round(amount * (corridor.alytoCSpread / 100));
   const fixedFee        = corridor.fixedFee ?? 0;
   const profitRetention = Math.round(amount * (corridor.profitRetentionPercent / 100));
@@ -596,10 +609,6 @@ export async function initCrossBorderPayment(req, res) {
 
   console.log('[CrossBorder] Fees desde TransactionConfig:');
   console.log('  corridorId:', corridorId);
-  console.log('  alytoCSpread%:', corridor.alytoCSpread);
-  console.log('  fixedFee:', corridor.fixedFee);
-  console.log('  payinFeePercent:', corridor.payinFeePercent);
-  console.log('  profitRetentionPercent:', corridor.profitRetentionPercent);
   console.log('  Fees calculados:', { payinFee, alytoCSpread, fixedFee, profitRetention, payoutFee });
 
   // ── 4. Crear payin según el método del corredor ───────────────────────────
@@ -1194,7 +1203,14 @@ export async function getQuote(req, res) {
   // ── 4. Obtener precios en tiempo real desde Vita (corredores no-BOB) ─────
   const round2 = n => Math.round(n * 100) / 100;
 
-  const payinFee        = amount * (corridor.payinFeePercent / 100);
+  // Fintoc cobra fee fijo en UF — usar cálculo dinámico si fintocConfig está presente.
+  let payinFee;
+  if (corridor.payinMethod === 'fintoc' && corridor.fintocConfig?.ufValue) {
+    const fintocResult = calculateFintocFee(amount, corridor.fintocConfig);
+    payinFee = fintocResult.fixedFee;
+  } else {
+    payinFee = amount * (corridor.payinFeePercent / 100);
+  }
   const alytoCSpread    = amount * (corridor.alytoCSpread / 100);
   const fixedFee        = corridor.fixedFee;
   const profitRetention = amount * (corridor.profitRetentionPercent / 100);

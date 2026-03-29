@@ -149,6 +149,21 @@ const transactionConfigSchema = new Schema(
       default: 0,
     },
     /**
+     * Configuración dinámica de fees de Fintoc (solo payinMethod: 'fintoc').
+     * Fintoc cobra un fee FIJO por transacción en UF, no un porcentaje.
+     * Si fintocConfig.ufValue está presente, el cálculo de payinFee usa
+     * calculateFintocFee() en lugar de payinFeePercent.
+     * null/ausente = usa payinFeePercent como fallback.
+     */
+    fintocConfig: {
+      /** Valor actual de la UF en CLP. Actualizar mensualmente desde admin. */
+      ufValue:     { type: Number, min: 0, default: null },
+      /** Tier de volumen Fintoc (1–5). Cambia según txns/mes. */
+      tier:        { type: Number, min: 1, max: 5, default: null },
+      /** Fecha de última actualización por admin (control de vigencia). */
+      lastUpdated: { type: Date, default: null },
+    },
+    /**
      * Fee fija del proveedor de pay-out (ej. Vita cobra fee por withdrawal).
      * Expresada en moneda de destino.
      * 0 = sin fee fija de payout.
