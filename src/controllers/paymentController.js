@@ -1062,7 +1062,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     destinationCurrency: corridor.destinationCurrency,
     exchangeRate:        effectiveRate,
     conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
-    isManualCorridor:    true,
+    isManualCorridor:    corridor.payoutMethod === 'anchorBolivia',
     stellarAsset:        'USDC',
     usdcTransitAmount,
     bobPerUsdc,
@@ -1301,7 +1301,7 @@ export async function getQuote(req, res) {
       destinationCurrency:  corridor.destinationCurrency,
       exchangeRate:         effectiveExchangeRate,
       // ── Ruta de conversión ───────────────────────────────────────────────
-      isManualCorridor:     true,
+      isManualCorridor:     corridor.payoutMethod === 'anchorBolivia',
       conversionPath:       `${corridor.originCurrency} → USDC → ${corridor.destinationCurrency}`,
       stellarAsset:         'USDC',
       usdcTransitAmount,     // USDC que viajan por Stellar como highway
