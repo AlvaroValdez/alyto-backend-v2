@@ -37,6 +37,7 @@ import {
   getCorridorAnalytics,
   getGlobalAnalytics,
   getTransactionComprobante,
+  getCorridorRates,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -59,6 +60,10 @@ import {
   deleteSRLQR,
   updateBankData,
 } from '../controllers/srlConfigController.js';
+import {
+  getSpAConfig,
+  updateSpAConfig,
+} from '../controllers/spaConfigController.js';
 import {
   adminListWallets,
   adminListPendingDeposits,
@@ -165,6 +170,18 @@ router.patch('/transactions/:transactionId/status', updateTransactionStatus);
 router.get('/corridors', listCorridors);
 
 /**
+ * GET /api/v1/admin/corridors/rates
+ *
+ * Tasas en tiempo real de todos los corredores activos.
+ * Muestra fees desglosados, tasa efectiva y monto estimado para un envío de referencia.
+ * IMPORTANTE: esta ruta DEBE ir ANTES de /:corridorId para que Express
+ * no interprete "rates" como un corridorId.
+ *
+ * Query params: referenceAmount (default 100000)
+ */
+router.get('/corridors/rates', getCorridorRates);
+
+/**
  * POST /api/v1/admin/corridors
  * Crea un corredor nuevo. Valida que corridorId no exista.
  * Body: todos los campos requeridos de TransactionConfig.
@@ -254,6 +271,22 @@ router.get('/exchange-rates', listExchangeRates);
  * Query params: startDate, endDate (ISO)
  */
 router.get('/analytics', getGlobalAnalytics);
+
+// ─── SpA Chile — Configuración payin manual CLP ─────────────────────────
+
+/**
+ * GET /api/v1/admin/spa-config
+ * Datos bancarios SpA, tasa CLP/BOB y limites del corredor cl-bo.
+ */
+router.get('/spa-config', getSpAConfig);
+
+/**
+ * PATCH /api/v1/admin/spa-config
+ * Actualiza datos bancarios, tasa y limites.
+ * Body: { bankName?, accountType?, accountNumber?, rut?, accountHolder?,
+ *         bankEmail?, clpPerBob?, minAmountCLP?, maxAmountCLP?, isActive? }
+ */
+router.patch('/spa-config', updateSpAConfig);
 
 // ─── SRL Bolivia — Configuración QR de pago ──────────────────────────────────
 

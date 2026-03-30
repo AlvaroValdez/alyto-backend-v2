@@ -21,6 +21,9 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import { dispatchPayout } from './ipnController.js';
+import { getPrices }      from '../services/vitaWalletService.js';
+import { getBOBRate }     from '../services/exchangeRateService.js';
+import { calculateFintocFee } from '../utils/fintocFees.js';
 
 // ─── getAllUsers ──────────────────────────────────────────────────────────────
 
@@ -973,5 +976,188 @@ export async function getTransactionComprobante(req, res) {
     filename:   transaction.paymentProof.filename,
     size:       transaction.paymentProof.size,
     uploadedAt: transaction.paymentProof.uploadedAt,
+  });
+}
+
+// ─── getCorridorRates ────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/corridors/rates
+ *
+ * Muestra todos los corredores activos con la tasa en tiempo real a la que
+ * se enviaría, fees desglosados y monto estimado para un envío de referencia.
+ *
+ * Query params:
+ *   referenceAmount {number} — monto de referencia (default: 100000)
+ *
+ * Requiere: protect + checkAdmin
+ */
+export async function getCorridorRates(req, res) {
+  const referenceAmount = Number(req.query.referenceAmount) || 100000;
+  const round2 = n => Math.round(n * 100) / 100;
+
+  let corridors;
+  try {
+    corridors = await TransactionConfig.find({ isActive: true })
+      .sort({ corridorId: 1 })
+      .lean();
+  } catch (err) {
+    console.error('[Admin getCorridorRates] Error BD:', err.message);
+    return res.status(500).json({ error: 'Error al obtener los corredores.' });
+  }
+
+  // Una sola llamada a Vita para obtener todas las tasas
+  let vitaPrices = null;
+  try {
+    vitaPrices = await getPrices();
+  } catch (err) {
+    console.warn('[Admin getCorridorRates] Vita /prices no disponible:', err.message);
+  }
+
+  const BOB_USD_RATE = await getBOBRate();
+  const vitaAttrs    = vitaPrices?.withdrawal?.prices?.attributes ?? null;
+
+  const result = corridors.map((c) => {
+    const amount = referenceAmount;
+
+    // ── Calcular payinFee ─────────────────────────────────────────────────
+    let payinFee = 0;
+    let payinFeeDetail = null;
+    if (c.payinMethod === 'fintoc' && c.fintocConfig?.ufValue) {
+      const fintocResult = calculateFintocFee(amount, c.fintocConfig);
+      payinFee = fintocResult.fixedFee;
+      payinFeeDetail = {
+        type: 'fintoc_uf',
+        ufValue: fintocResult.ufValue,
+        tier: fintocResult.tier,
+        tierRate: fintocResult.tierRate,
+        fixedFeeCLP: fintocResult.fixedFee,
+        effectivePercent: round2(fintocResult.percentage),
+      };
+    } else if (c.payinMethod === 'manual') {
+      payinFee = 0;
+      payinFeeDetail = { type: 'manual', fixedFee: 0, note: 'Sin fee de payin' };
+    } else {
+      payinFee = amount * ((c.payinFeePercent ?? 0) / 100);
+      payinFeeDetail = { type: 'percentage', percent: c.payinFeePercent ?? 0 };
+    }
+
+    const alytoCSpread    = amount * ((c.alytoCSpread ?? 0) / 100);
+    const fixedFee        = c.fixedFee ?? 0;
+    const profitRetention = amount * ((c.profitRetentionPercent ?? 0) / 100);
+    const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee);
+    const totalDeductedReal = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+    const netAmount         = round2(amount - totalDeductedReal);
+
+    // ── Calcular tasa y monto destino ─────────────────────────────────────
+    let effectiveRate      = null;
+    let destinationAmount  = null;
+    let rateSource         = null;
+    let rateBreakdown      = null;
+
+    if (vitaAttrs) {
+      const destKey = c.destinationCountry.toLowerCase();
+
+      if (destKey === 'bo' && c.originCurrency === 'CLP') {
+        // CLP→BOB: tasa compuesta via Vita CLP→USD × BOB_USD_RATE
+        const clpToUsd = Number(vitaAttrs.clp_sell?.['us'] ?? NaN);
+        if (isFinite(clpToUsd) && clpToUsd > 0) {
+          effectiveRate = round2(clpToUsd * BOB_USD_RATE * 1000000) / 1000000;
+          const payoutFee = c.payoutFeeFixed ?? 0;
+          destinationAmount = round2((netAmount * effectiveRate) - payoutFee);
+          rateSource = 'vita_clp_usd × bob_usd_rate';
+          rateBreakdown = {
+            clpToUsd:    round2(clpToUsd * 1000000) / 1000000,
+            bobUsdRate:  BOB_USD_RATE,
+            composite:   effectiveRate,
+          };
+        }
+      } else if (c.originCurrency === 'CLP') {
+        // CLP→destino: tasa directa de Vita
+        const rate = Number(vitaAttrs.clp_sell?.[destKey] ?? NaN);
+        if (isFinite(rate) && rate > 0) {
+          effectiveRate = rate;
+          const vitaFixedCost = Number(vitaAttrs.fixed_cost?.[destKey] ?? 0);
+          const payoutFee = vitaFixedCost > 0 ? vitaFixedCost : (c.payoutFeeFixed ?? 0);
+          destinationAmount = round2((netAmount * effectiveRate) - payoutFee);
+          rateSource = 'vita_clp_sell';
+          rateBreakdown = { clpToDestRate: rate, payoutFee };
+        }
+      } else if (c.originCurrency === 'BOB') {
+        // BOB→destino: BOB→USDC (tasa admin) → USDC→destino (tasa Vita)
+        const bobPerUsdc = (c.manualExchangeRate && c.manualExchangeRate > 0)
+          ? c.manualExchangeRate
+          : BOB_USD_RATE;
+        const usdcTransit = round2(netAmount / bobPerUsdc);
+
+        // Tasa USDC→destino via cross-rate
+        const clpToDest = Number(vitaAttrs.clp_sell?.[destKey] ?? NaN);
+        const clpToUsd  = Number(vitaAttrs.clp_sell?.['us'] ?? NaN);
+        if (isFinite(clpToDest) && isFinite(clpToUsd) && clpToUsd > 0) {
+          const usdToDestRate = clpToDest / clpToUsd;
+          const vitaFixedCost = Number(vitaAttrs.fixed_cost?.[destKey] ?? 0);
+          const payoutFee = vitaFixedCost > 0 ? vitaFixedCost : (c.payoutFeeFixed ?? 0);
+          destinationAmount = round2((usdcTransit * usdToDestRate) - payoutFee);
+          effectiveRate = round2((destinationAmount / amount) * 1000000) / 1000000;
+          rateSource = 'bob_admin_rate × vita_usd_dest';
+          rateBreakdown = {
+            bobPerUsdc,
+            usdcTransit,
+            usdToDestRate: round2(usdToDestRate * 100) / 100,
+            payoutFee,
+          };
+        }
+      }
+    }
+
+    return {
+      corridorId:          c.corridorId,
+      originCountry:       c.originCountry,
+      destinationCountry:  c.destinationCountry,
+      originCurrency:      c.originCurrency,
+      destinationCurrency: c.destinationCurrency,
+      payinMethod:         c.payinMethod,
+      payoutMethod:        c.payoutMethod,
+      legalEntity:         c.legalEntity,
+      isActive:            c.isActive,
+      // ── Fees desglosados ───────────────────────────────────────────────
+      fees: {
+        payinFee:          round2(payinFee),
+        payinFeeDetail,
+        alytoCSpread:      round2(alytoCSpread),
+        alytoCSpreadPct:   c.alytoCSpread,
+        fixedFee:          round2(fixedFee),
+        profitRetention:   round2(profitRetention),
+        profitRetentionPct: c.profitRetentionPercent,
+        totalDeducted,
+        totalDeductedReal,
+      },
+      // ── Tasa en tiempo real ────────────────────────────────────────────
+      liveRate: {
+        effectiveRate,
+        rateSource,
+        rateBreakdown,
+        referenceAmount: amount,
+        netAmountAfterFees: netAmount,
+        estimatedDestinationAmount: destinationAmount,
+        currency: c.destinationCurrency,
+      },
+      // ── Config del corredor ────────────────────────────────────────────
+      config: {
+        manualExchangeRate: c.manualExchangeRate,
+        minAmountOrigin:    c.minAmountOrigin,
+        maxAmountOrigin:    c.maxAmountOrigin,
+        fintocConfig:       c.fintocConfig,
+        fallbackPayoutMethod: c.fallbackPayoutMethod,
+      },
+    };
+  });
+
+  return res.json({
+    total:           result.length,
+    referenceAmount,
+    bobUsdRate:      BOB_USD_RATE,
+    vitaAvailable:   !!vitaPrices,
+    corridors:       result,
   });
 }
