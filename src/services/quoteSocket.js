@@ -23,6 +23,7 @@ import { WebSocketServer } from 'ws';
 import jwt                 from 'jsonwebtoken';
 import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
+import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices }       from './vitaWalletService.js';
 import Sentry              from './sentry.js';
 
@@ -145,34 +146,91 @@ function extractPricing(originCurrency, destinationCountry) {
  * @returns {Promise<QuoteUpdateMessage | null>}
  */
 async function computeQuote(state) {
+  const { corridor, originAmount, destinationCountry } = state;
+  if (!corridor || !originAmount || !destinationCountry) return null;
+
+  const amount = Number(originAmount);
+  const round2 = n => Math.round(n * 100) / 100;
+
+  // Diagnóstico — muestra los campos clave del corredor en cada cotización
+  console.info('[Alyto WS] computeQuote corridorFields:', {
+    corridorId:          corridor.corridorId,
+    legalEntity:         corridor.legalEntity,
+    originCurrency:      corridor.originCurrency,
+    destinationCurrency: corridor.destinationCurrency,
+    payinMethod:         corridor.payinMethod,
+    destinationCountry:  corridor.destinationCountry,
+  });
+
+  const payinFee        = round2(amount * (corridor.payinFeePercent       / 100));
+  const alytoCSpread    = round2(amount * (corridor.alytoCSpread          / 100));
+  const fixedFee        = corridor.fixedFee                               ?? 0;
+  const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
+  const totalFees       = round2(payinFee + alytoCSpread + fixedFee);
+
+  // ── Corredor manual CLP→BOB (SpA) — usa SpAConfig, no Vita ─────────────────
+  if (
+    corridor.legalEntity         === 'SpA' &&
+    corridor.destinationCurrency === 'BOB' &&
+    corridor.payinMethod         === 'manual'
+  ) {
+    const spaCfg = await SpAConfig.findOne({ isActive: true }).sort({ createdAt: -1 }).lean();
+    if (!spaCfg?.clpPerBob) {
+      console.warn('[Alyto WS] SpAConfig sin clpPerBob — corredor CLP→BOB no disponible');
+      return null;
+    }
+
+    const { clpPerBob } = spaCfg;
+    const netCLP           = round2(amount - totalFees - profitRetention);
+    const destinationAmount = round2(netCLP / clpPerBob);
+
+    if (destinationAmount <= 0) return null;
+
+    const exchangeRate   = round2(1 / clpPerBob);  // BOB por 1 CLP — para mostrar en UI
+    const quoteExpiresAt = new Date(Date.now() + 3 * 60 * 1000);
+
+    console.info('[Alyto WS] Quote CL-BO manual:', {
+      amount, clpPerBob, netCLP, destinationAmount, exchangeRate,
+    });
+
+    return {
+      type:                'quote_update',
+      corridorId:          corridor.corridorId,
+      originAmount:        amount,
+      originCurrency:      corridor.originCurrency,
+      destinationAmount,
+      destinationCurrency: corridor.destinationCurrency,
+      exchangeRate,
+      fees: {
+        payinFee,
+        alytoCSpread,
+        fixedFee,
+        payoutFee:     0,
+        totalDeducted: round2(totalFees),
+      },
+      quoteExpiresAt,
+      updatedAt: new Date(),
+      stale:     false,
+    };
+  }
+
+  // ── Corredores vía Vita ─────────────────────────────────────────────────────
   if (isCacheStale()) {
     await refreshVitaCache();
   }
-
-  const { corridor, originAmount, destinationCountry } = state;
-  if (!corridor || !originAmount || !destinationCountry) return null;
 
   const pricing = extractPricing(corridor.originCurrency, destinationCountry);
   if (!pricing) return null;
 
   const { rate: exchangeRate, fixedCost: vitaFixedCost } = pricing;
-  const amount  = Number(originAmount);
-  const round2  = n => Math.round(n * 100) / 100;
-
-  // Misma fórmula que getQuote en paymentController.js
-  const payinFee        = amount * (corridor.payinFeePercent    / 100);
-  const alytoCSpread    = amount * (corridor.alytoCSpread       / 100);
-  const fixedFee        = corridor.fixedFee                     ?? 0;
-  const profitRetention = amount * (corridor.profitRetentionPercent / 100);
-  const totalFees       = payinFee + alytoCSpread + fixedFee;
-  const amountAfterFees = amount - totalFees - profitRetention;
-  const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
+  const amountAfterFees   = round2(amount - totalFees - profitRetention);
+  const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
   const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
 
   if (destinationAmount <= 0) return null;
 
-  const localExpiry = new Date(Date.now() + 3 * 60 * 1000);
-  const vitaExpiry  = pricing.validUntil ? new Date(pricing.validUntil) : null;
+  const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+  const vitaExpiry     = pricing.validUntil ? new Date(pricing.validUntil) : null;
   const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
   return {
@@ -184,15 +242,15 @@ async function computeQuote(state) {
     destinationCurrency: corridor.destinationCurrency,
     exchangeRate,
     fees: {
-      payinFee:      round2(payinFee),
-      alytoCSpread:  round2(alytoCSpread),
-      fixedFee:      round2(fixedFee),
+      payinFee,
+      alytoCSpread,
+      fixedFee,
       payoutFee:     round2(payoutFee),
       totalDeducted: round2(totalFees + payoutFee),
     },
     quoteExpiresAt,
     updatedAt:  new Date(),
-    stale:      !vitaCache.prices,  // true si Vita no respondió y estamos usando cache expirado
+    stale:      !vitaCache.prices,
   };
 }
 
