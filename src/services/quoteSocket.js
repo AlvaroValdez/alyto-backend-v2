@@ -181,16 +181,19 @@ async function computeQuote(state) {
     }
 
     const { clpPerBob } = spaCfg;
-    const netCLP           = round2(amount - totalFees - profitRetention);
+    const netCLP            = round2(amount - totalFees - profitRetention);
     const destinationAmount = round2(netCLP / clpPerBob);
 
     if (destinationAmount <= 0) return null;
 
-    const exchangeRate   = round2(1 / clpPerBob);  // BOB por 1 CLP — para mostrar en UI
+    // Tasa efectiva all-in: absorbe comisiones dentro de la tasa visible al usuario.
+    // El usuario ve: 1 CLP = X BOB donde X ya incluye nuestro margen.
+    const effectiveRate  = +(destinationAmount / amount).toFixed(6);
     const quoteExpiresAt = new Date(Date.now() + 3 * 60 * 1000);
 
     console.info('[Alyto WS] Quote CL-BO manual:', {
-      amount, clpPerBob, netCLP, destinationAmount, exchangeRate,
+      amount, clpPerBob, netCLP, destinationAmount, effectiveRate,
+      grossRate: +(1 / clpPerBob).toFixed(6),
     });
 
     return {
@@ -200,13 +203,14 @@ async function computeQuote(state) {
       originCurrency:      corridor.originCurrency,
       destinationAmount,
       destinationCurrency: corridor.destinationCurrency,
-      exchangeRate,
+      exchangeRate:        effectiveRate,
+      isManualCorridor:    true,   // FE usa esto para ocultar desglose de fees
       fees: {
-        payinFee,
-        alytoCSpread,
-        fixedFee,
+        payinFee:      0,
+        alytoCSpread:  0,
+        fixedFee:      0,
         payoutFee:     0,
-        totalDeducted: round2(totalFees),
+        totalDeducted: 0,
       },
       quoteExpiresAt,
       updatedAt: new Date(),
