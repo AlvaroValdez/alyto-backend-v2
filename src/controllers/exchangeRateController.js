@@ -181,14 +181,21 @@ export async function updateCLPBOBRate(req, res) {
       upsertPair('CLP-BOB',  clpPerBob,  'calculated'),
     ]);
 
-    // Sync SpAConfig.clpPerBob
+    // Sync SpAConfig.clpPerBob — usar el mismo filtro que usa el quote engine
     const { default: SpAConfig } = await import('../models/SpAConfig.js');
-    let spaConfig = await SpAConfig.findOne().sort({ createdAt: -1 });
+    // Primero buscar el documento activo (mismo que usa el quote)
+    let spaConfig = await SpAConfig.findOne({ isActive: true }).sort({ createdAt: -1 });
+    // Fallback: cualquier documento si no hay activo
+    if (!spaConfig) spaConfig = await SpAConfig.findOne().sort({ createdAt: -1 });
     if (spaConfig) {
-      spaConfig.clpPerBob = clpPerBob;
-      spaConfig.updatedBy = adminId;
+      spaConfig.clpPerBob  = clpPerBob;
+      spaConfig.clpPerUsdt = clpPerUsdt;
+      spaConfig.usdtPerBob = bobPerUsdt;
+      spaConfig.updatedBy  = adminId;
       await spaConfig.save();
-      console.info(`[ExchangeRate] SpAConfig.clpPerBob sincronizado → ${clpPerBob}`);
+      console.info(`[ExchangeRate] SpAConfig sincronizado → clpPerBob=${clpPerBob}, clpPerUsdt=${clpPerUsdt}, usdtPerBob=${bobPerUsdt}`);
+    } else {
+      console.warn('[ExchangeRate] No se encontró SpAConfig para sincronizar clpPerBob');
     }
 
     console.info(

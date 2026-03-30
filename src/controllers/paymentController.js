@@ -1422,6 +1422,15 @@ export async function getQuote(req, res) {
 
     const { clpPerBob, minAmountCLP, maxAmountCLP } = spaCfg;
 
+    console.info('[Quote CL-BO] SpAConfig leído:', {
+      clpPerBob,
+      clpPerUsdt: spaCfg.clpPerUsdt,
+      usdtPerBob: spaCfg.usdtPerBob,
+      isActive:   spaCfg.isActive,
+      _id:        spaCfg._id,
+      updatedAt:  spaCfg.updatedAt,
+    });
+
     // Validar limites desde SpAConfig (mas especificos que TransactionConfig)
     if (amount < (minAmountCLP ?? 10000)) {
       return res.status(400).json({
