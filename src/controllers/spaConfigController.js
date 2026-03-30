@@ -33,7 +33,8 @@ export async function updateSpAConfig(req, res) {
     const {
       bankName, accountType, accountNumber, rut,
       accountHolder, bankEmail,
-      clpPerBob, minAmountCLP, maxAmountCLP, isActive,
+      clpPerBob, clpPerUsdt, usdtPerBob,
+      minAmountCLP, maxAmountCLP, isActive,
     } = req.body;
 
     // Validaciones
@@ -61,6 +62,8 @@ export async function updateSpAConfig(req, res) {
     if (rut           !== undefined) config.rut           = rut;
     if (accountHolder !== undefined) config.accountHolder = accountHolder;
     if (bankEmail     !== undefined) config.bankEmail     = bankEmail;
+    if (clpPerUsdt    !== undefined) config.clpPerUsdt    = Number(clpPerUsdt);
+    if (usdtPerBob    !== undefined) config.usdtPerBob    = Number(usdtPerBob);
     if (clpPerBob     !== undefined) config.clpPerBob     = Number(clpPerBob);
     if (minAmountCLP  !== undefined) config.minAmountCLP  = Number(minAmountCLP);
     if (maxAmountCLP  !== undefined) config.maxAmountCLP  = Number(maxAmountCLP);
