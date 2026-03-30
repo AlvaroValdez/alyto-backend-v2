@@ -47,6 +47,8 @@ import {
 import {
   upsertExchangeRate,
   listExchangeRates,
+  getCLPBOBRate,
+  updateCLPBOBRate,
 } from '../controllers/exchangeRateController.js';
 import {
   listKYBApplications,
@@ -249,6 +251,20 @@ router.get('/funding', listFunding);
 router.get('/funding/balance', getFundingBalance);
 
 // ─── Tasas de Cambio ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/exchange-rates/clp-bob
+ * Tasas del corredor CLP→BOB: CLP/USDT, BOB/USDT, CLP/BOB (calculada).
+ * IMPORTANTE: debe ir ANTES de /exchange-rates genérico.
+ */
+router.get('/exchange-rates/clp-bob', getCLPBOBRate);
+
+/**
+ * PATCH /api/v1/admin/exchange-rates/clp-bob
+ * Actualiza CLP/USDT + BOB/USDT, calcula CLP/BOB, sincroniza SpAConfig.clpPerBob.
+ * Body: { clpPerUsdt, bobPerUsdt, note? }
+ */
+router.patch('/exchange-rates/clp-bob', updateCLPBOBRate);
 
 /**
  * POST /api/v1/admin/exchange-rates

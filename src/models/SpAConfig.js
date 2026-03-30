@@ -26,8 +26,11 @@ const spAConfigSchema = new mongoose.Schema(
     bankEmail:     { type: String, default: '' },
 
     // ── Tasa CLP/BOB ─────────────────────────────────────────────────────
-    // Expresada como CLP por 1 BOB (ej: 99.59 → 1 BOB = 99.59 CLP)
-    // Se calcula: precio_compra_USDT_CLP / precio_venta_USDT_BOB
+    // clpPerUsdt: precio compra USDT en CLP (Binance P2P). Ej: 926.82
+    clpPerUsdt: { type: Number, default: null },
+    // usdtPerBob: precio venta USDT en BOB (Binance P2P). Ej: 9.31
+    usdtPerBob: { type: Number, default: null },
+    // clpPerBob: CLP por 1 BOB = clpPerUsdt / usdtPerBob. Ej: 99.55
     clpPerBob: { type: Number, default: 99.59 },
 
     // ── Limites del corredor cl-bo ────────────────────────────────────────
