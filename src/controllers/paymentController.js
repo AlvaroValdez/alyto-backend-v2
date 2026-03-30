@@ -577,14 +577,14 @@ export async function initCrossBorderPayment(req, res) {
     return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado o inactivo.` });
   }
 
-  // Validar que el corredor corresponde a la moneda origen del usuario
-  const ENTITY_CURRENCY_MAP_CBP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
-  const userOriginCurrency = ENTITY_CURRENCY_MAP_CBP[req.user?.legalEntity] ?? 'USD';
-  if (corridor.originCurrency !== userOriginCurrency) {
+  // Validar que el usuario tiene acceso al país de origen del corredor
+  const ENTITY_COUNTRY_MAP_CBP = { SpA: 'CL', SRL: 'BO', LLC: 'US' };
+  const userOriginCountryCBP   = ENTITY_COUNTRY_MAP_CBP[req.user?.legalEntity] ?? req.user?.residenceCountry ?? 'CL';
+  if (corridor.originCountry !== userOriginCountryCBP) {
     return res.status(403).json({
-      error: 'Este corredor no está disponible para tu cuenta.',
-      expected: userOriginCurrency,
-      corridorCurrency: corridor.originCurrency,
+      error: 'No tienes acceso a este corredor.',
+      userOriginCountry:     userOriginCountryCBP,
+      corridorOriginCountry: corridor.originCountry,
     });
   }
 
@@ -1327,13 +1327,9 @@ export async function getQuote(req, res) {
     });
   }
 
-  // Determinar moneda origen según entidad del usuario autenticado
-  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
-  const userOriginCurrency  = ENTITY_CURRENCY_MAP[req.user?.legalEntity] ?? 'USD';
-
   // ── 2. Buscar corredor activo en TransactionConfig ─────────────────────────
-  // Si se proporciona corridorId, buscar directamente por slug (soporta múltiples
-  // corredores por ruta, cada uno con distinto payinMethod).
+  // Buscar por países de origen/destino sin filtrar por legalEntity del usuario.
+  // El corredor cl-bo es SpA pero cualquier usuario con acceso a CL puede usarlo.
   let corridor;
   try {
     if (corridorId) {
@@ -1347,7 +1343,6 @@ export async function getQuote(req, res) {
       corridor = await TransactionConfig.findOne({
         originCountry:      origin,
         destinationCountry: dest,
-        originCurrency:     userOriginCurrency,
         isActive:           true,
       }).lean();
     }
@@ -1356,7 +1351,6 @@ export async function getQuote(req, res) {
       corridorId: corridorId ?? null,
       originCountry: originCountry?.toUpperCase(),
       destinationCountry: destinationCountry?.toUpperCase(),
-      originCurrency: userOriginCurrency,
       userId,
       error: err.message,
     });
@@ -1372,12 +1366,22 @@ export async function getQuote(req, res) {
       corridorId: corridorId ?? null,
       originCountry: origin,
       destinationCountry: dest,
-      originCurrency: userOriginCurrency,
       userId,
       legalEntity: req.user?.legalEntity,
     });
     return res.status(404).json({
       error: `Corredor no disponible para tu país de origen (${origin} → ${dest}).`,
+    });
+  }
+
+  // Verificar que el usuario tiene acceso al país de origen del corredor
+  const ENTITY_COUNTRY_MAP = { SpA: 'CL', SRL: 'BO', LLC: 'US' };
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[req.user?.legalEntity] ?? req.user?.residenceCountry ?? 'CL';
+  if (corridor.originCountry !== userOriginCountry) {
+    return res.status(403).json({
+      error: 'No tienes acceso a este corredor.',
+      userOriginCountry,
+      corridorOriginCountry: corridor.originCountry,
     });
   }
 
