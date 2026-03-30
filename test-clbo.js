@@ -22,7 +22,7 @@
  *
  * Variables requeridas en .env:
  *   TEST_ADMIN_EMAIL, TEST_ADMIN_PASSWORD
- *   TEST_USER_EMAIL, TEST_USER_PASSWORD (usuario SpA)
+ *   TEST_USER_SPA_EMAIL, TEST_USER_SPA_PASSWORD (usuario SpA)
  *   API_URL (default: http://localhost:3000)
  *   MONGODB_URI (para pasos 2-3 de verificacion directa)
  */
@@ -43,8 +43,8 @@ const CREDS = {
     password: process.env.TEST_ADMIN_PASSWORD ?? 'Admin1234!',
   },
   user: {
-    email:    process.env.TEST_USER_EMAIL    ?? 'test@avfinance.net',
-    password: process.env.TEST_USER_PASSWORD ?? 'Test1234!',
+    email:    process.env.TEST_USER_SPA_EMAIL    ?? 'test-spa@avfinance.net',
+    password: process.env.TEST_USER_SPA_PASSWORD ?? 'Test1234!',
   },
 };
 
