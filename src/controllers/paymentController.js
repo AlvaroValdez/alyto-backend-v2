@@ -588,7 +588,199 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── 3. Calcular fees desde TransactionConfig (configurable por corredor) ─────
+  // ── 3a. Corredor cl-bo manual: CLP → BOB (SpA payin TEF + anchorBolivia) ──
+  if (
+    corridor.legalEntity         === 'SpA' &&
+    corridor.destinationCurrency === 'BOB' &&
+    corridor.payinMethod         === 'manual'
+  ) {
+    const SpAConfig = (await import('../models/SpAConfig.js')).default;
+    const spaCfg = await SpAConfig.findOne({ isActive: true }).lean();
+
+    if (!spaCfg?.clpPerBob || !spaCfg?.accountNumber) {
+      return res.status(503).json({
+        error: 'El corredor CLP → BOB no esta disponible en este momento.',
+        code:  'SPA_CONFIG_MISSING',
+      });
+    }
+
+    const { clpPerBob } = spaCfg;
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
+    const fixedFeeVal       = corridor.fixedFee ?? 0;
+    const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
+    const totalDeductedReal = round2(spreadFee + fixedFeeVal + profitFee);
+    const netCLP            = round2(amount - totalDeductedReal);
+    const destinationBOB    = round2(netCLP / clpPerBob);
+
+    if (destinationBOB <= 0 || netCLP <= 0) {
+      return res.status(400).json({ error: 'El monto ingresado no cubre los fees minimos.' });
+    }
+
+    const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'B'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const paymentRef = req.body.paymentRef ?? `ALY-${Date.now().toString(36).toUpperCase()}`;
+
+    // Extraer comprobante de pago (base64)
+    const { paymentProofBase64, paymentProofMimetype } = req.body;
+    let paymentProof = undefined;
+    if (paymentProofBase64) {
+      const ext = (paymentProofMimetype ?? 'image/jpeg').split('/')[1] ?? 'jpg';
+      paymentProof = {
+        data:       paymentProofBase64,
+        mimetype:   paymentProofMimetype ?? 'image/jpeg',
+        filename:   `comprobante-${alytoTransactionId}.${ext}`,
+        uploadedAt: new Date(),
+      };
+    }
+
+    // Construir beneficiario
+    const ben = beneficiaryData ?? legacyBeneficiary ?? {};
+    const beneficiaryDoc = {
+      firstName:      ben.firstName  ?? '',
+      lastName:       ben.lastName   ?? '',
+      accountType:    ben.accountType ?? '',
+      accountBank:    ben.accountNumber ?? '',
+      bankCode:       ben.bankName   ?? '',
+      dynamicFields:  ben,
+    };
+    // Si es QR, guardar la imagen en dynamicFields
+    if (ben.type === 'qr_image' && ben.qrImageBase64) {
+      beneficiaryDoc.dynamicFields = {
+        ...ben,
+        qrImageBase64:   ben.qrImageBase64,
+        qrImageMimetype: ben.qrImageMimetype ?? 'image/png',
+      };
+    }
+
+    let transaction;
+    try {
+      transaction = await Transaction.create({
+        userId,
+        legalEntity:         corridor.legalEntity ?? 'SpA',
+        operationType:       'crossBorderPayment',
+        routingScenario:     corridor.routingScenario ?? 'B',
+        corridorId:          corridor._id,
+
+        originalAmount:      amount,
+        originCurrency:      'CLP',
+        originCountry:       'CL',
+        destinationCountry:  'BO',
+        destinationCurrency: 'BOB',
+        destinationAmount:   destinationBOB,
+        exchangeRate:        clpPerBob,
+        exchangeRateLockedAt: new Date(),
+
+        fees: {
+          spreadFee,
+          fixedFee:          fixedFeeVal,
+          profitRetention:   profitFee,
+          totalDeducted:     totalDeductedReal,
+          totalDeductedReal,
+          feeCurrency:       'CLP',
+        },
+
+        beneficiary:    beneficiaryDoc,
+        paymentProof,
+
+        providersUsed:  ['payin:manual'],
+        paymentLegs:    [{ stage: 'payin', provider: 'manual', status: 'pending' }],
+
+        paymentInstructions: {
+          bankName:      spaCfg.bankName,
+          accountType:   spaCfg.accountType,
+          accountNumber: spaCfg.accountNumber,
+          rut:           spaCfg.rut,
+          accountHolder: spaCfg.accountHolder,
+          bankEmail:     spaCfg.bankEmail,
+          currency:      'CLP',
+          amount,
+          reference:     paymentRef,
+        },
+
+        status:             'payin_pending',
+        alytoTransactionId,
+      });
+    } catch (err) {
+      console.error('[CrossBorder CL-BO] Error creando transaccion:', {
+        corridorId: corridor.corridorId, error: err.message,
+      });
+      Sentry.captureException(err);
+      return res.status(500).json({ error: 'Error interno al crear la transaccion.' });
+    }
+
+    // Emails en paralelo (fire-and-forget)
+    const user = await User.findById(userId).select('email firstName lastName').lean();
+    if (user?.email) {
+      sendEmail(
+        user.email,
+        process.env.SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS ?? '',
+        {
+          userName:       user.firstName ?? 'Usuario',
+          amount:         amount.toLocaleString('es-CL'),
+          paymentRef,
+          bankName:       spaCfg.bankName,
+          accountType:    spaCfg.accountType,
+          accountNumber:  spaCfg.accountNumber,
+          rut:            spaCfg.rut,
+          accountHolder:  spaCfg.accountHolder,
+          bankEmail:      spaCfg.bankEmail,
+          totalDeducted:  totalDeductedReal.toLocaleString('es-CL'),
+          destinationBOB: destinationBOB.toFixed(2),
+          clpPerBob:      clpPerBob.toFixed(2),
+        },
+      ).catch(err => console.error('[Email] Error CLP-BOB instrucciones:', err.message));
+    }
+    // Alerta admin
+    sendEmail(
+      process.env.ADMIN_EMAIL ?? '',
+      process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB ?? '',
+      {
+        transactionId:  alytoTransactionId,
+        userName:       `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
+        userEmail:      user?.email ?? '',
+        amount:         amount.toLocaleString('es-CL'),
+        paymentRef,
+        beneficiaryType: ben.type ?? 'bank_data',
+        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+        bankName:        ben.bankName ?? '',
+        accountNumber:   ben.accountNumber ?? '',
+        hasProof:        paymentProofBase64 ? 'Si' : 'No',
+        ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+      },
+    ).catch(err => console.error('[Email] Error admin CLP-BOB alert:', err.message));
+
+    console.info('[CrossBorder CL-BO] Transaccion creada:', {
+      alytoTransactionId,
+      amount,
+      destinationBOB,
+      clpPerBob,
+      totalDeductedReal,
+      beneficiaryType: ben.type ?? 'bank_data',
+    });
+
+    return res.status(201).json({
+      alytoTransactionId,
+      status:              'payin_pending',
+      message:             'Transaccion creada. Realiza la transferencia y recibiras confirmacion.',
+      paymentRef,
+      payinInstructions: {
+        bankName:      spaCfg.bankName,
+        accountType:   spaCfg.accountType,
+        accountNumber: spaCfg.accountNumber,
+        rut:           spaCfg.rut,
+        accountHolder: spaCfg.accountHolder,
+        bankEmail:     spaCfg.bankEmail,
+        amount,
+        reference:     paymentRef,
+        currency:      'CLP',
+      },
+      destinationAmount:   destinationBOB,
+      destinationCurrency: 'BOB',
+    });
+  }
+
+  // ── 3b. Calcular fees desde TransactionConfig (configurable por corredor) ────
   // Fintoc cobra fee fijo en UF — usar cálculo dinámico si fintocConfig está presente.
   // Corredores no-Fintoc (SRL, LLC) usan payinFeePercent como siempre.
   let payinFee;
@@ -1110,7 +1302,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
  * Auth: Bearer JWT (protect middleware)
  */
 export async function getQuote(req, res) {
-  let { originCountry, destinationCountry, originAmount } = req.query;
+  let { originCountry, destinationCountry, originAmount, corridorId } = req.query;
   const userId = req.user?._id?.toString();
 
   // ── 1. Validar query params — originCountry con fallback por legalEntity ────
@@ -1122,9 +1314,9 @@ export async function getQuote(req, res) {
     }
   }
 
-  if (!originCountry || !destinationCountry || !originAmount) {
+  if (!originAmount || (!corridorId && (!originCountry || !destinationCountry))) {
     return res.status(400).json({
-      error: 'Parámetros requeridos: originCountry, destinationCountry, originAmount.',
+      error: 'Parámetros requeridos: originAmount + (corridorId | originCountry + destinationCountry).',
     });
   }
 
@@ -1135,26 +1327,35 @@ export async function getQuote(req, res) {
     });
   }
 
-  const origin = originCountry.toUpperCase();
-  const dest   = destinationCountry.toUpperCase();
-
   // Determinar moneda origen según entidad del usuario autenticado
   const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
   const userOriginCurrency  = ENTITY_CURRENCY_MAP[req.user?.legalEntity] ?? 'USD';
 
   // ── 2. Buscar corredor activo en TransactionConfig ─────────────────────────
+  // Si se proporciona corridorId, buscar directamente por slug (soporta múltiples
+  // corredores por ruta, cada uno con distinto payinMethod).
   let corridor;
   try {
-    corridor = await TransactionConfig.findOne({
-      originCountry:      origin,
-      destinationCountry: dest,
-      originCurrency:     userOriginCurrency,
-      isActive:           true,
-    }).lean();
+    if (corridorId) {
+      corridor = await TransactionConfig.findOne({
+        corridorId: corridorId.toLowerCase(),
+        isActive:   true,
+      }).lean();
+    } else {
+      const origin = originCountry.toUpperCase();
+      const dest   = destinationCountry.toUpperCase();
+      corridor = await TransactionConfig.findOne({
+        originCountry:      origin,
+        destinationCountry: dest,
+        originCurrency:     userOriginCurrency,
+        isActive:           true,
+      }).lean();
+    }
   } catch (err) {
     console.error('[Alyto Quote] Error buscando corredor en BD:', {
-      originCountry: origin,
-      destinationCountry: dest,
+      corridorId: corridorId ?? null,
+      originCountry: originCountry?.toUpperCase(),
+      destinationCountry: destinationCountry?.toUpperCase(),
       originCurrency: userOriginCurrency,
       userId,
       error: err.message,
@@ -1162,8 +1363,13 @@ export async function getQuote(req, res) {
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
+  // Derivar origin/dest del corredor cuando se buscó por corridorId
+  const origin = corridor?.originCountry      ?? originCountry?.toUpperCase();
+  const dest   = corridor?.destinationCountry ?? destinationCountry?.toUpperCase();
+
   if (!corridor) {
     console.warn('[Alyto Quote] Corredor no encontrado:', {
+      corridorId: corridorId ?? null,
       originCountry: origin,
       destinationCountry: dest,
       originCurrency: userOriginCurrency,
@@ -1192,7 +1398,99 @@ export async function getQuote(req, res) {
     });
   }
 
-  // ── 3. Cotización BOB: early exit antes de llamar a Vita ─────────────────
+  // ── 3a. Corredor cl-bo: CLP → BOB manual ─────────────────────────────────
+  // Payin TEF manual SpA · Payout anchorBolivia manual.
+  // Tasa desde SpAConfig (CLP por 1 BOB). No usa Vita.
+  if (
+    corridor.legalEntity         === 'SpA' &&
+    corridor.destinationCurrency === 'BOB' &&
+    corridor.payinMethod         === 'manual'
+  ) {
+    const SpAConfig = (await import('../models/SpAConfig.js')).default;
+    const spaCfg = await SpAConfig.findOne({ isActive: true }).lean();
+
+    if (!spaCfg?.clpPerBob || !spaCfg?.accountNumber) {
+      return res.status(503).json({
+        error: 'El corredor CLP → BOB no esta disponible en este momento.',
+        code:  'SPA_CONFIG_MISSING',
+      });
+    }
+
+    const { clpPerBob, minAmountCLP, maxAmountCLP } = spaCfg;
+
+    // Validar limites desde SpAConfig (mas especificos que TransactionConfig)
+    if (amount < (minAmountCLP ?? 10000)) {
+      return res.status(400).json({
+        error: `Monto minimo: ${(minAmountCLP ?? 10000).toLocaleString('es-CL')} CLP`,
+      });
+    }
+    if (amount > (maxAmountCLP ?? 5000000)) {
+      return res.status(400).json({
+        error: `Monto maximo: ${(maxAmountCLP ?? 5000000).toLocaleString('es-CL')} CLP`,
+      });
+    }
+
+    // ── CALCULO EXACTO — Regla de Oro ─────────────────────────────────────
+    const round2 = (n) => Math.round(n * 100) / 100;
+
+    const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
+    const fixedFee          = corridor.fixedFee ?? 0;
+    const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
+    const totalDeductedReal = round2(spreadFee + fixedFee + profitFee);
+    const netCLP            = round2(amount - totalDeductedReal);
+    const destinationBOB    = round2(netCLP / clpPerBob);
+
+    // Verificacion de integridad en runtime
+    if (destinationBOB <= 0 || netCLP <= 0) {
+      console.error('[Quote CL-BO] Calculo invalido:', {
+        amount, spreadFee, fixedFee, profitFee, netCLP, destinationBOB,
+      });
+      return res.status(400).json({ error: 'El monto ingresado no cubre los fees minimos.' });
+    }
+
+    const paymentRef = `ALY-${Date.now().toString(36).toUpperCase()}`;
+
+    return res.status(200).json({
+      corridorId:             corridor.corridorId,
+      originCountry:          'CL',
+      destinationCountry:     'BO',
+      originCurrency:         'CLP',
+      destinationCurrency:    'BOB',
+      originAmount:           amount,
+      destinationAmount:      destinationBOB,
+      exchangeRate:           clpPerBob,
+      exchangeRateDisplay:    `1 BOB = ${clpPerBob.toFixed(2)} CLP`,
+      payinMethod:            'manual',
+      payoutMethod:           'anchorBolivia',
+      isManualCorridor:       true,
+      paymentRef,
+
+      fees: {
+        // Visible al usuario (total real, sin desglose de profit)
+        totalDeducted:     totalDeductedReal,
+        feeCurrency:       'CLP',
+        // BD interna — auditoría
+        spreadFee,
+        fixedFee,
+        profitRetention:   profitFee,
+        totalDeductedReal,
+      },
+
+      payinInstructions: {
+        bankName:      spaCfg.bankName,
+        accountType:   spaCfg.accountType,
+        accountNumber: spaCfg.accountNumber,
+        rut:           spaCfg.rut,
+        accountHolder: spaCfg.accountHolder,
+        bankEmail:     spaCfg.bankEmail,
+        amount,
+        reference:     paymentRef,
+        currency:      'CLP',
+      },
+    });
+  }
+
+  // ── 3b. Cotización BOB: early exit antes de llamar a Vita ─────────────────
   // Para corredores manuales Bolivia, entramos al flujo BOB inmediatamente.
   // Vita se llama dentro de calculateBOBQuote (siempre necesitamos USD→dest).
   if (corridor.originCurrency === 'BOB') {
@@ -1854,6 +2152,16 @@ const COUNTRY_META = {
   VE: { name: 'Venezuela',      flag: '🇻🇪' },
 };
 
+/** Labels legibles para métodos de payin */
+const PAYIN_METHOD_LABELS = {
+  fintoc:      'Transferencia Open Banking (Fintoc)',
+  manual:      'Transferencia bancaria manual',
+  stripe:      'Tarjeta de crédito/débito',
+  vitaWallet:  'Vita Wallet',
+  owlPay:      'OwlPay Harbor',
+  rampNetwork: 'Ramp Network',
+};
+
 export async function getAvailableCorridors(req, res) {
   const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
   const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
@@ -1881,13 +2189,16 @@ export async function getAvailableCorridors(req, res) {
   let corridors;
   try {
     corridors = await TransactionConfig.find(corridorFilter)
-      .select('corridorId destinationCountry destinationCurrency')
+      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig')
       .lean();
   } catch (err) {
     console.error('[Alyto Corridors] Error:', err.message);
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
+  // Formato plano compatible con el frontend actual (corridorsToCountries usa
+  // c.destinationCountry y c.destinationCurrency a nivel raíz).
+  // Incluimos payinMethod y payinMethodLabel como campos extra sin romper nada.
   const result = corridors.map((c) => {
     const meta = COUNTRY_META[c.destinationCountry] ?? {};
     return {
@@ -1896,6 +2207,8 @@ export async function getAvailableCorridors(req, res) {
       destinationCurrency:     c.destinationCurrency,
       destinationCountryName:  meta.name ?? c.destinationCountry,
       destinationFlag:         meta.flag ?? '',
+      payinMethod:             c.payinMethod,
+      payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
     };
   });
 
@@ -1903,5 +2216,126 @@ export async function getAvailableCorridors(req, res) {
     originCurrency: userOriginCurrency,
     originCountry:  userOriginCountry,
     corridors:      result,
+  });
+}
+
+// ─── GET /api/v1/payments/methods ───────────────────────────────────────────
+
+/**
+ * Métodos de pago disponibles para una ruta específica, con tasa en tiempo real.
+ *
+ * Query params:
+ *   destinationCountry — ISO alpha-2 (ej. "BO", "CO")
+ *
+ * Retorna los corredores activos para el usuario agrupados por método de payin,
+ * cada uno con la tasa actual y un monto estimado de referencia.
+ *
+ * Auth: Bearer JWT
+ */
+export async function getPayinMethods(req, res) {
+  const { destinationCountry } = req.query;
+
+  if (!destinationCountry) {
+    return res.status(400).json({ error: 'Parámetro requerido: destinationCountry.' });
+  }
+
+  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+  const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
+
+  const legalEntity        = req.user?.legalEntity ?? 'SpA';
+  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'CLP';
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'CL';
+  const dest               = destinationCountry.toUpperCase();
+
+  let corridors;
+  try {
+    corridors = await TransactionConfig.find({
+      isActive:           true,
+      originCountry:      userOriginCountry,
+      destinationCountry: dest,
+      originCurrency:     userOriginCurrency,
+    })
+      .select('corridorId payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig payoutFeeFixed originCurrency destinationCurrency manualExchangeRate profitRetentionPercent')
+      .lean();
+  } catch (err) {
+    console.error('[Alyto PayinMethods] Error:', err.message);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!corridors.length) {
+    return res.status(404).json({
+      error: `No hay métodos de pago disponibles para ${userOriginCountry} → ${dest}.`,
+    });
+  }
+
+  // Obtener tasas en tiempo real de Vita (una sola llamada para todos los corredores)
+  let vitaPrices = null;
+  try {
+    vitaPrices = await getPrices();
+  } catch (err) {
+    console.warn('[Alyto PayinMethods] Vita /prices no disponible:', err.message);
+  }
+
+  const REFERENCE_AMOUNT = 100000; // monto de referencia para estimar
+
+  const methods = await Promise.all(corridors.map(async (c) => {
+    // Calcular tasa efectiva para el monto de referencia
+    let effectiveRate = null;
+    let estimatedDestinationAmount = null;
+
+    if (vitaPrices) {
+      const pricing = await extractVitaPricing(vitaPrices, c.originCurrency, dest);
+      if (pricing) {
+        effectiveRate = pricing.rate;
+
+        // Simular fees para el monto de referencia
+        let payinFee;
+        if (c.payinMethod === 'fintoc' && c.fintocConfig?.ufValue) {
+          payinFee = calculateFintocFee(REFERENCE_AMOUNT, c.fintocConfig).fixedFee;
+        } else if (c.payinMethod === 'manual') {
+          payinFee = 0;
+        } else {
+          payinFee = REFERENCE_AMOUNT * ((c.payinFeePercent ?? 0) / 100);
+        }
+        const spread    = REFERENCE_AMOUNT * ((c.alytoCSpread ?? 0) / 100);
+        const fixed     = c.fixedFee ?? 0;
+        const retention = REFERENCE_AMOUNT * ((c.profitRetentionPercent ?? 0) / 100);
+        const netAmount = REFERENCE_AMOUNT - payinFee - spread - fixed - retention;
+        const payoutFee = pricing.fixedCost > 0 ? pricing.fixedCost : (c.payoutFeeFixed ?? 0);
+
+        estimatedDestinationAmount = Math.round(((netAmount * effectiveRate) - payoutFee) * 100) / 100;
+      }
+    }
+
+    return {
+      corridorId:       c.corridorId,
+      payinMethod:      c.payinMethod,
+      payinMethodLabel: PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
+      payoutMethod:     c.payoutMethod,
+      originCurrency:   c.originCurrency,
+      destinationCurrency: c.destinationCurrency,
+      // Tasa y estimación en tiempo real
+      effectiveRate,
+      referenceAmount:  REFERENCE_AMOUNT,
+      estimatedDestinationAmount,
+      // Fees visibles
+      fees: {
+        alytoCSpread:   c.alytoCSpread,
+        fixedFee:       c.fixedFee,
+        payinFeePercent: c.payinFeePercent,
+        payinMethod:    c.payinMethod,
+        isFintocUF:     !!(c.payinMethod === 'fintoc' && c.fintocConfig?.ufValue),
+      },
+    };
+  }));
+
+  return res.json({
+    originCountry:      userOriginCountry,
+    originCurrency:     userOriginCurrency,
+    destinationCountry: dest,
+    destinationCountryName: COUNTRY_META[dest]?.name ?? dest,
+    destinationFlag:        COUNTRY_META[dest]?.flag ?? '',
+    referenceAmount:    REFERENCE_AMOUNT,
+    methods,
   });
 }

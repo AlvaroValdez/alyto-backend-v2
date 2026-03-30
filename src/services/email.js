@@ -402,6 +402,91 @@ export const EMAILS = {
     ];
   },
 
+  // ── CLP → BOB (SpA manual payin) ──────────────────────────────────────────
+
+  /**
+   * Instrucciones de transferencia CLP al usuario para corredor cl-bo manual.
+   *
+   * @param {object} user
+   * @param {object} transaction
+   * @param {object} spaCfg — SpAConfig con datos bancarios
+   * @returns {[string, string, object]}
+   */
+  clpBobPayinInstructions(user, transaction, spaCfg) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS,
+      {
+        userName:        user.firstName,
+        amount:          formatCurrency(transaction.originalAmount, 'CLP'),
+        paymentRef:      transaction.paymentInstructions?.reference ?? transaction.alytoTransactionId,
+        bankName:        spaCfg.bankName,
+        accountType:     spaCfg.accountType,
+        accountNumber:   spaCfg.accountNumber,
+        rut:             spaCfg.rut,
+        accountHolder:   spaCfg.accountHolder,
+        bankEmail:       spaCfg.bankEmail,
+        totalDeducted:   formatCurrency(transaction.fees?.totalDeducted, 'CLP'),
+        destinationBOB:  formatCurrency(transaction.destinationAmount, 'BOB'),
+        clpPerBob:       (transaction.exchangeRate ?? 0).toFixed(2),
+        createdAt:       formatDate(transaction.createdAt),
+        supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+      },
+    ];
+  },
+
+  /**
+   * Alerta admin: nuevo pago CLP→BOB pendiente de verificacion.
+   *
+   * @param {object} transaction
+   * @param {object} user
+   * @returns {[string, string, object]}
+   */
+  adminClpBobAlert(transaction, user) {
+    const ben = transaction.beneficiary?.dynamicFields ?? transaction.beneficiary ?? {};
+    return [
+      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+      process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB,
+      {
+        transactionId:   transaction.alytoTransactionId,
+        userName:        `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
+        userEmail:       user?.email ?? '',
+        amount:          formatCurrency(transaction.originalAmount, 'CLP'),
+        paymentRef:      transaction.paymentInstructions?.reference ?? '',
+        beneficiaryType: ben.type ?? 'bank_data',
+        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+        bankName:        ben.bankName ?? '',
+        accountNumber:   ben.accountNumber ?? '',
+        hasProof:        transaction.paymentProof?.data ? 'Si' : 'No',
+        ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+        createdAt:       formatDate(transaction.createdAt),
+      },
+    ];
+  },
+
+  /**
+   * Confirmacion al usuario de payout completado CLP→BOB.
+   *
+   * @param {object} user
+   * @param {object} transaction
+   * @returns {[string, string, object]}
+   */
+  clpBobPayoutCompleted(user, transaction) {
+    const ben = transaction.beneficiary?.dynamicFields ?? transaction.beneficiary ?? {};
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_CLP_BOB_COMPLETED,
+      {
+        userName:        user.firstName,
+        destinationBOB:  formatCurrency(transaction.destinationAmount, 'BOB'),
+        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+        transactionId:   transaction.alytoTransactionId,
+        completedAt:     formatDate(transaction.updatedAt),
+        supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+      },
+    ];
+  },
+
   // ── KYB — Cuentas Business ────────────────────────────────────────────────
 
   /**

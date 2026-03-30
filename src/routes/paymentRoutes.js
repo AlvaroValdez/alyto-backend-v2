@@ -24,6 +24,7 @@ import {
   initCrossBorderPayment,
   getTransactionAudit,
   getAvailableCorridors,
+  getPayinMethods,
   getTransactionQR,
   uploadPaymentProof,
   uploadComprobante,
@@ -31,6 +32,7 @@ import {
 import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
 import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
+import { getSpAPayinInstructions }                         from '../controllers/spaConfigController.js';
 
 const router = Router();
 
@@ -92,6 +94,27 @@ router.get('/exchange-rates/:pair', getPublicExchangeRate);
  * Auth: Bearer JWT
  */
 router.get('/corridors', protect, getAvailableCorridors);
+
+/**
+ * GET /api/v1/payments/methods
+ *
+ * Métodos de pago disponibles para una ruta, con tasa en tiempo real.
+ * Permite al frontend mostrar las opciones de payin (Fintoc, manual, etc.)
+ * con estimación del monto que recibiría el beneficiario.
+ *
+ * Query params: destinationCountry (ISO alpha-2)
+ * Auth: Bearer JWT
+ */
+router.get('/methods', protect, getPayinMethods);
+
+/**
+ * GET /api/v1/payments/spa-payin-instructions
+ *
+ * Datos bancarios de AV Finance SpA para transferencia manual CLP.
+ * Retorna: bankName, accountType, accountNumber, rut, accountHolder, bankEmail
+ * Auth: Bearer JWT
+ */
+router.get('/spa-payin-instructions', protect, getSpAPayinInstructions);
 
 /**
  * GET /api/v1/payments/withdrawal-rules/:countryCode
