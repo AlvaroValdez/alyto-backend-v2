@@ -331,6 +331,72 @@ const CORREDORES = [
   },
 
   // ══════════════════════════════════════════════════════════════════════════
+  //  SpA Chile — Vita LatAm (corredores faltantes vs V1.5)
+  //  CR, DO, GT, PA, HT → todos cubiertos por Vita Wallet
+  // ══════════════════════════════════════════════════════════════════════════
+
+  ...[
+    { corridorId: 'cl-cr', dest: 'CR', destCurrency: 'CRC' },
+    { corridorId: 'cl-do', dest: 'DO', destCurrency: 'DOP' },
+    { corridorId: 'cl-gt', dest: 'GT', destCurrency: 'GTQ' },
+    { corridorId: 'cl-pa', dest: 'PA', destCurrency: 'USD' },  // Panamá dolarizado
+    { corridorId: 'cl-ht', dest: 'HT', destCurrency: 'HTG' },  // Haití — verificar cobertura Vita vigente
+  ].map(({ corridorId, dest, destCurrency }) => ({
+    corridorId,
+    originCountry:          'CL',
+    destinationCountry:     dest,
+    originCurrency:         'CLP',
+    destinationCurrency:    destCurrency,
+    payinMethod:            'fintoc',
+    payoutMethod:           'vitaWallet',
+    stellarAsset:           'USDC',
+    alytoCSpread:           2,
+    fixedFee:               300,
+    payinFeePercent:        1.2,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.8,
+    minAmountOrigin:        10000,
+    maxAmountOrigin:        null,
+    legalEntity:            'SpA',
+    routingScenario:        'B',
+    isActive:               true,
+    adminNotes:             `Corredor CL→${dest}. Vita Wallet. Verificar fixed_cost en /prices antes de activar en producción.`,
+  })),
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SpA Chile — OwlPay Global (AU, GB, CN)
+  //  Payin: Fintoc (CLP) → Payout: OwlPay Harbor (AUD/GBP/CNY)
+  //  Enrutado vía AV Finance LLC (Harbor) como payout institucional
+  // ══════════════════════════════════════════════════════════════════════════
+
+  ...[
+    { corridorId: 'cl-au', dest: 'AU', destCurrency: 'AUD' },
+    { corridorId: 'cl-gb', dest: 'GB', destCurrency: 'GBP' },
+    { corridorId: 'cl-cn', dest: 'CN', destCurrency: 'CNY' },
+  ].map(({ corridorId, dest, destCurrency }) => ({
+    corridorId,
+    originCountry:          'CL',
+    destinationCountry:     dest,
+    originCurrency:         'CLP',
+    destinationCurrency:    destCurrency,
+    payinMethod:            'fintoc',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   null,
+    stellarAsset:           'USDC',
+    alytoCSpread:           1.5,          // 0.5% OwlPay + 1% Alyto
+    fixedFee:               500,          // ~0.5 USD en CLP
+    payinFeePercent:        1.2,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.8,
+    minAmountOrigin:        50000,        // mínimo mayor por riesgo y costos OwlPay
+    maxAmountOrigin:        null,
+    legalEntity:            'SpA',
+    routingScenario:        'B',
+    isActive:               true,
+    adminNotes:             `Corredor CL→${dest}. Payout OwlPay Harbor. Verificar activación par CLP→${destCurrency} con Harbor antes de producción.`,
+  })),
+
+  // ══════════════════════════════════════════════════════════════════════════
   //  SRL Bolivia — Payin manual (BOB) → USDC (Stellar) → Payout LatAm
   // ══════════════════════════════════════════════════════════════════════════
 
@@ -358,6 +424,12 @@ const CORREDORES = [
     { corridorId: 'bo-ve', dest: 'VE', destCurrency: 'USD', spread: 3, fixed: 8, retention: 1.5 },
     { corridorId: 'bo-py', dest: 'PY', destCurrency: 'PYG', spread: 2, fixed: 5, retention: 1 },
     { corridorId: 'bo-uy', dest: 'UY', destCurrency: 'UYU', spread: 2, fixed: 5, retention: 1 },
+    // Vita LatAm faltantes vs V1.5
+    { corridorId: 'bo-cr', dest: 'CR', destCurrency: 'CRC', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-do', dest: 'DO', destCurrency: 'DOP', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-gt', dest: 'GT', destCurrency: 'GTQ', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-pa', dest: 'PA', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },  // dolarizado
+    { corridorId: 'bo-ht', dest: 'HT', destCurrency: 'HTG', spread: 3, fixed: 8, retention: 1.5 }, // spread mayor por riesgo operativo
   ].map(({ corridorId, dest, destCurrency, spread, fixed, retention }) => ({
     corridorId,
     originCountry:          'BO',
@@ -379,7 +451,9 @@ const CORREDORES = [
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             `Corredor BO→${dest}. Payin manual SRL. Tránsito USDC vía Stellar. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`,
+    adminNotes:             dest === 'HT'
+      ? `Corredor BO→HT. Payin manual SRL. Verificar cobertura Vita para HTG antes de activar en producción. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`
+      : `Corredor BO→${dest}. Payin manual SRL. Tránsito USDC vía Stellar. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`,
   })),
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -468,6 +542,40 @@ const CORREDORES = [
     isActive:               true,
     adminNotes:             'Corredor BO→MX institucional (LLC). OwlPay primario, Vita fallback. Distinto de bo-mx (SRL/vitaWallet).',
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SRL Bolivia — OwlPay Global (AU, GB, CN)
+  //  Payin: manual BOB → USDC Stellar → Payout OwlPay Harbor
+  //  Tasa BOB/USDC: CONFIGURAR vía PATCH /api/v1/admin/corridors/:id/rate
+  // ══════════════════════════════════════════════════════════════════════════
+
+  ...[
+    { corridorId: 'bo-au', dest: 'AU', destCurrency: 'AUD' },
+    { corridorId: 'bo-gb', dest: 'GB', destCurrency: 'GBP' },
+    { corridorId: 'bo-cn', dest: 'CN', destCurrency: 'CNY' },
+  ].map(({ corridorId, dest, destCurrency }) => ({
+    corridorId,
+    originCountry:          'BO',
+    destinationCountry:     dest,
+    originCurrency:         'BOB',
+    destinationCurrency:    destCurrency,
+    payinMethod:            'manual',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   null,
+    manualExchangeRate:     0,            // CONFIGURAR: PATCH /api/v1/admin/corridors/:corridorId/rate
+    stellarAsset:           'USDC',
+    alytoCSpread:           1.5,
+    fixedFee:               5,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.8,
+    minAmountOrigin:        50,
+    maxAmountOrigin:        null,
+    legalEntity:            'SRL',
+    routingScenario:        'C',
+    isActive:               true,
+    adminNotes:             `Corredor BO→${dest}. Payin manual SRL, payout OwlPay Harbor. Configurar tasa BOB/USDC con PATCH /api/v1/admin/corridors/${corridorId}/rate`,
+  })),
 
   // ── BO → Brasil (BRL institucional — LLC, OwlPay) ─────────────────────────
   {
@@ -562,6 +670,79 @@ const CORREDORES = [
     isActive:               true,
     adminNotes:             'Corredor US→MX. Payin y payout vía Vita. Entidad LLC.',
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  LLC Global (USD) — Vita LatAm faltantes vs V1.5
+  //  Payin: vitaWallet → Payout: vitaWallet
+  // ══════════════════════════════════════════════════════════════════════════
+
+  ...[
+    { corridorId: 'us-ar', dest: 'AR', destCurrency: 'ARS' },
+    { corridorId: 'us-br', dest: 'BR', destCurrency: 'BRL' },
+    { corridorId: 'us-bo', dest: 'BO', destCurrency: 'BOB' },
+    { corridorId: 'us-cl', dest: 'CL', destCurrency: 'CLP' },
+    { corridorId: 'us-ec', dest: 'EC', destCurrency: 'USD' },
+    { corridorId: 'us-ve', dest: 'VE', destCurrency: 'USD' },
+    { corridorId: 'us-py', dest: 'PY', destCurrency: 'PYG' },
+    { corridorId: 'us-uy', dest: 'UY', destCurrency: 'UYU' },
+    { corridorId: 'us-cr', dest: 'CR', destCurrency: 'CRC' },
+    { corridorId: 'us-do', dest: 'DO', destCurrency: 'DOP' },
+    { corridorId: 'us-gt', dest: 'GT', destCurrency: 'GTQ' },
+    { corridorId: 'us-pa', dest: 'PA', destCurrency: 'USD' },
+    { corridorId: 'us-ht', dest: 'HT', destCurrency: 'HTG' },
+  ].map(({ corridorId, dest, destCurrency }) => ({
+    corridorId,
+    originCountry:          'US',
+    destinationCountry:     dest,
+    originCurrency:         'USD',
+    destinationCurrency:    destCurrency,
+    payinMethod:            'vitaWallet',
+    payoutMethod:           'vitaWallet',
+    stellarAsset:           'USDC',
+    alytoCSpread:           2,
+    fixedFee:               2,
+    payinFeePercent:        1.5,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.8,
+    minAmountOrigin:        10,
+    maxAmountOrigin:        null,
+    legalEntity:            'LLC',
+    routingScenario:        'A',
+    isActive:               true,
+    adminNotes:             `Corredor US→${dest}. Payin y payout vía Vita. Entidad LLC.`,
+  })),
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  LLC Global (USD) — OwlPay Global (AU, GB, CN)
+  //  Payin: vitaWallet (USD) → Payout: OwlPay Harbor
+  // ══════════════════════════════════════════════════════════════════════════
+
+  ...[
+    { corridorId: 'us-au', dest: 'AU', destCurrency: 'AUD' },
+    { corridorId: 'us-gb', dest: 'GB', destCurrency: 'GBP' },
+    { corridorId: 'us-cn', dest: 'CN', destCurrency: 'CNY' },
+  ].map(({ corridorId, dest, destCurrency }) => ({
+    corridorId,
+    originCountry:          'US',
+    destinationCountry:     dest,
+    originCurrency:         'USD',
+    destinationCurrency:    destCurrency,
+    payinMethod:            'vitaWallet',
+    payoutMethod:           'owlPay',
+    fallbackPayoutMethod:   null,
+    stellarAsset:           'USDC',
+    alytoCSpread:           1,            // 0.5% OwlPay flat + 0.5% Alyto
+    fixedFee:               3,
+    payinFeePercent:        0,
+    payoutFeeFixed:         0,
+    profitRetentionPercent: 0.5,
+    minAmountOrigin:        500,          // mínimo Harbor End User Model
+    maxAmountOrigin:        null,
+    legalEntity:            'LLC',
+    routingScenario:        'A',
+    isActive:               true,
+    adminNotes:             `Corredor US→${dest}. OwlPay Harbor LLC. Verificar activación par USD→${destCurrency} con Harbor antes de producción.`,
+  })),
 
   // ── Corredor 6: Cualquier origen → Wallet Crypto (Stellar USDC) ──────────
   // Escenario futuro (Fase 18B): on-ramp directo a wallet Stellar
