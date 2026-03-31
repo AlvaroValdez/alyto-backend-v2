@@ -431,8 +431,12 @@ export async function dispatchPayout(transaction) {
     if (payoutMethod === 'vitaWallet') {
       try {
         sharedLivePrices = await getPrices();
-        const destKey   = (transaction.destinationCountry ?? '').toLowerCase();
-        const vitaAttrs = sharedLivePrices?.withdrawal?.prices?.attributes;
+        const destKey     = (transaction.destinationCountry ?? '').toLowerCase();
+        const destCountryUpper = destKey.toUpperCase();
+        const vitaAttrsSource  = VITA_SENT_ONLY_COUNTRIES.has(destCountryUpper)
+          ? sharedLivePrices?.vita_sent?.prices?.attributes
+          : sharedLivePrices?.withdrawal?.prices?.attributes;
+        const vitaAttrs = vitaAttrsSource ?? sharedLivePrices?.withdrawal?.prices?.attributes;
         let   liveDestAmount = null;
 
         if (vitaCurrency === 'usd') {
