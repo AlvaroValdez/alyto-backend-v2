@@ -588,11 +588,10 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── 3a. Corredor cl-bo manual: CLP → BOB (SpA payin TEF + anchorBolivia) ──
+  // ── 3a. Corredor cl-bo: CLP → BOB (anchorBolivia) ────────────────────────
   if (
-    corridor.legalEntity         === 'SpA' &&
     corridor.destinationCurrency === 'BOB' &&
-    corridor.payinMethod         === 'manual'
+    corridor.payoutMethod        === 'anchorBolivia'
   ) {
     const SpAConfig = (await import('../models/SpAConfig.js')).default;
     const spaCfg = await SpAConfig.findOne({ isActive: true }).lean();
@@ -1402,13 +1401,11 @@ export async function getQuote(req, res) {
     });
   }
 
-  // ── 3a. Corredor cl-bo: CLP → BOB manual ─────────────────────────────────
-  // Payin TEF manual SpA · Payout anchorBolivia manual.
-  // Tasa desde SpAConfig (CLP por 1 BOB). No usa Vita.
+  // ── 3a. Corredor cl-bo: CLP → BOB (anchorBolivia) ────────────────────────
+  // Payout anchorBolivia. Tasa desde SpAConfig (CLP por 1 BOB). No usa Vita.
   if (
-    corridor.legalEntity         === 'SpA' &&
     corridor.destinationCurrency === 'BOB' &&
-    corridor.payinMethod         === 'manual'
+    corridor.payoutMethod        === 'anchorBolivia'
   ) {
     const SpAConfig = (await import('../models/SpAConfig.js')).default;
     const spaCfg = await SpAConfig.findOne({ isActive: true }).lean();
@@ -1421,15 +1418,6 @@ export async function getQuote(req, res) {
     }
 
     const { clpPerBob, minAmountCLP, maxAmountCLP } = spaCfg;
-
-    console.info('[Quote CL-BO] SpAConfig leído:', {
-      clpPerBob,
-      clpPerUsdt: spaCfg.clpPerUsdt,
-      usdtPerBob: spaCfg.usdtPerBob,
-      isActive:   spaCfg.isActive,
-      _id:        spaCfg._id,
-      updatedAt:  spaCfg.updatedAt,
-    });
 
     // Validar limites desde SpAConfig (mas especificos que TransactionConfig)
     if (amount < (minAmountCLP ?? 10000)) {
