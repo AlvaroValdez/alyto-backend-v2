@@ -300,7 +300,7 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
     console.log('[convertBobToUsdc] manualExchangeRate no configurada en corredor — usando getBOBRate():', bobPerUsdc);
   }
 
-  const usdcAmount = Math.round((netAmountBOB / bobPerUsdc) * 10000) / 10000; // 4 decimales para USDC
+  const usdcAmount = Math.round((netAmountBOB / bobPerUsdc) * 100) / 100; // 2 decimales — igual que en la cotización (round2)
   return { usdcAmount, bobPerUsdc };
 }
 
@@ -382,14 +382,27 @@ export async function dispatchPayout(transaction) {
     let vitaCurrency    = (transaction.originCurrency ?? 'clp').toLowerCase();
 
     if (corridor.originCurrency === 'BOB') {
-      // convertBobToUsdc es async: resuelve manualExchangeRate → MongoDB → .env
-      const convResult = await convertBobToUsdc(netAmountNative, corridor);
-
-      const { usdcAmount, bobPerUsdc } = convResult;
-
-      console.log('[dispatchPayout] Conversión BOB→USDC:', {
-        netBOB: netAmountNative, bobPerUsdc, usdcAmount,
-      });
+      // Si el frontend envió usdcTransitAmount al crear la transacción, ya está almacenado
+      // en transaction.digitalAssetAmount. Usarlo directamente para que payout use
+      // el MISMO monto USDC que se cotizó al usuario — sin recalcular.
+      let usdcAmount, bobPerUsdc;
+      if (transaction.digitalAssetAmount > 0) {
+        usdcAmount  = transaction.digitalAssetAmount;
+        bobPerUsdc  = corridor.manualExchangeRate > 0
+          ? corridor.manualExchangeRate
+          : await getBOBRate();
+        console.log('[dispatchPayout] Usando usdcTransitAmount de la cotización:', {
+          netBOB: netAmountNative, bobPerUsdc, usdcAmount,
+        });
+      } else {
+        // Fallback: recalcular (cotización sin usdcTransitAmount — transacciones antiguas)
+        const convResult = await convertBobToUsdc(netAmountNative, corridor);
+        usdcAmount = convResult.usdcAmount;
+        bobPerUsdc = convResult.bobPerUsdc;
+        console.log('[dispatchPayout] Conversión BOB→USDC recalculada:', {
+          netBOB: netAmountNative, bobPerUsdc, usdcAmount,
+        });
+      }
 
       // Registrar conversión + activo Stellar en la transacción
       transaction.conversionRate = {
@@ -409,6 +422,52 @@ export async function dispatchPayout(transaction) {
       vitaCurrency    = 'usd';
     }
 
+    // ── Actualizar destinationAmount con tasa Vita en vivo ───────────────────
+    // Garantiza que el ledger y la notificación al usuario reflejen el monto
+    // real que Vita aplicará, no el estimado de la cotización (que puede ser
+    // de hace horas en corredores con payin manual como Bolivia).
+    // Se hace UNA sola llamada a getPrices() aquí y se reutiliza en tryProvider.
+    let sharedLivePrices = null;
+    if (payoutMethod === 'vitaWallet') {
+      try {
+        sharedLivePrices = await getPrices();
+        const destKey   = (transaction.destinationCountry ?? '').toLowerCase();
+        const vitaAttrs = sharedLivePrices?.withdrawal?.prices?.attributes;
+        let   liveDestAmount = null;
+
+        if (vitaCurrency === 'usd') {
+          // BOB corredor: payoutAmountUSD (USDC ≈ USD) × usdToDestRate
+          const clpToDest = Number(vitaAttrs?.clp_sell?.[destKey] ?? NaN);
+          const clpToUsd  = Number(vitaAttrs?.clp_sell?.['us']    ?? NaN);
+          if (isFinite(clpToDest) && isFinite(clpToUsd) && clpToUsd > 0) {
+            const usdToDestRate = clpToDest / clpToUsd;
+            const vitaFee       = Number(vitaAttrs?.fixed_cost?.[destKey] ?? 0) || (corridor.payoutFeeFixed ?? 0);
+            liveDestAmount = Math.round((payoutAmountUSD * usdToDestRate - vitaFee) * 100) / 100;
+          }
+        } else {
+          // CLP/USD corredor estándar: netCLP × clpToDestRate
+          const clpToDestRate = Number(vitaAttrs?.clp_sell?.[destKey] ?? NaN);
+          const vitaFee       = Number(vitaAttrs?.fixed_cost?.[destKey] ?? 0) || (corridor.payoutFeeFixed ?? 0);
+          if (isFinite(clpToDestRate) && clpToDestRate > 0) {
+            liveDestAmount = Math.round((payoutAmountUSD * clpToDestRate - vitaFee) * 100) / 100;
+          }
+        }
+
+        if (liveDestAmount != null && liveDestAmount > 0) {
+          transaction.destinationAmount    = liveDestAmount;
+          transaction.exchangeRateLockedAt = new Date();
+          await transaction.save();
+          console.log('[dispatchPayout] destinationAmount actualizado con tasa Vita en vivo:', {
+            transactionId: transaction.alytoTransactionId,
+            liveDestAmount, payoutAmountUSD, vitaCurrency,
+          });
+        }
+      } catch (priceErr) {
+        // No-fatal: continuar con el destinationAmount de la cotización original
+        console.warn('[dispatchPayout] No se pudo actualizar destinationAmount con tasa en vivo:', priceErr.message);
+      }
+    }
+
     const { vitaPayload, beneficiaryFlat } = buildBeneficiaryPayloads(
       ben, payoutAmountUSD, vitaCurrency, transaction,
     );
@@ -419,7 +478,9 @@ export async function dispatchPayout(transaction) {
         // Vita requiere llamar GET /prices justo antes de POST /transactions
         // para bloquear el tipo de cambio. Sin este paso retorna "Los precios caducaron",
         // especialmente en corredores manuales donde el payin se confirma horas después.
-        await getPrices();
+        // Si ya obtuvimos los precios arriba (sharedLivePrices), se reutilizan;
+        // de lo contrario se hace una llamada fresca.
+        if (!sharedLivePrices) await getPrices();
 
         // GT, SV, ES, PL solo están disponibles vía vita_sent (no en withdrawal rails).
         // Para todos los demás destinos se sigue usando withdrawal (comportamiento original).
