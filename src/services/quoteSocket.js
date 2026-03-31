@@ -25,6 +25,7 @@ import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices }       from './vitaWalletService.js';
+import { getBOBRate }      from './exchangeRateService.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -85,12 +86,11 @@ async function refreshVitaCache() {
 // ─── Cálculo de Cotización ────────────────────────────────────────────────────
 
 /**
- * Extrae la tasa y el costo fijo desde el cache de Vita para el par
- * (originCurrency, destinationCountry). Misma lógica que extractVitaPricing
- * en paymentController — duplicada aquí para evitar acoplamiento servicio↔controlador.
+ * Extrae tasa CLP→destino desde el cache de Vita.
+ * Para USD/USDC origin: cross-rate via CLP.
  *
- * @param {string} originCurrency      ISO 4217 mayúsculas (ej. 'CLP')
- * @param {string} destinationCountry  ISO alpha-2 mayúsculas (ej. 'CO')
+ * @param {string} originCurrency     'CLP' | 'USD' | 'USDC'
+ * @param {string} destinationCountry ISO alpha-2 (ej. 'CO')
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 function extractPricing(originCurrency, destinationCountry) {
@@ -112,26 +112,39 @@ function extractPricing(originCurrency, destinationCountry) {
     const clpToUsd  = Number(attrs?.clp_sell?.['us']       ?? NaN);
     if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
     rate = clpToDest / clpToUsd;
-  } else if (origin === 'BOB') {
-    // Bolivia: Vita no tiene bob_sell. Dos pasos:
-    //   PASO 1 — tasa USD→destino via cross-rate CLP
-    //   PASO 2 — dividir por BOB_USD_RATE (tasa oficial ASFI = 6.96)
-    const BOB_USD_RATE = parseFloat(process.env.BOB_USD_RATE || '6.96');
-    const clpToDest    = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
-    const clpToUsd     = Number(attrs?.clp_sell?.['us']       ?? NaN);
-    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
-    const usdToDestRate = clpToDest / clpToUsd;
-    rate = usdToDestRate / BOB_USD_RATE;
-    console.info('[Alyto WS] Cotización BOB→' + destinationCountry + ':', {
-      clpToDest, clpToUsd, usdToDestRate, BOB_USD_RATE, bobToDestRate: rate,
-    });
   } else {
     return null;
   }
 
   if (!isFinite(rate) || rate <= 0) return null;
 
-  // fixed_cost en withdrawal.prices.attributes.fixed_cost[country] (moneda destino)
+  const fixedCost  = Number(attrs?.fixed_cost?.[countryKey] ?? 0);
+  const validUntil = attrs?.valid_until ?? null;
+
+  return { rate, fixedCost, validUntil };
+}
+
+/**
+ * Extrae tasa USD→destino desde el cache de Vita (para corredores BOB).
+ * Misma lógica que extractVitaPricing(vitaResponse, 'USD', dest) en paymentController.
+ *
+ * @param {string} destinationCountry ISO alpha-2 (ej. 'CO')
+ * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
+ */
+function extractPricingUSD(destinationCountry) {
+  const withdrawal = vitaCache.prices?.withdrawal;
+  if (!withdrawal) return null;
+
+  const attrs      = withdrawal?.prices?.attributes;
+  const countryKey = destinationCountry.toLowerCase();
+
+  const clpToDest = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
+  const clpToUsd  = Number(attrs?.clp_sell?.['us']       ?? NaN);
+  if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+
+  const rate       = clpToDest / clpToUsd;   // unidades dest por 1 USD
+  if (!isFinite(rate) || rate <= 0) return null;
+
   const fixedCost  = Number(attrs?.fixed_cost?.[countryKey] ?? 0);
   const validUntil = attrs?.valid_until ?? null;
 
@@ -152,27 +165,16 @@ async function computeQuote(state) {
   const amount = Number(originAmount);
   const round2 = n => Math.round(n * 100) / 100;
 
-  // Diagnóstico — muestra los campos clave del corredor en cada cotización
-  console.info('[Alyto WS] computeQuote corridorFields:', {
-    corridorId:          corridor.corridorId,
-    legalEntity:         corridor.legalEntity,
-    originCurrency:      corridor.originCurrency,
-    destinationCurrency: corridor.destinationCurrency,
-    payinMethod:         corridor.payinMethod,
-    destinationCountry:  corridor.destinationCountry,
-  });
-
-  const payinFee        = round2(amount * (corridor.payinFeePercent       / 100));
-  const alytoCSpread    = round2(amount * (corridor.alytoCSpread          / 100));
-  const fixedFee        = corridor.fixedFee                               ?? 0;
+  const payinFee        = round2(amount * (corridor.payinFeePercent        / 100));
+  const alytoCSpread    = round2(amount * (corridor.alytoCSpread           / 100));
+  const fixedFee        = corridor.fixedFee                                ?? 0;
   const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
-  const totalFees       = round2(payinFee + alytoCSpread + fixedFee);
 
-  // ── Corredor manual CLP→BOB (SpA) — usa SpAConfig, no Vita ─────────────────
+  // ── BRANCH 1: CLP→BOB con payout anchorBolivia — usa SpAConfig, no Vita ────
+  // Cubre: corredor cl-bo (legalEntity:SRL, payinMethod:fintoc, payout:anchorBolivia)
   if (
-    corridor.legalEntity         === 'SpA' &&
     corridor.destinationCurrency === 'BOB' &&
-    corridor.payinMethod         === 'manual'
+    corridor.payoutMethod        === 'anchorBolivia'
   ) {
     const spaCfg = await SpAConfig.findOne({ isActive: true }).sort({ createdAt: -1 }).lean();
     if (!spaCfg?.clpPerBob) {
@@ -181,19 +183,18 @@ async function computeQuote(state) {
     }
 
     const { clpPerBob } = spaCfg;
-    const netCLP            = round2(amount - totalFees - profitRetention);
+    const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+    const netCLP            = round2(amount - totalDeducted);
     const destinationAmount = round2(netCLP / clpPerBob);
 
     if (destinationAmount <= 0) return null;
 
-    // Tasa efectiva all-in: absorbe comisiones dentro de la tasa visible al usuario.
-    // El usuario ve: 1 CLP = X BOB donde X ya incluye nuestro margen.
+    // Tasa efectiva all-in: comisiones absorbidas — el usuario no ve el desglose
     const effectiveRate  = +(destinationAmount / amount).toFixed(6);
     const quoteExpiresAt = new Date(Date.now() + 3 * 60 * 1000);
 
-    console.info('[Alyto WS] Quote CL-BO manual:', {
-      amount, clpPerBob, netCLP, destinationAmount, effectiveRate,
-      grossRate: +(1 / clpPerBob).toFixed(6),
+    console.info('[Alyto WS] Quote CL-BO (anchorBolivia):', {
+      amount, clpPerBob, totalDeducted, netCLP, destinationAmount, effectiveRate,
     });
 
     return {
@@ -202,32 +203,88 @@ async function computeQuote(state) {
       originAmount:        amount,
       originCurrency:      corridor.originCurrency,
       destinationAmount,
-      destinationCurrency: corridor.destinationCurrency,
+      destinationCurrency: 'BOB',
       exchangeRate:        effectiveRate,
-      isManualCorridor:    true,   // FE usa esto para ocultar desglose de fees
-      fees: {
-        payinFee:      0,
-        alytoCSpread:  0,
-        fixedFee:      0,
-        payoutFee:     0,
-        totalDeducted: 0,
-      },
+      isManualCorridor:    true,
+      fees: { payinFee: 0, alytoCSpread: 0, fixedFee: 0, payoutFee: 0, totalDeducted: 0 },
       quoteExpiresAt,
       updatedAt: new Date(),
       stale:     false,
     };
   }
 
-  // ── Corredores vía Vita ─────────────────────────────────────────────────────
-  if (isCacheStale()) {
-    await refreshVitaCache();
+  // ── BRANCH 2: BOB→destino — BOB→USDC→dest vía Vita ──────────────────────────
+  // Cubre: bo-co, bo-pe, bo-cl, bo-ar, bo-mx, bo-br, bo-us, bo-eu, etc.
+  if (corridor.originCurrency === 'BOB') {
+    if (isCacheStale()) await refreshVitaCache();
+
+    // Tasa BOB/USDC: prioridad corridor.manualExchangeRate → MongoDB → env
+    const bobPerUsdc = corridor.manualExchangeRate > 0
+      ? corridor.manualExchangeRate
+      : await getBOBRate();
+
+    // Vita USD→dest (cross-rate via CLP)
+    const usdPricing = extractPricingUSD(destinationCountry);
+    if (!usdPricing) {
+      console.warn('[Alyto WS] Sin tasa USD→' + destinationCountry + ' en Vita para BOB corredor');
+      return null;
+    }
+
+    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+
+    const netBOB = round2(amount - payinFee - alytoCSpread - fixedFee - profitRetention);
+    if (netBOB <= 0) return null;
+
+    const usdcTransitAmount = round2(netBOB / bobPerUsdc);
+    const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
+    const destinationAmount = round2((usdcTransitAmount * usdToDestRate) - payoutFee);
+
+    if (destinationAmount <= 0) return null;
+
+    const effectiveRate  = round2(destinationAmount / amount);
+    const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+    const vitaExpiry     = validUntil ? new Date(validUntil) : null;
+    const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
+
+    console.info('[Alyto WS] Quote BOB→' + destinationCountry + ':', {
+      amount, bobPerUsdc, netBOB, usdcTransitAmount, usdToDestRate, destinationAmount, effectiveRate,
+    });
+
+    return {
+      type:                'quote_update',
+      corridorId:          corridor.corridorId,
+      originAmount:        amount,
+      originCurrency:      'BOB',
+      destinationAmount,
+      destinationCurrency: corridor.destinationCurrency,
+      exchangeRate:        effectiveRate,
+      conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
+      isManualCorridor:    corridor.payoutMethod === 'anchorBolivia',
+      usdcTransitAmount,
+      bobPerUsdc,
+      fees: {
+        payinFee,
+        alytoCSpread,
+        fixedFee,
+        payoutFee:       round2(payoutFee),
+        profitRetention,
+        totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention + payoutFee),
+      },
+      quoteExpiresAt,
+      updatedAt: new Date(),
+      stale:     !vitaCache.prices,
+    };
   }
+
+  // ── BRANCH 3: CLP/USD/USDC→destino vía Vita (corredores estándar SpA/LLC) ───
+  if (isCacheStale()) await refreshVitaCache();
 
   const pricing = extractPricing(corridor.originCurrency, destinationCountry);
   if (!pricing) return null;
 
   const { rate: exchangeRate, fixedCost: vitaFixedCost } = pricing;
-  const amountAfterFees   = round2(amount - totalFees - profitRetention);
+  const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+  const amountAfterFees   = round2(amount - totalDeducted);
   const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
   const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
 
@@ -249,8 +306,9 @@ async function computeQuote(state) {
       payinFee,
       alytoCSpread,
       fixedFee,
-      payoutFee:     round2(payoutFee),
-      totalDeducted: round2(totalFees + payoutFee),
+      payoutFee:       round2(payoutFee),
+      profitRetention,
+      totalDeducted:   round2(totalDeducted + round2(payoutFee)),
     },
     quoteExpiresAt,
     updatedAt:  new Date(),
