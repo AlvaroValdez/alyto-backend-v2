@@ -19,6 +19,9 @@ import User   from '../models/User.js';
 /** Regex para contraseña segura: ≥8 chars, 1 mayúscula, 1 número, 1 símbolo */
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
+/** Moneda principal según entidad legal del usuario */
+const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
+
 /** Campos que el usuario tiene permitido actualizar en su perfil */
 const ALLOWED_UPDATE_FIELDS = new Set([
   'firstName',
@@ -49,7 +52,7 @@ function buildProfileResponse(user) {
     fcmTokens:      (user.fcmTokens ?? []).length,
     preferences: {
       language: user.preferences?.language  ?? 'es',
-      currency: user.preferences?.currency  ?? 'CLP',
+      currency: user.preferences?.currency  ?? ENTITY_CURRENCY_MAP[user.legalEntity] ?? 'CLP',
       notifications: {
         email: user.preferences?.notifications?.email ?? true,
         push:  user.preferences?.notifications?.push  ?? true,

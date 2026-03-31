@@ -588,6 +588,20 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
+  // ── Límite regulatorio BOB (RND 102400000021 — Bancarización Bolivia) ──────
+  // Aplica a todos los usuarios SRL cuyo origen es BOB.
+  // Umbral legal: Bs 50.000. Se opera hasta Bs 49.999 para no requerir
+  // documento bancario ASFI mientras se tramita la licencia ETF/PSAV.
+  if (req.user?.legalEntity === 'SRL' && corridor.originCurrency === 'BOB' && amount > 49_999) {
+    return res.status(400).json({
+      error:    'El monto supera el límite regulatorio por transacción en Bolivia.',
+      detail:   'Conforme a la RND 102400000021 (Bancarización Bolivia), operamos hasta Bs 49.999 por transacción mientras tramitamos la licencia ETF/PSAV ante ASFI.',
+      code:     'BOB_SINGLE_TX_LIMIT_EXCEEDED',
+      limit:    49_999,
+      currency: 'BOB',
+    });
+  }
+
   // ── 3a. Corredor cl-bo: CLP → BOB (anchorBolivia) ────────────────────────
   if (
     corridor.destinationCurrency === 'BOB' &&

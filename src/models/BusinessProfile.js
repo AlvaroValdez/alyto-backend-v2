@@ -55,14 +55,29 @@ const kybDocumentSchema = new Schema(
 );
 
 // ─── Sub-esquema: Límites Operativos ─────────────────────────────────────────
+//
+// Los límites se expresan en la moneda nativa de la entidad:
+//   SpA / LLC → USD  (default 50.000 / 80.000)
+//   SRL       → BOB  (default 49.999 / 300.000)
+//
+// Base legal SRL: RND 102400000021 (Bancarización Bolivia, vigente ene 2025).
+// El umbral de Bs 50.000 activa la obligatoriedad de documento bancario (IVA/IUE).
+// El límite de Bs 49.999 se mantiene por debajo para operar sin esa exigencia
+// mientras AV Finance SRL completa su licencia ETF/PSAV ante ASFI.
 
 const transactionLimitsSchema = new Schema(
   {
-    /** Monto máximo por operación individual (USD) */
+    /** Monto máximo por operación individual (en `currency`) */
     maxSingleTransaction: { type: Number, default: 50_000 },
-    /** Volumen máximo mensual acumulado (USD) */
+    /** Volumen máximo mensual acumulado (en `currency`) */
     maxMonthlyVolume:     { type: Number, default: 80_000 },
+    /** Moneda en que se expresan los límites (ISO 4217) */
     currency:             { type: String, default: 'USD' },
+    /**
+     * Nota legal visible al usuario en la interfaz.
+     * Para SRL/BOB: explica la restricción regulatoria de bancarización.
+     */
+    regulatoryNote:       { type: String, default: null },
   },
   { _id: false },
 );
