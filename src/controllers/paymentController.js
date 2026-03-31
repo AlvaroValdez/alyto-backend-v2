@@ -945,9 +945,9 @@ export async function initCrossBorderPayment(req, res) {
   // beneficiary (legado): mapear a los campos nombrados del schema
   let beneficiaryDoc = {};
   if (beneficiaryData && typeof beneficiaryData === 'object') {
-    // Separar campos fc_* (internos de Vita, no son datos del beneficiario)
+    // Separar campos fc_* (internos de Vita) y *_label (display-only del frontend)
     const vitaFields = Object.fromEntries(
-      Object.entries(beneficiaryData).filter(([k]) => !k.startsWith('fc_')),
+      Object.entries(beneficiaryData).filter(([k]) => !k.startsWith('fc_') && !k.endsWith('_label')),
     );
     beneficiaryDoc = { dynamicFields: vitaFields };
   } else if (legacyBeneficiary) {
