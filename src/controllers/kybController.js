@@ -96,6 +96,24 @@ export async function applyKYB(req, res) {
       type: businessData.documentTypes?.[idx] ?? 'other',
     }));
 
+    // ── Límites operativos según entidad legal ───────────────────────────────
+    // SRL/BOB: Bs 49.999 por transacción, Bs 300.000 mensual.
+    // Base legal: RND 102400000021 (Bancarización Bolivia, ene 2025).
+    // El umbral de Bs 50.000 activa exigencia de documento bancario ASFI.
+    const initialLimits = user.legalEntity === 'SRL'
+      ? {
+          maxSingleTransaction: 49_999,
+          maxMonthlyVolume:     300_000,
+          currency:             'BOB',
+          regulatoryNote:       'Límites establecidos conforme a la RND 102400000021 (Bancarización Bolivia). Las operaciones igual o superiores a Bs 50.000 requieren respaldo con documento bancario emitido por una entidad regulada por ASFI. Estos límites serán actualizados al obtener la licencia ETF/PSAV.',
+        }
+      : {
+          maxSingleTransaction: 50_000,
+          maxMonthlyVolume:     80_000,
+          currency:             'USD',
+          regulatoryNote:       null,
+        };
+
     // ── Crear BusinessProfile ─────────────────────────────────────────────────
     const profile = await BusinessProfile.create({
       userId:                  user._id,
@@ -116,6 +134,7 @@ export async function applyKYB(req, res) {
       businessDescription:     businessData.businessDescription,
       documents,
       kybStatus:               'pending',
+      transactionLimits:       initialLimits,
     });
 
     // ── Actualizar User ───────────────────────────────────────────────────────
