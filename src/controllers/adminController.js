@@ -21,7 +21,13 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import { dispatchPayout } from './ipnController.js';
-import { getPrices }      from '../services/vitaWalletService.js';
+import {
+  getPrices,
+  getWallets,
+  getDeposits,
+  getCryptoPrices,
+  VITA_SENT_ONLY_COUNTRIES,
+}                         from '../services/vitaWalletService.js';
 import { getBOBRate }     from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 
@@ -1014,11 +1020,18 @@ export async function getCorridorRates(req, res) {
     console.warn('[Admin getCorridorRates] Vita /prices no disponible:', err.message);
   }
 
-  const BOB_USD_RATE = await getBOBRate();
-  const vitaAttrs    = vitaPrices?.withdrawal?.prices?.attributes ?? null;
+  const BOB_USD_RATE       = await getBOBRate();
+  const vitaAttrsWithdrawal = vitaPrices?.withdrawal?.prices?.attributes ?? null;
+  const vitaAttrsSent       = vitaPrices?.vita_sent?.prices?.attributes  ?? null;
 
   const result = corridors.map((c) => {
     const amount = referenceAmount;
+
+    // Para GT/SV/ES/PL usar vita_sent prices; para el resto, withdrawal prices.
+    const destUpper = (c.destinationCountry ?? '').toUpperCase();
+    const vitaAttrs = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+      ? (vitaAttrsSent ?? vitaAttrsWithdrawal)
+      : vitaAttrsWithdrawal;
 
     // ── Calcular payinFee ─────────────────────────────────────────────────
     let payinFee = 0;
@@ -1159,5 +1172,138 @@ export async function getCorridorRates(req, res) {
     bobUsdRate:      BOB_USD_RATE,
     vitaAvailable:   !!vitaPrices,
     corridors:       result,
+  });
+}
+
+// ─── vitaDiagnostic ───────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/vita/diagnostic
+ *
+ * Diagnóstico completo del estado de la cuenta Vita AV Finance SpA.
+ * Consulta en paralelo: wallets, precios/cobertura, depósitos recientes,
+ * precios cripto y pares de exchange disponibles.
+ *
+ * Útil para verificar:
+ *  - Saldos activos y monedas habilitadas
+ *  - Cobertura de países por tabla (clp_sell, usd_sell, usdt_sell, etc.)
+ *  - Redes blockchain aceptadas para depósitos USDT/USDC
+ *  - Pares de exchange disponibles para conversión interna
+ */
+export async function vitaDiagnostic(req, res) {
+  const [walletsRes, pricesRes, depositsRes, cryptoPricesRes] =
+    await Promise.allSettled([
+      getWallets(),
+      getPrices(),
+      getDeposits(),
+      getCryptoPrices(),
+    ]);
+
+  // ── Wallets ────────────────────────────────────────────────────────────────
+  let wallets = null;
+  let walletsError = null;
+  if (walletsRes.status === 'fulfilled') {
+    const raw = walletsRes.value?.data ?? walletsRes.value;
+    wallets = (Array.isArray(raw) ? raw : [raw]).map((w) => ({
+      uuid:     w.uuid,
+      name:     w.name,
+      currency: w.currency,
+      balance:  w.balance,
+      status:   w.status,
+    }));
+  } else {
+    walletsError = walletsRes.reason?.message ?? 'Error desconocido';
+  }
+
+  // ── Precios / Cobertura de países ──────────────────────────────────────────
+  // Estructura real de Vita /prices:
+  //   { withdrawal: { prices: { attributes: { clp_sell: {co:..}, fixed_cost: {..} } } },
+  //     vita_sent:  { prices: { attributes: { clp_sell: {co:..., gt:..., sv:...} } } },
+  //     clp: { withdrawal: { prices: { ... } } } }
+  let coverage = null;
+  let pricesError = null;
+  if (pricesRes.status === 'fulfilled') {
+    const raw = pricesRes.value?.data ?? pricesRes.value ?? {};
+
+    // Extraer los attrs de cada sección relevante
+    const sections = {
+      withdrawal: raw?.withdrawal?.prices?.attributes,
+      vita_sent:  raw?.vita_sent?.prices?.attributes,
+    };
+
+    coverage = {};
+    for (const [section, attrs] of Object.entries(sections)) {
+      if (!attrs) continue;
+      const clpSell   = attrs.clp_sell   ?? {};
+      const fixedCost = attrs.fixed_cost ?? {};
+      const minAmount = attrs.min_amount ?? {};
+
+      coverage[section] = Object.entries(clpSell).map(([code, rate]) => ({
+        code,
+        rate,
+        fixedCost:  fixedCost[code] ?? null,
+        minAmount:  minAmount[code] ?? null,
+        vitaSentOnly: VITA_SENT_ONLY_COUNTRIES.has(code.toUpperCase()),
+      }));
+    }
+  } else {
+    pricesError = pricesRes.reason?.message ?? 'Error desconocido';
+  }
+
+  // ── Depósitos recientes ────────────────────────────────────────────────────
+  let deposits = null;
+  let depositsError = null;
+  if (depositsRes.status === 'fulfilled') {
+    const raw = depositsRes.value?.data ?? depositsRes.value;
+    const list = Array.isArray(raw) ? raw : (raw?.deposits ?? []);
+    deposits = list.slice(0, 10).map((d) => ({
+      id:        d.id ?? d.uuid,
+      asset:     d.currency ?? d.asset,
+      network:   d.network,
+      amount:    d.amount,
+      status:    d.status,
+      createdAt: d.created_at,
+    }));
+  } else {
+    depositsError = depositsRes.reason?.message ?? 'Error desconocido';
+  }
+
+  // ── Precios cripto y pares de exchange ─────────────────────────────────────
+  let cryptoPrices = null;
+  let cryptoError = null;
+  if (cryptoPricesRes.status === 'fulfilled') {
+    const raw = cryptoPricesRes.value?.data ?? cryptoPricesRes.value;
+    cryptoPrices = Array.isArray(raw)
+      ? raw.map((p) => ({
+          pair:    p.pair ?? `${p.from_currency}→${p.to_currency}`,
+          price:   p.price,
+          bid:     p.bid,
+          ask:     p.ask,
+        }))
+      : raw;
+  } else {
+    cryptoError = cryptoPricesRes.reason?.message ?? 'Error desconocido';
+  }
+
+  // ── Resumen de cobertura ───────────────────────────────────────────────────
+  const coverageSummary = coverage
+    ? Object.entries(coverage).reduce((acc, [table, entries]) => {
+        const vitaSentOnly = entries.filter((e) => e.vitaSentOnly).map((e) => e.code);
+        acc[table] = {
+          count:        entries.length,
+          countries:    entries.map((e) => e.code),
+          vitaSentOnly: vitaSentOnly.length ? vitaSentOnly : undefined,
+        };
+        return acc;
+      }, {})
+    : null;
+
+  return res.json({
+    generatedAt: new Date().toISOString(),
+    account:     'AV Finance SpA — Vita Wallet (cuenta única)',
+    wallets:     { data: wallets,      error: walletsError },
+    coverage:    { summary: coverageSummary, tables: coverage, error: pricesError },
+    deposits:    { recent: deposits,   error: depositsError },
+    cryptoPrices:{ data: cryptoPrices, error: cryptoError },
   });
 }

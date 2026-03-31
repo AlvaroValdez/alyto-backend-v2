@@ -25,7 +25,12 @@ import crypto            from 'crypto';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
-import { createPayout, getPrices } from '../services/vitaWalletService.js';
+import {
+  createPayout,
+  createVitaSentPayout,
+  VITA_SENT_ONLY_COUNTRIES,
+  getPrices,
+} from '../services/vitaWalletService.js';
 import { createDisbursement, verifyOwlPayWebhookSignature } from '../services/owlPayService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
@@ -415,6 +420,14 @@ export async function dispatchPayout(transaction) {
         // para bloquear el tipo de cambio. Sin este paso retorna "Los precios caducaron",
         // especialmente en corredores manuales donde el payin se confirma horas después.
         await getPrices();
+
+        // GT, SV, ES, PL solo están disponibles vía vita_sent (no en withdrawal rails).
+        // Para todos los demás destinos se sigue usando withdrawal (comportamiento original).
+        const destCountry = (transaction.destinationCountry ?? '').toUpperCase();
+        if (VITA_SENT_ONLY_COUNTRIES.has(destCountry)) {
+          console.info(`[dispatchPayout] ${destCountry} → vita_sent routing`);
+          return createVitaSentPayout(vitaPayload);
+        }
         return createPayout(vitaPayload);
       }
       if (method === 'owlPay') {

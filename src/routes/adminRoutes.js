@@ -38,6 +38,7 @@ import {
   getGlobalAnalytics,
   getTransactionComprobante,
   getCorridorRates,
+  vitaDiagnostic,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -287,6 +288,17 @@ router.get('/exchange-rates', listExchangeRates);
  * Query params: startDate, endDate (ISO)
  */
 router.get('/analytics', getGlobalAnalytics);
+
+// ─── Vita — Diagnóstico ───────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/vita/diagnostic
+ *
+ * Diagnóstico completo de la cuenta Vita AV Finance SpA:
+ * saldos activos, cobertura de países por tabla de precios (clp_sell / usd_sell /
+ * usdt_sell), depósitos recientes y pares de exchange disponibles.
+ */
+router.get('/vita/diagnostic', vitaDiagnostic);
 
 // ─── SpA Chile — Configuración payin manual CLP ─────────────────────────
 
