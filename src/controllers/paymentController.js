@@ -550,8 +550,9 @@ export async function initCrossBorderPayment(req, res) {
     beneficiaryData,
     beneficiary: legacyBeneficiary,
     // Datos de la cotización previa (opcionales — si el frontend los pasa se guardan)
-    destinationAmount: quotedDestAmount,
-    exchangeRate:      quotedExchangeRate,
+    destinationAmount:   quotedDestAmount,
+    exchangeRate:        quotedExchangeRate,
+    usdcTransitAmount:   quotedUsdcTransitAmount,
   } = req.body;
   const userId = req.user?._id;
 
@@ -797,6 +798,8 @@ export async function initCrossBorderPayment(req, res) {
   // ── 3b. Calcular fees desde TransactionConfig (configurable por corredor) ────
   // Fintoc cobra fee fijo en UF — usar cálculo dinámico si fintocConfig está presente.
   // Corredores no-Fintoc (SRL, LLC) usan payinFeePercent como siempre.
+  // round2: misma precisión que en la cotización (quoteSocket + calculateBOBQuote).
+  const round2 = n => Math.round(n * 100) / 100;
   let payinFee;
   if (corridor.payinMethod === 'fintoc' && corridor.fintocConfig?.ufValue) {
     const fintocResult = calculateFintocFee(amount, corridor.fintocConfig);
@@ -806,11 +809,11 @@ export async function initCrossBorderPayment(req, res) {
       fixedFee: fintocResult.fixedFee, effectivePercent: fintocResult.percentage.toFixed(3) + '%',
     });
   } else {
-    payinFee = Math.round(amount * (corridor.payinFeePercent / 100));
+    payinFee = round2(amount * (corridor.payinFeePercent / 100));
   }
-  const alytoCSpread    = Math.round(amount * (corridor.alytoCSpread / 100));
+  const alytoCSpread    = round2(amount * (corridor.alytoCSpread / 100));
   const fixedFee        = corridor.fixedFee ?? 0;
-  const profitRetention = Math.round(amount * (corridor.profitRetentionPercent / 100));
+  const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
   const payoutFee       = corridor.payoutFeeFixed ?? 0;
 
   console.log('[CrossBorder] Fees desde TransactionConfig:');
@@ -981,20 +984,24 @@ export async function initCrossBorderPayment(req, res) {
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
       // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
-      // El monto exacto de USDC se calcula y guarda en dispatchPayout al confirmar payin.
       ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
+      // usdcTransitAmount cotizado: almacenado en digitalAssetAmount para que dispatchPayout
+      // use exactamente el mismo monto USDC que se le mostró al usuario, sin recalcular.
+      ...(quotedUsdcTransitAmount != null && corridor.legalEntity === 'SRL'
+        ? { digitalAssetAmount: Number(quotedUsdcTransitAmount) }
+        : {}),
       // Montos y tasa de la cotización previa (desnormalizados para historial)
       ...(quotedDestAmount    != null ? { destinationAmount: quotedDestAmount }       : {}),
       ...(quotedExchangeRate  != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
 
       fees: {
-        payinFee:          Math.round(payinFee),
-        alytoCSpread:      Math.round(alytoCSpread),
-        fixedFee:          Math.round(fixedFee),
-        payoutFee:         Math.round(payoutFee),
-        profitRetention:   Math.round(profitRetention),
-        totalDeducted:     Math.round(payinFee + alytoCSpread + fixedFee + payoutFee),
-        totalDeductedReal: Math.round(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
+        payinFee,
+        alytoCSpread,
+        fixedFee,
+        payoutFee,
+        profitRetention,
+        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + payoutFee),
+        totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
         feeCurrency:       corridor.originCurrency ?? 'CLP',
       },
 
