@@ -24,7 +24,7 @@ import jwt                 from 'jsonwebtoken';
 import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
-import { getPrices }       from './vitaWalletService.js';
+import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
 import { getBOBRate }      from './exchangeRateService.js';
 import Sentry              from './sentry.js';
 
@@ -94,10 +94,13 @@ async function refreshVitaCache() {
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 function extractPricing(originCurrency, destinationCountry) {
-  const withdrawal = vitaCache.prices?.withdrawal;
-  if (!withdrawal) return null;
+  const destUpper  = destinationCountry.toUpperCase();
+  const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? vitaCache.prices?.vita_sent?.prices?.attributes
+    : vitaCache.prices?.withdrawal?.prices?.attributes;
+  const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
+  if (!attrs) return null;
 
-  const attrs      = withdrawal?.prices?.attributes;
   const countryKey = destinationCountry.toLowerCase();
   const origin     = originCurrency.toUpperCase();
   let rate;
@@ -132,10 +135,13 @@ function extractPricing(originCurrency, destinationCountry) {
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 function extractPricingUSD(destinationCountry) {
-  const withdrawal = vitaCache.prices?.withdrawal;
-  if (!withdrawal) return null;
+  const destUpper  = destinationCountry.toUpperCase();
+  const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? vitaCache.prices?.vita_sent?.prices?.attributes
+    : vitaCache.prices?.withdrawal?.prices?.attributes;
+  const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
+  if (!attrs) return null;
 
-  const attrs      = withdrawal?.prices?.attributes;
   const countryKey = destinationCountry.toLowerCase();
 
   const clpToDest = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
@@ -266,9 +272,9 @@ async function computeQuote(state) {
         payinFee,
         alytoCSpread,
         fixedFee,
-        payoutFee:       round2(payoutFee),
+        payoutFee:       0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
         profitRetention,
-        totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention + payoutFee),
+        totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention),
       },
       quoteExpiresAt,
       updatedAt: new Date(),
@@ -306,9 +312,9 @@ async function computeQuote(state) {
       payinFee,
       alytoCSpread,
       fixedFee,
-      payoutFee:       round2(payoutFee),
+      payoutFee:       0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
       profitRetention,
-      totalDeducted:   round2(totalDeducted + round2(payoutFee)),
+      totalDeducted:   round2(totalDeducted),
     },
     quoteExpiresAt,
     updatedAt:  new Date(),
