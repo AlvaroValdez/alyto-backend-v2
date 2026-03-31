@@ -275,6 +275,17 @@ export function getPaymentMethods(countryIso) {
   return vitaRequest('GET', `/payment_methods/${countryIso.toUpperCase()}`);
 }
 
+// ─── Constantes de cobertura ──────────────────────────────────────────────────
+
+/**
+ * Países que Vita SOLO soporta vía transactions_type: "vita_sent".
+ * No aparecen en la tabla withdrawal.prices.attributes.clp_sell.
+ * Confirmado en diagnostic 2026-03-31: GT, SV, ES, PL.
+ *
+ * Para estos destinos se debe llamar createVitaSentPayout() en lugar de createPayout().
+ */
+export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'ES', 'PL']);
+
 // ─── Endpoints Transaccionales ────────────────────────────────────────────────
 
 /**
@@ -312,6 +323,36 @@ export function createPayout(payload) {
   const fullPayload = {
     ...payload,
     transactions_type: 'withdrawal',
+    wallet:            walletUuid,
+    url_notify:        process.env.VITA_NOTIFY_URL ?? '',
+  };
+
+  return vitaRequest('POST', '/transactions', fullPayload);
+}
+
+/**
+ * createVitaSentPayout(payload)
+ * POST /api/businesses/transactions (transactions_type: "vita_sent")
+ *
+ * Variante de createPayout para países que Vita soporta exclusivamente
+ * a través de su red interna (vita_sent), no via rails bancarios directos.
+ * Cobertura adicional vs withdrawal: GT, SV, ES, PL.
+ *
+ * El payload tiene exactamente la misma forma que createPayout — la diferencia
+ * es únicamente transactions_type: 'vita_sent'.
+ *
+ * @param {object} payload — mismo schema que createPayout
+ * @returns {Promise<object>}
+ */
+export function createVitaSentPayout(payload) {
+  const walletUuid = process.env.VITA_BUSINESS_WALLET_UUID;
+  if (!walletUuid) {
+    throw new Error('[VitaWallet] VITA_BUSINESS_WALLET_UUID es requerido en .env.');
+  }
+
+  const fullPayload = {
+    ...payload,
+    transactions_type: 'vita_sent',
     wallet:            walletUuid,
     url_notify:        process.env.VITA_NOTIFY_URL ?? '',
   };
@@ -378,4 +419,48 @@ export function getPrices() {
  */
 export function getPayinPrices() {
   return vitaRequest('GET', '/payins_prices');
+}
+
+/**
+ * getWallets()
+ * GET /api/businesses/wallets
+ *
+ * Lista todas las wallets del negocio con sus balances actuales y monedas activas.
+ * La master wallet (is_master: true) es la que usa AV Finance SpA para operar.
+ *
+ * @returns {Promise<object>}
+ */
+export function getWallets() {
+  return vitaRequest('GET', '/wallets?page=1&count=10');
+}
+
+/**
+ * getDeposits()
+ * GET /api/businesses/deposits
+ *
+ * Devuelve los métodos de depósito disponibles para la cuenta, incluyendo
+ * las redes blockchain aceptadas para depositar USDC/USDT (BNB, ETH, Polygon, etc.)
+ *
+ * @returns {Promise<object>}
+ */
+export function getDeposits() {
+  return vitaRequest('GET', '/deposits');
+}
+
+/**
+ * getCryptoPrices()
+ * GET /api/businesses/crypto_prices
+ *
+ * Precios de intercambio crypto↔fiat y crypto↔crypto en tiempo real.
+ * Necesario como paso previo a cualquier exchange (USDT→USD, etc.)
+ * El campo coin_sell indica: 1 unidad de fiat = X crypto.
+ *
+ * Ejemplos:
+ *   usd: { usdt_sell: 0.895 }  → 1 USD = 0.895 USDT
+ *   usdt: { usd_sell: 1.117 } → 1 USDT = 1.117 USD
+ *
+ * @returns {Promise<object>}
+ */
+export function getCryptoPrices() {
+  return vitaRequest('GET', '/crypto_prices');
 }

@@ -338,9 +338,10 @@ const CORREDORES = [
   ...[
     { corridorId: 'cl-cr', dest: 'CR', destCurrency: 'CRC' },
     { corridorId: 'cl-do', dest: 'DO', destCurrency: 'DOP' },
-    { corridorId: 'cl-gt', dest: 'GT', destCurrency: 'GTQ' },
+    { corridorId: 'cl-gt', dest: 'GT', destCurrency: 'GTQ' },  // vita_sent routing
     { corridorId: 'cl-pa', dest: 'PA', destCurrency: 'USD' },  // Panamá dolarizado
-    { corridorId: 'cl-ht', dest: 'HT', destCurrency: 'HTG' },  // Haití — verificar cobertura Vita vigente
+    { corridorId: 'cl-ht', dest: 'HT', destCurrency: 'HTG' },
+    { corridorId: 'cl-sv', dest: 'SV', destCurrency: 'USD' },  // El Salvador dolarizado — vita_sent routing
   ].map(({ corridorId, dest, destCurrency }) => ({
     corridorId,
     originCountry:          'CL',
@@ -427,9 +428,10 @@ const CORREDORES = [
     // Vita LatAm faltantes vs V1.5
     { corridorId: 'bo-cr', dest: 'CR', destCurrency: 'CRC', spread: 2, fixed: 5, retention: 1 },
     { corridorId: 'bo-do', dest: 'DO', destCurrency: 'DOP', spread: 2, fixed: 5, retention: 1 },
-    { corridorId: 'bo-gt', dest: 'GT', destCurrency: 'GTQ', spread: 2, fixed: 5, retention: 1 },
+    { corridorId: 'bo-gt', dest: 'GT', destCurrency: 'GTQ', spread: 2, fixed: 5, retention: 1 },   // vita_sent routing
     { corridorId: 'bo-pa', dest: 'PA', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },  // dolarizado
-    { corridorId: 'bo-ht', dest: 'HT', destCurrency: 'HTG', spread: 3, fixed: 8, retention: 1.5 }, // spread mayor por riesgo operativo
+    { corridorId: 'bo-ht', dest: 'HT', destCurrency: 'HTG', spread: 3, fixed: 8, retention: 1.5 },
+    { corridorId: 'bo-sv', dest: 'SV', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },  // El Salvador dolarizado — vita_sent routing
   ].map(({ corridorId, dest, destCurrency, spread, fixed, retention }) => ({
     corridorId,
     originCountry:          'BO',
@@ -687,9 +689,10 @@ const CORREDORES = [
     { corridorId: 'us-uy', dest: 'UY', destCurrency: 'UYU' },
     { corridorId: 'us-cr', dest: 'CR', destCurrency: 'CRC' },
     { corridorId: 'us-do', dest: 'DO', destCurrency: 'DOP' },
-    { corridorId: 'us-gt', dest: 'GT', destCurrency: 'GTQ' },
+    { corridorId: 'us-gt', dest: 'GT', destCurrency: 'GTQ' },  // vita_sent routing
     { corridorId: 'us-pa', dest: 'PA', destCurrency: 'USD' },
     { corridorId: 'us-ht', dest: 'HT', destCurrency: 'HTG' },
+    { corridorId: 'us-sv', dest: 'SV', destCurrency: 'USD' },  // El Salvador dolarizado — vita_sent routing
   ].map(({ corridorId, dest, destCurrency }) => ({
     corridorId,
     originCountry:          'US',

@@ -49,6 +49,7 @@ import {
   getPrices,
   getWithdrawalRules as getVitaWithdrawalRules,
   createPayin,
+  VITA_SENT_ONLY_COUNTRIES,
 }                              from '../services/vitaWalletService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
@@ -1118,7 +1119,14 @@ export async function initCrossBorderPayment(req, res) {
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 async function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
-  const attrs = vitaPricesResponse?.withdrawal?.prices?.attributes;
+  // GT, SV, ES, PL only exist in vita_sent table — fall back to it for pricing.
+  // All other countries use withdrawal table (original behavior).
+  const destUpper  = destinationCountry.toUpperCase();
+  const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? vitaPricesResponse?.vita_sent?.prices?.attributes
+    : vitaPricesResponse?.withdrawal?.prices?.attributes;
+
+  const attrs = attrsSource ?? vitaPricesResponse?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
   const countryKey = destinationCountry.toLowerCase();
