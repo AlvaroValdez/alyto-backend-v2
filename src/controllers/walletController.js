@@ -42,7 +42,7 @@ import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '
  * @param {mongoose.ClientSession} [session]
  * @returns {Promise<WalletBOB>}
  */
-async function getOrCreateWallet(userId, session) {
+export async function getOrCreateWallet(userId, session) {
   const opts = session ? { session } : {}
   let wallet = await WalletBOB.findOne({ userId }, null, opts)
   if (!wallet) {
@@ -61,7 +61,7 @@ async function getOrCreateWallet(userId, session) {
  * @param {number} amount      — monto en BOB
  * @param {string} [reference] — referencia adicional
  */
-function fireAuditTrail(wtxId, type, amount, reference = '') {
+export function fireAuditTrail(wtxId, type, amount, reference = '') {
   // Construimos un objeto compatible con registerAuditTrail
   const fakeDoc = {
     alytoTransactionId: `${wtxId}`,
