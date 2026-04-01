@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed:corredores": "node scripts/seedCorredores.js",
+    "seed:corredores:espl": "node scripts/seedCorredoresEsPl.js",
     "seed:admin": "node scripts/seedAdmin.js",
     "check:env": "node scripts/checkEnv.js",
     "check:production": "node scripts/checkProduction.js",
