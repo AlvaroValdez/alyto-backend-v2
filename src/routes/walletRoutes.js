@@ -23,6 +23,11 @@ import {
   sendP2P,
   requestWithdrawal,
 } from '../controllers/walletController.js'
+import {
+  generateWalletQR,
+  scanAndPayQR,
+  previewQR,
+} from '../controllers/qrWalletController.js'
 
 const router = Router()
 
@@ -31,5 +36,10 @@ router.get('/transactions',      protect, getWalletTransactions)
 router.post('/deposit/initiate', protect, initiateDeposit)
 router.post('/send',             protect, sendP2P)
 router.post('/withdraw/request', protect, requestWithdrawal)
+
+// QR Wallet (Fase 29)
+router.post('/qr/generate', protect, generateWalletQR)
+router.post('/qr/scan',     protect, scanAndPayQR)
+router.get('/qr/preview',   protect, previewQR)
 
 export default router
