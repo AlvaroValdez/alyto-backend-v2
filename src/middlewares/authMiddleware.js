@@ -18,6 +18,35 @@ import jwt  from 'jsonwebtoken';
 import User from '../models/User.js';
 import { setSentryUser } from './sentryContext.js';
 
+// ─── Cache de usuarios autenticados ──────────────────────────────────────────
+// Evita una query MongoDB en cada request autenticado.
+// TTL: 5 min — suficiente para flujos normales.
+// Se invalida en logout (el token expira, decoded.id ya no matchea con TTL).
+// Para cambios críticos post-login (ej. cuenta suspendida), el TTL máximo
+// de 5 min es el delay aceptable antes de que el middleware lo detecte.
+
+const USER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const userCache = new Map(); // userId → { user, expiresAt }
+
+function getCachedUser(userId) {
+  const entry = userCache.get(userId);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    userCache.delete(userId);
+    return null;
+  }
+  return entry.user;
+}
+
+function setCachedUser(userId, user) {
+  userCache.set(userId, { user, expiresAt: Date.now() + USER_CACHE_TTL_MS });
+}
+
+/** Invalida el cache de un usuario (usar en logout o cambio de estado) */
+export function invalidateUserCache(userId) {
+  userCache.delete(String(userId));
+}
+
 // ─── protect ─────────────────────────────────────────────────────────────────
 
 /**
@@ -45,9 +74,15 @@ export async function protect(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Cargar usuario fresco de DB — detecta cuentas desactivadas post-emisión
-    const user = await User.findById(decoded.id)
-      .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId');
+    // Cargar usuario desde cache o DB.
+    // Cache TTL 5 min — evita una query por cada request autenticado.
+    let user = getCachedUser(decoded.id);
+    if (!user) {
+      user = await User.findById(decoded.id)
+        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId')
+        .lean();
+      if (user) setCachedUser(decoded.id, user);
+    }
 
     if (!user) {
       return res.status(401).json({
@@ -56,6 +91,7 @@ export async function protect(req, res, next) {
     }
 
     if (!user.isActive) {
+      invalidateUserCache(decoded.id); // Limpiar cache si la cuenta fue suspendida
       return res.status(401).json({
         error: 'No autorizado. Cuenta suspendida.',
       });

@@ -34,6 +34,7 @@ import kycRoutes           from './routes/kycRoutes.js';
 import kybRoutes           from './routes/kybRoutes.js';
 import walletRoutes        from './routes/walletRoutes.js';
 import reclamosRoutes      from './routes/reclamosRoutes.js';
+import contactsRoutes      from './routes/contactsRoutes.js';
 import { sentryContext }   from './middlewares/sentryContext.js';
 import { handleStripeWebhook }     from './webhooks/stripeWebhook.js';
 import { createQuoteSocketServer }  from './services/quoteSocket.js';
@@ -221,6 +222,7 @@ app.use('/api/v1/kyc',           kycRoutes);
 app.use('/api/v1/kyb',           kybRoutes);
 app.use('/api/v1/wallet',        walletRoutes);         // Fase 25 — Wallet BOB (SRL Bolivia)
 app.use('/api/v1/reclamos',      reclamosRoutes);       // Fase 27 — PRILI Reclamos ASFI
+app.use('/api/v1/contacts',      contactsRoutes);       // Fase 33 — Agenda de Contactos
 
 // ─── Rutas de Desarrollo (solo disponibles fuera de producción) ──────────────
 

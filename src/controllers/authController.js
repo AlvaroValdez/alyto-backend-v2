@@ -191,7 +191,8 @@ export async function loginUser(req, res) {
     }
 
     // Cargar con +password (campo oculto por select:false en el modelo)
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
+    // .lean() devuelve POJO en lugar de documento Mongoose — ~2-5x más rápido
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password').lean();
 
     // Mensaje genérico — no revelar si el email existe (prevención de user enumeration)
     if (!user || !user.password) {
@@ -207,15 +208,23 @@ export async function loginUser(req, res) {
       return res.status(401).json({ error: 'Cuenta suspendida. Contacta soporte.' });
     }
 
-    // Re-hash progresivo: si el hash tiene un cost > 10, actualizar silenciosamente
-    // Esto migra automáticamente hashes antiguos (cost 12) al nuevo estándar (cost 10)
+    // lastLoginAt siempre — fire-and-forget, no bloquea la respuesta
+    // Re-hash progresivo: si el hash tiene cost > 10, migrar silenciosamente
+    // IMPORTANTE: bcrypt.hash() es costoso (~500ms) — se ejecuta DESPUÉS de
+    // enviar la respuesta usando setImmediate para no bloquear el login.
     const currentRounds = parseInt(user.password.split('$')[2], 10);
     const TARGET_COST   = 10;
-    const updates       = { lastLoginAt: new Date() };
-    if (currentRounds > TARGET_COST) {
-      updates.password = await bcrypt.hash(password, TARGET_COST);
-    }
-    User.findByIdAndUpdate(user._id, updates).exec();
+    setImmediate(async () => {
+      try {
+        const updates = { lastLoginAt: new Date() };
+        if (currentRounds > TARGET_COST) {
+          updates.password = await bcrypt.hash(password, TARGET_COST);
+        }
+        await User.findByIdAndUpdate(user._id, updates);
+      } catch (err) {
+        console.warn('[Auth] Error en background update post-login:', err.message);
+      }
+    });
 
     // rememberMe: true → 30 días; false → 24 horas; ausente → default del entorno
     let jwtExpiry
