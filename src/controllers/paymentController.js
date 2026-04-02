@@ -1891,11 +1891,43 @@ export async function getTransactionStatus(req, res) {
     });
   }
 
-  // ── 2. Enmascarar número de cuenta del beneficiario ───────────────────────
-  const rawAccount    = transaction.beneficiary?.accountBank ?? '';
+  // ── 2. Extraer datos del beneficiario (schema fields + dynamicFields) ─────
+  const ben      = transaction.beneficiary ?? {};
+  const dynFields = Object.fromEntries(ben.dynamicFields ?? []);
+
+  // Nombre: campo schema o dynamicFields
+  const firstName = ben.firstName ?? dynFields.beneficiary_first_name ?? '';
+  const lastName  = ben.lastName  ?? dynFields.beneficiary_last_name  ?? '';
+  const fullName  = `${firstName} ${lastName}`.trim();
+
+  // Banco: bankCode schema o dynamic
+  const bankName = ben.bankCode
+    ?? dynFields.bank_name ?? dynFields.bank_code
+    ?? '';
+
+  // Cuenta: accountBank schema o dynamic — enmascarar solo últimos 4
+  const rawAccount = ben.accountBank
+    ?? dynFields.account_number ?? dynFields.account_bank
+    ?? '';
   const maskedAccount = rawAccount.length >= 4
     ? `****${rawAccount.slice(-4)}`
-    : '****';
+    : (rawAccount || '****');
+
+  // Tipo de cuenta
+  const accountType = ben.accountType ?? dynFields.account_type ?? '';
+
+  // Documento
+  const documentType   = ben.documentType
+    ?? dynFields.document_type ?? dynFields.beneficiary_document_type ?? '';
+  const documentNumber = ben.documentNumber
+    ?? dynFields.document_number ?? dynFields.beneficiary_document_number ?? '';
+
+  // País destino
+  const destinationCountry = transaction.destinationCountry ?? null;
+
+  // Concepto / referencia
+  const concept = transaction.concept ?? transaction.reference
+    ?? dynFields.concept ?? dynFields.reference ?? '';
 
   // ── 3. Mapear fees desde feeBreakdown ────────────────────────────────────
   const fb = transaction.feeBreakdown ?? {};
@@ -1908,6 +1940,7 @@ export async function getTransactionStatus(req, res) {
     originCurrency:      transaction.originCurrency,
     destinationAmount:   transaction.destinationAmount   ?? 0,
     destinationCurrency: transaction.destinationCurrency ?? '',
+    destinationCountry,
     exchangeRate:        transaction.exchangeRate        ?? 0,
     fees: {
       payinFee:      fb.providerFee ?? 0,
@@ -1917,10 +1950,14 @@ export async function getTransactionStatus(req, res) {
       totalDeducted: fb.totalFee    ?? 0,
     },
     beneficiary: {
-      fullName:      `${transaction.beneficiary?.firstName ?? ''} ${transaction.beneficiary?.lastName ?? ''}`.trim(),
-      bankName:      transaction.beneficiary?.bankCode ?? '',
+      fullName,
+      bankName,
       accountNumber: maskedAccount,
+      accountType,
+      documentType,
+      documentNumber,
     },
+    concept,
     payinMethod:       transaction.corridorId?.payinMethod ?? null,
     estimatedDelivery: transaction.corridorId?.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
     createdAt:         transaction.createdAt,
