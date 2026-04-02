@@ -320,7 +320,7 @@ export async function sendP2P(req, res) {
         counterpartyUserId: sender._id,
         confirmedAt:        new Date(),
       },
-    ], { session })
+    ], { session, ordered: true })
 
     await session.commitTransaction()
 
