@@ -39,6 +39,7 @@ import {
   getTransactionComprobante,
   getCorridorRates,
   vitaDiagnostic,
+  vitaBalance,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -299,6 +300,7 @@ router.get('/analytics', getGlobalAnalytics);
  * usdt_sell), depósitos recientes y pares de exchange disponibles.
  */
 router.get('/vita/diagnostic', vitaDiagnostic);
+router.get('/vita/balance',    vitaBalance);
 
 // ─── SpA Chile — Configuración payin manual CLP ─────────────────────────
 

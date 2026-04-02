@@ -1213,12 +1213,12 @@ export async function vitaDiagnostic(req, res) {
   let walletsError = null;
   if (walletsRes.status === 'fulfilled') {
     const raw = walletsRes.value?.data ?? walletsRes.value;
-    wallets = (Array.isArray(raw) ? raw : [raw]).map((w) => ({
-      uuid:     w.uuid,
-      name:     w.name,
-      currency: w.currency,
-      balance:  w.balance,
-      status:   w.status,
+    wallets = (Array.isArray(raw?.wallets ?? raw) ? (raw?.wallets ?? raw) : [raw]).map((w) => ({
+      uuid:      w.uuid,
+      type:      w.type,
+      isMaster:  w.attributes?.token === 'master',
+      balances:  w.attributes?.balances ?? {},
+      createdAt: w.attributes?.created_at,
     }));
   } else {
     walletsError = walletsRes.reason?.message ?? 'Error desconocido';
@@ -1315,4 +1315,55 @@ export async function vitaDiagnostic(req, res) {
     deposits:    { recent: deposits,   error: depositsError },
     cryptoPrices:{ data: cryptoPrices, error: cryptoError },
   });
+}
+
+// ─── vitaBalance ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/vita/balance
+ * Retorna saldos actuales de la wallet master Vita + alertas de liquidez.
+ */
+export async function vitaBalance(req, res) {
+  try {
+    const walletsRes = await getWallets();
+    const raw = walletsRes?.data ?? walletsRes;
+    const walletsList = raw?.wallets ?? (Array.isArray(raw) ? raw : [raw]);
+    const master = walletsList.find(w => w.attributes?.token === 'master') ?? walletsList[0];
+
+    const balances = master?.attributes?.balances ?? {};
+
+    const ALERT_THRESHOLDS = {
+      clp:  500000,
+      usd:  500,
+      usdt: 500,
+      usdc: 500,
+      cop:  2000000,
+    };
+
+    const alerts = [];
+    for (const [currency, threshold] of Object.entries(ALERT_THRESHOLDS)) {
+      const current = balances[currency] ?? 0;
+      if (current < threshold) {
+        alerts.push({
+          currency:  currency.toUpperCase(),
+          current,
+          threshold,
+          level:     current < threshold * 0.5 ? 'critical' : 'warning',
+          message:   `Saldo ${currency.toUpperCase()} bajo: ${current.toLocaleString()} (mínimo ${threshold.toLocaleString()})`,
+        });
+      }
+    }
+
+    return res.json({
+      walletId:  master?.uuid,
+      isMaster:  master?.attributes?.token === 'master',
+      balances,
+      alerts,
+      hasAlerts: alerts.length > 0,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[vitaBalance]', err.message);
+    return res.status(500).json({ error: 'Error consultando saldo Vita.' });
+  }
 }
