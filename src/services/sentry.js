@@ -10,21 +10,27 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Solo inicializar si SENTRY_DSN está configurado
-// En desarrollo sin DSN, Sentry se inicializa en modo "silencioso" (no envía eventos)
+// Solo inicializar si SENTRY_DSN está configurado.
+// El import de @sentry/profiling-node se hace dinámico para evitar que el
+// native addon falle al cargar en entornos de desarrollo sin las bindings.
 if (process.env.SENTRY_DSN) {
+  const integrations = [];
+  try {
+    const { nodeProfilingIntegration } = await import('@sentry/profiling-node');
+    integrations.push(nodeProfilingIntegration());
+  } catch {
+    // Native profiling addon no disponible en este entorno — continuar sin él
+  }
+
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
 
     environment: process.env.NODE_ENV ?? 'development',
 
-    integrations: [
-      nodeProfilingIntegration(),
-    ],
+    integrations,
 
     // Muestra de trazas: 20% en producción para no saturar la cuota,
     // 100% en desarrollo/QA para ver todo el flujo
