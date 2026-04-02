@@ -31,6 +31,15 @@ import {
 import { getBOBRate }     from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function normalizeAsset(raw) {
+  if (!raw) return 'USDC';
+  const upper = raw.toString().toUpperCase().trim();
+  if (['USDT', 'USDC', 'USD', 'XLM'].includes(upper)) return upper;
+  return 'USDC'; // fallback seguro
+}
+
 // ─── getAllUsers ──────────────────────────────────────────────────────────────
 
 /**
@@ -1258,7 +1267,7 @@ export async function vitaDiagnostic(req, res) {
     const list = Array.isArray(raw) ? raw : (raw?.deposits ?? []);
     deposits = list.slice(0, 10).map((d) => ({
       id:        d.id ?? d.uuid,
-      asset:     d.currency ?? d.asset,
+      asset:     normalizeAsset(d.currency ?? d.asset ?? 'USDC'),
       network:   d.network,
       amount:    d.amount,
       status:    d.status,
