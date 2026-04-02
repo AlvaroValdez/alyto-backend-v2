@@ -129,10 +129,9 @@ export async function scanAndPayQR(req, res) {
     }
 
     // 5. Obtener wallets (crear si no existen)
-    const [walletPayer, walletRecipient] = await Promise.all([
-      getOrCreateWallet(payer._id, session),
-      getOrCreateWallet(recipient._id, session),
-    ]);
+    // Nota: secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
+    const walletPayer     = await getOrCreateWallet(payer._id, session);
+    const walletRecipient = await getOrCreateWallet(recipient._id, session);
 
     if (walletPayer.status !== 'active') {
       await session.abortTransaction();
