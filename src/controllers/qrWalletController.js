@@ -200,7 +200,7 @@ export async function scanAndPayQR(req, res) {
         metadata:           { qrId: payload.qrId, qrType: payload.type },
         confirmedAt:        new Date(),
       },
-    ], { session });
+    ], { session, ordered: true });
 
     await session.commitTransaction();
 
