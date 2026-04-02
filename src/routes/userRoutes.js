@@ -21,6 +21,7 @@ import {
   deleteFcmToken,
   getSessions,
   processKyc,
+  uploadAvatar,
 } from '../controllers/userController.js';
 
 const router = Router();
@@ -46,6 +47,8 @@ const kycUpload = upload.fields([
   { name: 'selfie',        maxCount: 1 },
 ]);
 
+const avatarUpload = upload.single('avatar');
+
 // ─── Rutas ────────────────────────────────────────────────────────────────────
 
 // GET  /api/v1/user/profile
@@ -62,6 +65,9 @@ router.delete('/fcm-token', protect, deleteFcmToken);
 
 // GET /api/v1/user/sessions
 router.get('/sessions', protect, getSessions);
+
+// PATCH /api/v1/user/avatar
+router.patch('/avatar', protect, avatarUpload, uploadAvatar);
 
 // POST /api/v1/user/kyc
 router.post('/kyc', protect, kycUpload, processKyc);

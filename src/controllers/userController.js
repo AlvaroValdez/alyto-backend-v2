@@ -49,6 +49,7 @@ function buildProfileResponse(user) {
     kycStatus:      user.kycStatus,
     kycVerifiedAt:  user.kycApprovedAt ?? null,
     createdAt:      user.createdAt,
+    avatarUrl:      user.avatarUrl ?? null,
     fcmTokens:      (user.fcmTokens ?? []).length,
     preferences: {
       language: user.preferences?.language  ?? 'es',
@@ -241,6 +242,41 @@ export async function getSessions(req, res) {
   } catch (err) {
     console.error('[UserCtrl] getSessions error:', err.message);
     return res.status(500).json({ error: 'Error interno al obtener las sesiones.' });
+  }
+}
+
+// ─── PATCH /avatar ────────────────────────────────────────────────────────────
+
+/**
+ * uploadAvatar
+ * Recibe la imagen vía multipart (field: 'avatar'), la convierte a data URL
+ * base64 y la guarda en user.avatarUrl.
+ * Tamaño máximo aceptado: 2 MB (el cliente debe redimensionar antes de enviar).
+ */
+export async function uploadAvatar(req, res) {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
+    }
+
+    // Convertir buffer a data URL base64
+    const mimeType  = file.mimetype;
+    const base64    = file.buffer.toString('base64');
+    const dataUrl   = `data:${mimeType};base64,${base64}`;
+
+    const updated = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { avatarUrl: dataUrl } },
+      { new: true },
+    ).lean();
+
+    if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+    return res.status(200).json({ avatarUrl: dataUrl });
+  } catch (err) {
+    console.error('[UserCtrl] uploadAvatar error:', err.message);
+    return res.status(500).json({ error: 'Error interno al subir la foto de perfil.' });
   }
 }
 
