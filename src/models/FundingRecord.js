@@ -169,7 +169,6 @@ const fundingRecordSchema = new Schema(
 
 // Índices para consultas del balance por entidad
 fundingRecordSchema.index({ entity: 1, asset: 1, status: 1 });
-fundingRecordSchema.index({ fundingId: 1 }, { unique: true });
 fundingRecordSchema.index({ createdAt: -1 });
 
 const FundingRecord = mongoose.model('FundingRecord', fundingRecordSchema);
