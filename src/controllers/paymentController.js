@@ -1893,7 +1893,10 @@ export async function getTransactionStatus(req, res) {
 
   // ── 2. Extraer datos del beneficiario (schema fields + dynamicFields) ─────
   const ben      = transaction.beneficiary ?? {};
-  const dynFields = Object.fromEntries(ben.dynamicFields ?? []);
+  // Con .lean(), dynamicFields es un plain object (no un Map), así que lo usamos directamente
+  const dynFields = (ben.dynamicFields && typeof ben.dynamicFields === 'object')
+    ? ben.dynamicFields
+    : {};
 
   // Nombre: campo schema o dynamicFields
   const firstName = ben.firstName ?? dynFields.beneficiary_first_name ?? '';
