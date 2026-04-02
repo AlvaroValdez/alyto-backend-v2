@@ -110,6 +110,11 @@ const userSchema = new Schema(
       type:  String,
       trim:  true,
     },
+    /** Foto de perfil como data URL base64 (max ~150 KB tras compresión en cliente) */
+    avatarUrl: {
+      type:    String,
+      default: null,
+    },
 
     // ── Campo CRÍTICO: Jurisdicción Multi-Entidad ────────────────────────────
     /**
