@@ -73,7 +73,7 @@ export async function generateQR({
   const qrBase64 = await QRCode.toDataURL(JSON.stringify(payload), {
     width:                400,
     margin:               2,
-    errorCorrectionLevel: 'M',
+    errorCorrectionLevel: 'H',
     color: { dark: '#000000', light: '#ffffff' },
   });
 
