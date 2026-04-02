@@ -269,10 +269,9 @@ export async function sendP2P(req, res) {
       return res.status(400).json({ error: 'Solo puedes enviar a otros usuarios Bolivia (SRL).' })
     }
 
-    const [walletOrigen, walletDestino] = await Promise.all([
-      getOrCreateWallet(sender._id, session),
-      getOrCreateWallet(recipient._id, session),
-    ])
+    // Nota: secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
+    const walletOrigen  = await getOrCreateWallet(sender._id, session)
+    const walletDestino = await getOrCreateWallet(recipient._id, session)
 
     if (walletOrigen.status !== 'active') {
       await session.abortTransaction()
