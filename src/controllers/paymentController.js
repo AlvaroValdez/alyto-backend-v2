@@ -2208,6 +2208,7 @@ export async function uploadPaymentProof(req, res) {
  */
 
 const COUNTRY_META = {
+  // LatAm
   CO: { name: 'Colombia',       flag: '🇨🇴' },
   PE: { name: 'Perú',           flag: '🇵🇪' },
   AR: { name: 'Argentina',      flag: '🇦🇷' },
@@ -2220,6 +2221,26 @@ const COUNTRY_META = {
   BO: { name: 'Bolivia',        flag: '🇧🇴' },
   CL: { name: 'Chile',          flag: '🇨🇱' },
   VE: { name: 'Venezuela',      flag: '🇻🇪' },
+  GT: { name: 'Guatemala',      flag: '🇬🇹' },
+  SV: { name: 'El Salvador',    flag: '🇸🇻' },
+  CR: { name: 'Costa Rica',     flag: '🇨🇷' },
+  DO: { name: 'Rep. Dominicana',flag: '🇩🇴' },
+  HT: { name: 'Haití',          flag: '🇭🇹' },
+  PA: { name: 'Panamá',         flag: '🇵🇦' },
+  // Europa / global
+  EU: { name: 'Europa',         flag: '🇪🇺' },
+  GB: { name: 'Reino Unido',    flag: '🇬🇧' },
+  CN: { name: 'China',          flag: '🇨🇳' },
+  AE: { name: 'Emiratos Árabes',flag: '🇦🇪' },
+  AU: { name: 'Australia',      flag: '🇦🇺' },
+  ES: { name: 'España',         flag: '🇪🇸' },
+  PL: { name: 'Polonia',        flag: '🇵🇱' },
+  CA: { name: 'Canadá',         flag: '🇨🇦' },
+  HK: { name: 'Hong Kong',      flag: '🇭🇰' },
+  JP: { name: 'Japón',          flag: '🇯🇵' },
+  SG: { name: 'Singapur',       flag: '🇸🇬' },
+  ZA: { name: 'Sudáfrica',      flag: '🇿🇦' },
+  NG: { name: 'Nigeria',        flag: '🇳🇬' },
 };
 
 /** Labels legibles para métodos de payin */
