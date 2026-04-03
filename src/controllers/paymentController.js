@@ -2300,6 +2300,7 @@ export async function getAvailableCorridors(req, res) {
       destinationFlag:         meta.flag ?? '',
       payinMethod:             c.payinMethod,
       payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
+      minAmountOrigin:         c.minAmountOrigin ?? 0,
     };
   });
 
