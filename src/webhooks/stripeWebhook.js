@@ -20,6 +20,7 @@
 
 import Stripe from 'stripe';
 import User   from '../models/User.js';
+import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -128,6 +129,7 @@ async function _approveKyc(session) {
   user.kycApprovedAt  = new Date();
   user.kycProvider    = 'stripe_identity';
   await user.save();
+  invalidateUserCache(user._id); // forzar refresco del cache del middleware
 
   console.info(
     `[KYC Webhook] ✅ APROBADO — userId: ${user._id} | email: ${user.email} | entity: ${user.legalEntity} | prevStatus: ${prevStatus} → approved`
@@ -147,6 +149,7 @@ async function _rejectKyc(session, errorCode) {
   user.kycRejectedAt = new Date();
   user.kycErrorCode  = errorCode;
   await user.save();
+  invalidateUserCache(user._id); // forzar refresco del cache del middleware
 
   console.info(
     `[KYC Webhook] ❌ RECHAZADO — userId: ${user._id} | email: ${user.email} | code: ${errorCode} | prevStatus: ${prevStatus} → rejected`

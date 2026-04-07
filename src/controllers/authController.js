@@ -163,9 +163,20 @@ export async function registerUser(req, res) {
  * Respuesta 200: { user: { id, email, firstName, lastName, legalEntity, kycStatus, role, country } }
  */
 export async function getMe(req, res) {
-  const { _id, email, firstName, lastName, legalEntity, kycStatus, role, country } = req.user;
+  const { _id, email, firstName, lastName, legalEntity, role, country, avatarUrl } = req.user;
+
+  // Leer kycStatus directo de la DB — el middleware tiene caché de 5 min
+  // que puede quedar desactualizado justo cuando el KYC cambia a 'approved'.
+  let kycStatus = req.user.kycStatus;
+  try {
+    const fresh = await User.findById(_id).select('kycStatus kycApprovedAt').lean();
+    if (fresh) kycStatus = fresh.kycStatus;
+  } catch {
+    // Si falla la query, devolver lo que tiene el middleware (mejor que nada)
+  }
+
   return res.json({
-    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, role, country },
+    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, role, country, avatarUrl: avatarUrl ?? null },
   });
 }
 
