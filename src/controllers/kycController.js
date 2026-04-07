@@ -9,6 +9,7 @@
 
 import Stripe from 'stripe';
 import User   from '../models/User.js';
+import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
 let _stripe = null;
 function getStripe() {
@@ -95,6 +96,16 @@ export async function createKycSession(req, res) {
 
 // ─── getKycStatus ─────────────────────────────────────────────────────────────
 
+// Errores de Stripe Identity que implican rechazo definitivo (mismo set que el webhook)
+const HARD_REJECTION_CODES = new Set([
+  'document_expired',
+  'document_type_not_supported',
+  'document_unverified_other',
+  'selfie_face_mismatch',
+  'selfie_manipulated',
+  'selfie_unverified_other',
+]);
+
 /**
  * GET /api/v1/kyc/status
  * Requiere JWT (middleware protect).
@@ -102,14 +113,74 @@ export async function createKycSession(req, res) {
  * Devuelve el estado KYC actual del usuario. El frontend hace polling
  * a este endpoint cada 3 segundos mientras kycStatus === 'in_review'.
  *
- * @returns {{ kycStatus: string }}
+ * Cuando el estado está en 'in_review', consulta directamente a Stripe
+ * para resolver el estado sin depender del webhook. Esto garantiza que
+ * el usuario siempre vea el resultado correcto, incluso si el webhook
+ * tardó o falló.
+ *
+ * @returns {{ kycStatus: string, kycApprovedAt: string|null }}
  */
 export async function getKycStatus(req, res) {
   try {
-    const user = await User.findById(req.user._id).select('kycStatus kycApprovedAt');
+    const user = await User.findById(req.user._id)
+      .select('kycStatus kycApprovedAt stripeVerificationSessionId');
 
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado.' });
+    }
+
+    // Fast path: estado ya resuelto
+    if (user.kycStatus === 'approved' || user.kycStatus === 'rejected') {
+      return res.json({
+        kycStatus:     user.kycStatus,
+        kycApprovedAt: user.kycApprovedAt ?? null,
+      });
+    }
+
+    // Fallback activo: si está en in_review, consultar Stripe directamente.
+    // Esto resuelve el estado aunque el webhook haya fallado o aún no haya llegado.
+    if (user.kycStatus === 'in_review' && user.stripeVerificationSessionId) {
+      try {
+        const session = await getStripe().identity.verificationSessions.retrieve(
+          user.stripeVerificationSessionId,
+        );
+
+        console.info(
+          `[KYC Status] Stripe session ${session.id} → status: ${session.status} | last_error: ${JSON.stringify(session.last_error ?? null)}`,
+        );
+
+        if (session.status === 'verified') {
+          // Auto-aprobar: el webhook no llegó pero Stripe ya completó la verificación
+          await User.findByIdAndUpdate(user._id, {
+            kycStatus:     'approved',
+            kycApprovedAt: new Date(),
+            kycProvider:   'stripe_identity',
+          });
+          invalidateUserCache(user._id); // forzar refresco del cache del middleware
+          console.info(`[KYC Status] ✅ Auto-aprobado por polling — userId: ${user._id}`);
+          return res.json({ kycStatus: 'approved', kycApprovedAt: new Date() });
+        }
+
+        if (session.status === 'requires_input') {
+          const errorCode = session.last_error?.code;
+          if (errorCode && HARD_REJECTION_CODES.has(errorCode)) {
+            // Auto-rechazar: error definitivo de Stripe
+            await User.findByIdAndUpdate(user._id, {
+              kycStatus:     'rejected',
+              kycRejectedAt: new Date(),
+              kycErrorCode:  errorCode,
+            });
+            invalidateUserCache(user._id); // forzar refresco del cache del middleware
+            console.info(`[KYC Status] ❌ Auto-rechazado por polling — userId: ${user._id} | code: ${errorCode}`);
+            return res.json({ kycStatus: 'rejected', kycApprovedAt: null });
+          }
+        }
+
+        // session.status === 'processing' o error recuperable → seguir esperando
+      } catch (stripeErr) {
+        // Si Stripe falla, devolvemos el estado de DB sin bloquear al usuario
+        console.warn(`[KYC Status] No se pudo consultar Stripe: ${stripeErr.message}`);
+      }
     }
 
     return res.json({
