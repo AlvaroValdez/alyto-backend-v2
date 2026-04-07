@@ -76,6 +76,10 @@ import {
   adminUnfreezeWallet,
 } from '../controllers/walletController.js';
 import {
+  adminListPendingConversions,
+  adminConfirmBOBtoUSDC,
+} from '../controllers/walletUSDCController.js';
+import {
   adminListarReclamos,
   adminReclamosVencimientos,
   adminGetReclamo,
@@ -450,6 +454,21 @@ router.patch('/wallet/:userId/freeze',   adminFreezeWallet);
  * Descongela la wallet de un usuario.
  */
 router.patch('/wallet/:userId/unfreeze', adminUnfreezeWallet);
+
+// ─── USDC Wallet — Fase 35 ────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/wallet/usdc/conversions/pending
+ * Lista conversiones BOB→USDC pendientes de confirmación.
+ */
+router.get('/wallet/usdc/conversions/pending', adminListPendingConversions);
+
+/**
+ * POST /api/v1/admin/wallet/usdc/conversions/confirm
+ * Confirma una conversión BOB→USDC: debita BOB y acredita USDC atómicamente.
+ * Body: { wtxId, note? }
+ */
+router.post('/wallet/usdc/conversions/confirm', adminConfirmBOBtoUSDC);
 
 // ─── PRILI — Reclamos ASFI (Fase 27) ─────────────────────────────────────────
 

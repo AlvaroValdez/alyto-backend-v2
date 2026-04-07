@@ -36,10 +36,29 @@ const walletTransactionSchema = new mongoose.Schema({
   },
   type: {
     type:     String,
-    enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze'],
+    enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze',
+               'bob_to_usdc', 'usdc_deposit'],
     required: true,
   },
-  /** Monto en BOB */
+  /**
+   * Moneda de la transacción. Default 'BOB' para compatibilidad con registros anteriores.
+   * Usar 'USDC' para transacciones de WalletUSDC.
+   */
+  currency: {
+    type:    String,
+    enum:    ['BOB', 'USDC'],
+    default: 'BOB',
+  },
+  /**
+   * Modelo de wallet referenciado por walletId.
+   * Default 'WalletBOB' para compatibilidad. Usar 'WalletUSDC' para USDC.
+   */
+  walletModel: {
+    type:    String,
+    enum:    ['WalletBOB', 'WalletUSDC'],
+    default: 'WalletBOB',
+  },
+  /** Monto en la moneda indicada por `currency` */
   amount: {
     type:     Number,
     required: true,
