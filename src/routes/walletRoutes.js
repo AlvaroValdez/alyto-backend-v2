@@ -28,8 +28,16 @@ import {
   scanAndPayQR,
   previewQR,
 } from '../controllers/qrWalletController.js'
+import {
+  getUSDCBalance,
+  getDepositInstructions,
+  requestBOBtoUSDC,
+  getUSDCTransactions,
+} from '../controllers/walletUSDCController.js'
 
 const router = Router()
+
+// ─── BOB Wallet ───────────────────────────────────────────────────────────────
 
 router.get('/balance',           protect, getWalletBalance)
 router.get('/transactions',      protect, getWalletTransactions)
@@ -41,5 +49,13 @@ router.post('/withdraw/request', protect, requestWithdrawal)
 router.post('/qr/generate', protect, generateWalletQR)
 router.post('/qr/scan',     protect, scanAndPayQR)
 router.get('/qr/preview',   protect, previewQR)
+
+// ─── USDC Wallet (Fase 35) ───────────────────────────────────────────────────
+// IMPORTANTE: /usdc/deposit-instructions debe ir ANTES de /usdc/:anything
+
+router.get('/usdc/balance',               protect, getUSDCBalance)
+router.get('/usdc/deposit-instructions',  protect, getDepositInstructions)
+router.get('/usdc/transactions',          protect, getUSDCTransactions)
+router.post('/usdc/convert-bob',          protect, requestBOBtoUSDC)
 
 export default router
