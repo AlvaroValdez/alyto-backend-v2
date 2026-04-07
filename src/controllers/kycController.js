@@ -51,7 +51,8 @@ export async function createKycSession(req, res) {
       }),
     };
 
-    const session = await getStripe().identity.verificationSessions.create({
+    const flowId = process.env.STRIPE_IDENTITY_FLOW_ID
+    const sessionParams = {
       type: 'document',
       options: { document: documentOptions },
       return_url: returnUrl,
@@ -60,7 +61,12 @@ export async function createKycSession(req, res) {
         legalEntity: user.legalEntity,
         email:       user.email,
       },
-    });
+    }
+    // Usar el flujo configurado en el dashboard si está disponible
+    if (flowId) {
+      sessionParams.verification_flow = flowId
+    }
+    const session = await getStripe().identity.verificationSessions.create(sessionParams);
 
     // Persistir sessionId para el lookup en el webhook de Stripe
     await User.findByIdAndUpdate(userId, {
