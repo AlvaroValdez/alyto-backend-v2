@@ -36,18 +36,23 @@ export async function createKycSession(req, res) {
     // NO usar APP_URL — esa variable puede apuntar al backend (ngrok tunnel en dev).
     const returnUrl = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/kyc/return`;
 
+    // allowed_countries solo funciona en producción con aprobación Stripe.
+    // En sandbox Stripe lo rechaza con parameter_unknown.
+    const isLive = process.env.STRIPE_SECRET_KEY?.startsWith('sk_live');
+    const documentOptions = {
+      require_live_capture:    true,
+      require_matching_selfie: true,
+      allowed_types: ['driving_license', 'id_card', 'passport'],
+      ...(isLive && {
+        allowed_countries: ['BO', 'CL', 'US', 'AR', 'CO', 'PE', 'MX', 'BR',
+                            'EC', 'VE', 'UY', 'PY', 'CA', 'GB', 'DE', 'FR',
+                            'ES', 'IT', 'AU', 'CN', 'AE'],
+      }),
+    };
+
     const session = await getStripe().identity.verificationSessions.create({
       type: 'document',
-      options: {
-        document: {
-          require_live_capture:    true,
-          require_matching_selfie: true,
-          allowed_types: ['driving_license', 'id_card', 'passport'],
-          allowed_countries: ['BO', 'CL', 'US', 'AR', 'CO', 'PE', 'MX', 'BR',
-                              'EC', 'VE', 'UY', 'PY', 'CA', 'GB', 'DE', 'FR',
-                              'ES', 'IT', 'AU', 'CN', 'AE'],
-        },
-      },
+      options: { document: documentOptions },
       return_url: returnUrl,
       metadata: {
         userId,
@@ -72,8 +77,19 @@ export async function createKycSession(req, res) {
     });
 
   } catch (err) {
-    console.error('[KYC] Error creando session:', err.message);
-    return res.status(500).json({ error: 'Error al iniciar la verificación de identidad.' });
+    console.error('[KYC] Error creando session:', {
+      message: err.message,
+      type:    err.type,
+      code:    err.code,
+      param:   err.param,
+    });
+    const userMessage = err.type === 'StripeInvalidRequestError'
+      ? `Error de configuración Stripe: ${err.message}`
+      : 'Error al iniciar la verificación de identidad.';
+    return res.status(500).json({
+      error:      userMessage,
+      stripeCode: err.code ?? null,
+    });
   }
 }
 
