@@ -51,7 +51,7 @@ export async function createKycSession(req, res) {
       }),
     };
 
-    const flowId = process.env.STRIPE_IDENTITY_FLOW_ID
+    const flowId = isLive ? process.env.STRIPE_IDENTITY_FLOW_ID : null
     const sessionParams = {
       type: 'document',
       options: { document: documentOptions },
