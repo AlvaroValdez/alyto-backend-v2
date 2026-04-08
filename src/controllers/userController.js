@@ -13,14 +13,12 @@
 
 import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
+import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Regex para contraseña segura: ≥8 chars, 1 mayúscula, 1 número, 1 símbolo */
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
-
-/** Moneda principal según entidad legal del usuario */
-const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
 
 /** Campos que el usuario tiene permitido actualizar en su perfil */
 const ALLOWED_UPDATE_FIELDS = new Set([
@@ -53,7 +51,7 @@ function buildProfileResponse(user) {
     fcmTokens:      (user.fcmTokens ?? []).length,
     preferences: {
       language: user.preferences?.language  ?? 'es',
-      currency: user.preferences?.currency  ?? ENTITY_CURRENCY_MAP[user.legalEntity] ?? 'CLP',
+      currency: user.preferences?.currency  ?? ENTITY_CURRENCY_MAP[user.legalEntity] ?? 'USD',
       notifications: {
         email: user.preferences?.notifications?.email ?? true,
         push:  user.preferences?.notifications?.push  ?? true,

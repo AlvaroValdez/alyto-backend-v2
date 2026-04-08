@@ -13,6 +13,7 @@
 
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 
 // Statuses que representan una operación en curso (no terminal)
 const ACTIVE_STATUSES = [
@@ -58,9 +59,7 @@ export async function getDashboard(req, res) {
     const userId = req.user._id;
     const { firstName, lastName, legalEntity, kycStatus } = req.user;
 
-    // Moneda de origen según entidad del usuario
-    const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
-    const userOriginCurrency  = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
+    const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
 
     // Ejecutar todas las consultas en paralelo para minimizar latencia
     const [

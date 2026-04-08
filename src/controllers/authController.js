@@ -16,6 +16,7 @@ import bcrypt   from 'bcryptjs';
 import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
+import { getDefaultCurrency } from '../utils/entityMaps.js';
 
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
@@ -43,16 +44,6 @@ const ENTITY_DEFAULT_DOC = {
   SRL: 'ci_bolivia',
   LLC: 'passport',
 };
-
-/**
- * Devuelve la moneda predeterminada según el país de residencia.
- * @param {string} country — ISO 3166-1 alpha-2
- * @returns {string}
- */
-function getDefaultCurrency(country) {
-  const map = { CL: 'CLP', BO: 'BOB' };
-  return map[country?.toUpperCase()] ?? 'USD';
-}
 
 // ─── Generación de JWT ────────────────────────────────────────────────────────
 
