@@ -98,6 +98,11 @@ export async function protect(req, res, next) {
     }
 
     req.user = user;
+    // .lean() devuelve POJO sin el getter virtual `id` de Mongoose.
+    // Lo añadimos manualmente para compatibilidad con controllers que usen req.user.id
+    if (user._id && !user.id) {
+      user.id = user._id.toString();
+    }
     setSentryUser(user);
     next();
 
