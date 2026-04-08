@@ -44,6 +44,16 @@ const ENTITY_DEFAULT_DOC = {
   LLC: 'passport',
 };
 
+/**
+ * Devuelve la moneda predeterminada según el país de residencia.
+ * @param {string} country — ISO 3166-1 alpha-2
+ * @returns {string}
+ */
+function getDefaultCurrency(country) {
+  const map = { CL: 'CLP', BO: 'BOB' };
+  return map[country?.toUpperCase()] ?? 'USD';
+}
+
 // ─── Generación de JWT ────────────────────────────────────────────────────────
 
 /**
@@ -121,6 +131,7 @@ export async function registerUser(req, res) {
       legalEntity,
       kycStatus:        'pending',
       residenceCountry: countryCode,
+      preferences:      { currency: getDefaultCurrency(countryCode) },
       // Documento pendiente de verificación — se completa en el flujo KYC
       identityDocument: {
         type:           ENTITY_DEFAULT_DOC[legalEntity],
