@@ -34,6 +34,24 @@ const NOTIFICATION_SCHEMAS = {
 
 export const VALID_NOTIFICATION_TYPES = Object.keys(NOTIFICATION_SCHEMAS);
 
+// ─── getNotificationTypes ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/notifications/types
+ *
+ * Devuelve los tipos de notificación disponibles con sus campos requeridos.
+ * Sin DB call — puramente basado en la config local.
+ *
+ * Respuesta: { types: Array<{ type, requiredMetadata }> }
+ */
+export function getNotificationTypes(req, res) {
+  const types = Object.entries(NOTIFICATION_SCHEMAS).map(([type, schema]) => ({
+    type,
+    requiredMetadata: schema.required,
+  }));
+  return res.json({ types });
+}
+
 // ─── sendNotification ─────────────────────────────────────────────────────────
 
 /**
