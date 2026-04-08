@@ -508,4 +508,26 @@ router.post('/sanctions/screen',       screenUserManual);
 /** DELETE /api/v1/admin/sanctions/:entryId — Desactivar entrada (baja lógica) */
 router.delete('/sanctions/:entryId',   removeSanction);
 
+// ─── Notificaciones push — Trigger manual ─────────────────────────────────────
+
+import { sendNotification } from '../controllers/adminNotificationsController.js';
+
+/**
+ * POST /api/v1/admin/notifications/send
+ *
+ * Envía manualmente una notificación push a un usuario específico.
+ *
+ * Body:
+ *   userId           {string}  — ObjectId del usuario destinatario
+ *   notificationType {string}  — payinConfirmed | paymentCompleted | paymentFailed | payoutSent
+ *   metadata         {object}  — Parámetros del tipo:
+ *     payinConfirmed:     { amount, currency }
+ *     paymentCompleted:   { amount, currency, destinationAmount, destinationCurrency }
+ *     paymentFailed:      { amount, currency }
+ *     payoutSent:         { destinationCountry }
+ *
+ * Respuesta: { success: boolean, message: string }
+ */
+router.post('/notifications/send', sendNotification);
+
 export default router;
