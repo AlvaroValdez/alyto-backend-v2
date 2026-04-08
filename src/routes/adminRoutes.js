@@ -510,7 +510,15 @@ router.delete('/sanctions/:entryId',   removeSanction);
 
 // ─── Notificaciones push — Trigger manual ─────────────────────────────────────
 
-import { sendNotification } from '../controllers/adminNotificationsController.js';
+import { getNotificationTypes, sendNotification } from '../controllers/adminNotificationsController.js';
+
+/**
+ * GET /api/v1/admin/notifications/types
+ * Lista los tipos de notificación disponibles con sus campos de metadata requeridos.
+ * Sin DB call — basado en config local.
+ * Respuesta: { types: Array<{ type, requiredMetadata }> }
+ */
+router.get('/notifications/types', getNotificationTypes);
 
 /**
  * POST /api/v1/admin/notifications/send
