@@ -313,7 +313,7 @@ const userSchema = new Schema(
     preferences: {
       type: {
         language: { type: String, default: 'es' },
-        currency: { type: String, default: 'CLP' },
+        currency: { type: String, default: 'USD' },
         notifications: {
           type: {
             email: { type: Boolean, default: true },
