@@ -40,6 +40,7 @@ import {
   getCorridorRates,
   vitaDiagnostic,
   vitaBalance,
+  testPush,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -519,6 +520,7 @@ import { getNotificationTypes, sendNotification } from '../controllers/adminNoti
  * Respuesta: { types: Array<{ type, requiredMetadata }> }
  */
 router.get('/notifications/types', getNotificationTypes);
+router.post('/test-push', testPush);
 
 /**
  * POST /api/v1/admin/notifications/send
