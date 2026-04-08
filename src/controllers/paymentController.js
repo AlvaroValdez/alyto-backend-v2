@@ -22,6 +22,7 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import Sentry            from '../services/sentry.js';
+import { ENTITY_CURRENCY_MAP, ENTITY_COUNTRY_MAP } from '../utils/entityMaps.js';
 import {
   createWidgetLink,
   getPaymentIntent,
@@ -1002,7 +1003,7 @@ export async function initCrossBorderPayment(req, res) {
         profitRetention,
         totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + payoutFee),
         totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
-        feeCurrency:       corridor.originCurrency ?? 'CLP',
+        feeCurrency:       corridor.originCurrency ?? 'USD',
       },
 
       beneficiary: beneficiaryDoc,
@@ -2254,12 +2255,9 @@ const PAYIN_METHOD_LABELS = {
 };
 
 export async function getAvailableCorridors(req, res) {
-  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
-  const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
-
   const legalEntity        = req.user?.legalEntity ?? 'SpA';
-  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'CLP';
-  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'CL';
+  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'US';
 
   // Filtrar por legalEntity directamente para que LLC vea todos sus corredores
   // (el filtro anterior por originCurrency excluía corredores bo-* de LLC)
@@ -2331,12 +2329,9 @@ export async function getPayinMethods(req, res) {
     return res.status(400).json({ error: 'Parámetro requerido: destinationCountry.' });
   }
 
-  const ENTITY_CURRENCY_MAP = { SpA: 'CLP', SRL: 'BOB', LLC: 'USD' };
-  const ENTITY_COUNTRY_MAP  = { SpA: 'CL',  SRL: 'BO',  LLC: 'US'  };
-
   const legalEntity        = req.user?.legalEntity ?? 'SpA';
-  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'CLP';
-  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'CL';
+  const userOriginCurrency = ENTITY_CURRENCY_MAP[legalEntity] ?? 'USD';
+  const userOriginCountry  = ENTITY_COUNTRY_MAP[legalEntity]  ?? 'US';
   const dest               = destinationCountry.toUpperCase();
 
   let corridors;

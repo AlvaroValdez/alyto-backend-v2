@@ -36,7 +36,7 @@ const feesSchema = new Schema(
     /** Total real descontado incluyendo profitRetention (uso interno/auditoría) */
     totalDeductedReal: { type: Number, default: 0 },
     /** Moneda en que se expresan los fees */
-    feeCurrency:       { type: String, default: 'CLP' },
+    feeCurrency:       { type: String, default: 'USD' },
   },
   { _id: false },
 );
