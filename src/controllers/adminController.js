@@ -1367,3 +1367,15 @@ export async function vitaBalance(req, res) {
     return res.status(500).json({ error: 'Error consultando saldo Vita.' });
   }
 }
+
+// ─── testPush ─────────────────────────────────────────────────────────────────
+
+export async function testPush(req, res) {
+  const { userId, title, body } = req.body
+  const { sendPushNotification } = await import('../services/notifications.js')
+  const result = await sendPushNotification(
+    userId ?? req.user._id,
+    { title: title ?? 'Test push', body: body ?? 'Funcionando ✅', data: { type: 'test' } }
+  )
+  return res.json({ result })
+}
