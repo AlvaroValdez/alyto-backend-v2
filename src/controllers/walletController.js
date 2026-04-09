@@ -30,6 +30,7 @@ import WalletTransaction from '../models/WalletTransaction.js'
 import User             from '../models/User.js'
 import Sentry           from '../services/sentry.js'
 import { sendEmail, EMAILS } from '../services/email.js'
+import { notify, NOTIFICATIONS } from '../services/notifications.js'
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
@@ -326,6 +327,9 @@ export async function sendP2P(req, res) {
     // Audit trail Stellar — fire and forget
     fireAuditTrail(wtxSend.wtxId, 'send', amount)
 
+    // Push notification al destinatario
+    notify(recipient._id, NOTIFICATIONS.p2pReceived(amount, `${sender.firstName} ${sender.lastName}`)).catch(() => {})
+
     return res.json({
       wtxId:        wtxSend.wtxId,
       amount,
@@ -419,6 +423,9 @@ export async function requestWithdrawal(req, res) {
       ).catch(() => {})
     }
 
+    // Push notification al usuario
+    notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
+
     return res.status(201).json({
       wtxId:   wtx.wtxId,
       amount,
@@ -508,6 +515,9 @@ export async function adminConfirmDeposit(req, res) {
         },
       ).catch(() => {})
     }
+
+    // Push notification — depósito confirmado
+    notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
 
     return res.json({
       wtxId,
@@ -674,6 +684,9 @@ export async function adminFreezeWallet(req, res) {
       ).catch(() => {})
     }
 
+    // Push notification — wallet congelada
+    notify(userId, NOTIFICATIONS.walletFrozen()).catch(() => {})
+
     return res.json({
       walletId:  wallet.walletId,
       status:    'frozen',
@@ -758,6 +771,9 @@ export async function adminUnfreezeWallet(req, res) {
         },
       ).catch(() => {})
     }
+
+    // Push notification — wallet reactivada
+    notify(userId, NOTIFICATIONS.walletUnfrozen(wallet.balanceFrozen)).catch(() => {})
 
     return res.json({
       walletId: wallet.walletId,

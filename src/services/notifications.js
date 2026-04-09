@@ -10,6 +10,7 @@
  */
 
 import User from '../models/User.js';
+import Notification from '../models/Notification.js';
 
 // ─── Inicialización lazy (dinámica) de Firebase ───────────────────────────────
 // Se usa import() dinámico para que un fallo de Firebase NO bloquee el arranque
@@ -166,6 +167,37 @@ export async function sendPushNotification(userId, notification) {
   }
 }
 
+// ─── notify() — Persiste + Push en un solo paso ──────────────────────────────
+
+/**
+ * Persiste la notificación en MongoDB y envía push vía FCM.
+ * Nunca lanza excepción — ambos pasos son fire-and-forget.
+ *
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {{ title: string, body: string, data?: Record<string,string> }} notification
+ */
+export async function notify(userId, notification) {
+  // 1. Persistir en MongoDB
+  try {
+    await Notification.create({
+      userId,
+      type:  notification.data?.type ?? 'general',
+      title: notification.title,
+      body:  notification.body,
+      data:  notification.data ?? {},
+    });
+  } catch (err) {
+    console.error('[Alyto Notify] Error persistiendo notificación:', {
+      userId: userId?.toString(),
+      type:   notification.data?.type,
+      error:  err.message,
+    });
+  }
+
+  // 2. Enviar push FCM (existente, ya fire-and-forget)
+  sendPushNotification(userId, notification).catch(() => {});
+}
+
 // ─── Plantillas de notificaciones predefinidas ────────────────────────────────
 
 export const NOTIFICATIONS = {
@@ -220,6 +252,48 @@ export const NOTIFICATIONS = {
       title: 'Transferencia en camino 🚀',
       body:  `Enviamos el pago al banco de ${destinationCountry}. La acreditación puede tomar hasta 1 día hábil.`,
       data:  { type: 'payout_sent' },
+    };
+  },
+
+  // ── Wallet BOB ────────────────────────────────────────────────────────────
+
+  depositConfirmed(amount) {
+    return {
+      title: 'Depósito acreditado ✓',
+      body:  `Tu depósito de Bs. ${Number(amount).toFixed(2)} fue acreditado en tu wallet.`,
+      data:  { type: 'deposit_confirmed' },
+    };
+  },
+
+  withdrawalRequested(amount) {
+    return {
+      title: 'Retiro en proceso',
+      body:  `Tu solicitud de retiro de Bs. ${Number(amount).toFixed(2)} fue recibida. Procesaremos en 1-2 días hábiles.`,
+      data:  { type: 'withdrawal_requested' },
+    };
+  },
+
+  walletFrozen() {
+    return {
+      title: 'Wallet suspendida',
+      body:  'Tu wallet ha sido suspendida temporalmente por razones regulatorias. Contacta a soporte para más información.',
+      data:  { type: 'wallet_frozen' },
+    };
+  },
+
+  walletUnfrozen(balance) {
+    return {
+      title: 'Wallet reactivada ✓',
+      body:  `Tu wallet fue reactivada. Saldo disponible: Bs. ${Number(balance).toFixed(2)}.`,
+      data:  { type: 'wallet_unfrozen' },
+    };
+  },
+
+  p2pReceived(amount, senderName) {
+    return {
+      title: 'Dinero recibido',
+      body:  `${senderName} te envió Bs. ${Number(amount).toFixed(2)}.`,
+      data:  { type: 'p2p_received' },
     };
   },
 };
