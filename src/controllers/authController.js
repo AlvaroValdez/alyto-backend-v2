@@ -18,6 +18,7 @@ import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
+import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
@@ -143,6 +144,10 @@ export async function registerUser(req, res) {
       sendEmail(...EMAILS.welcome(user))
         .catch(err => console.error('[Auth] Error enviando welcome email:', err.message));
     });
+
+    // Notificar a admins — push + in-app + email
+    const fullName = `${user.firstName} ${user.lastName}`.trim();
+    notifyAdmins(NOTIFICATIONS.adminNewUser(fullName, user.email, legalEntity)).catch(() => {});
 
     return res.status(201).json({
       token,

@@ -30,7 +30,7 @@ import WalletTransaction from '../models/WalletTransaction.js'
 import User             from '../models/User.js'
 import Sentry           from '../services/sentry.js'
 import { sendEmail, EMAILS } from '../services/email.js'
-import { notify, NOTIFICATIONS } from '../services/notifications.js'
+import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
@@ -207,6 +207,10 @@ export async function initiateDeposit(req, res) {
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
 
+    // Notificar a admins — push + in-app
+    const fullName = `${user.firstName} ${user.lastName}`.trim();
+    notifyAdmins(NOTIFICATIONS.adminDepositRequest(amount, fullName)).catch(() => {});
+
     return res.status(201).json({
       wtxId:         wtx.wtxId,
       amount,
@@ -330,6 +334,11 @@ export async function sendP2P(req, res) {
     // Push notification al destinatario
     notify(recipient._id, NOTIFICATIONS.p2pReceived(amount, `${sender.firstName} ${sender.lastName}`)).catch(() => {})
 
+    // Notificar a admins — push + in-app
+    const senderName   = `${sender.firstName} ${sender.lastName}`.trim();
+    const receiverName = `${recipient.firstName} ${recipient.lastName}`.trim();
+    notifyAdmins(NOTIFICATIONS.adminP2PTransfer(amount, senderName, receiverName)).catch(() => {});
+
     return res.json({
       wtxId:        wtxSend.wtxId,
       amount,
@@ -404,27 +413,12 @@ export async function requestWithdrawal(req, res) {
 
     await session.commitTransaction()
 
-    // Notificar admin via email usando template de Bolivia como placeholder
-    if (process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA) {
-      sendEmail(
-        process.env.ADMIN_EMAIL ?? process.env.SENDGRID_FROM_EMAIL ?? 'admin@alyto.app',
-        process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
-        {
-          subject:       'Nueva solicitud de retiro Bolivia',
-          userName:      `${user.firstName} ${user.lastName}`,
-          userEmail:     user.email,
-          amount:        `Bs. ${amount.toFixed(2)}`,
-          reference:     wtx.wtxId,
-          bankName,
-          accountHolder,
-          accountNumber,
-          accountType,
-        },
-      ).catch(() => {})
-    }
-
     // Push notification al usuario
     notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
+
+    // Notificar a admins — push + in-app
+    const fullName = `${user.firstName} ${user.lastName}`.trim();
+    notifyAdmins(NOTIFICATIONS.adminWithdrawalRequest(amount, fullName)).catch(() => {})
 
     return res.status(201).json({
       wtxId:   wtx.wtxId,
