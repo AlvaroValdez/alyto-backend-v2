@@ -107,7 +107,7 @@ export async function getDashboard(req, res) {
 
     // Formatear transacciones recientes
     const formattedTransactions = recentTransactions.map((tx) => ({
-      transactionId:       tx._id,
+      transactionId:       tx.alytoTransactionId ?? tx._id,
       alytoTransactionId:  tx.alytoTransactionId ?? null,
       status:              tx.status,
       originAmount:        tx.originalAmount,
