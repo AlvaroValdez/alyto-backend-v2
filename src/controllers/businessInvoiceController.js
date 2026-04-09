@@ -31,8 +31,9 @@ import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
  * @returns {object} DTO listo para generateBusinessInvoice()
  */
 function buildInvoiceDTO(transaction, profile, invoiceNumber) {
-  const comisionServicio = transaction.feeBreakdown?.alytoFee ?? 0;
-  const tipoCambio       = transaction.exchangeRate ?? 6.98;
+  const comisionServicio = transaction.fees?.totalDeducted ?? transaction.feeBreakdown?.alytoFee ?? 0;
+  // conversionRate.rate = tasa BOB/USDC real; exchangeRate = tasa efectiva BOB→destino (NO usar)
+  const tipoCambio       = transaction.conversionRate?.rate ?? 6.98;
   const totalLiquidado   = transaction.originalAmount - comisionServicio;
 
   const repLegal = profile.legalRepresentative;
@@ -55,7 +56,7 @@ function buildInvoiceDTO(transaction, profile, invoiceNumber) {
     descripcionServicio: transaction.businessInvoice?.serviceDescription ?? null,
     fechaHora:           transaction.createdAt.toISOString(),
     txid:                (transaction.stellarTxId && transaction.stellarTxId !== 'undefined')
-      ? transaction.stellarTxId : 'PENDIENTE',
+      ? transaction.stellarTxId : 'N/A — Liquidación manual (Anchor Bolivia)',
     montoOrigenBOB:      transaction.originalAmount,
     tipoDeCambio:        tipoCambio,
     fuenteTipoCambio:    transaction.businessInvoice?.exchangeRateSource ?? null,
