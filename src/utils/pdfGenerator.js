@@ -21,27 +21,11 @@
  */
 
 import PDFDocument from 'pdfkit';
-import { existsSync }  from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath }    from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Resuelve la ruta al logo con fallback en cascada:
- *   1. Variable de entorno AV_FINANCE_LOGO_PATH (producción / S3 local)
- *   2. Ruta relativa al repo de logos del workspace de desarrollo
- *   3. null → cabecera sin imagen
- */
-function resolveLogoPath() {
-  if (process.env.AV_FINANCE_LOGO_PATH && existsSync(process.env.AV_FINANCE_LOGO_PATH)) {
-    return process.env.AV_FINANCE_LOGO_PATH;
-  }
-  // Fallback dev: logos en el workspace del proyecto
-  const devPath = resolve(__dirname, '../../../Logos/LogoAlyto.png');
-  if (existsSync(devPath)) return devPath;
-  return null;
-}
+import {
+  COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
+  resolveLogoPath, formatBOB, formatUSDC,
+  drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
+} from './pdfHelpers.js';
 
 // ─── Validación de campos requeridos ─────────────────────────────────────────
 
@@ -77,93 +61,6 @@ function validarDTO(data) {
   }
 }
 
-// ─── Formateo de montos bolivianos ────────────────────────────────────────────
-
-/**
- * Formatea un número al estilo boliviano: Bs. 1.250,00
- * Separador de miles: punto (.)  |  Decimal: coma (,)
- *
- * @param {number} amount
- * @returns {string}
- */
-function formatBOB(amount) {
-  const [intPart, decPart] = Number(amount).toFixed(2).split('.');
-  const intFormatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-  return `Bs. ${intFormatted},${decPart}`;
-}
-
-/**
- * Formatea un número como cantidad de USDC con 7 decimales.
- * @param {number} amount
- * @returns {string}
- */
-function formatUSDC(amount) {
-  return `${Number(amount).toFixed(7)} USDC`;
-}
-
-// ─── Helpers de dibujo PDF ────────────────────────────────────────────────────
-
-/** Dibuja una línea separadora horizontal a lo ancho de la página. */
-function drawSeparator(doc, color = '#CCCCCC') {
-  doc
-    .moveTo(doc.page.margins.left, doc.y)
-    .lineTo(doc.page.width - doc.page.margins.right, doc.y)
-    .strokeColor(color)
-    .lineWidth(0.5)
-    .stroke();
-  doc.moveDown(0.5);
-}
-
-/**
- * Dibuja una fila de tabla de dos columnas (concepto | valor).
- * @param {PDFDocument} doc
- * @param {string} concepto
- * @param {string} valor
- * @param {object} opts
- * @param {boolean} opts.bold      - Negrita en concepto
- * @param {string}  opts.bgColor   - Color de fondo (hex) para resaltar
- * @param {number}  opts.leftX     - X de inicio
- * @param {number}  opts.colWidth  - Ancho de la columna izquierda
- * @param {number}  opts.rowHeight - Alto de la fila
- */
-function drawTableRow(doc, concepto, valor, {
-  bold     = false,
-  bgColor  = null,
-  leftX    = null,
-  colWidth = 240,
-  rowHeight = 18,
-} = {}) {
-  const x      = leftX ?? doc.page.margins.left;
-  const totalW = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-  const y      = doc.y;
-
-  // Fondo de fila (para resaltar el total)
-  if (bgColor) {
-    doc.rect(x, y, totalW, rowHeight).fill(bgColor);
-  }
-
-  const font = bold ? 'Helvetica-Bold' : 'Helvetica';
-
-  doc
-    .font(font)
-    .fontSize(9)
-    .fillColor(bgColor ? '#FFFFFF' : '#222222')
-    .text(concepto, x + 4, y + 4, { width: colWidth, lineBreak: false });
-
-  doc
-    .font('Helvetica')
-    .fontSize(9)
-    .fillColor(bgColor ? '#FFFFFF' : '#222222')
-    .text(valor, x + colWidth + 4, y + 4, {
-      width:     totalW - colWidth - 8,
-      align:     'right',
-      lineBreak: false,
-    });
-
-  doc.moveDown(0);
-  doc.y = y + rowHeight;
-}
-
 // ─── Constructor principal del PDF ────────────────────────────────────────────
 
 /**
@@ -184,83 +81,13 @@ function buildPDF(data) {
     const marginL = doc.page.margins.left;
     const contentW = pageW - marginL - doc.page.margins.right;
 
-    // Paleta institucional Alyto
-    const COLOR_PRIMARY   = '#1A3A5C';  // Azul Alyto
-    const COLOR_ACCENT    = '#F5A623';  // Amarillo Alyto
-    const COLOR_GRAY      = '#666666';
-    const COLOR_LIGHT_BG  = '#F5F7FA';
-
     // ═══════════════════════════════════════════════════════════════════════
-    // SECCIÓN 1 — CABECERA INSTITUCIONAL
+    // SECCIÓN 1 — CABECERA INSTITUCIONAL (compartida vía pdfHelpers)
     // ═══════════════════════════════════════════════════════════════════════
 
-    // Barra superior con color acento
-    doc.rect(0, 0, pageW, 8).fill(COLOR_ACCENT);
+    drawInstitutionalHeader(doc, 'Comprobante Oficial de Transacción', data.numeroComprobante);
 
-    // Logo — centrado en la cabecera
-    const logoPath  = resolveLogoPath();
-    const logoH     = 44;
-    const logoY     = 18;
-
-    if (logoPath) {
-      // Calcular ancho proporcional: logo original 604×217 → height=44 → width≈122
-      const logoW = Math.round(logoH * (604 / 217));
-      const logoX = (pageW - logoW) / 2;
-      doc.image(logoPath, logoX, logoY, { height: logoH });
-      doc.y = logoY + logoH + 10;
-    } else {
-      // Fallback tipográfico si no hay imagen
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(22)
-        .fillColor(COLOR_PRIMARY)
-        .text('alyto', marginL, logoY + 6, { align: 'center', width: contentW });
-      doc.y = logoY + logoH + 10;
-    }
-
-    // Razón social
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(18)
-      .fillColor(COLOR_PRIMARY)
-      .text('AV Finance SRL', marginL, doc.y, { align: 'center', width: contentW });
-
-    doc.moveDown(0.3);
-
-    // NIT y dirección desde variables de entorno (nunca hardcodeados)
-    const nit       = process.env.AV_FINANCE_NIT      ?? '[NIT pendiente — configurar AV_FINANCE_NIT]';
-    const direccion = process.env.AV_FINANCE_ADDRESS   ?? '[Dirección pendiente — configurar AV_FINANCE_ADDRESS]';
-
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(COLOR_GRAY)
-      .text(`NIT: ${nit}  ·  ${direccion}`, marginL, doc.y, { align: 'center', width: contentW });
-
-    doc.moveDown(0.5);
-
-    // Nombre del documento (invariable por normativa)
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(13)
-      .fillColor(COLOR_PRIMARY)
-      .text('Comprobante Oficial de Transacción', marginL, doc.y, {
-        align: 'center',
-        width: contentW,
-      });
-
-    doc.moveDown(0.3);
-
-    // Número de comprobante correlativo
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(COLOR_GRAY)
-      .text(`N° ${data.numeroComprobante}`, marginL, doc.y, { align: 'center', width: contentW });
-
-    doc.moveDown(0.8);
-    drawSeparator(doc, COLOR_ACCENT);
-    doc.moveDown(0.5);
+    const nit = process.env.AV_FINANCE_NIT ?? '[NIT pendiente]';
 
     // ═══════════════════════════════════════════════════════════════════════
     // SECCIÓN 2 — DATOS DEL CLIENTE (KYC)
@@ -482,8 +309,7 @@ function buildPDF(data) {
       );
 
     // Barra inferior con color acento
-    const pageH = doc.page.height;
-    doc.rect(0, pageH - 8, pageW, 8).fill(COLOR_ACCENT);
+    drawFooterBar(doc);
 
     doc.end();
   });

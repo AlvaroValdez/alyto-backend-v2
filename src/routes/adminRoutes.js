@@ -92,6 +92,9 @@ import {
   removeSanction,
   screenUserManual,
 } from '../controllers/sanctionsController.js';
+import {
+  adminGetBusinessInvoice,
+} from '../controllers/businessInvoiceController.js';
 import multer from 'multer';
 
 const router = Router();
@@ -161,6 +164,14 @@ router.get('/transactions/:transactionId', getTransaction);
  * Esta ruta DEBE ir ANTES de /:transactionId/status para evitar conflicto.
  */
 router.get('/transactions/:transactionId/comprobante', getTransactionComprobante);
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/business-invoice
+ *
+ * Genera y descarga el Comprobante Oficial de Servicio B2B (PDF) desde admin.
+ * Sin ownership check — acceso admin completo.
+ */
+router.get('/transactions/:transactionId/business-invoice', adminGetBusinessInvoice);
 
 /**
  * PATCH /api/v1/admin/transactions/:transactionId/status

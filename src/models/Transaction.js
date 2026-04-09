@@ -225,6 +225,38 @@ const boliviaComplianceSchema = new Schema(
   { _id: false },
 );
 
+// ─── Sub-esquema: Factura B2B (Comprobante Oficial de Servicio) ──────────────
+// Aplica cuando accountType = 'business' y KYB aprobado.
+// Cumple: RND 102400000021 (bancarización), RM 055/2025 (documentación),
+//         NC12 (fuente tipo de cambio), DS 5384 (trazabilidad blockchain).
+
+const bancarizacionSchema = new Schema(
+  {
+    payerBankName:         { type: String, trim: true },
+    payerAccountNumber:    { type: String, trim: true },
+    payerAccountHolder:    { type: String, trim: true },
+    receiverBankName:      { type: String, trim: true },
+    receiverAccountNumber: { type: String, trim: true },
+    bankOperationNumber:   { type: String, trim: true },
+    paymentDocReference:   { type: String, trim: true },
+  },
+  { _id: false },
+);
+
+const businessInvoiceSchema = new Schema(
+  {
+    invoiceNumber:       { type: String, trim: true },
+    invoicePdfUrl:       { type: String, trim: true },
+    invoiceGeneratedAt:  { type: Date },
+    bancarizacion:       { type: bancarizacionSchema },
+    exchangeRateSource:  { type: String, trim: true },
+    spreadFx:            { type: Number },
+    serviceDescription:  { type: String, trim: true },
+    verificationHash:    { type: String, trim: true, index: true },
+  },
+  { _id: false },
+);
+
 // ─── Esquema Principal: Transaction ──────────────────────────────────────────
 
 const transactionSchema = new Schema(
@@ -506,6 +538,11 @@ const transactionSchema = new Schema(
     // ── Compliance Bolivia (solo Escenario C — legalEntity = 'SRL') ───────────
     boliviaCompliance: {
       type: boliviaComplianceSchema,
+    },
+
+    // ── Factura B2B (accountType = 'business', KYB aprobado) ─────────────────
+    businessInvoice: {
+      type: businessInvoiceSchema,
     },
 
     // ── Metadatos ─────────────────────────────────────────────────────────────

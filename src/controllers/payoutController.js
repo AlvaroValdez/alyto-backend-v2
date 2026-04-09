@@ -19,27 +19,8 @@
 import Transaction from '../models/Transaction.js';
 import User        from '../models/User.js';
 import { generateOfficialReceipt } from '../utils/pdfGenerator.js';
-
-// ─── Helper: número correlativo de comprobante ────────────────────────────────
-
-/**
- * Genera el número correlativo del Comprobante Oficial.
- * Formato: BOL-<AÑO><MES>-<ID_PARCIAL>
- *
- * TODO producción: reemplazar por contador atómico en BD para evitar duplicados
- * en entornos multi-instancia (ver correlativo.service.js — Compliance_Bolivia_Alyto).
- *
- * @param {import('mongoose').Document} transaction
- * @returns {string} Ej: 'BOL-202503-A1B2C3'
- */
-function generarNumeroCorrelativo(transaction) {
-  const now    = new Date();
-  const year   = now.getFullYear();
-  const month  = String(now.getMonth() + 1).padStart(2, '0');
-  // Últimos 6 chars del ObjectId → único por transacción, sin secuencia incremental
-  const seq    = transaction._id.toString().slice(-6).toUpperCase();
-  return `BOL-${year}${month}-${seq}`;
-}
+import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
+import { autoGenerateBusinessInvoice } from './businessInvoiceController.js';
 
 // ─── POST /api/v1/payouts/bolivia/manual ────────────────────────────────────
 
@@ -145,7 +126,7 @@ export async function processBoliviaManualPayout(req, res) {
   }
 
   // ── 6. Actualizar la transacción a COMPLETED ──────────────────────────────
-  const numeroComprobante = generarNumeroCorrelativo(transaction);
+  const numeroComprobante = generarNumeroCorrelativo('BOL', transaction);
   const ahora             = new Date();
 
   try {
@@ -254,7 +235,13 @@ export async function processBoliviaManualPayout(req, res) {
     stellarTxId:        transaction.stellarTxId,
   });
 
-  // ── 9. Retornar el PDF al caller ──────────────────────────────────────────
+  // ── 9. Auto-generar factura B2B si el usuario es Business ─────────────────
+  if (user.accountType === 'business' && user.businessProfileId) {
+    autoGenerateBusinessInvoice(transaction, user._id)
+      .catch(err => console.warn('[B2B Invoice] Auto-generation failed:', err.message));
+  }
+
+  // ── 10. Retornar el PDF al caller ─────────────────────────────────────────
   res.setHeader('Content-Type',        'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Length',      pdfBuffer.length);

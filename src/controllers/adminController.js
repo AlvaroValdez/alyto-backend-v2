@@ -269,7 +269,7 @@ export async function getTransaction(req, res) {
   try {
     const transaction = await Transaction
       .findOne({ alytoTransactionId: transactionId })
-      .populate('userId', 'email firstName lastName legalEntity kycStatus residenceCountry')
+      .populate('userId', 'email firstName lastName legalEntity kycStatus residenceCountry accountType')
       .lean();
 
     if (!transaction) {

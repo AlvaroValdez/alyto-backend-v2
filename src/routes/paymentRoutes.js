@@ -33,6 +33,8 @@ import { protect, requireEntity }                          from '../middlewares/
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
 import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
 import { getSpAPayinInstructions }                         from '../controllers/spaConfigController.js';
+import { generateBusinessInvoiceForTransaction }           from '../controllers/businessInvoiceController.js';
+import { checkBusinessKYB }                                from '../middlewares/checkBusinessKYB.js';
 
 const router = Router();
 
@@ -197,6 +199,18 @@ router.get('/:transactionId/qr', protect, getTransactionQR);
  * Auth: Bearer JWT
  */
 router.post('/:transactionId/comprobante', protect, uploadComprobante.single('comprobante'), uploadPaymentProof);
+
+/**
+ * GET /api/v1/payments/:transactionId/business-invoice
+ *
+ * Genera y descarga el Comprobante Oficial de Servicio B2B (PDF).
+ * Solo disponible para usuarios Business con KYB aprobado y transacciones
+ * completadas bajo la entidad SRL.
+ *
+ * Params: transactionId — alytoTransactionId
+ * Auth:   Bearer JWT + Business KYB aprobado
+ */
+router.get('/:transactionId/business-invoice', protect, checkBusinessKYB, generateBusinessInvoiceForTransaction);
 
 /**
  * GET /api/v1/payments/:transactionId/audit
