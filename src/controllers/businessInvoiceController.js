@@ -37,7 +37,7 @@ function buildInvoiceDTO(transaction, profile, invoiceNumber) {
 
   const repLegal = profile.legalRepresentative;
   const representanteLegal = repLegal
-    ? `${repLegal.firstName ?? ''} ${repLegal.lastName ?? ''}`.trim() || null
+    ? (repLegal.name ?? `${repLegal.firstName ?? ''} ${repLegal.lastName ?? ''}`.trim()) || null
     : null;
 
   return {
@@ -54,7 +54,8 @@ function buildInvoiceDTO(transaction, profile, invoiceNumber) {
       : 'Liquidación de Activo Digital',
     descripcionServicio: transaction.businessInvoice?.serviceDescription ?? null,
     fechaHora:           transaction.createdAt.toISOString(),
-    txid:                transaction.stellarTxId ?? 'PENDIENTE',
+    txid:                (transaction.stellarTxId && transaction.stellarTxId !== 'undefined')
+      ? transaction.stellarTxId : 'PENDIENTE',
     montoOrigenBOB:      transaction.originalAmount,
     tipoDeCambio:        tipoCambio,
     fuenteTipoCambio:    transaction.businessInvoice?.exchangeRateSource ?? null,

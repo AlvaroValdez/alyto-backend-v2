@@ -184,8 +184,19 @@ export async function getMe(req, res) {
     // Si falla la query, devolver lo que tiene el middleware (mejor que nada)
   }
 
+  // Leer accountType y kybStatus frescos de BD
+  let accountType = req.user.accountType;
+  let kybStatus   = req.user.kybStatus;
+  try {
+    const freshBiz = await User.findById(_id).select('accountType kybStatus').lean();
+    if (freshBiz) {
+      accountType = freshBiz.accountType;
+      kybStatus   = freshBiz.kybStatus;
+    }
+  } catch { /* fallback a lo que tiene el middleware */ }
+
   return res.json({
-    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, role, country, avatarUrl: avatarUrl ?? null },
+    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, kybStatus, accountType, role, country, avatarUrl: avatarUrl ?? null },
   });
 }
 
@@ -262,6 +273,8 @@ export async function loginUser(req, res) {
         email:       user.email,
         legalEntity: user.legalEntity,
         kycStatus:   user.kycStatus,
+        kybStatus:   user.kybStatus,
+        accountType: user.accountType,
         role:        user.role,
       },
     });
