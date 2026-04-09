@@ -31,6 +31,8 @@ const notificationSchema = new mongoose.Schema(
         'wallet_frozen',
         'wallet_unfrozen',
         'p2p_received',
+        'conversion_confirmed',
+        'conversion_rejected',
         'general',
       ],
     },

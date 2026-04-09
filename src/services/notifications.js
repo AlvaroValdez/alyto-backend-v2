@@ -296,4 +296,22 @@ export const NOTIFICATIONS = {
       data:  { type: 'p2p_received' },
     };
   },
+
+  // ── Conversión BOB → USDC ─────────────────────────────────────────────────
+
+  conversionConfirmed(bobAmount, usdcAmount) {
+    return {
+      title: 'Conversión completada ✓',
+      body:  `Tu conversión de Bs. ${Number(bobAmount).toFixed(2)} fue acreditada: ${Number(usdcAmount).toFixed(6)} USDC.`,
+      data:  { type: 'conversion_confirmed' },
+    };
+  },
+
+  conversionRejected(bobAmount, reason) {
+    return {
+      title: 'Conversión no procesada',
+      body:  `Tu solicitud de conversión de Bs. ${Number(bobAmount).toFixed(2)} no pudo completarse${reason ? `: ${reason}` : '.'}. Los fondos fueron devueltos a tu wallet.`,
+      data:  { type: 'conversion_rejected' },
+    };
+  },
 };

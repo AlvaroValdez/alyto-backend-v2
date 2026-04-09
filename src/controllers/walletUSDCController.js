@@ -16,6 +16,7 @@
  * Endpoints admin (en adminController / adminRoutes):
  *   GET  /api/v1/admin/wallet/usdc/conversions/pending
  *   POST /api/v1/admin/wallet/usdc/conversions/confirm
+ *   POST /api/v1/admin/wallet/usdc/conversions/reject
  */
 
 import mongoose          from 'mongoose'
@@ -26,6 +27,7 @@ import WalletTransaction from '../models/WalletTransaction.js'
 import ExchangeRate      from '../models/ExchangeRate.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
+import { notify, NOTIFICATIONS } from '../services/notifications.js'
 
 // ─── Helper: generar memo único ───────────────────────────────────────────────
 
@@ -387,6 +389,9 @@ export async function adminConfirmBOBtoUSDC(req, res) {
     // 5. Audit trail Stellar — fire and forget
     fireUSDCAuditTrail(wtxUSDC.wtxId)
 
+    // 6. Notificación al usuario
+    notify(wtx.userId, NOTIFICATIONS.conversionConfirmed(bobAmount, usdcAmount)).catch(() => {})
+
     return res.json({
       wtxId,
       wtxUSDCId:     wtxUSDC.wtxId,
@@ -428,7 +433,102 @@ export async function adminListPendingConversions(req, res) {
   }
 }
 
-// ─── FUNCIÓN 6 (ADMIN): GET /api/v1/wallet/usdc/transactions ─────────────────
+// ─── FUNCIÓN 6 (ADMIN): POST /api/v1/admin/wallet/usdc/conversions/reject ────
+
+/**
+ * Admin rechaza una conversión BOB→USDC pendiente.
+ * Operación atómica:
+ *   1. Libera BOB.balanceReserved
+ *   2. Marca WalletTransaction como 'failed' con razón de rechazo
+ *   3. Fire-and-forget: audit trail + notificación push al usuario
+ *
+ * Body: { wtxId, rejectReason? }
+ */
+export async function adminRejectBOBtoUSDC(req, res) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    const admin = req.user
+    const { wtxId, rejectReason } = req.body
+
+    if (!wtxId) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'wtxId es requerido.' })
+    }
+
+    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+    if (!wtx) {
+      await session.abortTransaction()
+      return res.status(404).json({ error: 'Transacción no encontrada.' })
+    }
+    if (wtx.type !== 'bob_to_usdc') {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'La transacción no es una conversión BOB→USDC.' })
+    }
+    if (wtx.status !== 'pending') {
+      await session.abortTransaction()
+      return res.status(400).json({ error: `La conversión ya fue procesada (status: ${wtx.status}).` })
+    }
+
+    const { bobAmount, walletBOBId } = wtx.metadata ?? {}
+
+    if (!bobAmount || !walletBOBId) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Metadata de conversión incompleta.' })
+    }
+
+    const walletBOB = await WalletBOB.findById(walletBOBId).session(session)
+    if (!walletBOB) {
+      await session.abortTransaction()
+      return res.status(404).json({ error: 'WalletBOB no encontrada.' })
+    }
+
+    const now = new Date()
+
+    // 1. Liberar reserva — devolver BOB al saldo disponible
+    await WalletBOB.updateOne({ _id: walletBOB._id }, {
+      $inc: { balanceReserved: -bobAmount },
+    }, { session })
+
+    // 2. Marcar WalletTransaction como failed (rechazada)
+    await WalletTransaction.updateOne({ _id: wtx._id }, {
+      status:   'failed',
+      metadata: {
+        ...(wtx.metadata ?? {}),
+        rejectReason: rejectReason ?? '',
+        rejectedBy:   admin._id,
+        rejectedAt:   now,
+      },
+    }, { session })
+
+    await session.commitTransaction()
+
+    // 3. Audit trail Stellar — fire and forget
+    fireUSDCAuditTrail(wtxId)
+
+    // 4. Notificación al usuario
+    notify(wtx.userId, NOTIFICATIONS.conversionRejected(bobAmount, rejectReason ?? '')).catch(() => {})
+
+    return res.json({
+      wtxId,
+      status:       'failed',
+      bobReleased:  bobAmount,
+      rejectReason: rejectReason ?? '',
+      rejectedAt:   now,
+    })
+
+  } catch (err) {
+    await session.abortTransaction()
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminRejectBOBtoUSDC' } })
+    console.error('[WalletUSDC] Error en adminRejectBOBtoUSDC:', err.message)
+    return res.status(500).json({ error: 'Error al rechazar la conversión.' })
+  } finally {
+    session.endSession()
+  }
+}
+
+// ─── FUNCIÓN 7: GET /api/v1/wallet/usdc/transactions ─────────────────────────
 
 /**
  * Historial paginado de movimientos USDC del usuario.
