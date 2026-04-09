@@ -20,6 +20,7 @@
 
 import Sentry         from '../services/sentry.js';
 import { sendEmail, EMAILS } from '../services/email.js';
+import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import User            from '../models/User.js';
 
@@ -155,8 +156,12 @@ export async function applyKYB(req, res) {
     // Al usuario: solicitud recibida
     sendEmail(...EMAILS.kybReceived(user, profile)).catch(() => {});
 
-    // Al admin: nueva solicitud con link al backoffice
-    sendEmail(...EMAILS.adminKybAlert(user, profile)).catch(() => {});
+    // Al admin: push + in-app + email
+    const fullName = `${user.firstName} ${user.lastName}`.trim();
+    notifyAdmins(
+      NOTIFICATIONS.adminKybSubmitted(profile.legalName ?? profile.tradeName ?? 'empresa', fullName),
+      { email: EMAILS.adminKybAlert(user, profile) },
+    ).catch(() => {});
 
     return res.status(201).json({
       businessId: profile.businessId,
@@ -273,9 +278,13 @@ export async function uploadKYBDocuments(req, res) {
     // Sincronizar con User
     await User.findByIdAndUpdate(user._id, { kybStatus: 'pending' });
 
-    // Alertar al admin que hay documentos nuevos
+    // Alertar al admin que hay documentos nuevos — push + in-app + email
     const freshUser = await User.findById(user._id).lean();
-    sendEmail(...EMAILS.adminKybAlert(freshUser, profile)).catch(() => {});
+    const kybFullName = `${freshUser.firstName} ${freshUser.lastName}`.trim();
+    notifyAdmins(
+      NOTIFICATIONS.adminKybSubmitted(profile.legalName ?? profile.tradeName ?? 'empresa', kybFullName),
+      { email: EMAILS.adminKybAlert(freshUser, profile) },
+    ).catch(() => {});
 
     console.info('[KYB] Documentos adicionales recibidos.', {
       userId:        user._id,

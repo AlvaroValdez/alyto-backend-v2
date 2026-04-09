@@ -198,6 +198,45 @@ export async function notify(userId, notification) {
   sendPushNotification(userId, notification).catch(() => {});
 }
 
+// ─── notifyAdmins() — Persiste + Push + Email a todos los admins ─────────────
+
+/**
+ * Envía notificación in-app + push a TODOS los usuarios con role='admin'.
+ * Opcionalmente envía email al SENDGRID_ADMIN_EMAIL.
+ *
+ * @param {{ title: string, body: string, data?: Record<string,string> }} notification
+ * @param {{ email?: [string, string, object] }} opts — Si se pasa email, se envía vía SendGrid
+ */
+export async function notifyAdmins(notification, opts = {}) {
+  try {
+    const admins = await User.find({ role: 'admin' }).select('_id').lean();
+    if (!admins.length) {
+      console.warn('[Alyto NotifyAdmins] No hay usuarios admin registrados.');
+      return;
+    }
+
+    // In-app + push para cada admin (en paralelo, fire-and-forget)
+    await Promise.allSettled(admins.map(a => notify(a._id, notification)));
+
+    console.info('[Alyto NotifyAdmins] Notificación enviada.', {
+      type:       notification.data?.type ?? 'general',
+      adminCount: admins.length,
+    });
+  } catch (err) {
+    console.error('[Alyto NotifyAdmins] Error:', err.message);
+  }
+
+  // Email al admin (opcional)
+  if (opts.email) {
+    try {
+      const { sendEmail } = await import('./email.js');
+      await sendEmail(...opts.email);
+    } catch (err) {
+      console.error('[Alyto NotifyAdmins] Error enviando email:', err.message);
+    }
+  }
+}
+
 // ─── Plantillas de notificaciones predefinidas ────────────────────────────────
 
 export const NOTIFICATIONS = {
@@ -312,6 +351,72 @@ export const NOTIFICATIONS = {
       title: 'Conversión no procesada',
       body:  `Tu solicitud de conversión de Bs. ${Number(bobAmount).toFixed(2)} no pudo completarse${reason ? `: ${reason}` : '.'}. Los fondos fueron devueltos a tu wallet.`,
       data:  { type: 'conversion_rejected' },
+    };
+  },
+
+  // ── Admin — Alertas de movimientos de usuarios ────────────────────────────
+
+  adminNewUser(userName, email, entity) {
+    return {
+      title: 'Nuevo usuario registrado',
+      body:  `${userName} (${email}) se registró en ${entity}.`,
+      data:  { type: 'admin_new_user' },
+    };
+  },
+
+  adminNewTransaction(txId, amount, currency, corridor) {
+    return {
+      title: 'Nueva transferencia creada',
+      body:  `${txId}: ${Number(amount).toLocaleString('es-CL')} ${currency} (${corridor}).`,
+      data:  { type: 'admin_new_transaction', txId },
+    };
+  },
+
+  adminDepositRequest(amount, userName) {
+    return {
+      title: 'Depósito pendiente',
+      body:  `${userName} solicitó un depósito de Bs. ${Number(amount).toFixed(2)}.`,
+      data:  { type: 'admin_deposit_request' },
+    };
+  },
+
+  adminWithdrawalRequest(amount, userName) {
+    return {
+      title: 'Retiro solicitado',
+      body:  `${userName} solicitó un retiro de Bs. ${Number(amount).toFixed(2)}.`,
+      data:  { type: 'admin_withdrawal_request' },
+    };
+  },
+
+  adminConversionRequest(bobAmount, usdcAmount, userName) {
+    return {
+      title: 'Conversión BOB→USDC pendiente',
+      body:  `${userName} solicitó convertir Bs. ${Number(bobAmount).toFixed(2)} → ${Number(usdcAmount).toFixed(6)} USDC.`,
+      data:  { type: 'admin_conversion_request' },
+    };
+  },
+
+  adminKybSubmitted(businessName, userName) {
+    return {
+      title: 'Nueva solicitud KYB',
+      body:  `${userName} envió solicitud KYB para "${businessName}".`,
+      data:  { type: 'admin_kyb_submitted' },
+    };
+  },
+
+  adminPaymentProof(txId, userName) {
+    return {
+      title: 'Comprobante subido',
+      body:  `${userName} subió comprobante de pago para ${txId}.`,
+      data:  { type: 'admin_payment_proof', txId },
+    };
+  },
+
+  adminP2PTransfer(amount, senderName, receiverName) {
+    return {
+      title: 'Transferencia P2P',
+      body:  `${senderName} envió Bs. ${Number(amount).toFixed(2)} a ${receiverName}.`,
+      data:  { type: 'admin_p2p_transfer' },
     };
   },
 };

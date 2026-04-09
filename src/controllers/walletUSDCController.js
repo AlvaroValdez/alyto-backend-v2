@@ -27,7 +27,7 @@ import WalletTransaction from '../models/WalletTransaction.js'
 import ExchangeRate      from '../models/ExchangeRate.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
-import { notify, NOTIFICATIONS } from '../services/notifications.js'
+import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 
 // ─── Helper: generar memo único ───────────────────────────────────────────────
 
@@ -258,6 +258,10 @@ export async function requestBOBtoUSDC(req, res) {
     }], { session })
 
     await session.commitTransaction()
+
+    // Notificar a admins — push + in-app
+    const fullName = `${user.firstName} ${user.lastName}`.trim();
+    notifyAdmins(NOTIFICATIONS.adminConversionRequest(amount, usdcAmount, fullName)).catch(() => {});
 
     return res.status(201).json({
       wtxId:       wtx.wtxId,

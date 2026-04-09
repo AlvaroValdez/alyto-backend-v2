@@ -56,6 +56,7 @@ import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate }          from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
+import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -793,6 +794,9 @@ export async function initCrossBorderPayment(req, res) {
       beneficiaryType: ben.type ?? 'bank_data',
     });
 
+    // Notificar a admins — push + in-app
+    notifyAdmins(NOTIFICATIONS.adminNewTransaction(alytoTransactionId, amount, 'CLP', 'CLP→BOB')).catch(() => {});
+
     return res.status(201).json({
       alytoTransactionId,
       status:              'payin_pending',
@@ -1081,11 +1085,14 @@ export async function initCrossBorderPayment(req, res) {
     } else {
       console.error('[CrossBorder] ⚠️ Usuario no encontrado para email instrucciones, userId:', userId);
     }
-    sendEmail(...EMAILS.adminBoliviaAlert(transaction))
-      .catch(err => console.error('[CrossBorder] Error email admin Bolivia alert:', {
-        error: err.message, txId: alytoTransactionId,
-      }));
   }
+
+  // Notificar a admins — push + in-app
+  const corridorLabel = `${transaction.originCurrency}→${transaction.destinationCurrency}`;
+  notifyAdmins(
+    NOTIFICATIONS.adminNewTransaction(alytoTransactionId, transaction.originalAmount, transaction.originCurrency, corridorLabel),
+    corridor.payinMethod === 'manual' ? { email: EMAILS.adminBoliviaAlert(transaction) } : {},
+  ).catch(() => {});
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────
   if (corridor.payinMethod === 'manual') {
@@ -2188,26 +2195,12 @@ export async function uploadPaymentProof(req, res) {
     return res.status(500).json({ error: 'Error guardando el comprobante.' });
   }
 
-  // Notificar al admin
-  try {
-    const user = await User.findById(userId).select('firstName lastName').lean();
-    const adminEmail = process.env.SENDGRID_ADMIN_EMAIL;
-    if (adminEmail) {
-      await sendEmail({
-        to:         adminEmail,
-        templateId: process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
-        dynamicTemplateData: {
-          transactionId: transaction.alytoTransactionId,
-          userName:      user ? `${user.firstName} ${user.lastName}` : 'Usuario',
-          amount:        `${transaction.originalAmount} BOB`,
-          ledgerUrl:     `${process.env.APP_URL ?? ''}/admin/ledger/${transaction.alytoTransactionId}`,
-        },
-      });
-      console.log('[Comprobante] Admin notificado →', adminEmail);
-    }
-  } catch (emailErr) {
-    console.error('[Comprobante] Error notificando admin:', emailErr.message);
-  }
+  // Notificar a admins — push + in-app + email
+  const user = await User.findById(userId).select('firstName lastName').lean();
+  const userName = user ? `${user.firstName} ${user.lastName}`.trim() : 'Usuario';
+  notifyAdmins(
+    NOTIFICATIONS.adminPaymentProof(transaction.alytoTransactionId, userName),
+  ).catch(() => {});
 
   return res.status(200).json({
     message:       'Comprobante recibido correctamente.',

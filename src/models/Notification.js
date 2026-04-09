@@ -22,6 +22,7 @@ const notificationSchema = new mongoose.Schema(
       type:     String,
       required: true,
       enum: [
+        // ── User-facing ──
         'payin_confirmed',
         'payment_completed',
         'payment_failed',
@@ -37,6 +38,15 @@ const notificationSchema = new mongoose.Schema(
         'kyc',
         'system',
         'general',
+        // ── Admin-facing ──
+        'admin_new_user',
+        'admin_new_transaction',
+        'admin_deposit_request',
+        'admin_withdrawal_request',
+        'admin_conversion_request',
+        'admin_kyb_submitted',
+        'admin_payment_proof',
+        'admin_p2p_transfer',
       ],
     },
 
