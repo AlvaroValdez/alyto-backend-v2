@@ -21,6 +21,8 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import { dispatchPayout } from './ipnController.js';
+import { sendPushNotification } from '../services/notifications.js';
+import { sendEmail, EMAILS }    from '../services/email.js';
 import {
   getPrices,
   getWallets,
@@ -378,6 +380,23 @@ export async function updateTransactionStatus(req, res) {
     newStatus,
     adminId,
   });
+
+  // ── Notificar al usuario que su pago fue recibido (payin manual confirmado) ─
+  if (newStatus === 'payin_confirmed') {
+    // Push notification
+    sendPushNotification(transaction.userId, {
+      title: 'Pago recibido ✓',
+      body:  'Recibimos tu pago. Tu transferencia está siendo procesada y pronto estará en camino.',
+      data:  { type: 'payin_confirmed' },
+    }).catch(err => console.error('[Admin] Error push payin_confirmed:', err.message));
+
+    // Email transaccional
+    User.findById(transaction.userId).select('email firstName lastName').lean()
+      .then(user => {
+        if (user?.email) sendEmail(...EMAILS.paymentInitiated(user, transaction));
+      })
+      .catch(err => console.error('[Admin] Error email payin_confirmed:', err.message));
+  }
 
   // ── Trigger automático de payout cuando el admin confirma un payin manual ─
   // Para corredores SRL Bolivia el payin es manual — el admin verifica la

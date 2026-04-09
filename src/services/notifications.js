@@ -192,8 +192,8 @@ export const NOTIFICATIONS = {
    */
   paymentCompleted(amount, currency, destinationAmount, destinationCurrency) {
     return {
-      title: '✅ Transferencia completada',
-      body:  `Tu transferencia de ${Number(amount).toLocaleString('es-CL')} ${currency} fue entregada. El beneficiario recibió ${Number(destinationAmount).toLocaleString('es-CL')} ${destinationCurrency}.`,
+      title: '¡Dinero entregado! ✓',
+      body:  `Tu transferencia fue completada. El beneficiario recibió ${Number(destinationAmount).toLocaleString('es-CL')} ${destinationCurrency}.`,
       data:  { type: 'payment_completed' },
     };
   },
@@ -205,8 +205,8 @@ export const NOTIFICATIONS = {
    */
   paymentFailed(amount, currency) {
     return {
-      title: '❌ Transferencia fallida',
-      body:  `Tu transferencia de ${Number(amount).toLocaleString('es-CL')} ${currency} no pudo completarse. Contáctanos si necesitas ayuda.`,
+      title: 'Transferencia no completada',
+      body:  `Tu transferencia de ${Number(amount).toLocaleString('es-CL')} ${currency} no pudo completarse. Por favor contáctanos para resolver esto.`,
       data:  { type: 'payment_failed' },
     };
   },
@@ -217,8 +217,8 @@ export const NOTIFICATIONS = {
    */
   payoutSent(destinationCountry) {
     return {
-      title: '📤 Pago enviado al banco',
-      body:  `Enviamos el pago al banco en ${destinationCountry}. La acreditación toma hasta 1 día hábil.`,
+      title: 'Transferencia en camino 🚀',
+      body:  `Enviamos el pago al banco de ${destinationCountry}. La acreditación puede tomar hasta 1 día hábil.`,
       data:  { type: 'payout_sent' },
     };
   },

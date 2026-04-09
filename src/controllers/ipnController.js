@@ -605,80 +605,108 @@ export async function dispatchPayout(transaction) {
     console.log('[dispatchPayout] ¿Es sandbox?:', process.env.VITA_ENVIRONMENT === 'sandbox');
 
     if (process.env.VITA_ENVIRONMENT === 'sandbox') {
-      // ── SANDBOX: proveedores no envían IPN — auto-completar inmediatamente ────
-      console.log(`[dispatchPayout] 🧪 Sandbox (${providerUsed}) — auto-completing...`);
+      // ── SANDBOX: simulate production 2-step flow (payout_sent → completed) ────
+      // Step 1: payout_sent — same as production
+      console.log(`[dispatchPayout] 🧪 Sandbox (${providerUsed}) — step 1: payout_sent`);
 
-      transaction.status      = 'completed';
-      transaction.completedAt = new Date();
-      // payoutReference ya fue asignado arriba desde providerResponse
-
+      transaction.status = 'payout_sent';
       transaction.ipnLog.push({
         provider:   'system',
-        eventType:  'payout_completed_sandbox',
-        status:     'completed',
+        eventType:  'payout_dispatched_sandbox',
+        status:     'payout_sent',
         rawPayload: {
-          message:          'Auto-completed en sandbox — en producción espera IPN de Vita',
+          message:          'Sandbox step 1/2 — simulating production payout_sent',
           vitaWithdrawalId: transaction.payoutReference,
         },
         receivedAt: new Date(),
       });
       await transaction.save();
-      console.log('[dispatchPayout] ✅ Status: completed');
 
-      // Stellar audit trail (best-effort)
-      try {
-        console.log('[dispatchPayout] Llamando Stellar...');
-        const stellarTxId = await registerAuditTrail(transaction);
-        console.log('[dispatchPayout] Stellar resultado:', stellarTxId);
-        if (stellarTxId) {
-          transaction.stellarTxId = stellarTxId;
-          transaction.ipnLog.push({
-            provider:   'stellar',
-            eventType:  'stellar_audit_registered',
-            status:     'completed',
-            rawPayload: {
-              stellarTxId,
-              network:     process.env.STELLAR_NETWORK ?? 'testnet',
-              explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
-            },
-            receivedAt: new Date(),
-          });
-          await transaction.save().catch(err =>
-            console.error('[Alyto Payout] Error guardando stellarTxId:', err.message),
-          );
-          console.log('[Stellar] ✅ Audit trail registrado:', stellarTxId);
-        }
-      } catch (stellarError) {
-        console.error('[Stellar] Error:', stellarError.message);
-      }
-
-      // Notificación push: transferencia completada
+      // Push + email: pago enviado al banco
       try {
         await sendPushNotification(
           transaction.userId,
-          NOTIFICATIONS.paymentCompleted(
-            transaction.originalAmount,
-            transaction.originCurrency,
-            transaction.destinationAmount,
-            transaction.destinationCurrency,
-          ),
+          NOTIFICATIONS.payoutSent(transaction.destinationCountry),
         );
       } catch (notifErr) {
-        console.error('[Alyto Payout] Error enviando push paymentCompleted (sandbox):', notifErr.message);
+        console.error('[Alyto Payout] Error push payout_sent (sandbox):', notifErr.message);
       }
 
-      // Email transaccional: pago completado
-      try {
-        const user = await User.findById(transaction.userId).lean();
-        if (user?.email) {
-          await sendEmail(...EMAILS.paymentCompleted(user, transaction));
-          console.log('[Email] ✅ Completado →', user.email);
+      // SANDBOX ONLY: simulate Vita IPN delay
+      const txId = transaction._id;
+      setTimeout(async () => {
+        try {
+          console.log(`[dispatchPayout] 🧪 Sandbox step 2: completing ${transaction.alytoTransactionId}`);
+          const tx = await Transaction.findById(txId);
+          if (!tx || tx.status !== 'payout_sent') return;
+
+          tx.status      = 'completed';
+          tx.completedAt = new Date();
+          tx.ipnLog.push({
+            provider:   'system',
+            eventType:  'payout_completed_sandbox',
+            status:     'completed',
+            rawPayload: {
+              message:          'Sandbox step 2/2 — simulated Vita IPN confirmation',
+              vitaWithdrawalId: tx.payoutReference,
+            },
+            receivedAt: new Date(),
+          });
+          await tx.save();
+
+          // Stellar audit trail (best-effort)
+          try {
+            const stellarTxId = await registerAuditTrail(tx);
+            if (stellarTxId) {
+              tx.stellarTxId = stellarTxId;
+              tx.ipnLog.push({
+                provider:   'stellar',
+                eventType:  'stellar_audit_registered',
+                status:     'completed',
+                rawPayload: {
+                  stellarTxId,
+                  network:     process.env.STELLAR_NETWORK ?? 'testnet',
+                  explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
+                },
+                receivedAt: new Date(),
+              });
+              await tx.save().catch(() => {});
+            }
+          } catch (stellarErr) {
+            console.error('[Stellar] Error (sandbox step 2):', stellarErr.message);
+          }
+
+          // Push: transferencia completada
+          try {
+            await sendPushNotification(
+              tx.userId,
+              NOTIFICATIONS.paymentCompleted(
+                tx.originalAmount, tx.originCurrency,
+                tx.destinationAmount, tx.destinationCurrency,
+              ),
+            );
+          } catch (notifErr) {
+            console.error('[Alyto Payout] Error push paymentCompleted (sandbox):', notifErr.message);
+          }
+
+          // Email: pago completado
+          try {
+            const user = await User.findById(tx.userId).lean();
+            if (user?.email) {
+              await sendEmail(...EMAILS.paymentCompleted(user, tx));
+              console.log('[Email] ✅ Completado (sandbox) →', user.email);
+            }
+          } catch (emailErr) {
+            console.error('[Email] Error completado (sandbox):', emailErr.message);
+          }
+
+          console.log('[dispatchPayout] ✅ Sandbox step 2 complete:', tx.alytoTransactionId);
+        } catch (err) {
+          console.error('[dispatchPayout] Sandbox step 2 error:', err.message);
         }
-      } catch (emailErr) {
-        console.error('[Email] Error completado:', emailErr.message);
-      }
+      }, 4000);
 
-      console.log('[dispatchPayout] ✅ Transacción completada (sandbox):', transaction.alytoTransactionId);
+      console.log('[dispatchPayout] 🧪 Sandbox step 1 done — step 2 scheduled in 4s:', transaction.alytoTransactionId);
 
     } else {
       // ── VITA PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─
