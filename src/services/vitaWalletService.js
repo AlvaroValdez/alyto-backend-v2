@@ -29,7 +29,10 @@ import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-const VITA_BASE_URL = `${process.env.VITA_API_URL ?? 'https://api.stage.vitawallet.io'}/api/businesses`;
+if (!process.env.VITA_API_URL) {
+  console.warn('[Vita] ⚠️ VITA_API_URL no definida — usando sandbox por defecto. Configurar en producción.');
+}
+const VITA_BASE_URL = `${process.env.VITA_API_URL || 'https://api.stage.vitawallet.io'}/api/businesses`;
 
 // ─── HMAC-SHA256 — Generación de firma (portado de V1.5 vitaClient.js) ────────
 

@@ -22,7 +22,7 @@ const spAConfigSchema = new mongoose.Schema(
     },
     accountNumber: { type: String, default: '' },
     rut:           { type: String, default: '' },
-    accountHolder: { type: String, default: 'AV Finance SpA' },
+    accountHolder: { type: String, default: process.env.SPA_ACCOUNT_HOLDER || 'AV Finance SpA' },
     bankEmail:     { type: String, default: '' },
 
     // ── Tasa CLP/BOB ─────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ const spAConfigSchema = new mongoose.Schema(
     // usdtPerBob: precio venta USDT en BOB (Binance P2P). Ej: 9.31
     usdtPerBob: { type: Number, default: null },
     // clpPerBob: CLP por 1 BOB = clpPerUsdt / usdtPerBob. Ej: 99.55
-    clpPerBob: { type: Number, default: 99.59 },
+    clpPerBob: { type: Number, default: null },
 
     // ── Limites del corredor cl-bo ────────────────────────────────────────
     minAmountCLP: { type: Number, default: 10000 },

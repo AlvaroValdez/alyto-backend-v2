@@ -50,10 +50,26 @@ import { handleStellarError } from '../utils/stellarErrors.js';
 import Transaction            from '../models/Transaction.js';
 import User                   from '../models/User.js';
 
-// ─── Conversión FX (simulada) ─────────────────────────────────────────────────
-// TODO: reemplazar por consulta al proveedor de FX en tiempo real (ej. OwlPay rates)
-// 1 USDC ≈ 950 CLP (tipo de cambio aproximado para Testnet)
-const SIMULATED_CLP_PER_USDC = 950;
+// ─── Conversión FX CLP→USDC ──────────────────────────────────────────────────
+import ExchangeRate from '../models/ExchangeRate.js';
+
+const CLP_USD_FALLBACK = parseFloat(process.env.CLP_USD_RATE || '950');
+
+/**
+ * Obtiene la tasa CLP/USDC desde MongoDB (par CLP-USD o CLP-USDT).
+ * Fallback: env CLP_USD_RATE → 950 hardcoded de último recurso.
+ */
+async function getCLPRate() {
+  try {
+    const record = await ExchangeRate.findOne({
+      pair: { $in: ['CLP-USD', 'CLP-USDT'] },
+    }).sort({ updatedAt: -1 });
+    if (record) return record.rate;
+  } catch (err) {
+    console.warn('[Stellar] Error consultando CLP rate, usando fallback:', err.message);
+  }
+  return CLP_USD_FALLBACK;
+}
 
 // ─── 1. Fee Bump Transaction ──────────────────────────────────────────────────
 
@@ -514,16 +530,16 @@ export async function executeWeb3Transit(transactionId) {
   }
 
   // ── 3. Calcular conversión fxConversion: CLP → USDC ─────────────────────
-  // Monto CLP original ÷ tipo de cambio = monto en USDC
-  // Stellar acepta hasta 7 decimales — redondear hacia abajo para no sobredibujar
-  const usdcAmount = (transaction.originalAmount / SIMULATED_CLP_PER_USDC).toFixed(7);
+  // Tasa dinámica: MongoDB → env CLP_USD_RATE → fallback 950
+  const clpPerUsdc = await getCLPRate();
+  const usdcAmount = (transaction.originalAmount / clpPerUsdc).toFixed(7);
 
   console.info('[Alyto Stellar] executeWeb3Transit: iniciando tránsito Web3.', {
     ...logCtx,
     alytoTransactionId: transaction.alytoTransactionId,
     clpAmount:          transaction.originalAmount,
     usdcAmount,
-    fxRate:             SIMULATED_CLP_PER_USDC,
+    fxRate:             clpPerUsdc,
     clientStellarAddress,
     // spaCorporateAddress es pública — seguro para logs
     spaCorporateAddress,
@@ -613,7 +629,7 @@ export async function executeWeb3Transit(transactionId) {
         stellarLedger:       stellarResult.ledger,
         digitalAsset:        'USDC',
         digitalAssetAmount:  parseFloat(usdcAmount),
-        exchangeRate:        SIMULATED_CLP_PER_USDC,
+        exchangeRate:        clpPerUsdc,
         exchangeRateLockedAt: new Date(),
         stellarSourceAddress: spaCorporateAddress,
         stellarDestAddress:   clientStellarAddress,

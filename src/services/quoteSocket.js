@@ -32,7 +32,9 @@ import Sentry              from './sentry.js';
 
 const REFRESH_INTERVAL_MS          = parseInt(process.env.QUOTE_REFRESH_INTERVAL_MS    ?? '60000', 10);
 const RATE_CHANGE_THRESHOLD        = parseFloat(process.env.QUOTE_RATE_CHANGE_THRESHOLD ?? '0.005');
-const CACHE_REFRESH_BEFORE_EXPIRY  = 2 * 60 * 1000;   // refrescar Vita 2 min antes de que expire
+const CACHE_REFRESH_BEFORE_EXPIRY  = parseInt(process.env.QUOTE_CACHE_REFRESH_BEFORE_MS ?? '120000', 10);
+const QUOTE_VALIDITY_MS            = parseInt(process.env.QUOTE_VALIDITY_MS             ?? '180000', 10); // 3 min
+const VITA_CACHE_DEFAULT_TTL_MS    = parseInt(process.env.VITA_CACHE_TTL_MS             ?? '600000', 10); // 10 min
 const MAX_CONNECTIONS_PER_USER     = 3;
 
 // ─── Cache Global de Precios Vita ─────────────────────────────────────────────
@@ -75,7 +77,7 @@ async function refreshVitaCache() {
     const vitaValidUntil = data?.withdrawal?.prices?.attributes?.valid_until;
     vitaCache.validUntil = vitaValidUntil
       ? new Date(vitaValidUntil)
-      : new Date(Date.now() + 10 * 60 * 1000);
+      : new Date(Date.now() + VITA_CACHE_DEFAULT_TTL_MS);
     return true;
   } catch (err) {
     console.warn('[Alyto WS] No se pudo refrescar el cache de precios Vita:', err.message);
@@ -197,7 +199,7 @@ async function computeQuote(state) {
 
     // Tasa efectiva all-in: comisiones absorbidas — el usuario no ve el desglose
     const effectiveRate  = +(destinationAmount / amount).toFixed(6);
-    const quoteExpiresAt = new Date(Date.now() + 3 * 60 * 1000);
+    const quoteExpiresAt = new Date(Date.now() + QUOTE_VALIDITY_MS);
 
     console.info('[Alyto WS] Quote CL-BO (anchorBolivia):', {
       amount, clpPerBob, totalDeducted, netCLP, destinationAmount, effectiveRate,
@@ -248,7 +250,7 @@ async function computeQuote(state) {
     if (destinationAmount <= 0) return null;
 
     const effectiveRate  = round2(destinationAmount / amount);
-    const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+    const localExpiry    = new Date(Date.now() + QUOTE_VALIDITY_MS);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
     const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
@@ -296,7 +298,7 @@ async function computeQuote(state) {
 
   if (destinationAmount <= 0) return null;
 
-  const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
+  const localExpiry    = new Date(Date.now() + QUOTE_VALIDITY_MS);
   const vitaExpiry     = pricing.validUntil ? new Date(pricing.validUntil) : null;
   const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
