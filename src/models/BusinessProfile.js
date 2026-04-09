@@ -19,9 +19,12 @@ const { Schema } = mongoose;
 
 const legalRepresentativeSchema = new Schema(
   {
+    name:           { type: String, trim: true },
     firstName:      { type: String, trim: true },
     lastName:       { type: String, trim: true },
+    docType:        { type: String, trim: true },
     documentType:   { type: String, trim: true },
+    docNumber:      { type: String, trim: true },
     documentNumber: { type: String, trim: true },
     email:          { type: String, lowercase: true, trim: true },
     phone:          { type: String, trim: true },
@@ -37,12 +40,15 @@ const kybDocumentSchema = new Schema(
     type: {
       type: String,
       enum: [
-        'tax_certificate',    // RUT / NIT / EIN — certificado tributario
-        'incorporation_deed', // Escritura de constitución
-        'legal_rep_id',       // CI / pasaporte del representante legal
-        'address_proof',      // Comprobante de domicilio
-        'bank_statement',     // Estado de cuenta bancario
-        'other',
+        // Frontend keys (KybForm.jsx DOCS_SCHEMA)
+        'docTaxId',        // RUT / NIT de la empresa
+        'docConstitution', // Escritura de constitución
+        'docRepId',        // CI del representante legal
+        'docDomicile',     // Comprobante de domicilio
+        'docBankStatement',// Estado de cuenta bancaria
+        // Legacy values
+        'tax_certificate', 'incorporation_deed', 'legal_rep_id',
+        'address_proof', 'bank_statement', 'other',
       ],
     },
     filename:   { type: String },
@@ -115,11 +121,15 @@ const businessProfileSchema = new Schema(
     businessType: {
       type: String,
       enum: [
-        'sole_proprietor', // Persona natural con actividad comercial
-        'llc',             // SRL / LLC
-        'corporation',     // SA / Corp / PLC
-        'partnership',     // Sociedad de personas / Colectiva
-        'ngo',             // ONG / Fundación
+        'SRL',   // Sociedad de Responsabilidad Limitada
+        'SA',    // Sociedad Anónima
+        'SpA',   // Sociedad por Acciones
+        'LLC',   // Limited Liability Company
+        'LLP',   // Limited Liability Partnership
+        'IND',   // Empresa Individual
+        'OTHER', // Otro
+        // Legacy values (pre-Phase 35)
+        'sole_proprietor', 'llc', 'corporation', 'partnership', 'ngo',
       ],
     },
     industry:  { type: String, trim: true },
@@ -139,10 +149,13 @@ const businessProfileSchema = new Schema(
     estimatedMonthlyVolume: {
       type: String,
       enum: [
-        'under_5k',  // < $5.000 USD
-        '5k_20k',    // $5.000 – $20.000 USD
-        '20k_60k',   // $20.000 – $60.000 USD
-        'over_60k',  // > $60.000 USD
+        '0-10k',     // Menos de $10.000 USD
+        '10k-50k',   // $10.000 – $50.000 USD
+        '50k-100k',  // $50.000 – $100.000 USD
+        '100k-500k', // $100.000 – $500.000 USD
+        '500k+',     // Más de $500.000 USD
+        // Legacy values
+        'under_5k', '5k_20k', '20k_60k', 'over_60k',
       ],
     },
     /** Corredores de interés declarados por el usuario — ej. ["BO-US", "BO-EU"] */
