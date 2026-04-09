@@ -7,7 +7,7 @@
  */
 
 import User from '../models/User.js';
-import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
+import { notify, NOTIFICATIONS } from '../services/notifications.js';
 
 // ─── Esquema de parámetros por tipo ──────────────────────────────────────────
 // Cada entrada define qué campos del `metadata` son necesarios para construir
@@ -124,7 +124,7 @@ export async function sendNotification(req, res) {
 
   // ── 6. Enviar ─────────────────────────────────────────────────────────────
   try {
-    await sendPushNotification(userId.trim(), notification);
+    await notify(userId.trim(), notification);
   } catch (err) {
     console.error('[Admin Notifications] Error enviando notificación:', err.message);
     return res.status(500).json({ success: false, message: 'Error al enviar la notificación.' });
