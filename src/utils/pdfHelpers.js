@@ -31,6 +31,10 @@ export function resolveLogoPath() {
   if (process.env.AV_FINANCE_LOGO_PATH && existsSync(process.env.AV_FINANCE_LOGO_PATH)) {
     return process.env.AV_FINANCE_LOGO_PATH;
   }
+  // Logo incluido en el repo (funciona en Render y local)
+  const repoPath = resolve(__dirname, '../assets/LogoAlyto.png');
+  if (existsSync(repoPath)) return repoPath;
+  // Fallback: workspace de desarrollo local
   const devPath = resolve(__dirname, '../../../Logos/LogoAlyto.png');
   if (existsSync(devPath)) return devPath;
   return null;
@@ -65,7 +69,7 @@ export function drawSeparator(doc, color = '#CCCCCC') {
     .strokeColor(color)
     .lineWidth(0.5)
     .stroke();
-  doc.moveDown(0.5);
+  doc.moveDown(0.25);
 }
 
 /**
@@ -133,66 +137,56 @@ export function drawInstitutionalHeader(doc, titulo, numeroCorrelativo) {
   const contentW = pageW - marginL - doc.page.margins.right;
 
   // Barra superior acento
-  doc.rect(0, 0, pageW, 8).fill(COLOR_ACCENT);
+  doc.rect(0, 0, pageW, 6).fill(COLOR_ACCENT);
 
   // Logo
   const logoPath = resolveLogoPath();
-  const logoH    = 44;
-  const logoY    = 18;
+  const logoH    = 36;
+  const logoY    = 14;
 
   if (logoPath) {
     const logoW = Math.round(logoH * (604 / 217));
     const logoX = (pageW - logoW) / 2;
     doc.image(logoPath, logoX, logoY, { height: logoH });
-    doc.y = logoY + logoH + 10;
+    doc.y = logoY + logoH + 6;
   } else {
     doc
       .font('Helvetica-Bold')
-      .fontSize(22)
+      .fontSize(18)
       .fillColor(COLOR_PRIMARY)
-      .text('alyto', marginL, logoY + 6, { align: 'center', width: contentW });
-    doc.y = logoY + logoH + 10;
+      .text('alyto', marginL, logoY + 4, { align: 'center', width: contentW });
+    doc.y = logoY + logoH + 6;
   }
 
-  // Razón social
+  // Razón social + NIT en una línea
+  const nit       = process.env.AV_FINANCE_NIT    ?? '[NIT pendiente]';
+  const direccion = process.env.AV_FINANCE_ADDRESS ?? '';
+
   doc
     .font('Helvetica-Bold')
-    .fontSize(18)
+    .fontSize(12)
     .fillColor(COLOR_PRIMARY)
     .text('AV Finance SRL', marginL, doc.y, { align: 'center', width: contentW });
 
-  doc.moveDown(0.3);
-
-  const nit       = process.env.AV_FINANCE_NIT    ?? '[NIT pendiente — configurar AV_FINANCE_NIT]';
-  const direccion = process.env.AV_FINANCE_ADDRESS ?? '[Dirección pendiente — configurar AV_FINANCE_ADDRESS]';
+  doc.moveDown(0.15);
 
   doc
     .font('Helvetica')
-    .fontSize(9)
+    .fontSize(8)
     .fillColor(COLOR_GRAY)
-    .text(`NIT: ${nit}  ·  ${direccion}`, marginL, doc.y, { align: 'center', width: contentW });
+    .text(`NIT: ${nit}${direccion ? '  ·  ' + direccion : ''}`, marginL, doc.y, { align: 'center', width: contentW });
 
-  doc.moveDown(0.5);
+  doc.moveDown(0.3);
 
-  // Título del documento
+  // Título del documento + número en una línea
   doc
     .font('Helvetica-Bold')
-    .fontSize(13)
+    .fontSize(11)
     .fillColor(COLOR_PRIMARY)
-    .text(titulo, marginL, doc.y, { align: 'center', width: contentW });
+    .text(`${titulo}  —  N° ${numeroCorrelativo}`, marginL, doc.y, { align: 'center', width: contentW });
 
-  doc.moveDown(0.3);
-
-  // Número correlativo
-  doc
-    .font('Helvetica')
-    .fontSize(9)
-    .fillColor(COLOR_GRAY)
-    .text(`N° ${numeroCorrelativo}`, marginL, doc.y, { align: 'center', width: contentW });
-
-  doc.moveDown(0.8);
+  doc.moveDown(0.4);
   drawSeparator(doc, COLOR_ACCENT);
-  doc.moveDown(0.5);
 }
 
 // ── Footer institucional ─────────────────────────────────────────────────────
