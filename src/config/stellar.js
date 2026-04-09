@@ -79,9 +79,10 @@ export const BASE_FEE_STROOPS = '100';
 
 /**
  * Fee elevada para transacciones con urgencia (Fee Bump corporativo).
- * Ajustar dinámicamente consultando /fee_stats de Horizon en producción.
+ * Configurable via STELLAR_PRIORITY_FEE_STROOPS env var.
+ * Default: 1000 stroops. Ajustar según congestión de red.
  */
-export const PRIORITY_FEE_STROOPS = '1000';
+export const PRIORITY_FEE_STROOPS = process.env.STELLAR_PRIORITY_FEE_STROOPS || '1000';
 
 /** Timeout estándar para transacciones (segundos). */
 export const TX_TIMEOUT_SECONDS = 30;

@@ -15,8 +15,12 @@ import QRCode  from 'qrcode';
 
 const QR_SECRET = process.env.QR_HMAC_SECRET ?? process.env.JWT_SECRET;
 
-// TTL por defecto en segundos por tipo
-const DEFAULT_TTL = { charge: 600, p2p: 300, deposit: 0 };
+// TTL por defecto en segundos por tipo (configurable via env)
+const DEFAULT_TTL = {
+  charge:  parseInt(process.env.QR_TTL_CHARGE  || '600', 10),
+  p2p:     parseInt(process.env.QR_TTL_P2P     || '300', 10),
+  deposit: parseInt(process.env.QR_TTL_DEPOSIT || '0', 10),
+};
 
 /**
  * Genera un QR Alyto firmado HMAC-SHA256.
