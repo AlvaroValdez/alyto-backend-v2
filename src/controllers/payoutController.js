@@ -237,8 +237,10 @@ export async function processBoliviaManualPayout(req, res) {
 
   // ── 9. Auto-generar factura B2B si el usuario es Business ─────────────────
   if (user.accountType === 'business' && user.businessProfileId) {
-    autoGenerateBusinessInvoice(transaction, user._id)
-      .catch(err => console.warn('[B2B Invoice] Auto-generation failed:', err.message));
+    // Recargar transacción fresca (con status: completed) para el generador B2B
+    Transaction.findById(transactionId).then(freshTx => {
+      if (freshTx) return autoGenerateBusinessInvoice(freshTx, user._id);
+    }).catch(err => console.warn('[B2B Invoice] Auto-generation failed:', err.message));
   }
 
   // ── 10. Retornar el PDF al caller ─────────────────────────────────────────
