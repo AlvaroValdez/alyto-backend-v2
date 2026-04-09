@@ -503,20 +503,16 @@ export async function adminConfirmDeposit(req, res) {
 
     // Notificar al usuario
     const depositUser = await User.findById(wtx.userId).lean()
-    if (depositUser && process.env.SENDGRID_TEMPLATE_COMPLETED) {
-      sendEmail(
-        depositUser.email,
-        process.env.SENDGRID_TEMPLATE_COMPLETED,
-        {
-          firstName:   depositUser.firstName,
-          amount:      `Bs. ${wtx.amount.toFixed(2)}`,
-          reference:   wtxId,
-          balanceNew:  `Bs. ${newBalance.toFixed(2)}`,
-        },
-      ).catch(() => {})
+    if (depositUser?.email) {
+      sendEmail(...EMAILS.walletDepositConfirmed(depositUser, {
+        amount:     wtx.amount,
+        currency:   'BOB',
+        newBalance,
+        wtxId,
+      })).catch(err => console.error('[Wallet] Error email depósito confirmado:', err.message))
     }
 
-    // Push notification — depósito confirmado
+    // Push + in-app notification — depósito confirmado
     notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
 
     return res.json({

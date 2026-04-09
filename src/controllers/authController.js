@@ -17,6 +17,7 @@ import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
+import { sendEmail, EMAILS }  from '../services/email.js';
 
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
@@ -136,6 +137,12 @@ export async function registerUser(req, res) {
     console.info(
       `[Auth] Registro exitoso — userId: ${user._id} | entity: ${legalEntity} | country: ${countryCode}`,
     );
+
+    // Welcome email — fire-and-forget (no bloquear respuesta de registro)
+    setImmediate(() => {
+      sendEmail(...EMAILS.welcome(user))
+        .catch(err => console.error('[Auth] Error enviando welcome email:', err.message));
+    });
 
     return res.status(201).json({
       token,

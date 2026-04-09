@@ -21,7 +21,7 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import { dispatchPayout } from './ipnController.js';
-import { sendPushNotification } from '../services/notifications.js';
+import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS }    from '../services/email.js';
 import {
   getPrices,
@@ -383,12 +383,10 @@ export async function updateTransactionStatus(req, res) {
 
   // ── Notificar al usuario que su pago fue recibido (payin manual confirmado) ─
   if (newStatus === 'payin_confirmed') {
-    // Push notification
-    sendPushNotification(transaction.userId, {
-      title: 'Pago recibido ✓',
-      body:  'Recibimos tu pago. Tu transferencia está siendo procesada y pronto estará en camino.',
-      data:  { type: 'payin_confirmed' },
-    }).catch(err => console.error('[Admin] Error push payin_confirmed:', err.message));
+    // Push + in-app notification
+    notify(transaction.userId, NOTIFICATIONS.payinConfirmed(
+      transaction.originalAmount, transaction.originCurrency,
+    )).catch(err => console.error('[Admin] Error notify payin_confirmed:', err.message));
 
     // Email transaccional
     User.findById(transaction.userId).select('email firstName lastName').lean()
@@ -403,12 +401,41 @@ export async function updateTransactionStatus(req, res) {
   // transferencia bancaria y cambia el status a 'payin_confirmed'.
   // En ese momento se dispara automáticamente el payout a Vita.
   if (newStatus === 'payin_confirmed') {
-    console.info('[Admin] Disparando dispatchPayout para payin manual confirmado:', transactionId);
-    dispatchPayout(transaction).catch(err => {
-      console.error('[Admin] Error en dispatchPayout tras confirmación manual:', {
+    console.info('[Admin] Disparando dispatchPayout para payin manual confirmado:', {
+      transactionId,
+      legalEntity:  transaction.legalEntity,
+      corridor:     transaction.corridorId?.toString(),
+      destCountry:  transaction.destinationCountry,
+      amount:       transaction.originalAmount,
+      currency:     transaction.originCurrency,
+    });
+    dispatchPayout(transaction).catch(async (err) => {
+      console.error('[Admin] ❌ Error en dispatchPayout tras confirmación manual:', {
         transactionId,
-        error: err.message,
+        error:  err.message,
+        stack:  err.stack?.split('\n').slice(0, 3).join(' | '),
       });
+      // Enviar alerta admin por email — el payout falló después de confirmar payin
+      try {
+        const adminEmail = process.env.ADMIN_EMAIL ?? process.env.SENDGRID_ADMIN_EMAIL;
+        if (adminEmail) {
+          await sendEmail(
+            adminEmail,
+            process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA ?? process.env.SENDGRID_TEMPLATE_FAILED,
+            {
+              transactionId,
+              originAmount:   `${transaction.originalAmount} ${transaction.originCurrency}`,
+              destinationCountry: transaction.destinationCountry,
+              error:          err.message,
+              createdAt:      new Date().toISOString(),
+              ledgerUrl:      `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+              userName:       'ALERTA: Payout falló tras confirmación manual',
+            },
+          );
+        }
+      } catch (emailErr) {
+        console.error('[Admin] Error enviando alerta admin de payout fallido:', emailErr.message);
+      }
     });
   }
 

@@ -34,7 +34,7 @@ import {
 import { createDisbursement, verifyOwlPayWebhookSignature } from '../services/owlPayService.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
-import { sendPushNotification, NOTIFICATIONS } from '../services/notifications.js';
+import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS } from '../services/email.js';
 import { getBOBRate }        from '../services/exchangeRateService.js';
 
@@ -547,7 +547,7 @@ export async function dispatchPayout(transaction) {
             fallbackProvider: fallback,    fallbackError: fallbackErr.message,
           });
           try {
-            await sendPushNotification(transaction.userId,
+            await notify(transaction.userId,
               NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
           } catch (e) { console.error('[Email] Error push failed (all providers):', e.message); }
           try {
@@ -567,7 +567,7 @@ export async function dispatchPayout(transaction) {
           error: primaryError.message,
         });
         try {
-          await sendPushNotification(transaction.userId,
+          await notify(transaction.userId,
             NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
         } catch (e) { console.error('[Email] Error push failed (no fallback):', e.message); }
         try {
@@ -624,7 +624,7 @@ export async function dispatchPayout(transaction) {
 
       // Push + email: pago enviado al banco
       try {
-        await sendPushNotification(
+        await notify(
           transaction.userId,
           NOTIFICATIONS.payoutSent(transaction.destinationCountry),
         );
@@ -678,7 +678,7 @@ export async function dispatchPayout(transaction) {
 
           // Push: transferencia completada
           try {
-            await sendPushNotification(
+            await notify(
               tx.userId,
               NOTIFICATIONS.paymentCompleted(
                 tx.originalAmount, tx.originCurrency,
@@ -721,7 +721,7 @@ export async function dispatchPayout(transaction) {
 
       // Notificación push: pago enviado al banco
       try {
-        await sendPushNotification(
+        await notify(
           transaction.userId,
           NOTIFICATIONS.payoutSent(transaction.destinationCountry),
         );
@@ -852,7 +852,7 @@ export async function handleVitaIPN(req, res) {
 
         // Notificación push: payin confirmado
         try {
-          await sendPushNotification(
+          await notify(
             transaction.userId,
             NOTIFICATIONS.payinConfirmed(transaction.originalAmount, transaction.originCurrency),
           );
@@ -887,7 +887,7 @@ export async function handleVitaIPN(req, res) {
 
         // Notificación push: pago fallido
         try {
-          await sendPushNotification(
+          await notify(
             transaction.userId,
             NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
           );
@@ -953,7 +953,7 @@ export async function handleVitaIPN(req, res) {
 
         // Notificación push: transferencia completada
         try {
-          await sendPushNotification(
+          await notify(
             transaction.userId,
             NOTIFICATIONS.paymentCompleted(
               transaction.originalAmount,
@@ -993,7 +993,7 @@ export async function handleVitaIPN(req, res) {
 
         // Notificación push: transferencia fallida
         try {
-          await sendPushNotification(
+          await notify(
             transaction.userId,
             NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
           );
@@ -1243,7 +1243,7 @@ export async function handleOwlPayIPN(req, res) {
 
       // Push notification
       try {
-        await sendPushNotification(
+        await notify(
           transaction.userId,
           NOTIFICATIONS.paymentCompleted(
             transaction.originalAmount,
@@ -1284,7 +1284,7 @@ export async function handleOwlPayIPN(req, res) {
       notifyAdminManualPayout(transaction).catch(() => {});
 
       try {
-        await sendPushNotification(
+        await notify(
           transaction.userId,
           NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
         );

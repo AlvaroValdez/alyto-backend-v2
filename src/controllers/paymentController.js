@@ -728,43 +728,61 @@ export async function initCrossBorderPayment(req, res) {
     // Emails en paralelo (fire-and-forget)
     const user = await User.findById(userId).select('email firstName lastName').lean();
     if (user?.email) {
-      sendEmail(
-        user.email,
-        process.env.SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS ?? '',
-        {
-          userName:       user.firstName ?? 'Usuario',
-          amount:         amount.toLocaleString('es-CL'),
-          paymentRef,
-          bankName:       spaCfg.bankName,
-          accountType:    spaCfg.accountType,
-          accountNumber:  spaCfg.accountNumber,
-          rut:            spaCfg.rut,
-          accountHolder:  spaCfg.accountHolder,
-          bankEmail:      spaCfg.bankEmail,
-          totalDeducted:  totalDeductedReal.toLocaleString('es-CL'),
-          destinationBOB: destinationBOB.toFixed(2),
-          clpPerBob:      clpPerBob.toFixed(2),
-        },
-      ).catch(err => console.error('[Email] Error CLP-BOB instrucciones:', err.message));
+      const clpBobTemplateId = process.env.SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS
+        ?? process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN
+        ?? process.env.SENDGRID_TEMPLATE_INITIATED;
+      if (!clpBobTemplateId) {
+        console.error('[Email] ⚠️ Falta SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS — email de instrucciones NO enviado.');
+      } else {
+        sendEmail(
+          user.email,
+          clpBobTemplateId,
+          {
+            userName:       user.firstName ?? 'Usuario',
+            amount:         amount.toLocaleString('es-CL'),
+            paymentRef,
+            bankName:       spaCfg.bankName,
+            accountType:    spaCfg.accountType,
+            accountNumber:  spaCfg.accountNumber,
+            rut:            spaCfg.rut,
+            accountHolder:  spaCfg.accountHolder,
+            bankEmail:      spaCfg.bankEmail,
+            totalDeducted:  totalDeductedReal.toLocaleString('es-CL'),
+            destinationBOB: destinationBOB.toFixed(2),
+            clpPerBob:      clpPerBob.toFixed(2),
+          },
+        ).catch(err => console.error('[Email] Error CLP-BOB instrucciones:', {
+          error: err.message, to: user.email, templateId: clpBobTemplateId,
+        }));
+      }
     }
     // Alerta admin
-    sendEmail(
-      process.env.ADMIN_EMAIL ?? '',
-      process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB ?? '',
-      {
-        transactionId:  alytoTransactionId,
-        userName:       `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
-        userEmail:      user?.email ?? '',
-        amount:         amount.toLocaleString('es-CL'),
-        paymentRef,
-        beneficiaryType: ben.type ?? 'bank_data',
-        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
-        bankName:        ben.bankName ?? '',
-        accountNumber:   ben.accountNumber ?? '',
-        hasProof:        paymentProofBase64 ? 'Si' : 'No',
-        ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
-      },
-    ).catch(err => console.error('[Email] Error admin CLP-BOB alert:', err.message));
+    const adminClpBobTemplate = process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB
+      ?? process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA;
+    const adminEmail = process.env.ADMIN_EMAIL ?? process.env.SENDGRID_ADMIN_EMAIL;
+    if (adminClpBobTemplate && adminEmail) {
+      sendEmail(
+        adminEmail,
+        adminClpBobTemplate,
+        {
+          transactionId:  alytoTransactionId,
+          userName:       `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim(),
+          userEmail:      user?.email ?? '',
+          amount:         amount.toLocaleString('es-CL'),
+          paymentRef,
+          beneficiaryType: ben.type ?? 'bank_data',
+          beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+          bankName:        ben.bankName ?? '',
+          accountNumber:   ben.accountNumber ?? '',
+          hasProof:        paymentProofBase64 ? 'Si' : 'No',
+          ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+        },
+      ).catch(err => console.error('[Email] Error admin CLP-BOB alert:', {
+        error: err.message, to: adminEmail, templateId: adminClpBobTemplate,
+      }));
+    } else {
+      console.error('[Email] ⚠️ Falta SENDGRID_TEMPLATE_ADMIN_CLP_BOB o ADMIN_EMAIL — alerta admin NO enviada.');
+    }
 
     console.info('[CrossBorder CL-BO] Transaccion creada:', {
       alytoTransactionId,
@@ -1057,10 +1075,16 @@ export async function initCrossBorderPayment(req, res) {
     const user = await User.findById(userId).select('email firstName').lean();
     if (user) {
       sendEmail(...EMAILS.manualPayinInstructions(user, transaction, manualPaymentInstructions))
-        .catch(err => console.error('[CrossBorder] Error email instrucciones:', err.message));
+        .catch(err => console.error('[CrossBorder] Error email instrucciones:', {
+          error: err.message, to: user.email, txId: alytoTransactionId,
+        }));
+    } else {
+      console.error('[CrossBorder] ⚠️ Usuario no encontrado para email instrucciones, userId:', userId);
     }
     sendEmail(...EMAILS.adminBoliviaAlert(transaction))
-      .catch(err => console.error('[CrossBorder] Error email admin Bolivia alert:', err.message));
+      .catch(err => console.error('[CrossBorder] Error email admin Bolivia alert:', {
+        error: err.message, txId: alytoTransactionId,
+      }));
   }
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────

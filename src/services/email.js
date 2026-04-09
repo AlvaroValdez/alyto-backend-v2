@@ -283,7 +283,7 @@ export const EMAILS = {
 
     return [
       user.email,
-      process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN,
+      process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN ?? process.env.SENDGRID_TEMPLATE_INITIATED,
       {
         userName:           user.firstName,
         transactionId:      transaction.alytoTransactionId,
@@ -483,6 +483,64 @@ export const EMAILS = {
         transactionId:   transaction.alytoTransactionId,
         completedAt:     formatDate(transaction.updatedAt),
         supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+      },
+    ];
+  },
+
+  // ── Welcome — Bienvenida al registro ──────────────────────────────────────
+
+  /**
+   * Email de bienvenida tras registro exitoso.
+   *
+   * @param {object} user — Documento User recién creado
+   * @returns {[string, string, object]}
+   */
+  welcome(user) {
+    const entityName = {
+      SpA: 'AV Finance SpA',
+      SRL: 'AV Finance SRL',
+      LLC: 'AV Finance LLC',
+    }[user.legalEntity] ?? 'AV Finance';
+
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_WELCOME,
+      {
+        userName:      user.firstName,
+        entityName,
+        legalEntity:   user.legalEntity,
+        verifyUrl:     `${process.env.APP_URL ?? 'https://alyto.app'}/kyc`,
+        supportEmail:  process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+        supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+      },
+    ];
+  },
+
+  // ── Wallet — Depósito acreditado ────────────────────────────────────────────
+
+  /**
+   * Notifica al usuario que su depósito BOB fue acreditado.
+   *
+   * @param {object} user
+   * @param {object} params
+   * @param {number} params.amount
+   * @param {string} params.currency
+   * @param {number} params.newBalance
+   * @param {string} params.wtxId
+   * @returns {[string, string, object]}
+   */
+  walletDepositConfirmed(user, { amount, currency, newBalance, wtxId }) {
+    return [
+      user.email,
+      process.env.SENDGRID_TEMPLATE_DEPOSIT_CONFIRMED,
+      {
+        userName:     user.firstName,
+        amount:       formatCurrency(amount, currency),
+        currency,
+        newBalance:   formatCurrency(newBalance, currency),
+        wtxId,
+        confirmedAt:  formatDate(new Date()),
+        supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
       },
     ];
   },
