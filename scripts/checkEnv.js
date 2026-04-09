@@ -42,20 +42,29 @@ const IMPORTANT = [
   { name: 'SENDGRID_API_KEY',       desc: 'SendGrid — emails de notificación al admin' },
   { name: 'SENDGRID_FROM_EMAIL',    desc: 'SendGrid — dirección de origen de emails' },
   { name: 'ADMIN_EMAIL',            desc: 'Email del admin para notificaciones de payout manual' },
+  { name: 'ALLOWED_ORIGINS',        desc: 'Orígenes permitidos para CORS (producción)' },
+  { name: 'OWLPAY_API_KEY',         desc: 'OwlPay Harbor — API key (recibida post-KYB)' },
+  { name: 'OWLPAY_WEBHOOK_SECRET',  desc: 'OwlPay — verificación webhooks harbor-signature' },
+  { name: 'QR_HMAC_SECRET',         desc: 'Fase 29 — secreto HMAC para firmar QR codes Bolivia' },
 ];
 
 /**
  * OPCIONALES — solo necesarias en producción o para features específicas.
  */
 const OPTIONAL = [
-  { name: 'STELLAR_LLC_SECRET_KEY',  desc: 'Stellar — clave secreta cuenta LLC' },
-  { name: 'STELLAR_SPA_SECRET_KEY',  desc: 'Stellar — clave secreta cuenta SpA' },
-  { name: 'STELLAR_SRL_SECRET_KEY',  desc: 'Stellar — clave secreta cuenta SRL' },
-  { name: 'STELLAR_CHANNEL_SECRET',  desc: 'Stellar — channelAccount para Fee Bump' },
-  { name: 'OWLPAY_API_KEY',          desc: 'OwlPay — on-ramp institucional Escenario A' },
-  { name: 'FIREBASE_PROJECT_ID',     desc: 'Firebase — notificaciones push (Fase 19)' },
-  { name: 'FIREBASE_CLIENT_EMAIL',   desc: 'Firebase — service account' },
-  { name: 'FIREBASE_PRIVATE_KEY',    desc: 'Firebase — service account private key' },
+  { name: 'STELLAR_LLC_SECRET_KEY',          desc: 'Stellar — clave secreta cuenta LLC' },
+  { name: 'STELLAR_SPA_SECRET_KEY',          desc: 'Stellar — clave secreta cuenta SpA' },
+  { name: 'STELLAR_SRL_SECRET_KEY',          desc: 'Stellar — clave secreta cuenta SRL' },
+  { name: 'STELLAR_CHANNEL_SECRET',          desc: 'Stellar — channelAccount para Fee Bump' },
+  { name: 'FIREBASE_PROJECT_ID',             desc: 'Firebase — notificaciones push (Fase 19)' },
+  { name: 'FIREBASE_CLIENT_EMAIL',           desc: 'Firebase — service account' },
+  { name: 'FIREBASE_PRIVATE_KEY',            desc: 'Firebase — service account private key' },
+  { name: 'STRIPE_IDENTITY_FLOW_ID',         desc: 'Stripe Identity — Flow ID del flujo Alyto Bolivia (producción)' },
+  { name: 'VITA_LOGIN_PROD',                 desc: 'Vita — credenciales producción (requerido en launch)' },
+  { name: 'VITA_TRANS_KEY_PROD',             desc: 'Vita — trans-key producción' },
+  { name: 'VITA_SECRET_PROD',                desc: 'Vita — HMAC secret producción' },
+  { name: 'VITA_BUSINESS_WALLET_UUID_PROD',  desc: 'Vita — UUID master wallet producción' },
+  { name: 'VITA_NOTIFY_URL_PROD',            desc: 'Vita — IPN URL producción' },
 ];
 
 // ─── Función de verificación ──────────────────────────────────────────────────
