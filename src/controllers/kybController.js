@@ -360,7 +360,11 @@ export async function getKYBApplication(req, res) {
   try {
     const { businessId } = req.params;
 
-    const profile = await BusinessProfile.findOne({ businessId })
+    // Aceptar tanto businessId (BIZ-XXXXXXXX) como _id (ObjectId de 24 hex)
+    const isObjectId = /^[a-f\d]{24}$/i.test(businessId);
+    const filter = isObjectId ? { _id: businessId } : { businessId };
+
+    const profile = await BusinessProfile.findOne(filter)
       .populate('userId', 'firstName lastName email kycStatus legalEntity residenceCountry')
       .populate('kybReviewedBy', 'firstName lastName email')
       .lean();
@@ -370,7 +374,7 @@ export async function getKYBApplication(req, res) {
     }
 
     // Incluir datos base64 de documentos en la vista de detalle admin
-    const profileWithDocs = await BusinessProfile.findOne({ businessId })
+    const profileWithDocs = await BusinessProfile.findOne(filter)
       .select('+documents.data')
       .lean();
 
@@ -413,7 +417,11 @@ export async function reviewKYBApplication(req, res) {
       });
     }
 
-    const profile = await BusinessProfile.findOne({ businessId });
+    // Aceptar tanto businessId (BIZ-XXXXXXXX) como _id (ObjectId de 24 hex)
+    const isObjectId = /^[a-f\d]{24}$/i.test(businessId);
+    const filter = isObjectId ? { _id: businessId } : { businessId };
+
+    const profile = await BusinessProfile.findOne(filter);
     if (!profile) {
       return res.status(404).json({ error: `Solicitud KYB "${businessId}" no encontrada.` });
     }
