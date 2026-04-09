@@ -29,19 +29,20 @@ router.get('/session', protect, createKycSession);
  */
 router.get('/status', protect, getKycStatus);
 
-/**
- * POST /api/v1/kyc/approve-test
- * Solo activo en NODE_ENV !== 'production'.
- * Aprueba KYC sin pasar por Stripe — para testing de flujos post-KYC.
- * Body: { userId: string }
- */
-router.post('/approve-test', approveKycTest);
+// ─── Endpoints de desarrollo (deshabilitados en producción) ─────────────────
+if (process.env.NODE_ENV !== 'production') {
+  /**
+   * POST /api/v1/kyc/approve-test
+   * Aprueba KYC sin pasar por Stripe — para testing de flujos post-KYC.
+   * Body: { userId: string }
+   */
+  router.post('/approve-test', approveKycTest);
 
-/**
- * GET /api/v1/kyc/debug/:userId
- * Solo activo en NODE_ENV !== 'production'.
- * No requiere JWT — solo para diagnóstico local.
- */
-router.get('/debug/:userId', getKycDebug);
+  /**
+   * GET /api/v1/kyc/debug/:userId
+   * No requiere JWT — solo para diagnóstico local.
+   */
+  router.get('/debug/:userId', getKycDebug);
+}
 
 export default router;
