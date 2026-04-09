@@ -14,7 +14,7 @@ import User              from '../models/User.js';
 import WalletBOB         from '../models/WalletBOB.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import { generateQR, verifyQR }        from '../services/qrWalletService.js';
-import { sendPushNotification }        from '../services/notifications.js';
+import { notify }                      from '../services/notifications.js';
 import { getOrCreateWallet, fireAuditTrail } from './walletController.js';
 import Sentry            from '../services/sentry.js';
 
@@ -206,10 +206,11 @@ export async function scanAndPayQR(req, res) {
     // 9. Audit trail Stellar — fire and forget
     fireAuditTrail(wtxSend.wtxId, 'qr_pay', finalAmount);
 
-    // 10. Push notification al receptor — fire and forget
-    sendPushNotification(recipient._id, {
+    // 10. Push + in-app notification al receptor — fire and forget
+    notify(recipient._id, {
       title: 'Pago recibido',
       body:  `Recibiste Bs. ${finalAmount.toFixed(2)} de ${payer.firstName} ${payer.lastName}`,
+      data:  { type: 'qr_payment' },
     }).catch(() => {});
 
     return res.json({
