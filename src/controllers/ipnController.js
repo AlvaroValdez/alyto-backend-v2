@@ -166,18 +166,19 @@ async function notifyAdminManualPayout(transaction) {
  */
 function resolveNetAmountForPayout(transaction) {
   const fees = transaction.fees || {};
+  const round2 = n => Math.round(n * 100) / 100;
 
   // Usar totalDeductedReal si está disponible (transacciones nuevas).
   // Fallback explícito para transacciones anteriores que no tienen el campo.
   const totalReal = fees.totalDeductedReal
-    ?? Math.round(
+    ?? round2(
       (fees.payinFee        || 0)
       + (fees.alytoCSpread  || 0)
       + (fees.fixedFee      || 0)
       + (fees.profitRetention || 0),
     );
 
-  const montoNeto = Math.round((transaction.originalAmount ?? 0) - totalReal);
+  const montoNeto = round2((transaction.originalAmount ?? 0) - totalReal);
 
   console.log('[dispatchPayout] Desglose fees:');
   console.log('  originAmount:', transaction.originalAmount);
@@ -422,53 +423,22 @@ export async function dispatchPayout(transaction) {
       vitaCurrency    = 'usd';
     }
 
-    // ── Actualizar destinationAmount con tasa Vita en vivo ───────────────────
-    // Garantiza que el ledger y la notificación al usuario reflejen el monto
-    // real que Vita aplicará, no el estimado de la cotización (que puede ser
-    // de hace horas en corredores con payin manual como Bolivia).
-    // Se hace UNA sola llamada a getPrices() aquí y se reutiliza en tryProvider.
+    // ── Pre-cargar precios Vita (requerido por tryProvider) ────────────────────
+    // Ya NO recalculamos destinationAmount aquí. El quote incluye un markup
+    // (vitaRateMarkup) que protege a Alyto del drift FX entre quote y payout.
+    // El usuario recibe exactamente lo que se le cotizó — sin sorpresas.
+    // getPrices() solo se necesita para que Vita procese la transacción.
     let sharedLivePrices = null;
     if (payoutMethod === 'vitaWallet') {
       try {
         sharedLivePrices = await getPrices();
-        const destKey     = (transaction.destinationCountry ?? '').toLowerCase();
-        const destCountryUpper = destKey.toUpperCase();
-        const vitaAttrsSource  = VITA_SENT_ONLY_COUNTRIES.has(destCountryUpper)
-          ? sharedLivePrices?.vita_sent?.prices?.attributes
-          : sharedLivePrices?.withdrawal?.prices?.attributes;
-        const vitaAttrs = vitaAttrsSource ?? sharedLivePrices?.withdrawal?.prices?.attributes;
-        let   liveDestAmount = null;
-
-        if (vitaCurrency === 'usd') {
-          // BOB corredor: payoutAmountUSD (USDC ≈ USD) × usdToDestRate
-          const clpToDest = Number(vitaAttrs?.clp_sell?.[destKey] ?? NaN);
-          const clpToUsd  = Number(vitaAttrs?.clp_sell?.['us']    ?? NaN);
-          if (isFinite(clpToDest) && isFinite(clpToUsd) && clpToUsd > 0) {
-            const usdToDestRate = clpToDest / clpToUsd;
-            const vitaFee       = Number(vitaAttrs?.fixed_cost?.[destKey] ?? 0) || (corridor.payoutFeeFixed ?? 0);
-            liveDestAmount = Math.round((payoutAmountUSD * usdToDestRate - vitaFee) * 100) / 100;
-          }
-        } else {
-          // CLP/USD corredor estándar: netCLP × clpToDestRate
-          const clpToDestRate = Number(vitaAttrs?.clp_sell?.[destKey] ?? NaN);
-          const vitaFee       = Number(vitaAttrs?.fixed_cost?.[destKey] ?? 0) || (corridor.payoutFeeFixed ?? 0);
-          if (isFinite(clpToDestRate) && clpToDestRate > 0) {
-            liveDestAmount = Math.round((payoutAmountUSD * clpToDestRate - vitaFee) * 100) / 100;
-          }
-        }
-
-        if (liveDestAmount != null && liveDestAmount > 0) {
-          transaction.destinationAmount    = liveDestAmount;
-          transaction.exchangeRateLockedAt = new Date();
-          await transaction.save();
-          console.log('[dispatchPayout] destinationAmount actualizado con tasa Vita en vivo:', {
-            transactionId: transaction.alytoTransactionId,
-            liveDestAmount, payoutAmountUSD, vitaCurrency,
-          });
-        }
+        console.log('[dispatchPayout] Precios Vita cargados para tryProvider. destinationAmount del quote preservado:', {
+          transactionId: transaction.alytoTransactionId,
+          destinationAmount: transaction.destinationAmount,
+          payoutAmountUSD, vitaCurrency,
+        });
       } catch (priceErr) {
-        // No-fatal: continuar con el destinationAmount de la cotización original
-        console.warn('[dispatchPayout] No se pudo actualizar destinationAmount con tasa en vivo:', priceErr.message);
+        console.warn('[dispatchPayout] No se pudo cargar precios Vita (tryProvider usará call propio):', priceErr.message);
       }
     }
 

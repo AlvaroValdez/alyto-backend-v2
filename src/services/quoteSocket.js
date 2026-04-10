@@ -173,6 +173,18 @@ async function computeQuote(state) {
   const amount = Number(originAmount);
   const round2 = n => Math.round(n * 100) / 100;
 
+  // Validar monto mínimo del corredor
+  const minAmount = corridor.minAmountOrigin ?? 0;
+  if (minAmount > 0 && amount < minAmount) {
+    return {
+      type:           'quote_error',
+      code:           'BELOW_MINIMUM',
+      message:        `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
+      minAmountOrigin: minAmount,
+      currency:        corridor.originCurrency,
+    };
+  }
+
   const payinFee        = round2(amount * (corridor.payinFeePercent        / 100));
   const alytoCSpread    = round2(amount * (corridor.alytoCSpread           / 100));
   const fixedFee        = corridor.fixedFee                                ?? 0;
@@ -214,7 +226,13 @@ async function computeQuote(state) {
       destinationCurrency: 'BOB',
       exchangeRate:        effectiveRate,
       isManualCorridor:    true,
-      fees: { payinFee: 0, alytoCSpread: 0, fixedFee: 0, payoutFee: 0, totalDeducted: 0 },
+      fees: {
+        payinFee:      round2(payinFee),
+        alytoCSpread:  round2(alytoCSpread),
+        fixedFee:      round2(fixedFee),
+        payoutFee:     0,
+        totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
+      },
       quoteExpiresAt,
       updatedAt: new Date(),
       stale:     false,
@@ -245,7 +263,10 @@ async function computeQuote(state) {
 
     const usdcTransitAmount = round2(netBOB / bobPerUsdc);
     const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-    const destinationAmount = round2((usdcTransitAmount * usdToDestRate) - payoutFee);
+    // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
+    const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+    const adjustedRate      = round2(usdToDestRate * (1 - vitaMarkup / 100));
+    const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
 
     if (destinationAmount <= 0) return null;
 
@@ -294,7 +315,10 @@ async function computeQuote(state) {
   const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
   const amountAfterFees   = round2(amount - totalDeducted);
   const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-  const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
+  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
+  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+  const adjustedRate      = round2(exchangeRate * (1 - vitaMarkup / 100));
+  const destinationAmount = round2((amountAfterFees * adjustedRate) - payoutFee);
 
   if (destinationAmount <= 0) return null;
 

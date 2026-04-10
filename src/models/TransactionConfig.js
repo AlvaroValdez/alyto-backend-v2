@@ -174,15 +174,30 @@ const transactionConfigSchema = new Schema(
       default: 0,
     },
     /**
-     * Porcentaje del spread de Alyto que se retiene como ganancia neta.
-     * El resto puede cubrir costos operativos del corredor.
-     * Expresado en puntos porcentuales: 80 = retener 80% del spread como profit.
+     * Porcentaje del monto de origen retenido como ganancia neta de Alyto.
+     * Expresado en puntos porcentuales: 1 = 1% del monto de origen.
+     * Default conservador: 1% — los seeds configuran valores por corredor.
      */
     profitRetentionPercent: {
       type:    Number,
       min:     0,
-      max:     100,
-      default: 80,
+      max:     10,
+      default: 1,
+    },
+
+    /**
+     * Markup porcentual sobre la tasa de Vita para proteger a Alyto del
+     * drift FX entre el momento del quote y el payout (especialmente en
+     * corredores con payin manual donde pueden pasar horas).
+     * Expresado en puntos porcentuales: 0.5 = descontar 0.5% de la tasa Vita.
+     * El usuario recibe la tasa con markup ya aplicado — sin sorpresas.
+     * 0 = sin markup (Alyto asume riesgo FX completo).
+     */
+    vitaRateMarkup: {
+      type:    Number,
+      min:     0,
+      max:     5,
+      default: 0.5,
     },
 
     /**

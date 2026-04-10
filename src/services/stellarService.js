@@ -53,7 +53,7 @@ import User                   from '../models/User.js';
 // ─── Conversión FX CLP→USDC ──────────────────────────────────────────────────
 import ExchangeRate from '../models/ExchangeRate.js';
 
-const CLP_USD_FALLBACK = parseFloat(process.env.CLP_USD_RATE || '950');
+const CLP_USD_FALLBACK = parseFloat(process.env.CLP_USD_RATE || '966');
 
 /**
  * Obtiene la tasa CLP/USDC desde MongoDB (par CLP-USD o CLP-USDT).
