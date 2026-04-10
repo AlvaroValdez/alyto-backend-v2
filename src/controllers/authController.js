@@ -276,11 +276,15 @@ export async function loginUser(req, res) {
       user: {
         id:          user._id,
         email:       user.email,
+        firstName:   user.firstName,
+        lastName:    user.lastName,
         legalEntity: user.legalEntity,
         kycStatus:   user.kycStatus,
         kybStatus:   user.kybStatus,
         accountType: user.accountType,
         role:        user.role,
+        country:     user.country,
+        avatarUrl:   user.avatarUrl ?? null,
       },
     });
 
