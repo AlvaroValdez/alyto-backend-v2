@@ -40,6 +40,19 @@ export async function createVerificationSession(req, res) {
     const user   = req.user;
     const userId = user._id.toString();
 
+    // ── Country-based KYC gating ─────────────────────────────────────────────
+    // Stripe Identity no soporta allowed_countries vía API.
+    // Restringimos en código por entidad legal antes de crear la sesión.
+    const SUPPORTED_ENTITIES = ['SpA', 'SRL', 'LLC'];
+    if (!SUPPORTED_ENTITIES.includes(user.legalEntity)) {
+      return res.status(403).json({
+        success: false,
+        message: 'La verificación de identidad no está disponible para tu país aún. Contáctanos en soporte@alyto.app',
+      });
+    }
+
+    console.log(`[Identity] KYC session created for user ${userId} entity=${user.legalEntity} country=${user.residenceCountry}`);
+
     // Crear sesión en Stripe — configurada para biometría completa
     const session = await getStripe().identity.verificationSessions.create({
       type: 'document',
@@ -79,7 +92,13 @@ export async function createVerificationSession(req, res) {
     });
 
   } catch (error) {
-    console.error('[Identity] Error al crear sesión de verificación:', error.message);
+    console.error('[Identity] Error al crear sesión de verificación:', {
+      message: error.message,
+      type:    error.type,
+      code:    error.code,
+      param:   error.param,
+      raw:     error.raw ?? error,
+    });
     return res.status(500).json({
       error: 'No se pudo iniciar la sesión de verificación. Intenta nuevamente.',
     });
