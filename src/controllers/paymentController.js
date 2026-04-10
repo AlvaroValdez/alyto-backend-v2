@@ -592,6 +592,24 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
+  // ── Validar monto mínimo y máximo del corredor ────────────────────────────
+  if (corridor.minAmountOrigin && amount < corridor.minAmountOrigin) {
+    return res.status(400).json({
+      error:    `El monto mínimo para este corredor es ${corridor.minAmountOrigin} ${corridor.originCurrency}.`,
+      code:     'BELOW_MINIMUM',
+      min:      corridor.minAmountOrigin,
+      currency: corridor.originCurrency,
+    });
+  }
+  if (corridor.maxAmountOrigin && amount > corridor.maxAmountOrigin) {
+    return res.status(400).json({
+      error:    `El monto máximo para este corredor es ${corridor.maxAmountOrigin} ${corridor.originCurrency}.`,
+      code:     'ABOVE_MAXIMUM',
+      max:      corridor.maxAmountOrigin,
+      currency: corridor.originCurrency,
+    });
+  }
+
   // ── Límite regulatorio BOB (RND 102400000021 — Bancarización Bolivia) ──────
   // Aplica a todos los usuarios SRL cuyo origen es BOB.
   // Umbral legal: Bs 50.000. Se opera hasta Bs 49.999 para no requerir
@@ -624,10 +642,18 @@ export async function initCrossBorderPayment(req, res) {
     const { clpPerBob } = spaCfg;
     const round2 = (n) => Math.round(n * 100) / 100;
 
+    // payinFee: incluir fee de Fintoc si aplica, o porcentual del corredor
+    let payinFeeVal;
+    if (corridor.payinMethod === 'fintoc' && corridor.fintocConfig?.ufValue) {
+      const fintocResult = calculateFintocFee(amount, corridor.fintocConfig);
+      payinFeeVal = fintocResult.fixedFee;
+    } else {
+      payinFeeVal = round2(amount * (corridor.payinFeePercent / 100));
+    }
     const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
     const fixedFeeVal       = corridor.fixedFee ?? 0;
     const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
-    const totalDeductedReal = round2(spreadFee + fixedFeeVal + profitFee);
+    const totalDeductedReal = round2(payinFeeVal + spreadFee + fixedFeeVal + profitFee);
     const netCLP            = round2(amount - totalDeductedReal);
     const destinationBOB    = round2(netCLP / clpPerBob);
 
@@ -689,10 +715,11 @@ export async function initCrossBorderPayment(req, res) {
         exchangeRateLockedAt: new Date(),
 
         fees: {
-          spreadFee,
+          payinFee:          payinFeeVal,
+          alytoCSpread:      spreadFee,
           fixedFee:          fixedFeeVal,
           profitRetention:   profitFee,
-          totalDeducted:     totalDeductedReal,
+          totalDeducted:     round2(payinFeeVal + spreadFee + fixedFeeVal),
           totalDeductedReal,
           feeCurrency:       'CLP',
         },
@@ -1298,7 +1325,10 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   // ── 4. Conversión BOB → USDC → destino ────────────────────────────────────
   const usdcTransitAmount = round2(netBOB / bobPerUsdc);
   const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-  const destinationAmount = round2((usdcTransitAmount * usdToDestRate) - payoutFee);
+  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
+  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+  const adjustedRate      = round2(usdToDestRate * (1 - vitaMarkup / 100));
+  const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
 
   if (destinationAmount <= 0) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -1495,17 +1525,25 @@ export async function getQuote(req, res) {
     // ── CALCULO EXACTO — Regla de Oro ─────────────────────────────────────
     const round2 = (n) => Math.round(n * 100) / 100;
 
+    // payinFee: incluir fee de Fintoc si aplica, o porcentual del corredor
+    let payinFee;
+    if (corridor.payinMethod === 'fintoc' && corridor.fintocConfig?.ufValue) {
+      const fintocResult = calculateFintocFee(amount, corridor.fintocConfig);
+      payinFee = fintocResult.fixedFee;
+    } else {
+      payinFee = round2(amount * (corridor.payinFeePercent / 100));
+    }
     const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
     const fixedFee          = corridor.fixedFee ?? 0;
     const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
-    const totalDeductedReal = round2(spreadFee + fixedFee + profitFee);
+    const totalDeductedReal = round2(payinFee + spreadFee + fixedFee + profitFee);
     const netCLP            = round2(amount - totalDeductedReal);
     const destinationBOB    = round2(netCLP / clpPerBob);
 
     // Verificacion de integridad en runtime
     if (destinationBOB <= 0 || netCLP <= 0) {
       console.error('[Quote CL-BO] Calculo invalido:', {
-        amount, spreadFee, fixedFee, profitFee, netCLP, destinationBOB,
+        amount, payinFee, spreadFee, fixedFee, profitFee, netCLP, destinationBOB,
       });
       return res.status(400).json({ error: 'El monto ingresado no cubre los fees minimos.' });
     }
@@ -1528,12 +1566,14 @@ export async function getQuote(req, res) {
       paymentRef,
 
       fees: {
-        // Visible al usuario (total real, sin desglose de profit)
-        totalDeducted:     totalDeductedReal,
+        // Visible al usuario (total sin profitRetention — regla CLAUDE.md)
+        payinFee:          round2(payinFee),
+        alytoCSpread:      round2(spreadFee),
+        fixedFee:          round2(fixedFee),
+        payoutFee:         0,
+        totalDeducted:     round2(payinFee + spreadFee + fixedFee),
         feeCurrency:       'CLP',
-        // BD interna — auditoría
-        spreadFee,
-        fixedFee,
+        // BD interna — auditoría (NO visible al usuario)
         profitRetention:   profitFee,
         totalDeductedReal,
       },
@@ -1641,7 +1681,10 @@ export async function getQuote(req, res) {
 
     // payoutFee: costo fijo de Vita para este destino (en moneda destino)
     const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
-    const destinationAmount = round2((usdcTransitAmount * usdcToDestRate) - payoutFee);
+    // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
+    const vitaMarkup      = corridor.vitaRateMarkup ?? 0.5;
+    const adjustedRate    = round2(usdcToDestRate * (1 - vitaMarkup / 100));
+    const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
 
     if (destinationAmount <= 0) {
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -1729,7 +1772,10 @@ export async function getQuote(req, res) {
   // estático del TransactionConfig actúa como fallback (ej. en mantenimiento de Vita)
   const payoutFee = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
 
-  const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
+  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
+  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+  const adjustedRate      = round2(exchangeRate * (1 - vitaMarkup / 100));
+  const destinationAmount = round2((amountAfterFees * adjustedRate) - payoutFee);
 
   if (destinationAmount <= 0) {
     return res.status(400).json({
@@ -2295,7 +2341,7 @@ export async function getAvailableCorridors(req, res) {
   let corridors;
   try {
     corridors = await TransactionConfig.find(corridorFilter)
-      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig')
+      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin maxAmountOrigin')
       .lean();
   } catch (err) {
     console.error('[Alyto Corridors] Error:', err.message);

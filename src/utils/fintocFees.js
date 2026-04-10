@@ -31,7 +31,10 @@ export const FINTOC_TIER_RATES = {
  * @returns {{ fixedFee: number, percentage: number, tierRate: number, ufValue: number, tier: number }}
  */
 export function calculateFintocFee(transactionAmount, fintocConfig = {}) {
-  const ufValue  = fintocConfig?.ufValue || 38000;
+  const ufValue  = fintocConfig?.ufValue || 38800;
+  if (!fintocConfig?.ufValue) {
+    console.warn('[fintocFees] Usando UF fallback (38800). Actualizar fintocConfig.ufValue en el corredor.');
+  }
   const tier     = fintocConfig?.tier    || 1;
   const tierRate = FINTOC_TIER_RATES[tier] || FINTOC_TIER_RATES[1];
 
