@@ -4,10 +4,17 @@
  * Almacena todas las notificaciones enviadas a cada usuario para
  * alimentar el centro de notificaciones (historial, badge, mark-as-read).
  *
- * TTL de 90 días — MongoDB elimina documentos automáticamente.
+ * TTL configurable vía NOTIFICATION_TTL_DAYS (default 1825 = 5 años) —
+ * ver nota de compliance sobre el índice TTL al final del archivo.
  */
 
 import mongoose from 'mongoose';
+
+// COMPLIANCE: ASFI Circular 2/2022 (Bolivia) y UAF Chile exigen conservar
+// registros transaccionales por mínimo 5 años (1825 días). NO reducir este
+// valor sin revisión legal previa.
+const NOTIFICATION_TTL_SECONDS =
+  parseInt(process.env.NOTIFICATION_TTL_DAYS ?? '1825', 10) * 86400;
 
 const notificationSchema = new mongoose.Schema(
   {
@@ -63,7 +70,11 @@ const notificationSchema = new mongoose.Schema(
 // Consulta principal: notificaciones del usuario, no leídas primero, más recientes primero
 notificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
 
-// TTL — auto-eliminar después de 90 días
-notificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 86400 });
+// TTL — cumplimiento ASFI/UAF (5 años por defecto, configurable vía env).
+// ⚠️ Los cambios al TTL no se aplican retroactivamente a documentos existentes.
+notificationSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: NOTIFICATION_TTL_SECONDS },
+);
 
 export default mongoose.model('Notification', notificationSchema);

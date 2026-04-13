@@ -223,28 +223,18 @@ app.get('/cancel', (req, res) => {
 
 /**
  * GET /api/health
- * Healthcheck para load balancers, uptime monitors y CI/CD pipelines.
- * Retorna estado del servidor y de la conexión a MongoDB.
+ * Healthcheck público para load balancers, uptime monitors y CI/CD pipelines.
+ * Devuelve solo lo necesario para determinar si el servicio responde —
+ * sin detalles de infraestructura (DB driver status, Stellar network,
+ * proveedores externos, versiones de servicios) que faciliten fingerprinting.
+ * Para diagnósticos detallados, usar GET /api/v1/admin/health (auth + admin).
  */
 app.get('/api/health', (req, res) => {
-  const mongoStatus = mongoose.connection.readyState;
-  // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
-  const mongoStates = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
-
-  const isHealthy = mongoStatus === 1;
-
+  const isHealthy = mongoose.connection.readyState === 1;
   res.status(isHealthy ? 200 : 503).json({
     status:    isHealthy ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
-    version:   '2.0.0',
-    services: {
-      mongodb: {
-        status: mongoStates[mongoStatus] ?? 'unknown',
-      },
-      stellar: {
-        network: process.env.STELLAR_NETWORK ?? 'testnet',
-      },
-    },
+    version:   process.env.npm_package_version ?? '2.0.0',
   });
 });
 

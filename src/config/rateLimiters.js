@@ -2,8 +2,10 @@
  * rateLimiters.js — Configuración centralizada de Rate Limiting por entorno
  *
  * Estrategia:
- *   - development / test → sin límites (skipea todos los limiters)
- *   - production         → límites estrictos diferenciados por operación
+ *   - test                → sin límites (para pruebas automatizadas)
+ *   - development/staging → límites activos, bypass opcional vía header
+ *                            x-bypass-rate-limit === DEV_RATE_LIMIT_BYPASS_KEY
+ *   - production          → límites estrictos, sin bypass posible
  *
  * Principio de menor privilegio:
  *   Solo los endpoints de mutación con riesgo de brute-force tienen limiters propios.
@@ -14,7 +16,7 @@
  *   registerLimiter      → POST /auth/register     (5 intentos / hora por IP)
  *   forgotPasswordLimiter → POST /auth/forgot-password (3 intentos / hora por IP)
  *   resetPasswordLimiter → POST /auth/reset-password  (5 intentos / hora por IP)
- *   generalLimiter       → todas las rutas         (100 req / 15 min por IP)
+ *   generalLimiter       → todas las rutas         (200 req / 15 min por IP)
  *   paymentsLimiter      → /api/v1/payments/*      (20 req / min por IP)
  */
 
@@ -22,13 +24,24 @@ import rateLimit from 'express-rate-limit';
 
 const ENV     = process.env.NODE_ENV ?? 'development';
 const IS_PROD = ENV === 'production';
+const IS_TEST = ENV === 'test';
 
 // ─── Skip handler ─────────────────────────────────────────────────────────────
-// En dev y test omite completamente el rate limiting para no bloquear pruebas.
-// En producción siempre aplica.
+// En test se omite completamente para no bloquear suites automatizadas.
+// En dev/staging se permite un bypass explícito vía header con clave secreta
+// (para pruebas manuales sin deshabilitar la protección por defecto).
+// En producción siempre aplica — no hay bypass posible.
 
-function skip() {
-  return !IS_PROD;
+function skip(req) {
+  if (IS_TEST) return true;
+  if (
+    !IS_PROD &&
+    process.env.DEV_RATE_LIMIT_BYPASS_KEY &&
+    req.headers['x-bypass-rate-limit'] === process.env.DEV_RATE_LIMIT_BYPASS_KEY
+  ) {
+    return true;
+  }
+  return false;
 }
 
 // ─── Factory helper ───────────────────────────────────────────────────────────
@@ -52,7 +65,7 @@ function makeLimiter({ windowMs, max, message }) {
 
 export const generalLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max:      IS_PROD ? 200 : 0,
+  max:      200,
   message:  'Demasiadas solicitudes. Intenta de nuevo más tarde.',
 });
 
@@ -64,7 +77,7 @@ export const generalLimiter = makeLimiter({
  */
 export const loginLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000,
-  max:      IS_PROD ? 5 : 0,
+  max:      5,
   message:  'Demasiados intentos de inicio de sesión. Espera 15 minutos e intenta de nuevo.',
 });
 
@@ -74,7 +87,7 @@ export const loginLimiter = makeLimiter({
  */
 export const registerLimiter = makeLimiter({
   windowMs: 60 * 60 * 1000,
-  max:      IS_PROD ? 5 : 0,
+  max:      5,
   message:  'Demasiadas solicitudes de registro desde esta red. Intenta más tarde.',
 });
 
@@ -84,7 +97,7 @@ export const registerLimiter = makeLimiter({
  */
 export const forgotPasswordLimiter = makeLimiter({
   windowMs: 60 * 60 * 1000,
-  max:      IS_PROD ? 3 : 0,
+  max:      3,
   message:  'Demasiadas solicitudes de recuperación de contraseña. Intenta en una hora.',
 });
 
@@ -94,7 +107,7 @@ export const forgotPasswordLimiter = makeLimiter({
  */
 export const resetPasswordLimiter = makeLimiter({
   windowMs: 60 * 60 * 1000,
-  max:      IS_PROD ? 5 : 0,
+  max:      5,
   message:  'Demasiados intentos de restablecimiento de contraseña. Intenta en una hora.',
 });
 
@@ -103,6 +116,6 @@ export const resetPasswordLimiter = makeLimiter({
 
 export const paymentsLimiter = makeLimiter({
   windowMs: 60 * 1000, // 1 minuto
-  max:      IS_PROD ? 20 : 0,
+  max:      20,
   message:  'Límite de solicitudes de pago excedido. Intenta de nuevo en un minuto.',
 });
