@@ -16,6 +16,7 @@
 
 import { Router } from 'express'
 import { protect, requireKycApproved } from '../middlewares/authMiddleware.js'
+import { idempotencyCheck } from '../middlewares/idempotency.js'
 import {
   getWalletBalance,
   getWalletTransactions,
@@ -41,7 +42,7 @@ const router = Router()
 
 router.get('/balance',           protect, requireKycApproved, getWalletBalance)
 router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
-router.post('/deposit/initiate', protect, requireKycApproved, initiateDeposit)
+router.post('/deposit/initiate', protect, requireKycApproved, idempotencyCheck, initiateDeposit)
 router.post('/send',             protect, requireKycApproved, sendP2P)
 router.post('/withdraw/request', protect, requireKycApproved, requestWithdrawal)
 
@@ -56,6 +57,6 @@ router.get('/qr/preview',   protect, requireKycApproved, previewQR)
 router.get('/usdc/balance',               protect, requireKycApproved, getUSDCBalance)
 router.get('/usdc/deposit-instructions',  protect, requireKycApproved, getDepositInstructions)
 router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTransactions)
-router.post('/usdc/convert-bob',          protect, requireKycApproved, requestBOBtoUSDC)
+router.post('/usdc/convert-bob',          protect, requireKycApproved, idempotencyCheck, requestBOBtoUSDC)
 
 export default router

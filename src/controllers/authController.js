@@ -154,9 +154,7 @@ export async function registerUser(req, res) {
 
     const token = generateToken(user._id, user.tokenVersion);
 
-    console.info(
-      `[Auth] Registro exitoso — userId: ${user._id} | entity: ${legalEntity} | country: ${countryCode}`,
-    );
+    console.info(`[Auth] Registro exitoso — userId: ${user._id} entity: ${legalEntity}`);
 
     // Welcome email — fire-and-forget (no bloquear respuesta de registro)
     setImmediate(() => {
@@ -357,11 +355,6 @@ export async function forgotPassword(req, res) {
     // Enviar email con el link de reset
     const APP_URL   = process.env.APP_URL ?? 'http://localhost:5173'
     const resetLink = `${APP_URL}/reset-password/${rawToken}`
-
-    // En desarrollo, loguear el link para facilitar pruebas sin SendGrid
-    if (process.env.NODE_ENV !== 'production') {
-      console.info(`[Auth] 🔑 Reset link (dev): ${resetLink}`)
-    }
 
     // Fire-and-forget: no bloquea la respuesta si el email falla
     if (process.env.SENDGRID_API_KEY) {

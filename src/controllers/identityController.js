@@ -51,7 +51,7 @@ export async function createVerificationSession(req, res) {
       });
     }
 
-    console.log(`[Identity] KYC session created for user ${userId} entity=${user.legalEntity} country=${user.residenceCountry}`);
+    console.log(`[Identity] KYC session created: userId=${userId} entity=${user.legalEntity}`);
 
     // Crear sesión en Stripe — configurada para biometría completa
     const session = await getStripe().identity.verificationSessions.create({

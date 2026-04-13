@@ -233,7 +233,7 @@ export async function approveKycTest(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado.' });
     }
 
-    console.info(`[KYC Test] ✅ KYC aprobado manualmente — userId: ${userId} | email: ${user.email}`);
+    console.info(`[KYC Test] ✅ KYC aprobado manualmente — userId: ${userId}`);
 
     return res.json({
       message: 'KYC aprobado en modo test',

@@ -31,6 +31,7 @@ import {
 } from '../controllers/paymentController.js';
 import { protect, requireEntity, requireKycApproved }      from '../middlewares/authMiddleware.js';
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
+import { idempotencyCheck }                                from '../middlewares/idempotency.js';
 import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
 import { getSpAPayinInstructions }                         from '../controllers/spaConfigController.js';
 import { generateBusinessInvoiceForTransaction }           from '../controllers/businessInvoiceController.js';
@@ -141,7 +142,7 @@ router.get('/withdrawal-rules/:countryCode', protect, getWithdrawalRulesControll
  * Body: { corridorId, originAmount, beneficiaryData | beneficiary }
  * Auth: Bearer JWT
  */
-router.post('/crossborder', protect, requireKycApproved, checkSanctions, initCrossBorderPayment);
+router.post('/crossborder', protect, requireKycApproved, checkSanctions, idempotencyCheck, initCrossBorderPayment);
 
 /**
  * POST /api/v1/payments/payin/fintoc

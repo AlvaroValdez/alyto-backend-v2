@@ -528,7 +528,7 @@ export async function dispatchPayout(transaction) {
             const user = await User.findById(transaction.userId).lean();
             if (user?.email) {
               await sendEmail(...EMAILS.paymentFailed(user, transaction));
-              console.log('[Email] ✅ Fallido (todos los providers) →', user.email);
+              console.log(`[Email] ✅ Fallido (todos los providers) → userId=${user._id}`);
             }
           } catch (e) { console.error('[Email] Error failed (all providers):', e.message); }
           return;
@@ -548,7 +548,7 @@ export async function dispatchPayout(transaction) {
           const user = await User.findById(transaction.userId).lean();
           if (user?.email) {
             await sendEmail(...EMAILS.paymentFailed(user, transaction));
-            console.log('[Email] ✅ Fallido →', user.email);
+            console.log(`[Email] ✅ Fallido → userId=${user._id}`);
           }
         } catch (e) { console.error('[Email] Error failed (no fallback):', e.message); }
         return;
@@ -667,7 +667,7 @@ export async function dispatchPayout(transaction) {
             const user = await User.findById(tx.userId).lean();
             if (user?.email) {
               await sendEmail(...EMAILS.paymentCompleted(user, tx));
-              console.log('[Email] ✅ Completado (sandbox) →', user.email);
+              console.log(`[Email] ✅ Completado (sandbox) → userId=${user._id}`);
             }
           } catch (emailErr) {
             console.error('[Email] Error completado (sandbox):', emailErr.message);
@@ -941,7 +941,7 @@ export async function handleVitaIPN(req, res) {
           const user = await User.findById(transaction.userId).lean();
           if (user?.email) {
             await sendEmail(...EMAILS.paymentCompleted(user, transaction));
-            console.log('[Email] ✅ Completado →', user.email);
+            console.log(`[Email] ✅ Completado → userId=${user._id}`);
           }
         } catch (emailErr) {
           console.error('[Email] Error completado:', emailErr.message);
@@ -1217,7 +1217,7 @@ export async function handleOwlPayIPN(req, res) {
         const user = await User.findById(transaction.userId).lean();
         if (user?.email) {
           await sendEmail(...EMAILS.paymentCompleted(user, transaction));
-          console.log('[Email] ✅ Completado (OwlPay) →', user.email);
+          console.log(`[Email] ✅ Completado (OwlPay) → userId=${user._id}`);
         }
       } catch (emailErr) {
         console.error('[Email] Error completado (OwlPay):', emailErr.message);

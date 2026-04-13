@@ -55,7 +55,7 @@ export async function upsertExchangeRate(req, res) {
     const isNew = previousRate === null;
     console.log(
       `[ExchangeRate] ${isNew ? 'CREADA' : 'ACTUALIZADA'} — ${normalizedPair}: ` +
-      `${previousRate ?? '-'} → ${rate} (${source}) por ${req.user.email}`,
+      `${previousRate ?? '-'} → ${rate} (${source}) por userId=${req.user._id}`,
     );
 
     return res.status(200).json({
