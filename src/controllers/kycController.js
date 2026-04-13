@@ -212,7 +212,7 @@ export async function getKycStatus(req, res) {
  * Respuesta 200: { message, user: { id, email, kycStatus } }
  */
 export async function approveKycTest(req, res) {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') {
     return res.status(404).json({ error: 'Not found.' });
   }
 

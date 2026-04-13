@@ -123,15 +123,29 @@ app.use(helmet({
 // Compression — reduce el tamaño de las respuestas JSON/text (gzip/br)
 app.use(compression());
 
-// CORS — en producción usar ALLOWED_ORIGINS (comma-separated).
-// Fallback a CORS_ORIGIN para retrocompatibilidad con entornos existentes.
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : (process.env.CORS_ORIGIN ?? '*');
+// CORS — allowlist explícita vía ALLOWED_ORIGINS (comma-separated).
+// Fail-fast en producción si no hay orígenes configurados para evitar wildcard
+// con credentials=true (vulnerabilidad crítica).
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
+  console.error('[Alyto Server] FATAL: ALLOWED_ORIGINS no configurado en producción. Abortando.');
+  process.exit(1);
+}
 
 app.use(cors({
-  origin:      allowedOrigins,
-  credentials: true,
+  origin(origin, callback) {
+    // Permitir peticiones sin Origin (mobile apps, curl, health checks)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origen no permitido (${origin})`));
+  },
+  credentials:    true,
+  methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
 
 // Rate limiting general — protege todas las rutas contra DDoS/brute-force
@@ -228,9 +242,10 @@ app.use('/api/v1/contacts',      contactsRoutes);       // Fase 33 — Agenda de
 app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificaciones
 app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
 
-// ─── Rutas de Desarrollo (solo disponibles fuera de producción) ──────────────
+// ─── Rutas de Desarrollo (opt-in explícito vía ALYTO_ENABLE_DEV_ROUTES=1) ────
+// SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.
 
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.ALYTO_ENABLE_DEV_ROUTES === '1') {
   /**
    * GET /api/v1/dev/test-user
    * Devuelve el ID del usuario de prueba sembrado al arrancar.
