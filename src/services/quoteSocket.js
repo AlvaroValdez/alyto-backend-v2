@@ -456,16 +456,13 @@ function scheduleRefresh(ws) {
 // ─── Handlers de Mensajes ─────────────────────────────────────────────────────
 
 /**
- * subscribe_quote: autentica el JWT, encuentra el corredor y envía la primera cotización.
+ * subscribe_quote: usa el userId ya autenticado en el handshake, encuentra el corredor y envía la primera cotización.
  */
 async function handleSubscribe(ws, msg) {
-  // ── 1. Validar JWT ────────────────────────────────────────────────────────
-  let userId;
-  try {
-    const decoded = jwt.verify(msg.token, process.env.JWT_SECRET);
-    userId = decoded.id;
-  } catch {
-    ws.close(4001, 'Token inválido o expirado.');
+  // ── 1. userId viene del handshake (cookie JWT verificada en verifyClient) ─
+  const userId = ws.authenticatedUserId;
+  if (!userId) {
+    ws.close(4001, 'No autenticado.');
     return;
   }
 
@@ -567,10 +564,54 @@ async function handleUpdateAmount(ws, msg) {
  * @param {import('http').Server} httpServer
  * @returns {WebSocketServer}
  */
-export function createQuoteSocketServer(httpServer) {
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/quote' });
+/**
+ * Extrae una cookie específica de un header Cookie RFC-6265.
+ * Retorna el valor url-decoded o null si no existe.
+ */
+function getCookieFromHeader(cookieHeader, name) {
+  if (!cookieHeader) return null;
+  const parts = cookieHeader.split(/;\s*/);
+  for (const p of parts) {
+    const idx = p.indexOf('=');
+    if (idx === -1) continue;
+    const k = p.slice(0, idx).trim();
+    if (k === name) {
+      try {
+        return decodeURIComponent(p.slice(idx + 1));
+      } catch {
+        return p.slice(idx + 1);
+      }
+    }
+  }
+  return null;
+}
 
-  wss.on('connection', (ws) => {
+export function createQuoteSocketServer(httpServer) {
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path:   '/ws/quote',
+    // Autenticación en el handshake: lee la cookie HttpOnly alyto_token
+    // y verifica el JWT antes de aceptar la conexión.
+    verifyClient: (info, callback) => {
+      try {
+        const token = getCookieFromHeader(info.req.headers.cookie, 'alyto_token');
+        if (!token) return callback(false, 401, 'Unauthorized: missing session cookie');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        // Adjuntar datos al request para consumirlos en el handler de 'connection'
+        info.req.authenticatedUserId       = decoded.id;
+        info.req.authenticatedTokenVersion = decoded.tokenVersion ?? 0;
+        callback(true);
+      } catch {
+        callback(false, 401, 'Unauthorized: invalid or expired token');
+      }
+    },
+  });
+
+  wss.on('connection', (ws, req) => {
+    // userId y tokenVersion autenticados en verifyClient
+    ws.authenticatedUserId       = req.authenticatedUserId;
+    ws.authenticatedTokenVersion = req.authenticatedTokenVersion;
+
     // Estado inicial de la conexión
     ws.quoteState = {
       userId:             null,

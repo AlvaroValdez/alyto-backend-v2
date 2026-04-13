@@ -15,7 +15,7 @@
  */
 
 import { Router } from 'express'
-import { protect } from '../middlewares/authMiddleware.js'
+import { protect, requireKycApproved } from '../middlewares/authMiddleware.js'
 import {
   getWalletBalance,
   getWalletTransactions,
@@ -39,23 +39,23 @@ const router = Router()
 
 // ─── BOB Wallet ───────────────────────────────────────────────────────────────
 
-router.get('/balance',           protect, getWalletBalance)
-router.get('/transactions',      protect, getWalletTransactions)
-router.post('/deposit/initiate', protect, initiateDeposit)
-router.post('/send',             protect, sendP2P)
-router.post('/withdraw/request', protect, requestWithdrawal)
+router.get('/balance',           protect, requireKycApproved, getWalletBalance)
+router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
+router.post('/deposit/initiate', protect, requireKycApproved, initiateDeposit)
+router.post('/send',             protect, requireKycApproved, sendP2P)
+router.post('/withdraw/request', protect, requireKycApproved, requestWithdrawal)
 
 // QR Wallet (Fase 29)
-router.post('/qr/generate', protect, generateWalletQR)
-router.post('/qr/scan',     protect, scanAndPayQR)
-router.get('/qr/preview',   protect, previewQR)
+router.post('/qr/generate', protect, requireKycApproved, generateWalletQR)
+router.post('/qr/scan',     protect, requireKycApproved, scanAndPayQR)
+router.get('/qr/preview',   protect, requireKycApproved, previewQR)
 
 // ─── USDC Wallet (Fase 35) ───────────────────────────────────────────────────
 // IMPORTANTE: /usdc/deposit-instructions debe ir ANTES de /usdc/:anything
 
-router.get('/usdc/balance',               protect, getUSDCBalance)
-router.get('/usdc/deposit-instructions',  protect, getDepositInstructions)
-router.get('/usdc/transactions',          protect, getUSDCTransactions)
-router.post('/usdc/convert-bob',          protect, requestBOBtoUSDC)
+router.get('/usdc/balance',               protect, requireKycApproved, getUSDCBalance)
+router.get('/usdc/deposit-instructions',  protect, requireKycApproved, getDepositInstructions)
+router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTransactions)
+router.post('/usdc/convert-bob',          protect, requireKycApproved, requestBOBtoUSDC)
 
 export default router

@@ -19,6 +19,7 @@ import User     from '../models/User.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
+import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
@@ -50,18 +51,35 @@ const ENTITY_DEFAULT_DOC = {
 // ─── Generación de JWT ────────────────────────────────────────────────────────
 
 /**
- * Genera un JWT firmado con el ID del usuario.
+ * Genera un JWT firmado con id + tokenVersion (para revocación server-side).
  * @param {string|ObjectId} userId
- * @param {string} [expiresIn] — Sobreescribe JWT_EXPIRES_IN del entorno
+ * @param {number}          tokenVersion — valor actual del contador del user
+ * @param {string}          [expiresIn]  — sobreescribe JWT_EXPIRES_IN del entorno
  * @returns {string} Token JWT
  */
-function generateToken(userId, expiresIn) {
+function generateToken(userId, tokenVersion, expiresIn) {
   return jwt.sign(
-    { id: userId },
+    { id: userId, tokenVersion: tokenVersion ?? 0 },
     process.env.JWT_SECRET,
-    { expiresIn: expiresIn ?? process.env.JWT_EXPIRES_IN ?? '7d' },
+    { expiresIn: expiresIn ?? process.env.JWT_EXPIRES_IN ?? '24h' },
   );
 }
+
+/**
+ * Opciones estándar de la cookie HttpOnly de autenticación.
+ * @param {boolean} rememberMe — true => 7 días; false => 24 horas
+ */
+export function authCookieOptions(rememberMe) {
+  return {
+    httpOnly: true,
+    secure:   process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge:   rememberMe ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000,
+    path:     '/',
+  };
+}
+
+export const AUTH_COOKIE_NAME = 'alyto_token';
 
 /** Genera el hash SHA-256 de un token en texto claro. */
 function hashToken(token) {
@@ -92,16 +110,17 @@ export async function registerUser(req, res) {
       });
     }
 
-    if (password.length < 8) {
+    if (typeof password !== 'string' || password.length < 8) {
       return res.status(400).json({
         error: 'La contraseña debe tener al menos 8 caracteres.',
       });
     }
 
-    const countryCode = country.toUpperCase();
+    const countryCode = String(country).toUpperCase();
+    const normalizedEmail = String(email).toLowerCase().trim();
 
     // ── Verificar duplicado antes de hashear ───────────────────────────────
-    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    const existing = await User.findOne({ email: normalizedEmail });
     if (existing) {
       return res.status(409).json({
         error: 'El email ya está registrado.',
@@ -116,10 +135,10 @@ export async function registerUser(req, res) {
 
     // ── Creación del usuario ───────────────────────────────────────────────
     const user = await User.create({
-      firstName:        firstName?.trim() ?? 'Usuario',
-      lastName:         lastName?.trim()  ?? 'Alyto',
-      email:            email.toLowerCase().trim(),
-      phone:            phone?.trim(),
+      firstName:        (typeof firstName === 'string' && firstName.trim()) || 'Usuario',
+      lastName:         (typeof lastName === 'string' && lastName.trim())   || 'Alyto',
+      email:            normalizedEmail,
+      phone:            typeof phone === 'string' ? phone.trim() : undefined,
       password:         passwordHash,
       legalEntity,
       kycStatus:        'pending',
@@ -133,7 +152,7 @@ export async function registerUser(req, res) {
       },
     });
 
-    const token = generateToken(user._id);
+    const token = generateToken(user._id, user.tokenVersion);
 
     console.info(
       `[Auth] Registro exitoso — userId: ${user._id} | entity: ${legalEntity} | country: ${countryCode}`,
@@ -149,8 +168,9 @@ export async function registerUser(req, res) {
     const fullName = `${user.firstName} ${user.lastName}`.trim();
     notifyAdmins(NOTIFICATIONS.adminNewUser(fullName, user.email, legalEntity)).catch(() => {});
 
+    res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(false));
+
     return res.status(201).json({
-      token,
       user: {
         id:          user._id,
         email:       user.email,
@@ -220,15 +240,17 @@ export async function loginUser(req, res) {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
       return res.status(400).json({
         error: 'Los campos email y password son requeridos.',
       });
     }
 
+    const normalizedEmail = String(email).toLowerCase().trim();
+
     // Cargar con +password (campo oculto por select:false en el modelo)
     // .lean() devuelve POJO en lugar de documento Mongoose — ~2-5x más rápido
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password').lean();
+    const user = await User.findOne({ email: normalizedEmail }).select('+password').lean();
 
     // Mensaje genérico — no revelar si el email existe (prevención de user enumeration)
     if (!user || !user.password) {
@@ -262,17 +284,17 @@ export async function loginUser(req, res) {
       }
     });
 
-    // rememberMe: true → 30 días; false → 24 horas; ausente → default del entorno
-    let jwtExpiry
-    if (req.body.rememberMe === true)  jwtExpiry = '30d'
-    else if (req.body.rememberMe === false) jwtExpiry = '24h'
+    // rememberMe: true → 7 días; false/ausente → 24 horas (reducido desde 30d/7d)
+    const rememberMe = req.body.rememberMe === true;
+    const jwtExpiry  = rememberMe ? '7d' : '24h';
 
-    const token = generateToken(user._id, jwtExpiry);
+    const token = generateToken(user._id, user.tokenVersion, jwtExpiry);
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
 
+    res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
+
     return res.json({
-      token,
       user: {
         id:          user._id,
         email:       user.email,
@@ -311,12 +333,12 @@ export async function forgotPassword(req, res) {
   // Respuesta genérica para evitar user enumeration
   const SUCCESS_MSG = 'Si ese email está registrado, recibirás las instrucciones en tu bandeja de entrada.'
 
-  if (!email) {
+  if (typeof email !== 'string' || !email) {
     return res.status(400).json({ error: 'El campo email es requerido.' })
   }
 
   try {
-    const user = await User.findOne({ email: email.toLowerCase().trim() })
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() })
 
     // Si el usuario no existe, respondemos igual — no revelamos que el email no existe
     if (!user) {
@@ -387,7 +409,7 @@ export async function forgotPassword(req, res) {
 export async function resetPassword(req, res) {
   const { token, newPassword } = req.body
 
-  if (!token || !newPassword) {
+  if (typeof token !== 'string' || typeof newPassword !== 'string' || !token || !newPassword) {
     return res.status(400).json({ error: 'Los campos token y newPassword son requeridos.' })
   }
 
@@ -396,7 +418,7 @@ export async function resetPassword(req, res) {
   }
 
   try {
-    const tokenHash = hashToken(token)
+    const tokenHash = hashToken(String(token))
 
     // Buscar usuario con el token válido y no expirado
     const user = await User.findOne({
@@ -411,11 +433,14 @@ export async function resetPassword(req, res) {
       })
     }
 
-    // Actualizar contraseña y limpiar campos de reset
+    // Actualizar contraseña, invalidar tokens existentes y limpiar campos de reset
     user.password             = await bcrypt.hash(newPassword, 10)
+    user.tokenVersion         = (user.tokenVersion ?? 0) + 1
     user.passwordResetToken   = undefined
     user.passwordResetExpires = undefined
     await user.save()
+
+    invalidateUserCache(String(user._id))
 
     console.info(`[Auth] Contraseña restablecida — userId: ${user._id}`)
     return res.json({ message: 'Contraseña actualizada exitosamente.' })
@@ -472,5 +497,32 @@ export async function registerFcmToken(req, res) {
   } catch (err) {
     console.error('[Auth] Error registrando token FCM:', err.message);
     return res.status(500).json({ error: 'Error al registrar token.' });
+  }
+}
+
+// ─── logoutUser ───────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/auth/logout
+ * Incrementa tokenVersion (revocando todos los JWTs activos del usuario),
+ * limpia el cache del middleware y la cookie HttpOnly.
+ */
+export async function logoutUser(req, res) {
+  try {
+    const userId = req.user?.id ?? req.user?._id;
+    if (userId) {
+      await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
+      invalidateUserCache(String(userId));
+    }
+    res.clearCookie(AUTH_COOKIE_NAME, {
+      httpOnly: true,
+      secure:   process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path:     '/',
+    });
+    return res.json({ message: 'Sesión cerrada.' });
+  } catch (err) {
+    console.error('[Auth] Error en logoutUser:', err.message);
+    return res.status(500).json({ error: 'Error al cerrar sesión.' });
   }
 }

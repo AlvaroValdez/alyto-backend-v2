@@ -29,7 +29,7 @@ import {
   uploadPaymentProof,
   uploadComprobante,
 } from '../controllers/paymentController.js';
-import { protect, requireEntity }                          from '../middlewares/authMiddleware.js';
+import { protect, requireEntity, requireKycApproved }      from '../middlewares/authMiddleware.js';
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
 import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
 import { getSpAPayinInstructions }                         from '../controllers/spaConfigController.js';
@@ -141,7 +141,7 @@ router.get('/withdrawal-rules/:countryCode', protect, getWithdrawalRulesControll
  * Body: { corridorId, originAmount, beneficiaryData | beneficiary }
  * Auth: Bearer JWT
  */
-router.post('/crossborder', protect, checkSanctions, initCrossBorderPayment);
+router.post('/crossborder', protect, requireKycApproved, checkSanctions, initCrossBorderPayment);
 
 /**
  * POST /api/v1/payments/payin/fintoc
@@ -151,7 +151,7 @@ router.post('/crossborder', protect, checkSanctions, initCrossBorderPayment);
  * Devuelve: { widgetUrl, widgetToken, alytoTransactionId, ... }
  */
 // Requiere JWT válido + usuario bajo AV Finance SpA (Chile)
-router.post('/payin/fintoc', protect, requireEntity(['SpA']), initiateFintocPayin);
+router.post('/payin/fintoc', protect, requireKycApproved, requireEntity(['SpA']), initiateFintocPayin);
 
 /**
  * POST /api/v1/payments/webhooks/fintoc

@@ -1125,13 +1125,8 @@ export async function handleOwlPayIPN(req, res) {
   const rawBody   = req.rawBody ?? JSON.stringify(req.body);
 
   if (!verifyOwlPayWebhookSignature(rawBody, signature)) {
-    console.warn('[Alyto IPN/OwlPay] Firma inválida — rechazando petición.', {
-      ip: req.ip,
-    });
-    Sentry.captureMessage('OwlPay IPN firma inválida', {
-      level: 'warning',
-      extra: { ip: req.ip, body: req.body },
-    });
+    console.warn('[OwlPay IPN] Invalid signature from IP:', req.ip);
+    // Do not log or capture the body — it is unauthenticated attacker-controlled data
     return res.status(401).json({ error: 'Firma inválida.' });
   }
 

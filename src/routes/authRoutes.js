@@ -16,6 +16,7 @@ import { Router } from 'express';
 import {
   registerUser,
   loginUser,
+  logoutUser,
   getMe,
   forgotPassword,
   resetPassword,
@@ -64,6 +65,12 @@ router.post('/forgot-password', forgotPasswordLimiter, forgotPassword);
  * Body: { token, newPassword }
  */
 router.post('/reset-password', resetPasswordLimiter, resetPassword);
+
+/**
+ * POST /api/v1/auth/logout
+ * Revoca todos los tokens activos (incrementa tokenVersion) y limpia la cookie.
+ */
+router.post('/logout', protect, logoutUser);
 
 /**
  * POST /api/v1/auth/fcm-token
