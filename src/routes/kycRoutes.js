@@ -10,7 +10,7 @@
 
 import { Router }                                    from 'express';
 import { createKycSession, getKycStatus, getKycDebug, approveKycTest } from '../controllers/kycController.js';
-import { protect }                                    from '../middlewares/authMiddleware.js';
+import { protect, requireAdmin }                      from '../middlewares/authMiddleware.js';
 
 const router = Router();
 
@@ -29,20 +29,22 @@ router.get('/session', protect, createKycSession);
  */
 router.get('/status', protect, getKycStatus);
 
-// ─── Endpoints de desarrollo (deshabilitados en producción) ─────────────────
-if (process.env.NODE_ENV !== 'production') {
+// ─── Endpoints de desarrollo (opt-in vía ALYTO_ENABLE_DEV_ROUTES=1) ─────────
+// SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.
+if (process.env.ALYTO_ENABLE_DEV_ROUTES === '1') {
   /**
    * POST /api/v1/kyc/approve-test
    * Aprueba KYC sin pasar por Stripe — para testing de flujos post-KYC.
    * Body: { userId: string }
+   * Requiere JWT de admin.
    */
-  router.post('/approve-test', approveKycTest);
+  router.post('/approve-test', protect, requireAdmin, approveKycTest);
 
   /**
    * GET /api/v1/kyc/debug/:userId
-   * No requiere JWT — solo para diagnóstico local.
+   * Solo diagnóstico local — requiere JWT de admin.
    */
-  router.get('/debug/:userId', getKycDebug);
+  router.get('/debug/:userId', protect, requireAdmin, getKycDebug);
 }
 
 export default router;

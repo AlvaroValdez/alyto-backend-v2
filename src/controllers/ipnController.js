@@ -83,10 +83,6 @@ function verifyVitaSignature(body, headers) {
 
   const sortedString = sortAndStringify(body);
 
-  console.log('[Vita IPN] Body raw:', JSON.stringify(body));
-  console.log('[Vita IPN] VITA_SECRET primeros 8 chars:', secret.substring(0, 8));
-  console.log('[Vita IPN] Sorted string:', sortedString);
-
   const expectedSignature = crypto
     .createHmac('sha256', secret)
     .update(sortedString)
@@ -96,10 +92,18 @@ function verifyVitaSignature(body, headers) {
     ?.replace('V2-HMAC-SHA256, Signature: ', '')
     ?.trim();
 
-  console.log('[Vita IPN] Expected:', expectedSignature);
-  console.log('[Vita IPN] Received:', receivedSignature);
+  if (!receivedSignature || receivedSignature.length !== expectedSignature.length) {
+    return false;
+  }
 
-  return expectedSignature === receivedSignature;
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(expectedSignature, 'hex'),
+      Buffer.from(receivedSignature, 'hex'),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -556,7 +560,6 @@ export async function dispatchPayout(transaction) {
 
     // Extraer referencia externa según proveedor
     if (providerUsed === 'vitaWallet') {
-      console.log('[dispatchPayout] Respuesta Vita:', JSON.stringify(providerResponse?.data || providerResponse));
       transaction.payoutReference = providerResponse?.data?.id ?? providerResponse?.id ?? providerResponse?.transaction?.id ?? null;
     } else {
       // OwlPay
@@ -758,13 +761,10 @@ export async function dispatchPayout(transaction) {
 export async function handleVitaIPN(req, res) {
   // ── 1. Validar firma HMAC-SHA256 ──────────────────────────────────────────
   if (!verifyVitaSignature(req.body, req.headers)) {
-    console.warn('[Alyto IPN/Vita] Firma inválida — rechazando petición.', {
-      ip:   req.ip,
-      body: JSON.stringify(req.body)?.slice(0, 200),
-    });
+    console.warn('[Vita IPN] Invalid signature - requestId:', req.headers['x-request-id'] ?? 'unknown');
     Sentry.captureMessage('IPN firma inválida recibida', {
       level: 'warning',
-      extra: { body: req.body, ip: req.ip },
+      extra: { ip: req.ip, requestId: req.headers['x-request-id'] ?? 'unknown' },
     });
     // 401 aquí: firma inválida no necesita un 200 — Vita no reintentará si enviamos 401
     return res.status(401).json({ error: 'Firma inválida.' });
@@ -1021,15 +1021,6 @@ export async function handleVitaIPN(req, res) {
  * Si no existe por payinReference, busca por paymentLegs.externalId (legacy).
  */
 export async function handleFintocIPN(req, res) {
-  // Log inmediato — ANTES de cualquier validación para confirmar que el handler es alcanzado
-  console.log('[Fintoc IPN] ⚡ Webhook recibido en /api/v1/ipn/fintoc');
-  console.log('[Fintoc IPN] Headers:', JSON.stringify({
-    'content-type':     req.headers['content-type'],
-    'fintoc-signature': req.headers['fintoc-signature'],
-    'user-agent':       req.headers['user-agent'],
-  }));
-  console.log('[Fintoc IPN] Body:', JSON.stringify(req.body));
-
   const { type, data } = req.body;
 
   console.info('[Alyto IPN/Fintoc] Evento recibido.', {
