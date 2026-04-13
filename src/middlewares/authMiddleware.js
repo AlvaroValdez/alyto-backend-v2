@@ -25,7 +25,7 @@ import { setSentryUser } from './sentryContext.js';
 // Para cambios críticos post-login (ej. cuenta suspendida), el TTL máximo
 // de 5 min es el delay aceptable antes de que el middleware lo detecte.
 
-const USER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const USER_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos — reducido para acotar ventana de revocación
 const userCache = new Map(); // userId → { user, expiresAt }
 
 function getCachedUser(userId) {
@@ -59,11 +59,11 @@ export function invalidateUserCache(userId) {
  *  4. Rechaza si el usuario fue eliminado o desactivado tras emitir el token
  */
 export async function protect(req, res, next) {
-  let token;
-
-  if (req.headers.authorization?.startsWith('Bearer ')) {
-    token = req.headers.authorization.split(' ')[1];
-  }
+  // 1) Cookie HttpOnly (modo principal); 2) Authorization: Bearer (fallback para API/mobile)
+  const token = req.cookies?.alyto_token
+    ?? (req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.split(' ')[1]
+        : null);
 
   if (!token) {
     return res.status(401).json({
@@ -75,11 +75,11 @@ export async function protect(req, res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // Cargar usuario desde cache o DB.
-    // Cache TTL 5 min — evita una query por cada request autenticado.
+    // Cache TTL 2 min — acota la ventana de revocación por tokenVersion.
     let user = getCachedUser(decoded.id);
     if (!user) {
       user = await User.findById(decoded.id)
-        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId')
+        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId tokenVersion')
         .lean();
       if (user) setCachedUser(decoded.id, user);
     }
@@ -94,6 +94,16 @@ export async function protect(req, res, next) {
       invalidateUserCache(decoded.id); // Limpiar cache si la cuenta fue suspendida
       return res.status(401).json({
         error: 'No autorizado. Cuenta suspendida.',
+      });
+    }
+
+    // Revocación server-side: el user puede haber invalidado tokens (logout,
+    // password reset, suspensión) incrementando tokenVersion.
+    const userTokenVersion = user.tokenVersion ?? 0;
+    const jwtTokenVersion  = decoded.tokenVersion ?? 0;
+    if (jwtTokenVersion !== userTokenVersion) {
+      return res.status(401).json({
+        error: 'Session expired',
       });
     }
 
@@ -153,6 +163,29 @@ export function requireAdmin(req, res, next) {
     });
   }
 
+  next();
+}
+
+// ─── requireKycApproved ───────────────────────────────────────────────────────
+
+/**
+ * Middleware que bloquea el acceso a rutas que requieren KYC aprobado.
+ * Debe ejecutarse después de protect() — req.user debe estar disponible.
+ *
+ * Uso:
+ *   router.post('/payments/initiate', protect, requireKycApproved, handler);
+ */
+export function requireKycApproved(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'No autenticado' });
+  }
+  if (req.user.kycStatus !== 'approved') {
+    return res.status(403).json({
+      success: false,
+      message: 'Debes verificar tu identidad antes de continuar.',
+      code:    'KYC_REQUIRED',
+    });
+  }
   next();
 }
 

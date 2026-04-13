@@ -19,6 +19,8 @@ import cors           from 'cors';
 import helmet         from 'helmet';
 import { generalLimiter, paymentsLimiter } from './config/rateLimiters.js';
 import compression    from 'compression';
+import cookieParser   from 'cookie-parser';
+import mongoSanitize  from 'express-mongo-sanitize';
 import mongoose       from 'mongoose';
 import authRoutes          from './routes/authRoutes.js';
 import paymentRoutes       from './routes/paymentRoutes.js';
@@ -48,15 +50,12 @@ import Transaction from './models/Transaction.js';
 const PORT        = process.env.PORT        ?? 3000;
 const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/alyto-v2';
 
-// JWT_SECRET es obligatorio en producción — fail fast para evitar tokens inseguros
-if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
-  console.error('[Alyto Server] FATAL: JWT_SECRET no definido en producción. Abortando.');
+// JWT_SECRET es obligatorio en todos los entornos — fail fast para evitar tokens
+// firmados con secretos conocidos si NODE_ENV está mal configurado.
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret || jwtSecret.length < 32) {
+  console.error('FATAL: JWT_SECRET must be set and at least 32 characters. Refusing to start.');
   process.exit(1);
-}
-// En desarrollo se asigna un valor por defecto para facilitar el onboarding local
-if (!process.env.JWT_SECRET) {
-  process.env.JWT_SECRET = 'alyto_dev_jwt_secret_change_in_production';
-  console.warn('[Alyto Server] ⚠️  JWT_SECRET no configurado — usando valor de desarrollo. NO usar en producción.');
 }
 
 // ─── Verificación de variables de entorno ────────────────────────────────────
@@ -81,13 +80,13 @@ if (process.env.NODE_ENV === 'production') {
 
 // Helmet — headers de seguridad HTTP (CSP, HSTS, X-Frame-Options, etc.)
 // Debe ir ANTES de CORS para que los headers de seguridad se apliquen a toda respuesta.
+const isProd = process.env.NODE_ENV === 'production';
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc:  ["'self'"],
       scriptSrc:   [
         "'self'",
-        "'unsafe-inline'",
         'https://js.fintoc.com',
         'https://wizard.fintoc.com',
         'https://js.stripe.com',
@@ -109,13 +108,15 @@ app.use(helmet({
         'https://wizard.fintoc.com',
         'https://widget.fintoc.com',
         'https://api.stripe.com',
-        'wss://192.168.1.94:3000',
-        'ws://192.168.1.94:3000',
-        'https://*.ngrok-free.app',
-        'wss://*.ngrok-free.app',
+        ...(isProd ? [] : [
+          'wss://192.168.1.94:3000',
+          'ws://192.168.1.94:3000',
+          'https://*.ngrok-free.app',
+          'wss://*.ngrok-free.app',
+        ]),
       ],
       imgSrc:      ["'self'", 'data:', 'https:'],
-      styleSrc:    ["'self'", "'unsafe-inline'"],
+      styleSrc:    ["'self'"],
     },
   },
 }));
@@ -159,9 +160,37 @@ app.post(
   handleStripeWebhook,
 );
 
+// IPN webhooks (Vita, Fintoc, OwlPay): capturar rawBody para verificación HMAC
+// byte-exacta y parsear body como JSON para los handlers. DEBE ir antes de express.json().
+app.use('/api/v1/ipn', (req, res, next) => {
+  express.raw({ type: 'application/json', limit: '1mb' })(req, res, (err) => {
+    if (err) return next(err);
+    if (Buffer.isBuffer(req.body)) {
+      req.rawBody = req.body;
+      try {
+        req.body = JSON.parse(req.body.toString('utf8'));
+      } catch {
+        req.body = {};
+      }
+    }
+    next();
+  });
+});
+
 // Parseo de JSON con límite de payload
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Parser de cookies — necesario para auth vía HttpOnly cookie 'alyto_token'
+app.use(cookieParser());
+
+// NoSQL injection sanitizer — reemplaza claves con $ o . en body/query/params.
+app.use(mongoSanitize({
+  replaceWith: '_',
+  onSanitize: ({ req, key }) => {
+    console.warn(`[SECURITY] Sanitized key "${key}" from ${req.path}`);
+  },
+}));
 
 // Request logging — registra método, ruta y latencia de cada petición
 app.use((req, res, next) => {
@@ -340,17 +369,29 @@ async function resolveMongoUri() {
 }
 
 async function seedDevUser() {
-  if (process.env.NODE_ENV === 'production') return;
+  // Gate principal: solo corre cuando los dev routes están habilitados.
+  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') return;
+
+  // Guard adicional: rehusar si la DB parece ser producción o NODE_ENV=production.
+  const dbName = mongoose.connection.db.databaseName;
+  if ((dbName && dbName.toLowerCase().includes('prod')) || process.env.NODE_ENV === 'production') {
+    console.error('FATAL: seedDevUser() refused to run against production database.');
+    return;
+  }
+
+  const bcrypt = (await import('bcryptjs')).default;
+  const devPasswordHash = await bcrypt.hash('DevPassword123!', 12);
+
+  // dev@alyto.test: user de prueba local. NUNCA debe llegar a la DB de producción.
   const existing = await User.findOne({ email: 'dev@alyto.test' });
   if (existing) return;
   const user = await User.create({
     firstName:        'Dev',
     lastName:         'Alyto',
     email:            'dev@alyto.test',
+    password:         devPasswordHash,
     legalEntity:      'SpA',
-    kycStatus:        'approved',
-    kycApprovedAt:    new Date(),
-    kycProvider:      'dev_mock',
+    kycStatus:        'pending',
     residenceCountry: 'CL',
     preferences:      { currency: 'CLP' },
     identityDocument: { type: 'rut', number: '12345678-9', issuingCountry: 'CL' },
@@ -364,10 +405,9 @@ async function seedDevUser() {
     firstName:        'Operador',
     lastName:         'Bolivia',
     email:            'dev-srl@alyto.test',
+    password:         devPasswordHash,
     legalEntity:      'SRL',
-    kycStatus:        'approved',
-    kycApprovedAt:    new Date(),
-    kycProvider:      'dev_mock',
+    kycStatus:        'pending',
     residenceCountry: 'BO',
     preferences:      { currency: 'BOB' },
     taxId:            '1023456789',

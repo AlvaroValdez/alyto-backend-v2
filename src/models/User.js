@@ -296,6 +296,16 @@ const userSchema = new Schema(
     lastLoginAt: {
       type: Date,
     },
+    /**
+     * Contador monotónico para revocación de JWTs.
+     * Se incrementa en logout, password reset, o suspensión admin.
+     * El middleware protect() compara decoded.tokenVersion !== user.tokenVersion
+     * para rechazar tokens emitidos antes del último bump.
+     */
+    tokenVersion: {
+      type:    Number,
+      default: 0,
+    },
 
     // ── Reset de contraseña ──────────────────────────────────────────────────
     /** Hash SHA-256 del token enviado por email. Se almacena el hash, nunca el texto claro. */
