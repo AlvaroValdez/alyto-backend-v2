@@ -101,7 +101,10 @@ function hashToken(token) {
  */
 export async function registerUser(req, res) {
   try {
-    const { email, password, country, firstName, lastName, phone } = req.body;
+    const {
+      email, password, country, firstName, lastName, phone,
+      termsAccepted, termsAcceptedAt, termsVersion,
+    } = req.body;
 
     // ── Validación de campos obligatorios ──────────────────────────────────
     if (!email || !password || !country) {
@@ -113,6 +116,12 @@ export async function registerUser(req, res) {
     if (typeof password !== 'string' || password.length < 8) {
       return res.status(400).json({
         error: 'La contraseña debe tener al menos 8 caracteres.',
+      });
+    }
+
+    if (!termsAccepted) {
+      return res.status(400).json({
+        error: 'Debes aceptar los Términos y Condiciones para continuar.',
       });
     }
 
@@ -149,6 +158,15 @@ export async function registerUser(req, res) {
         type:           ENTITY_DEFAULT_DOC[legalEntity],
         number:         'PENDING_VERIFICATION',
         issuingCountry: countryCode,
+      },
+      // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI
+      tosAcceptance: {
+        accepted:   true,
+        version:    typeof termsVersion === 'string' ? termsVersion : '2.0',
+        entity:     legalEntity,
+        acceptedAt: termsAcceptedAt ? new Date(termsAcceptedAt) : new Date(),
+        ipAddress:  req.ip,
+        userAgent:  req.get('user-agent') ?? null,
       },
     });
 
