@@ -20,7 +20,6 @@ import helmet         from 'helmet';
 import { generalLimiter, paymentsLimiter } from './config/rateLimiters.js';
 import compression    from 'compression';
 import cookieParser   from 'cookie-parser';
-import mongoSanitize  from 'express-mongo-sanitize';
 import mongoose       from 'mongoose';
 import authRoutes          from './routes/authRoutes.js';
 import paymentRoutes       from './routes/paymentRoutes.js';
@@ -184,13 +183,42 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Parser de cookies — necesario para auth vía HttpOnly cookie 'alyto_token'
 app.use(cookieParser());
 
-// NoSQL injection sanitizer — reemplaza claves con $ o . en body/query/params.
-app.use(mongoSanitize({
-  replaceWith: '_',
-  onSanitize: ({ req, key }) => {
-    console.warn(`[SECURITY] Sanitized key "${key}" from ${req.path}`);
-  },
-}));
+// NoSQL injection sanitizer — reemplaza claves con $ o . por _ en body/params/query.
+// Implementación propia: express-mongo-sanitize@2.x reasigna req.query, que en
+// Express 5 es un getter read-only y lanza TypeError. Aquí mutamos los objetos
+// in-place recursivamente (sin reasignar la referencia externa), compatible con
+// Express 5.
+app.use((req, res, next) => {
+  const sanitize = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        const safeKey = key.replace(/[$.]/g, '_');
+        const val = obj[key];
+        delete obj[key];
+        obj[safeKey] = val;
+        console.warn(`[SECURITY] Sanitized key "${key}" from ${req.path}`);
+      }
+    }
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object') sanitize(val);
+    }
+  };
+  sanitize(req.body);
+  sanitize(req.params);
+  // req.query es un getter read-only en Express 5 — no podemos reasignar la
+  // propiedad del prototipo, pero sí definir una data-property en la instancia
+  // que sombrea al getter con una versión ya saneada.
+  const sanitizedQuery = { ...req.query };
+  sanitize(sanitizedQuery);
+  Object.defineProperty(req, 'query', {
+    value:        sanitizedQuery,
+    writable:     true,
+    configurable: true,
+    enumerable:   true,
+  });
+  next();
+});
 
 // Request logging — registra método, ruta y latencia de cada petición
 app.use((req, res, next) => {
