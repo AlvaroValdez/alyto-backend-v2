@@ -205,6 +205,62 @@ export async function sendRawEmail(to, subject, html) {
   }
 }
 
+/**
+ * Envía el email de bienvenida. Usa SendGrid Dynamic Template si
+ * SENDGRID_TEMPLATE_WELCOME está configurado; si no, envía HTML inline
+ * (idéntico tono y estructura que otros emails transaccionales).
+ */
+export async function sendWelcomeEmail(user) {
+  const entityName = {
+    SpA: 'AV Finance SpA',
+    SRL: 'AV Finance SRL',
+    LLC: 'AV Finance LLC',
+  }[user.legalEntity] ?? 'AV Finance';
+
+  const verifyUrl    = `${process.env.APP_URL ?? 'https://alyto.app'}/kyc`;
+  const supportEmail = process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app';
+
+  if (process.env.SENDGRID_TEMPLATE_WELCOME) {
+    return sendEmail(user.email, process.env.SENDGRID_TEMPLATE_WELCOME, {
+      userName:        user.firstName,
+      entityName,
+      legalEntity:     user.legalEntity,
+      verifyUrl,
+      supportEmail,
+      supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+    });
+  }
+
+  const subject = `Bienvenido a Alyto, ${user.firstName} 👋`;
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;background:#F8FAFC;">
+      <div style="background:#0B1526;padding:32px 24px;text-align:center;">
+        <h1 style="color:#FFFFFF;margin:0;font-size:24px;letter-spacing:-0.5px;">Alyto</h1>
+      </div>
+      <div style="background:#FFFFFF;padding:32px 24px;color:#0F1B2E;">
+        <h2 style="margin:0 0 16px;font-size:22px;">Hola ${user.firstName}, bienvenido a Alyto Wallet.</h2>
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:#3B4A63;">
+          Tu cuenta ha sido creada bajo <strong>${entityName}</strong>.
+        </p>
+        <p style="margin:0 0 24px;font-size:15px;line-height:1.5;color:#3B4A63;">
+          El siguiente paso es verificar tu identidad para comenzar a enviar dinero.
+        </p>
+        <a href="${verifyUrl}"
+           style="display:inline-block;background:#1D9E75;color:#FFFFFF;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:600;font-size:15px;">
+          Verificar identidad
+        </a>
+        <p style="margin:32px 0 0;font-size:13px;color:#64748B;">
+          ¿Dudas? Escríbenos a <a href="mailto:${supportEmail}" style="color:#1D9E75;">${supportEmail}</a>.
+        </p>
+      </div>
+      <div style="padding:16px 24px;text-align:center;font-size:12px;color:#94A3B8;">
+        Este email fue enviado a ${user.email}. © ${new Date().getFullYear()} Alyto.
+      </div>
+    </div>
+  `;
+  return sendRawEmail(user.email, subject, html);
+}
+
 // ─── Emails predefinidos ──────────────────────────────────────────────────────
 
 /**
