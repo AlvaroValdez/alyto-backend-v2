@@ -25,10 +25,22 @@ import crypto from 'crypto';
 // Base URL sin versión — cada endpoint incluye su prefijo /v1/ o /v2/ explícitamente.
 // Correcto: https://harbor-sandbox.owlpay.com/api + /v2/transfers = /api/v2/transfers
 // Incorrecto: .../api/v1 + /v2/transfers = /api/v1/v2/transfers (doble versión)
+//
+// Normalización:
+//   1. Quita slash final
+//   2. Garantiza sufijo /api (Harbor lo requiere)
+//   3. Elimina /v1 o /v2 (cada endpoint añade su propia versión)
 const OWLPAY_BASE_URL = (() => {
-  const raw = process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL ?? '';
-  // Eliminar sufijo /v1 o /v2 si viene en la env var (compat. con configs antiguas)
-  return raw.replace(/\/v\d+$/, '') || 'https://harbor-sandbox.owlpay.com/api';
+  let baseUrl = (process.env.OWLPAY_BASE_URL
+              ?? process.env.OWLPAY_API_URL
+              ?? 'https://harbor-sandbox.owlpay.com/api').trim();
+
+  baseUrl = baseUrl.replace(/\/$/, '');
+  baseUrl = baseUrl.replace(/\/v\d+$/, '');
+  if (!baseUrl.endsWith('/api')) {
+    baseUrl = `${baseUrl}/api`;
+  }
+  return baseUrl;
 })();
 
 /**
@@ -36,12 +48,44 @@ const OWLPAY_BASE_URL = (() => {
  * Lanza inmediatamente si no está definido — fail fast.
  * @returns {string}
  */
-function getOwlPayApiKey() {
+export function getOwlPayApiKey() {
   const key = process.env.OWLPAY_API_KEY;
   if (!key || key.trim() === '') {
     throw new Error('[Alyto OwlPay] Missing OWLPAY_API_KEY. Verificar .env o AWS Secrets Manager.');
   }
   return key;
+}
+
+/** @returns {string} Base URL normalizada (lazy getter para tests / health checks) */
+export function getOwlPayBaseUrl() {
+  return OWLPAY_BASE_URL;
+}
+
+/**
+ * Resuelve el customerUuid de Harbor para la entidad legal indicada.
+ * Harbor requiere un customer previamente creado en el portal — no acepta IDs arbitrarios.
+ *
+ * @param {'LLC'|'SpA'|'SRL'} legalEntity
+ * @returns {string}
+ * @throws si no hay UUID configurado para la entidad
+ */
+function resolveCustomerUuid(legalEntity) {
+  const ENTITY_CUSTOMER_UUID = {
+    LLC: process.env.OWLPAY_CUSTOMER_UUID_LLC,
+    SpA: process.env.OWLPAY_CUSTOMER_UUID_SPA,
+    SRL: process.env.OWLPAY_CUSTOMER_UUID_SRL,
+  };
+
+  const customerUuid = ENTITY_CUSTOMER_UUID[legalEntity];
+
+  if (!customerUuid) {
+    throw new Error(
+      `[OwlPay] No Harbor customerUuid configured for entity: ${legalEntity}. ` +
+      `Set OWLPAY_CUSTOMER_UUID_${(legalEntity ?? '').toUpperCase()} in environment variables.`,
+    );
+  }
+
+  return customerUuid;
 }
 
 /**
@@ -108,10 +152,12 @@ async function owlPayRequest(endpoint, options = {}) {
  * @param {number} params.amount              - Monto en USD
  * @param {string} params.currency            - ISO 4217, debe ser 'USD'
  * @param {string} params.destinationWallet   - Stellar public key del cliente destino
- * @param {string} params.userId              - ID interno Alyto (metadata y fallback)
+ * @param {string} params.userId              - ID interno Alyto (metadata)
  * @param {string} params.alytoTransactionId  - Idempotency key
+ * @param {'LLC'|'SpA'|'SRL'} params.legalEntity - Entidad legal que opera la transferencia
  * @param {string} [params.memo]              - Memo Stellar (opcional)
- * @param {string} [params.customerUuid]      - UUID del customer en Harbor (on_behalf_of)
+ * @param {string} [params.customerUuid]      - Override explícito del UUID del customer en Harbor.
+ *                                              Si no se pasa, se resuelve vía OWLPAY_CUSTOMER_UUID_<ENTITY>.
  * @param {object} [params.beneficiary]       - Datos del beneficiario para Harbor
  * @returns {Promise<OnRampOrderResult>}
  *
@@ -131,6 +177,7 @@ export async function createOnRampOrder({
   destinationWallet,
   userId,
   alytoTransactionId,
+  legalEntity,
   memo,
   customerUuid,
   beneficiary = {},
@@ -140,6 +187,9 @@ export async function createOnRampOrder({
     throw new Error('[Alyto OwlPay] destinationWallet debe ser una Stellar public key válida.');
   }
   if (!amount || amount <= 0) throw new Error('[Alyto OwlPay] amount debe ser positivo en USD.');
+
+  // Resolver customerUuid: explícito > entidad legal. Harbor exige un UUID válido.
+  const resolvedCustomerUuid = customerUuid ?? resolveCustomerUuid(legalEntity);
 
   // ── PASO 1: Obtener quote ─────────────────────────────────────────────────
   const quotePayload = {
@@ -178,7 +228,7 @@ export async function createOnRampOrder({
 
   // ── PASO 3: Crear el transfer ─────────────────────────────────────────────
   const transferPayload = {
-    on_behalf_of:              customerUuid ?? userId,
+    on_behalf_of:              resolvedCustomerUuid,
     quote_id:                  quoteId,
     application_transfer_uuid: alytoTransactionId,
     destination: {
@@ -281,6 +331,8 @@ export async function createDisbursement({
   beneficiary,
   alytoTransactionId,
   userId,
+  legalEntity,
+  corridorCode,
 }) {
   if (!amount || amount <= 0) {
     throw new Error('[Alyto OwlPay] createDisbursement: amount debe ser un número positivo en USD.');
@@ -322,8 +374,8 @@ export async function createDisbursement({
     metadata: {
       alyto_transaction_id: alytoTransactionId,
       alyto_user_id:        String(userId ?? ''),
-      legal_entity:         'SRL',
-      corridor:             'C',
+      legal_entity:         legalEntity ?? 'unknown',
+      corridor:             corridorCode ?? 'unknown',
       operation_type:       'manualPayinPayout',
     },
   };

@@ -477,6 +477,8 @@ export async function dispatchPayout(transaction) {
           beneficiary:         beneficiaryFlat,
           alytoTransactionId:  transaction.alytoTransactionId,
           userId:              transaction.userId,
+          legalEntity:         transaction.legalEntity ?? corridor?.legalEntity,
+          corridorCode:        corridor?.corridorId ?? transaction.corridorId,
         });
       }
       throw new Error(`Proveedor desconocido: ${method}`);
@@ -1121,8 +1123,15 @@ export async function handleFintocIPN(req, res) {
  */
 export async function handleOwlPayIPN(req, res) {
   // ── 1. Verificar firma HMAC-SHA256 ────────────────────────────────────────
-  const signature = req.headers['x-owlpay-signature'];
+  // Harbor envía 'harbor-signature'. Aceptamos también 'x-owlpay-signature'
+  // por compatibilidad con integraciones previas durante la transición.
+  const signature = req.headers['harbor-signature'] ?? req.headers['x-owlpay-signature'];
   const rawBody   = req.rawBody ?? JSON.stringify(req.body);
+
+  if (!signature) {
+    console.warn('[OwlPay IPN] Missing signature header from IP:', req.ip);
+    return res.status(401).json({ error: 'Missing signature' });
+  }
 
   if (!verifyOwlPayWebhookSignature(rawBody, signature)) {
     console.warn('[OwlPay IPN] Invalid signature from IP:', req.ip);
