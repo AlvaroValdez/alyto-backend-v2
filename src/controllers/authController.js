@@ -125,6 +125,14 @@ export async function registerUser(req, res) {
       });
     }
 
+    // Versión vigente de T&C — no bloquea si el cliente envía una versión
+    // anterior (para no rechazar usuarios existentes), pero queda registrado
+    // en logs para auditoría de compliance.
+    const CURRENT_TERMS_VERSION = '2.1';
+    if (termsVersion !== CURRENT_TERMS_VERSION) {
+      console.warn('[Auth] User accepted old T&C version:', termsVersion);
+    }
+
     const countryCode = String(country).toUpperCase();
     const normalizedEmail = String(email).toLowerCase().trim();
 
@@ -162,7 +170,7 @@ export async function registerUser(req, res) {
       // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI
       tosAcceptance: {
         accepted:   true,
-        version:    typeof termsVersion === 'string' ? termsVersion : '2.0',
+        version:    typeof termsVersion === 'string' ? termsVersion : CURRENT_TERMS_VERSION,
         entity:     legalEntity,
         acceptedAt: termsAcceptedAt ? new Date(termsAcceptedAt) : new Date(),
         ipAddress:  req.ip,
