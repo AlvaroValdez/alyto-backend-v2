@@ -247,3 +247,233 @@ Funciones comprometidas ante ASFI que deben implementarse:
 if (legalEntity === 'LLC' && amount >= 500) → OwlPay Harbor
 else if (destinationCountry en cobertura Vita) → Vita Wallet
 else → OwlPay Harbor como fallback
+
+---
+
+## 🏦 Arquitectura del Modelo Anchor — AV Finance SRL (Hito v2.0)
+
+> Documentado: Abril 2026 | Versión: 2.0 | Estado: Producción
+
+### Concepto fundamental
+
+AV Finance SRL opera como **anchor de bolivianos (BOB)** en la red
+de pagos de Alyto Wallet. Esto significa que AV Finance SRL es la
+única entidad que recibe fondos en BOB de los usuarios bolivianos —
+ningún proveedor externo (Vita, Harbor, OwlPay) toca directamente
+las cuentas bancarias bolivianas.
+
+El modelo se divide en tres capas:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CAPA 1 — PAYIN BOB                       │
+│  Usuario transfiere BOB → Cuenta bancaria AV Finance SRL    │
+│  Admin confirma recepción en Ledger                         │
+│  Proveedor: MANUAL (Banco Bisa / Banco Nacional Bolivia)    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                 CAPA 2 — CONVERSIÓN INTERNA                 │
+│  BOB → USDT/USDC vía Binance P2P (operación manual admin)   │
+│  USDC acreditado en wallet Stellar SRL                      │
+│  Registrado en FundingRecord (modelo de tesorería)          │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                   CAPA 3 — PAYOUT DESTINO                   │
+│  Proveedor seleccionado según destino del corredor          │
+│  Vita Wallet → 21 destinos LatAm/Europa                     │
+│  OwlPay Harbor → China (CNY), Nigeria (NGN) + futuros       │
+│  Manual Admin → Bolivia (BOB, solo corredor cl-bo SpA)      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Flujos por proveedor de payout
+
+#### Flujo A — BOB → LatAm/Europa via Vita Wallet (21 corredores)
+
+```
+[Usuario]
+  │ Transfiere BOB a Banco AV Finance SRL
+  ↓
+[Admin — Ledger]
+  │ Confirma payin → status: payin_confirmed
+  ↓
+[dispatchPayout()]
+  │ Llama a Vita API con instrucción de pago
+  │ Vita debita de cuenta AV Finance SRL en Vita
+  ↓
+[Vita Wallet]
+  │ Entrega en moneda local al beneficiario
+  │ Confirma vía IPN → status: completed
+  ↓
+[Usuario]
+  Recibe push "¡Dinero entregado! ✓" + email
+```
+
+**Corredores activos:** bo-ar, bo-br, bo-ca, bo-cl, bo-co, bo-cr,
+bo-do, bo-ec, bo-es, bo-gt, bo-hk, bo-ht, bo-mx, bo-pa, bo-pe,
+bo-pl, bo-py, bo-sv, bo-us, bo-uy, bo-ve
+
+**Método payout Vita:**
+- `createPayout()` — corredores estándar
+- `createVitaSentPayout()` — VITA_SENT_ONLY_COUNTRIES: { GT, SV, ES, PL }
+
+---
+
+#### Flujo B — BOB → China/Nigeria via OwlPay Harbor (2 corredores activos)
+
+```
+[Usuario]
+  │ Transfiere BOB a Banco AV Finance SRL
+  ↓
+[Admin — Ledger]
+  │ Confirma payin → status: payin_confirmed
+  ↓
+[dispatchPayout() → tryOwlPayV2()]
+  │ 1. getHarborQuote() — obtiene tasa USDC→CNY/NGN
+  │ 2. createHarborTransfer() — Harbor genera instruction_address
+  │ 3. Pre-check FundingRecord.getAvailableUSDC('SRL')
+  │ 4. sendUSDCToHarbor() — envía USDC desde wallet Stellar SRL
+  │    a instruction_address (chain: TBD — pendiente Sam/OwlPay)
+  ↓
+[OwlPay Harbor]
+  │ Detecta USDC on-chain
+  │ IPN: transfer.source_received → status: payout_sent
+  │ Entrega CNY/NGN al beneficiario
+  │ IPN: transfer.completed → status: completed
+  ↓
+[Usuario]
+  Recibe push "¡Dinero entregado! ✓" + email
+```
+
+**Corredores activos:** bo-cn (CNY), bo-ng (NGN)
+
+**Estado sendUSDCToHarbor:**
+- `OWLPAY_USDC_SEND_ENABLED=0` → modo manual (admin recibe email con instrucción)
+- `OWLPAY_USDC_SEND_ENABLED=1` → automático (activar cuando Sam confirme chain)
+
+**Corredores pendientes Harbor:** bo-au (AUD), bo-gb (GBP),
+bo-jp (JPY Q1 2026), bo-sg (SGD Q1 2026), bo-za (ZAR),
+bo-ae-srl (AED Q1 2026)
+
+---
+
+#### Flujo C — CLP → BOB via AV Finance SRL (anchor completo)
+
+```
+[Usuario Chile — SpA]
+  │ Paga CLP via Fintoc → status: payin_pending
+  ↓
+[Fintoc IPN]
+  │ Confirma pago → status: payin_confirmed
+  ↓
+[dispatchPayout()]
+  │ payoutMethod === 'anchorBolivia' → PARA
+  │ No llama a ningún proveedor externo
+  │ Envía email a admin: adminBoliviaAlert
+  ↓
+[Admin — Manual]
+  │ Recibe email con datos del beneficiario en Bolivia
+  │ Ejecuta transferencia bancaria BOB al beneficiario
+  │ Confirma en Ledger → status: completed
+  ↓
+[Usuario]
+  Recibe push "¡Dinero entregado! ✓" + email
+```
+
+**Corredor:** cl-bo (SpA, CLP → BOB)
+**Liquidez BOB:** AV Finance SRL mantiene saldo en cuentas bolivianas
+**Nota:** Este es el único flujo donde AV Finance SRL ejecuta
+el pago final en Bolivia.
+
+---
+
+### Modelo de liquidez USDC (Tesorería SRL)
+
+```
+ENTRADA DE USDC:
+  Admin compra USDT/USDC en Binance P2P con BOB recibido
+  → Transfiere USDC a STELLAR_SRL_PUBLIC_KEY
+  → Registra FundingRecord en sistema (tipo: binance_p2p)
+  → Status: confirmed → saldo disponible aumenta
+
+SALIDA DE USDC:
+  dispatchPayout() → sendUSDCToHarbor() → USDC sale de wallet Stellar SRL
+  → FundingRecord comprometido (in-flight tracking)
+  → Harbor confirma → saldo disponible reduce definitivamente
+
+PRE-CHECK EN PAYOUT:
+  FundingRecord.getAvailableUSDC('SRL') >= transaction.digitalAssetAmount
+  Si insuficiente → status: pending_funding + email admin
+```
+
+**Modelos involucrados:**
+- `FundingRecord.js` — registro de entradas de liquidez
+- `WalletUSDC.js` — saldo USDC por usuario (conversiones BOB→USDC)
+- `ExchangeRate.js` — tasa BOB/USDT (actualizada manualmente vía admin)
+
+---
+
+### Estado de corredores SRL — Abril 2026
+
+| Estado | Provider | Count | Corredores |
+|--------|----------|-------|------------|
+| 🟢 Activo | Vita Wallet | 21 | bo-ar, bo-br, bo-ca, bo-cl, bo-co, bo-cr, bo-do, bo-ec, bo-es, bo-gt, bo-hk, bo-ht, bo-mx, bo-pa, bo-pe, bo-pl, bo-py, bo-sv, bo-us, bo-uy, bo-ve |
+| 🟢 Activo | OwlPay Harbor | 2 | bo-cn, bo-ng |
+| 🔻 Inactivo | OwlPay Harbor | 7 | bo-au, bo-gb, bo-jp, bo-sg, bo-za, bo-ae-srl, bo-eu-srl |
+| 🔻 Inactivo | OwlPay Harbor | 1 | bo-us-owlpay (LLC launch) |
+| 🔻 Inactivo | OwlPay Harbor | 2 | bo-cn-srl, bo-gb-srl (duplicados) |
+| **Total** | | **33** | |
+
+---
+
+### Entidades legales y responsabilidades
+
+| Entidad | País | Rol en el modelo anchor |
+|---------|------|------------------------|
+| AV Finance SRL | Bolivia | Anchor BOB — recibe y custodia BOB, opera corredores bo-* |
+| AV Finance SpA | Chile | Opera corredores cl-*, recibe CLP vía Fintoc |
+| AV Finance LLC | Delaware, EEUU | Opera corredores us-*, recibe USD vía Vita/OwlPay |
+
+**Regulación aplicable a SRL:**
+- ASFI Bolivia — PSAV en trámite (Circular 2/2022)
+- UAF Bolivia — reporte de operaciones sospechosas
+- Límites de transacción configurables en TransactionConfig
+
+---
+
+### Variables de entorno críticas para el modelo anchor SRL
+
+```env
+# Stellar wallet SRL (custodio de USDC)
+STELLAR_SRL_SECRET_KEY=      # nunca commitear
+STELLAR_SRL_PUBLIC_KEY=      # dirección pública Stellar SRL
+
+# OwlPay Harbor
+OWLPAY_API_KEY=              # Default Key (producción)
+OWLPAY_BASE_URL=             # sandbox: harbor-sandbox.owlpay.com/api
+                             # prod:    harbor-api.owlpay.com/api
+OWLPAY_WEBHOOK_SECRET=       # para verificar harbor-signature
+OWLPAY_CUSTOMER_UUID_SRL=    # UUID del customer AV Finance SRL en Harbor
+OWLPAY_USDC_SEND_ENABLED=0   # 0=manual, 1=automático (activar post Sam)
+OWLPAY_SOURCE_CHAIN=stellar  # chain fuente USDC (pendiente confirmación Sam)
+
+# Tipo de cambio BOB
+# Actualizar manualmente via admin panel o ExchangeRate model
+# Fallback: 9.31 BOB/USDT (NO usar en producción sin actualizar)
+```
+
+---
+
+### Decisiones arquitecturales registradas
+
+| Fecha | Decisión | Razón |
+|-------|----------|-------|
+| 2026-01 | USD como pivot currency real (no USDC/USDT) | USDC en Stellar es solo audit trail; Vita maneja USD internamente |
+| 2026-02 | Modelo no-custodial Web3/SaaS | AV Finance nunca toca fondos del usuario directamente |
+| 2026-03 | anchorBolivia para cl-bo | Bolivia no tiene infraestructura bancaria conectada a redes internacionales automáticas |
+| 2026-04 | OwlPay Harbor v2 para CNY/NGN | Vita no cubre China ni Nigeria; Harbor tiene rails locales directos |
+| 2026-04 | OWLPAY_USDC_SEND_ENABLED=0 | sendUSDCToHarbor pendiente confirmación chain con Sam (Stellar vs ETH) |
