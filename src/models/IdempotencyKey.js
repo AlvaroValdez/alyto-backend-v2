@@ -16,7 +16,6 @@ const idempotencyKeySchema = new mongoose.Schema({
     type:     String,
     required: true,
     unique:   true,
-    index:    true,
   },
   userId: {
     type:     mongoose.Schema.Types.ObjectId,

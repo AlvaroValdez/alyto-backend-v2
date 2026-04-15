@@ -196,7 +196,9 @@ const businessProfileSchema = new Schema(
 
 // ─── Índices ──────────────────────────────────────────────────────────────────
 
-businessProfileSchema.index({ businessId: 1 });
+// Nota: businessId y userId tienen `unique: true` en el campo, lo que ya crea
+// índices implícitos. No los redeclaramos aquí para evitar el warning de Mongoose
+// "Duplicate schema index".
 businessProfileSchema.index({ kybStatus: 1 });
 businessProfileSchema.index({ countryOfIncorporation: 1 });
 

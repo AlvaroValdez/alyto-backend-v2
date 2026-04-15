@@ -15,7 +15,6 @@ const sanctionsListSchema = new mongoose.Schema({
     type:    String,
     default: () => `SCN-${Date.now()}`,
     unique:  true,
-    index:   true,
   },
   type: {
     type:     String,
