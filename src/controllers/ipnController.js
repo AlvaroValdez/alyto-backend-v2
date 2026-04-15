@@ -31,11 +31,18 @@ import {
   VITA_SENT_ONLY_COUNTRIES,
   getPrices,
 } from '../services/vitaWalletService.js';
-import { createDisbursement, verifyOwlPayWebhookSignature } from '../services/owlPayService.js';
+import {
+  verifyOwlPayWebhookSignature,
+  getHarborQuote,
+  createHarborTransfer,
+  getCustomerUuid,
+  sendUSDCToHarbor,
+} from '../services/owlPayService.js';
+import FundingRecord from '../models/FundingRecord.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
-import { sendEmail, EMAILS } from '../services/email.js';
+import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { getBOBRate }        from '../services/exchangeRateService.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -309,6 +316,166 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
   return { usdcAmount, bobPerUsdc };
 }
 
+// ─── tryOwlPayV2 — Harbor off-ramp v2 (SRL/LLC) ─────────────────────────────
+
+/**
+ * Flujo off-ramp OwlPay Harbor v2: USDC → fiat local.
+ *
+ *   1. Asegura conversión BOB→USDC si corridor.originCurrency === 'BOB'.
+ *   2. Pre-check de liquidez USDC en la treasury de la entidad.
+ *   3. getHarborQuote → createHarborTransfer (obtiene instruction_address).
+ *   4. Envía USDC automáticamente (si OWLPAY_USDC_SEND_ENABLED=1) o alerta al admin.
+ *
+ * Estados que puede dejar en la transacción:
+ *   pending_funding            — liquidez USDC insuficiente
+ *   payout_pending_usdc_send   — Harbor transfer creado, falta enviar USDC
+ *   payout_in_transit          — USDC enviado, esperando Harbor
+ *
+ * @param {object} transaction — Documento Mongoose
+ * @param {object} corridor    — TransactionConfig lean
+ */
+async function tryOwlPayV2(transaction, corridor) {
+  const entity = transaction.legalEntity ?? corridor?.legalEntity;
+
+  // ── 1. Conversión BOB→USDC si aplica (replica lógica de la rama común) ──
+  const netAmountNative = resolveNetAmountForPayout(transaction);
+  let usdcAmount = netAmountNative;
+
+  if (corridor.originCurrency === 'BOB') {
+    if (transaction.digitalAssetAmount > 0) {
+      usdcAmount = transaction.digitalAssetAmount;
+    } else {
+      const conv = await convertBobToUsdc(netAmountNative, corridor);
+      usdcAmount = conv.usdcAmount;
+      transaction.conversionRate = {
+        fromCurrency:    'BOB',
+        toCurrency:      'USDC',
+        rate:            conv.bobPerUsdc,
+        convertedAmount: usdcAmount,
+      };
+      transaction.digitalAsset       = 'USDC';
+      transaction.digitalAssetAmount = usdcAmount;
+      await transaction.save().catch(() => {});
+    }
+  }
+
+  if (!usdcAmount || usdcAmount <= 0) {
+    throw new Error(`Monto USDC inválido para Harbor transfer: ${usdcAmount}`);
+  }
+
+  // ── 2. Pre-check liquidez USDC en tesorería ───────────────────────────────
+  const availableUSDC = await FundingRecord.getAvailableUSDC(entity);
+  if (availableUSDC < usdcAmount) {
+    transaction.status        = 'pending_funding';
+    transaction.failureReason = `Liquidez USDC insuficiente (${entity}): disponible ${availableUSDC.toFixed(2)}, requerido ${usdcAmount.toFixed(2)}`;
+    await appendIpnLog(transaction, 'payout_pending_funding', 'owlPay', 'pending_funding', {
+      entity, available: availableUSDC, required: usdcAmount,
+    });
+
+    try {
+      await sendRawEmail(
+        process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+        `⚠️ USDC Liquidez Insuficiente — ${transaction.alytoTransactionId}`,
+        `<p>Transaction <strong>${transaction.alytoTransactionId}</strong> requiere <strong>${usdcAmount.toFixed(2)} USDC</strong>, pero solo hay <strong>${availableUSDC.toFixed(2)} USDC</strong> disponibles para ${entity}.</p><p>Registra un FundingRecord para liberar el payout.</p>`,
+      );
+    } catch (e) { console.error('[tryOwlPayV2] Error email admin (pending_funding):', e.message); }
+
+    return { success: false, reason: 'pending_funding' };
+  }
+
+  // ── 3. Harbor quote + transfer ────────────────────────────────────────────
+  const customerUuid = getCustomerUuid(entity);
+  const beneficiary  = transaction.beneficiary ?? transaction.beneficiaryDetails ?? {};
+
+  const quote = await getHarborQuote({
+    sourceAmount:      usdcAmount,
+    sourceCurrency:    'USDC',
+    sourceChain:       process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+    destCountry:       corridor.destinationCountry,
+    destCurrency:      corridor.destinationCurrency,
+    customerUuid,
+    commissionPercent: corridor.alytoCSpread ?? 0.5,
+  });
+
+  const sourceAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? process.env.STELLAR_LLC_PUBLIC_KEY;
+
+  const transfer = await createHarborTransfer({
+    quoteId:            quote.quoteId,
+    customerUuid,
+    alytoTransactionId: transaction.alytoTransactionId,
+    sourceAddress,
+    beneficiary,
+    destCountry:        corridor.destinationCountry,
+    destCurrency:       corridor.destinationCurrency,
+  });
+
+  // ── 4. Persistir detalles del transfer ────────────────────────────────────
+  transaction.payoutReference = transfer.harborTransferId;
+  transaction.harborTransfer  = {
+    transferId:         transfer.harborTransferId,
+    instructionAddress: transfer.instructionAddress,
+    instructionMemo:    transfer.instructionMemo,
+    instructionChain:   transfer.instructionChain,
+    usdcAmountRequired: transfer.sourceAmount,
+    expiresAt:          transfer.expiresAt,
+    quoteId:            quote.quoteId,
+    status:             transfer.status,
+  };
+  transaction.status          = 'payout_pending_usdc_send';
+  transaction.providersUsed   = [...(transaction.providersUsed ?? []), 'payout:owlPay-v2'];
+  await transaction.save();
+
+  await appendIpnLog(transaction, 'harbor_transfer_created', 'owlPay', 'payout_pending_usdc_send', {
+    harborTransferId:   transfer.harborTransferId,
+    quoteId:            quote.quoteId,
+    usdcAmountRequired: transfer.sourceAmount,
+    destinationAmount:  transfer.destinationAmount,
+    expiresAt:          transfer.expiresAt,
+  });
+
+  // ── 5. Enviar USDC a la instruction_address (o alertar al admin) ──────────
+  if (process.env.OWLPAY_USDC_SEND_ENABLED === '1') {
+    try {
+      await sendUSDCToHarbor({
+        instructionAddress: transfer.instructionAddress,
+        instructionMemo:    transfer.instructionMemo,
+        instructionChain:   transfer.instructionChain,
+        amount:             transfer.sourceAmount,
+        alytoTransactionId: transaction.alytoTransactionId,
+      });
+      transaction.status = 'payout_in_transit';
+      await transaction.save();
+      await appendIpnLog(transaction, 'usdc_sent_to_harbor', 'owlPay', 'payout_in_transit', {
+        amount: transfer.sourceAmount, to: transfer.instructionAddress,
+      });
+    } catch (sendErr) {
+      console.error('[tryOwlPayV2] sendUSDCToHarbor falló — alertando admin:', sendErr.message);
+      Sentry.captureException(sendErr, {
+        tags:  { component: 'tryOwlPayV2', step: 'sendUSDCToHarbor' },
+        extra: { transactionId: transaction.alytoTransactionId },
+      });
+      try {
+        await sendRawEmail(...EMAILS.adminUSDCSendRequired({ transaction, transfer, quote }));
+      } catch (e) { console.error('[tryOwlPayV2] Error email admin (send fallido):', e.message); }
+    }
+  } else {
+    console.log(
+      `[OwlPay] MANUAL USDC SEND REQUIRED:\n` +
+      `  Transaction: ${transaction.alytoTransactionId}\n` +
+      `  Send: ${transfer.sourceAmount} USDC\n` +
+      `  To: ${transfer.instructionAddress}\n` +
+      `  Memo: ${transfer.instructionMemo ?? 'none'}\n` +
+      `  Chain: ${transfer.instructionChain}\n` +
+      `  Expires: ${transfer.expiresAt}`,
+    );
+    try {
+      await sendRawEmail(...EMAILS.adminUSDCSendRequired({ transaction, transfer, quote }));
+    } catch (e) { console.error('[tryOwlPayV2] Error email admin (manual send):', e.message); }
+  }
+
+  return { success: true, transferId: transfer.harborTransferId };
+}
+
 // ─── dispatchPayout ───────────────────────────────────────────────────────────
 
 /**
@@ -371,6 +538,36 @@ export async function dispatchPayout(transaction) {
     destinationCountry: transaction.destinationCountry,
     originCurrency:     transaction.originCurrency,
   });
+
+  // ── Ruta v2: OwlPay Harbor off-ramp (SRL/LLC) ─────────────────────────────
+  if (payoutMethod === 'owlPay' && ['SRL', 'LLC'].includes(transaction.legalEntity)) {
+    try {
+      await tryOwlPayV2(transaction, corridor);
+    } catch (err) {
+      console.error('[Alyto Payout] tryOwlPayV2 falló:', {
+        transactionId: transaction.alytoTransactionId,
+        error:         err.message,
+      });
+      Sentry.captureException(err, {
+        tags:  { component: 'dispatchPayout', provider: 'owlPay-v2' },
+        extra: { transactionId: transaction.alytoTransactionId },
+      });
+
+      transaction.status        = 'failed';
+      transaction.failureReason = `OwlPay Harbor v2: ${err.message}`;
+      await appendIpnLog(transaction, 'owlpay_v2_failed', 'owlPay', 'failed', { error: err.message });
+
+      try {
+        await notify(transaction.userId,
+          NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
+      } catch (e) { console.error('[Email] Error push failed (owlPay v2):', e.message); }
+      try {
+        const user = await User.findById(transaction.userId).lean();
+        if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
+      } catch (e) { console.error('[Email] Error failed (owlPay v2):', e.message); }
+    }
+    return;
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // ── vitaWallet | owlPay: ambos proveedores bancarios con lógica común ────
@@ -470,16 +667,10 @@ export async function dispatchPayout(transaction) {
         return createPayout(vitaPayload);
       }
       if (method === 'owlPay') {
-        return createDisbursement({
-          amount:              payoutAmountUSD,
-          destinationCountry:  transaction.destinationCountry,
-          destinationCurrency: transaction.destinationCurrency,
-          beneficiary:         beneficiaryFlat,
-          alytoTransactionId:  transaction.alytoTransactionId,
-          userId:              transaction.userId,
-          legalEntity:         transaction.legalEntity ?? corridor?.legalEntity,
-          corridorCode:        corridor?.corridorId ?? transaction.corridorId,
-        });
+        // Harbor v2 off-ramp se maneja antes de tryProvider via tryOwlPayV2.
+        // Si caemos aquí, el corredor no califica para v2 (ej. entidad no es SRL/LLC)
+        // o se activó como fallback — en ese caso, no hay flujo v1 disponible.
+        throw new Error('OwlPay v1 disbursement descontinuado. Usa OwlPay Harbor v2 (SRL/LLC).');
       }
       throw new Error(`Proveedor desconocido: ${method}`);
     }
@@ -1123,8 +1314,6 @@ export async function handleFintocIPN(req, res) {
  */
 export async function handleOwlPayIPN(req, res) {
   // ── 1. Verificar firma HMAC-SHA256 ────────────────────────────────────────
-  // Harbor envía 'harbor-signature'. Aceptamos también 'x-owlpay-signature'
-  // por compatibilidad con integraciones previas durante la transición.
   const signature = req.headers['harbor-signature'] ?? req.headers['x-owlpay-signature'];
   const rawBody   = req.rawBody ?? JSON.stringify(req.body);
 
@@ -1132,51 +1321,93 @@ export async function handleOwlPayIPN(req, res) {
     console.warn('[OwlPay IPN] Missing signature header from IP:', req.ip);
     return res.status(401).json({ error: 'Missing signature' });
   }
-
   if (!verifyOwlPayWebhookSignature(rawBody, signature)) {
     console.warn('[OwlPay IPN] Invalid signature from IP:', req.ip);
-    // Do not log or capture the body — it is unauthenticated attacker-controlled data
     return res.status(401).json({ error: 'Firma inválida.' });
   }
 
-  const { event, data } = req.body;
-  const disbursementId     = data?.id ?? data?.disbursement_id;
-  const disbursementStatus = data?.status;
+  const { event, data } = req.body ?? {};
+  const isV2      = typeof event === 'string' && event.startsWith('transfer.');
+  const isV1      = typeof event === 'string' && event.startsWith('disbursement.');
+  const eventKind = isV2 ? 'v2' : isV1 ? 'v1' : 'unknown';
 
-  console.info('[Alyto IPN/OwlPay] Webhook recibido.', { event, disbursementId, disbursementStatus });
+  const transferId            = data?.id ?? data?.transfer_id ?? data?.uuid;
+  const applicationTransferId = data?.application_transfer_uuid ?? data?.applicationTransferUuid;
+  const disbursementId        = data?.id ?? data?.disbursement_id;
+  const status                = data?.status;
+  const failureReason         = data?.failure_reason ?? data?.failureReason;
 
-  // ── 2. Buscar transacción por payoutReference ─────────────────────────────
+  console.info('[Alyto IPN/OwlPay] Webhook recibido.', {
+    event, kind: eventKind, transferId, applicationTransferId, disbursementId, status,
+  });
+
+  // ── 2. Buscar transacción ────────────────────────────────────────────────
   let transaction;
   try {
-    transaction = await Transaction.findOne({ payoutReference: disbursementId });
+    if (isV2) {
+      if (applicationTransferId) {
+        transaction = await Transaction.findOne({ alytoTransactionId: applicationTransferId });
+      }
+      if (!transaction && transferId) {
+        transaction = await Transaction.findOne({
+          $or: [
+            { payoutReference: transferId },
+            { 'harborTransfer.transferId': transferId },
+          ],
+        });
+      }
+    } else {
+      // v1 (legacy) o unknown
+      transaction = await Transaction.findOne({ payoutReference: disbursementId ?? transferId });
+    }
   } catch (err) {
-    console.error('[Alyto IPN/OwlPay] Error buscando transacción:', {
-      disbursementId,
-      error: err.message,
-    });
+    console.error('[Alyto IPN/OwlPay] Error buscando transacción:', { transferId, error: err.message });
     return res.status(200).json({ received: true });
   }
 
   if (!transaction) {
-    console.warn('[Alyto IPN/OwlPay] Transacción no encontrada para disbursementId:', disbursementId);
+    console.warn('[Alyto IPN/OwlPay] Transacción no encontrada.', {
+      event, transferId, applicationTransferId, disbursementId,
+    });
     return res.status(200).json({ received: true });
   }
 
-  // ── 3. Registrar webhook en ipnLog ────────────────────────────────────────
-  await appendIpnLog(transaction, 'owlpay_webhook_received', 'owlPay', disbursementStatus, req.body);
+  await appendIpnLog(transaction, 'owlpay_webhook_received', 'owlPay', status, req.body);
 
   try {
-    // ── Caso A: desembolso completado ─────────────────────────────────────
-    if (disbursementStatus === 'completed' && transaction.status === 'payout_sent') {
+    // ═══════════════════════════════════════════════════════════════════════
+    // v2: transfer.source_received — Harbor recibió el USDC en la instruction address
+    // ═══════════════════════════════════════════════════════════════════════
+    if (event === 'transfer.source_received') {
+      transaction.status = 'payout_sent';
+      if (transaction.harborTransfer) transaction.harborTransfer.status = status ?? 'source_received';
+      await transaction.save();
+
+      await appendIpnLog(transaction, 'harbor_source_received', 'owlPay', 'payout_sent', req.body);
+
+      try {
+        await notify(transaction.userId, {
+          title: 'Pago en proceso',
+          body:  'Recibimos los fondos en nuestra plataforma de liquidación. El beneficiario recibirá el pago pronto.',
+          data:  { type: 'payout_sent' },
+        });
+      } catch (e) { console.error('[OwlPay IPN] Error push source_received:', e.message); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v2: transfer.completed — Harbor desembolsó el fiat al beneficiario
+    // legacy v1: disbursement.completed
+    // ═══════════════════════════════════════════════════════════════════════
+    else if (event === 'transfer.completed' || event === 'disbursement.completed') {
       transaction.status      = 'completed';
       transaction.completedAt = new Date();
+      if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';
       await transaction.save();
 
       await appendIpnLog(transaction, 'payout_completed', 'owlPay', 'completed', req.body);
 
-      console.info('[Alyto IPN/OwlPay] Payout completado — transacción finalizada. ✅', {
-        transactionId: transaction.alytoTransactionId,
-        disbursementId,
+      console.info('[Alyto IPN/OwlPay] Payout completado. ✅', {
+        transactionId: transaction.alytoTransactionId, event,
       });
 
       // Stellar audit trail (best-effort)
@@ -1197,80 +1428,100 @@ export async function handleOwlPayIPN(req, res) {
             },
             receivedAt: new Date(),
           });
-          await transaction.save().catch(err =>
-            console.error('[Alyto IPN/OwlPay] Error guardando stellarTxId:', err.message),
-          );
-          console.log('[Stellar] ✅ Audit trail registrado (OwlPay):', stellarTxId);
+          await transaction.save().catch(e =>
+            console.error('[OwlPay IPN] Error guardando stellarTxId:', e.message));
         }
       } catch (stellarErr) {
-        console.error('[Alyto IPN/OwlPay] Error Stellar audit:', stellarErr.message);
+        console.error('[OwlPay IPN] Error Stellar audit:', stellarErr.message);
       }
 
-      // Push notification
       try {
-        await notify(
-          transaction.userId,
-          NOTIFICATIONS.paymentCompleted(
-            transaction.originalAmount,
-            transaction.originCurrency,
-            transaction.destinationAmount,
-            transaction.destinationCurrency,
-          ),
-        );
-      } catch (notifErr) {
-        console.error('[Alyto IPN/OwlPay] Error push payment_completed:', notifErr.message);
-      }
+        await notify(transaction.userId, NOTIFICATIONS.paymentCompleted(
+          transaction.originalAmount, transaction.originCurrency,
+          transaction.destinationAmount, transaction.destinationCurrency,
+        ));
+      } catch (e) { console.error('[OwlPay IPN] Error push completed:', e.message); }
 
-      // Email transaccional
       try {
         const user = await User.findById(transaction.userId).lean();
-        if (user?.email) {
-          await sendEmail(...EMAILS.paymentCompleted(user, transaction));
-          console.log(`[Email] ✅ Completado (OwlPay) → userId=${user._id}`);
-        }
-      } catch (emailErr) {
-        console.error('[Email] Error completado (OwlPay):', emailErr.message);
-      }
+        if (user?.email) await sendEmail(...EMAILS.paymentCompleted(user, transaction));
+      } catch (e) { console.error('[OwlPay IPN] Error email completed:', e.message); }
+    }
 
-    // ── Caso B: desembolso fallido ────────────────────────────────────────
-    } else if (disbursementStatus === 'failed' && transaction.status === 'payout_sent') {
+    // ═══════════════════════════════════════════════════════════════════════
+    // v2: transfer.failed / legacy disbursement.failed
+    // ═══════════════════════════════════════════════════════════════════════
+    else if (event === 'transfer.failed' || event === 'disbursement.failed') {
       transaction.status        = 'failed';
-      transaction.failureReason = `Payout OwlPay denegado: ${data?.failure_reason ?? 'Sin detalle'}`;
+      transaction.failureReason = `Harbor transfer failed: ${failureReason ?? 'Sin detalle'}`;
+      if (transaction.harborTransfer) transaction.harborTransfer.status = 'failed';
       await transaction.save();
 
       await appendIpnLog(transaction, 'payout_failed', 'owlPay', 'failed', req.body);
 
-      console.error('[Alyto IPN/OwlPay] Payout denegado — requiere revisión manual.', {
-        transactionId: transaction.alytoTransactionId,
-        disbursementId,
-        failureReason: data?.failure_reason,
+      console.error('[Alyto IPN/OwlPay] Transfer fallido — requiere revisión manual.', {
+        transactionId: transaction.alytoTransactionId, failureReason,
       });
 
       notifyAdminManualPayout(transaction).catch(() => {});
 
       try {
-        await notify(
-          transaction.userId,
-          NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
-        );
-      } catch (notifErr) {
-        console.error('[Alyto IPN/OwlPay] Error push payment_failed:', notifErr.message);
-      }
+        await notify(transaction.userId,
+          NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
+      } catch (e) { console.error('[OwlPay IPN] Error push failed:', e.message); }
 
       try {
         const user = await User.findById(transaction.userId).lean();
         if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
-      } catch (emailErr) {
-        console.error('[Email] Error fallido (OwlPay):', emailErr.message);
-      }
+      } catch (e) { console.error('[OwlPay IPN] Error email failed:', e.message); }
+    }
 
-    } else {
-      // Evento no accionable en el estado actual (ej. duplicado o estado inesperado)
-      console.info('[Alyto IPN/OwlPay] Evento no accionable — ignorando.', {
-        transactionId:   transaction.alytoTransactionId,
-        currentStatus:   transaction.status,
-        disbursementStatus,
-        event,
+    // ═══════════════════════════════════════════════════════════════════════
+    // v2: transfer.expired — el USDC no se envió antes del deadline
+    // ═══════════════════════════════════════════════════════════════════════
+    else if (event === 'transfer.expired') {
+      transaction.status        = 'failed';
+      transaction.failureReason = 'Harbor transfer expired — USDC not sent in time';
+      if (transaction.harborTransfer) transaction.harborTransfer.status = 'expired';
+      await transaction.save();
+
+      await appendIpnLog(transaction, 'harbor_transfer_expired', 'owlPay', 'failed', req.body);
+
+      console.error('[Alyto IPN/OwlPay] ⚠️ Harbor transfer EXPIRED', {
+        transactionId: transaction.alytoTransactionId,
+        expiresAt:     transaction.harborTransfer?.expiresAt,
+      });
+
+      // Alertar al admin — se requiere refund manual al usuario
+      try {
+        await sendRawEmail(
+          process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+          `⚠️ Transfer EXPIRED — ${transaction.alytoTransactionId}`,
+          `<p>Harbor transfer <strong>${transaction.harborTransfer?.transferId ?? transferId}</strong> expiró antes de que enviáramos USDC.</p>` +
+          `<p>El deadline era <strong>${transaction.harborTransfer?.expiresAt ?? '—'}</strong>.</p>` +
+          `<p><strong>Acción requerida:</strong> refund manual al usuario ${transaction.userId} por ${transaction.originalAmount} ${transaction.originCurrency}.</p>`,
+        );
+      } catch (e) { console.error('[OwlPay IPN] Error email admin (expired):', e.message); }
+
+      try {
+        await notify(transaction.userId,
+          NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency));
+      } catch (e) { console.error('[OwlPay IPN] Error push expired:', e.message); }
+
+      try {
+        const user = await User.findById(transaction.userId).lean();
+        if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
+      } catch (e) { console.error('[OwlPay IPN] Error email expired:', e.message); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Otros eventos (informativos, duplicados, etc.)
+    // ═══════════════════════════════════════════════════════════════════════
+    else {
+      console.info('[Alyto IPN/OwlPay] Evento no accionable.', {
+        transactionId: transaction.alytoTransactionId,
+        currentStatus: transaction.status,
+        event, status,
       });
     }
   } catch (err) {
@@ -1280,7 +1531,7 @@ export async function handleOwlPayIPN(req, res) {
     });
     Sentry.captureException(err, {
       tags:  { component: 'handleOwlPayIPN' },
-      extra: { transactionId: transaction?.alytoTransactionId, disbursementId },
+      extra: { transactionId: transaction?.alytoTransactionId, event, transferId },
     });
   }
 

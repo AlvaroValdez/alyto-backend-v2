@@ -171,6 +171,41 @@ const fundingRecordSchema = new Schema(
 fundingRecordSchema.index({ entity: 1, asset: 1, status: 1 });
 fundingRecordSchema.index({ createdAt: -1 });
 
+/**
+ * Devuelve el USDC disponible para payouts de una entidad legal:
+ *   disponible = sum(FundingRecord.amount confirmado USDC)
+ *                - sum(Transaction.digitalAssetAmount en vuelo para esa entidad)
+ *
+ * Transacciones "en vuelo" consumen liquidez hasta que Harbor confirma o falla:
+ *   payout_pending_usdc_send, payout_in_transit, payout_sent
+ *
+ * @param {'LLC'|'SpA'|'SRL'} entity
+ * @returns {Promise<number>} USDC disponible (>= 0)
+ */
+fundingRecordSchema.statics.getAvailableUSDC = async function (entity) {
+  if (!entity) return 0;
+
+  const [inflowAgg, outflowAgg] = await Promise.all([
+    this.aggregate([
+      { $match: { entity, asset: 'USDC', status: 'confirmed' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+    mongoose.model('Transaction').aggregate([
+      {
+        $match: {
+          legalEntity: entity,
+          status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
+        },
+      },
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
+    ]),
+  ]);
+
+  const inflow  = inflowAgg[0]?.total  ?? 0;
+  const outflow = outflowAgg[0]?.total ?? 0;
+  return Math.max(0, inflow - outflow);
+};
+
 const FundingRecord = mongoose.model('FundingRecord', fundingRecordSchema);
 
 export default FundingRecord;

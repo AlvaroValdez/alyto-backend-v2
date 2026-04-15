@@ -1,28 +1,49 @@
 /**
- * owlPayProvider.js — On-ramp Institucional Escenario A (AV Finance LLC)
- * Puente fiat → USDC sobre Stellar. Ver OWLPAY_API_KEY en .env
+ * owlPayProvider.js — OwlPay Harbor v2 off-ramp (SRL/LLC)
+ * Puente USDC → fiat local vía Harbor. Ver OWLPAY_API_KEY en .env
  * Docs: https://harbor-developers.owlpay.com/docs/overview
  *
- * Delegación: la lógica real vive en services/owlPayService.js. Este provider
- * solo adapta la interfaz del registry al contrato del servicio.
+ * Esta clase es thin-wrapper del nuevo flujo v2: getHarborQuote →
+ * createHarborTransfer. El envío de USDC a la instruction_address se delega
+ * al dispatchPayout de ipnController (que controla el OWLPAY_USDC_SEND_ENABLED
+ * flag). Este provider se mantiene por si el registry necesita invocar
+ * Harbor fuera del dispatcher principal.
  */
-import { createDisbursement } from '../../services/owlPayService.js';
+import {
+  getHarborQuote,
+  createHarborTransfer,
+  getCustomerUuid,
+} from '../../services/owlPayService.js';
 
 export default {
   id:    'owlPay',
   stage: 'transit',
 
   async execute(transaction, corridor) {
-    return createDisbursement({
-      amount:              transaction.originAmount,
-      legalEntity:         transaction.legalEntity ?? corridor?.legalEntity,
-      corridorCode:        transaction.corridorId ?? corridor?.corridorId,
-      alytoTransactionId:  transaction.alytoTransactionId,
-      userId:              transaction.userId,
-      beneficiary:         transaction.beneficiaryDetails ?? transaction.beneficiary,
-      destinationCountry:  corridor?.destinationCountry  ?? transaction.destinationCountry,
-      destinationCurrency: corridor?.destinationCurrency ?? transaction.destinationCurrency,
+    const entity       = transaction.legalEntity ?? corridor?.legalEntity;
+    const customerUuid = getCustomerUuid(entity);
+
+    const quote = await getHarborQuote({
+      sourceAmount:      transaction.digitalAssetAmount ?? transaction.originAmount,
+      sourceCurrency:    'USDC',
+      sourceChain:       process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+      destCountry:       corridor?.destinationCountry  ?? transaction.destinationCountry,
+      destCurrency:      corridor?.destinationCurrency ?? transaction.destinationCurrency,
+      customerUuid,
+      commissionPercent: corridor?.alytoCSpread ?? 0.5,
     });
+
+    const transfer = await createHarborTransfer({
+      quoteId:            quote.quoteId,
+      customerUuid,
+      alytoTransactionId: transaction.alytoTransactionId,
+      sourceAddress:      process.env.STELLAR_SRL_PUBLIC_KEY ?? process.env.STELLAR_LLC_PUBLIC_KEY,
+      beneficiary:        transaction.beneficiaryDetails ?? transaction.beneficiary,
+      destCountry:        corridor?.destinationCountry  ?? transaction.destinationCountry,
+      destCurrency:       corridor?.destinationCurrency ?? transaction.destinationCurrency,
+    });
+
+    return { quote, transfer };
   },
 
   async healthCheck() {
