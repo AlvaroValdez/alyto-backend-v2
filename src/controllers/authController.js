@@ -17,7 +17,7 @@ import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
-import { sendEmail, EMAILS }  from '../services/email.js';
+import { sendEmail, EMAILS, sendWelcomeEmail } from '../services/email.js';
 import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
@@ -174,10 +174,13 @@ export async function registerUser(req, res) {
 
     console.info(`[Auth] Registro exitoso — userId: ${user._id} entity: ${legalEntity}`);
 
-    // Welcome email — fire-and-forget (no bloquear respuesta de registro)
+    // Welcome email — fire-and-forget (no bloquear respuesta de registro).
+    // sendWelcomeEmail usa SendGrid Dynamic Template si SENDGRID_TEMPLATE_WELCOME
+    // está configurado; si no, envía HTML inline (fallback).
+    console.log('[Auth] Sending welcome email to:', user.email);
     setImmediate(() => {
-      sendEmail(...EMAILS.welcome(user))
-        .catch(err => console.error('[Auth] Error enviando welcome email:', err.message));
+      sendWelcomeEmail(user)
+        .catch(err => console.error('[Auth] Error enviando welcome email:', err.message, err.response?.body));
     });
 
     // Notificar a admins — push + in-app + email
@@ -190,9 +193,12 @@ export async function registerUser(req, res) {
       user: {
         id:          user._id,
         email:       user.email,
+        firstName:   user.firstName,
+        lastName:    user.lastName,
         legalEntity: user.legalEntity,
         kycStatus:   user.kycStatus,
         role:        user.role,
+        country:     user.residenceCountry,
       },
     });
 
