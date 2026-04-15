@@ -478,9 +478,33 @@ const transactionSchema = new Schema(
     // ── Estado Global de la Transacción ──────────────────────────────────────
     status: {
       type:    String,
-      enum:    ['pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed', 'processing', 'in_transit', 'payout_pending', 'payout_sent', 'completed', 'failed', 'refunded'],
+      enum:    [
+        'pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed',
+        'processing', 'in_transit', 'payout_pending', 'payout_sent',
+        'payout_pending_usdc_send', 'payout_in_transit', 'pending_funding',
+        'completed', 'failed', 'refunded',
+      ],
       default: 'pending',
       index:   true,
+    },
+
+    // ── Harbor off-ramp transfer (OwlPay v2) ──────────────────────────────────
+    /**
+     * Detalles del transfer Harbor creado para off-ramp USDC→fiat local.
+     * Rellenado por tryOwlPayV2() al crear el transfer.
+     * instructionAddress es la dirección a la que Alyto debe enviar USDC.
+     */
+    harborTransfer: {
+      type: new Schema({
+        transferId:         { type: String, trim: true },
+        instructionAddress: { type: String, trim: true },
+        instructionMemo:    { type: String, trim: true },
+        instructionChain:   { type: String, trim: true },
+        usdcAmountRequired: { type: Number },
+        expiresAt:          { type: Date },
+        quoteId:            { type: String, trim: true },
+        status:             { type: String, trim: true },
+      }, { _id: false }),
     },
     /** Mensaje de error si status = 'failed' */
     failureReason: {

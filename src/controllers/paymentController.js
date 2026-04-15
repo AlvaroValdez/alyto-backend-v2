@@ -52,6 +52,11 @@ import {
   createPayin,
   VITA_SENT_ONLY_COUNTRIES,
 }                              from '../services/vitaWalletService.js';
+import {
+  getHarborQuote,
+  getHarborTransferRequirements,
+  getCustomerUuid,
+}                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate }          from '../services/exchangeRateService.js';
@@ -467,6 +472,58 @@ function transformVitaField(f) {
  * Auth: Bearer JWT (protect middleware)
  * Params: countryCode — ISO alpha-2 mayúsculas (ej. CO, PE, AR)
  */
+/** Transforma un field del JSON Schema de Harbor al formato canónico del frontend */
+function transformHarborField(key, spec, requiredSet) {
+  if (!key || !spec) return null;
+
+  let type = 'text';
+  if (spec.enum && Array.isArray(spec.enum)) type = 'select';
+  else if (spec.format === 'email') type = 'email';
+  else if (spec.type === 'number' || spec.type === 'integer') type = 'text';
+
+  const options = Array.isArray(spec.enum)
+    ? spec.enum.map(v => ({ value: v, label: String(v) }))
+    : [];
+
+  return {
+    key,
+    label:       spec.title ?? spec.description ?? key,
+    type,
+    required:    requiredSet.has(key),
+    options,
+    min:         spec.minLength ?? spec.minimum ?? null,
+    max:         spec.maxLength ?? spec.maximum ?? null,
+    placeholder: spec.example ?? spec.pattern ?? '',
+    format:      spec.format   ?? null,
+    hint:        spec.description ?? null,
+    when:        null,
+  };
+}
+
+/** Aplana un JSON Schema anidado (payout_instrument, beneficiary_info) a un array de fields */
+function flattenHarborSchema(schema) {
+  if (!schema || typeof schema !== 'object') return [];
+
+  const fields = [];
+  const topRequired = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const props = schema.properties ?? {};
+
+  for (const [key, spec] of Object.entries(props)) {
+    if (spec?.type === 'object' && spec.properties) {
+      const nestedRequired = new Set(Array.isArray(spec.required) ? spec.required : []);
+      for (const [nkey, nspec] of Object.entries(spec.properties)) {
+        const field = transformHarborField(nkey, nspec, nestedRequired);
+        if (field) fields.push(field);
+      }
+    } else {
+      const field = transformHarborField(key, spec, topRequired);
+      if (field) fields.push(field);
+    }
+  }
+
+  return fields;
+}
+
 export async function getWithdrawalRulesController(req, res) {
   const countryCode = (req.params.countryCode ?? '').toUpperCase();
 
@@ -474,49 +531,93 @@ export async function getWithdrawalRulesController(req, res) {
     return res.status(400).json({ error: 'countryCode inválido. Usar ISO alpha-2 (ej. CO, PE).' });
   }
 
-  // ── 1. Revisar caché ──────────────────────────────────────────────────────
-  const cached = withdrawalRulesCache.get(countryCode);
-  if (cached && (Date.now() - cached.cachedAt) < RULES_CACHE_TTL_MS) {
-    return res.status(200).json(cached.rules);
+  // ── 1. Resolver corredor activo para (destCountry, legalEntity) ────────────
+  const legalEntity = req.user?.legalEntity ?? null;
+  let corridor = null;
+  try {
+    const query = { destinationCountry: countryCode, isActive: true };
+    if (legalEntity) query.legalEntity = legalEntity;
+    corridor = await TransactionConfig.findOne(query).lean();
+    if (!corridor && legalEntity) {
+      corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true }).lean();
+    }
+  } catch (err) {
+    console.warn('[Alyto WithdrawalRules] Error resolviendo corredor:', err.message);
   }
 
-  // ── 2. Obtener desde Vita ──────────────────────────────────────────────────
-  let rules;
+  const payoutMethod = corridor?.payoutMethod ?? 'vitaWallet';
+  const cacheKey     = `${countryCode}:${payoutMethod}`;
+
+  // ── 2. Revisar caché ───────────────────────────────────────────────────────
+  const cached = withdrawalRulesCache.get(cacheKey);
+  if (cached && (Date.now() - cached.cachedAt) < RULES_CACHE_TTL_MS) {
+    return res.status(200).json(cached.payload);
+  }
+
+  // ── 3a. Harbor (OwlPay) — requirements dinámicos ───────────────────────────
+  if (payoutMethod === 'owlPay') {
+    try {
+      const customerUuid = getCustomerUuid(legalEntity ?? 'SRL');
+      const quote = await getHarborQuote({
+        sourceAmount:      100,
+        sourceCurrency:    'USDC',
+        sourceChain:       process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+        destCountry:       countryCode,
+        destCurrency:      corridor?.destinationCurrency ?? 'USD',
+        customerUuid,
+        commissionPercent: corridor?.alytoCSpread ?? 0.5,
+      });
+
+      const requirements = await getHarborTransferRequirements({
+        quoteId:     quote.quoteId,
+        destCountry: countryCode,
+      });
+
+      const fields = flattenHarborSchema(requirements.schema);
+      const payload = { destCountry: countryCode, payoutMethod: 'owlPay', fields };
+      withdrawalRulesCache.set(cacheKey, { payload, cachedAt: Date.now() });
+
+      console.info(`[Alyto WithdrawalRules] Harbor requirements para ${countryCode}: ${fields.length} campos.`);
+      return res.status(200).json(payload);
+    } catch (err) {
+      console.warn(`[Alyto WithdrawalRules] Harbor no disponible para ${countryCode} — fallback a reglas locales.`, err.message);
+      Sentry.captureMessage(`WithdrawalRules Harbor fallback ${countryCode}`, {
+        level: 'warning', extra: { error: err.message, countryCode },
+      });
+      // Cae al flujo Vita/fallback de abajo
+    }
+  }
+
+  // ── 3b. Vita Wallet — flujo existente ──────────────────────────────────────
+  let fields;
   try {
     const vitaResponse = await getVitaWithdrawalRules();
     const country      = countryCode.toLowerCase();
-    const fields       = vitaResponse?.rules?.[country]?.fields ?? [];
+    const vitaFields   = vitaResponse?.rules?.[country]?.fields ?? [];
 
-    if (fields.length === 0) {
+    if (vitaFields.length === 0) {
       throw new Error(`Vita no devuelve campos para ${countryCode}`);
     }
 
-    rules = fields.map(transformVitaField).filter(Boolean);
-    withdrawalRulesCache.set(countryCode, { rules, cachedAt: Date.now() });
-
-    console.info(`[Alyto WithdrawalRules] Reglas cargadas desde Vita para ${countryCode}: ${rules.length} campos.`);
+    fields = vitaFields.map(transformVitaField).filter(Boolean);
+    console.info(`[Alyto WithdrawalRules] Reglas cargadas desde Vita para ${countryCode}: ${fields.length} campos.`);
   } catch (err) {
-    // ── 3. Fallback a reglas hardcodeadas ─────────────────────────────────────
     console.warn(`[Alyto WithdrawalRules] Vita no disponible para ${countryCode} — usando fallback.`, err.message);
-
     Sentry.captureMessage(`WithdrawalRules fallback activado para ${countryCode}`, {
-      level: 'warning',
-      extra: { error: err.message, countryCode },
+      level: 'warning', extra: { error: err.message, countryCode },
     });
 
-    rules = FALLBACK_WITHDRAWAL_RULES[countryCode] ?? null;
-
-    if (!rules) {
+    fields = FALLBACK_WITHDRAWAL_RULES[countryCode] ?? null;
+    if (!fields) {
       return res.status(404).json({
         error: `No hay reglas de retiro disponibles para ${countryCode} en este momento.`,
       });
     }
-
-    // Cachear fallback con TTL reducido (10 min) para reintentar Vita pronto
-    withdrawalRulesCache.set(countryCode, { rules, cachedAt: Date.now() - (RULES_CACHE_TTL_MS - 10 * 60 * 1000) });
   }
 
-  return res.status(200).json(rules);
+  const payload = { destCountry: countryCode, payoutMethod: 'vitaWallet', fields };
+  withdrawalRulesCache.set(cacheKey, { payload, cachedAt: Date.now() });
+  return res.status(200).json(payload);
 }
 
 // ─── POST /api/v1/payments/crossborder ───────────────────────────────────────

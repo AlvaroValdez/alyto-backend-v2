@@ -174,6 +174,37 @@ export async function sendEmail(to, templateId, dynamicData) {
   }
 }
 
+/**
+ * Envía un email con HTML inline (sin SendGrid Dynamic Template).
+ * Útil para alertas admin que no necesitan template formal.
+ * Nunca lanza excepción.
+ *
+ * @param {string} to
+ * @param {string} subject
+ * @param {string} html
+ */
+export async function sendRawEmail(to, subject, html) {
+  if (!process.env.SENDGRID_API_KEY) {
+    console.warn('[Alyto Email] SENDGRID_API_KEY no configurado — email raw omitido.', { to, subject });
+    return;
+  }
+  try {
+    await sgMail.send({
+      to,
+      from: {
+        email: process.env.SENDGRID_FROM_EMAIL ?? 'noreply@alyto.app',
+        name:  'Alyto',
+      },
+      subject,
+      html,
+    });
+    console.info('[Alyto Email] Email raw enviado.', { to, subject });
+  } catch (err) {
+    console.error('[Alyto Email] Error enviando email raw:', { to, subject, error: err.message });
+    Sentry.captureException(err, { tags: { component: 'emailService' }, extra: { to, subject } });
+  }
+}
+
 // ─── Emails predefinidos ──────────────────────────────────────────────────────
 
 /**
@@ -668,6 +699,53 @@ export const EMAILS = {
         submittedAt:           formatDate(profile.createdAt ?? new Date()),
         reviewUrl:             `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/kyb/${profile.businessId}`,
       },
+    ];
+  },
+
+  /**
+   * Alerta admin: enviar USDC manualmente a Harbor (instruction_address).
+   * Usa sendRawEmail (inline HTML) porque aún no existe SendGrid template.
+   *
+   * @param {{ transaction: object, transfer: object, quote: object }} ctx
+   * @returns {[string, string, string]} — args para sendRawEmail(to, subject, html)
+   */
+  adminUSDCSendRequired({ transaction, transfer, quote }) {
+    const ben         = transaction.beneficiary ?? transaction.beneficiaryDetails ?? {};
+    const beneName    = resolveBeneficiaryName(ben) || '—';
+    const destAmount  = formatCurrency(quote?.destinationAmount, quote?.destinationCurrency ?? transaction.destinationCurrency);
+    const expiresStr  = transfer?.expiresAt ? formatDate(transfer.expiresAt) : '—';
+    const ledgerUrl   = `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`;
+
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 640px; margin: auto; background: #0A1A2F; color: #E8ECF3; border-radius: 12px; overflow: hidden;">
+        <div style="background: #B91C1C; padding: 20px 24px;">
+          <h1 style="margin:0; font-size: 20px; color: #fff;">USDC Manual Send Required</h1>
+          <p style="margin: 6px 0 0; font-size: 13px; color: #FCA5A5;">Transaction ${transaction.alytoTransactionId}</p>
+        </div>
+        <div style="padding: 24px;">
+          <p style="margin-top:0;">Harbor ha emitido una instruction_address para esta transferencia. Alyto debe enviar USDC antes del vencimiento para evitar la expiración del transfer.</p>
+          <table style="width:100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
+            <tr><td style="padding:8px 0; color:#8A96B8;">Transaction ID</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px;">${transaction.alytoTransactionId}</code></td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">Monto a enviar</td><td style="padding:8px 0;"><strong>${Number(transfer?.sourceAmount ?? 0).toFixed(6)} USDC</strong></td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">Dirección destino</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px; word-break:break-all;">${transfer?.instructionAddress ?? '—'}</code></td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">Memo</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px;">${transfer?.instructionMemo ?? 'none required'}</code></td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">Chain</td><td style="padding:8px 0;">${transfer?.instructionChain ?? '—'}</td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">⏰ Expira</td><td style="padding:8px 0; color:#FCA5A5;"><strong>${expiresStr}</strong></td></tr>
+          </table>
+          <hr style="border:none; border-top: 1px solid #1E293B;">
+          <p style="font-size:13px; color:#8A96B8;">Beneficiario: <strong style="color:#E8ECF3;">${beneName}</strong> → <strong style="color:#E8ECF3;">${destAmount}</strong> en ${transaction.destinationCountry ?? '—'}</p>
+          <div style="background:#7F1D1D; border-left: 4px solid #EF4444; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+            <strong>⚠️ WARNING:</strong> This transfer will EXPIRE if USDC is not sent before the deadline.
+          </div>
+          <a href="${ledgerUrl}" style="display:inline-block; background:#F5C518; color:#0A1A2F; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Abrir en Ledger</a>
+        </div>
+      </div>
+    `;
+
+    return [
+      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+      `🔐 USDC Manual Send Required — ${transaction.alytoTransactionId}`,
+      html,
     ];
   },
 };

@@ -1,35 +1,26 @@
 /**
- * owlPayService.js — Motor de Liquidez Institucional B2B (AV Finance LLC)
+ * owlPayService.js — Motor de Liquidez OwlPay Harbor (v2)
  *
- * Integración con la API Harbor de OwlPay para operaciones de on-ramp
- * fiat → USDC/XLM y liquidación institucional B2B global.
+ * Integración completa con Harbor API v2:
+ *   - On-ramp USD→USDC/Stellar (Escenario A, LLC): createOnRampOrder
+ *   - Off-ramp USDC→fiat local (Escenario C, SRL / A LLC): flujo de 3 pasos
+ *       1. getHarborQuote                     → POST /v2/transfers/quotes
+ *       2. getHarborTransferRequirements      → GET  /v2/transfers/quotes/{id}/requirements
+ *       3. createHarborTransfer               → POST /v2/transfers
+ *     Harbor devuelve una `instruction_address` a la que Alyto debe enviar
+ *     los USDC. Una vez recibidos, Harbor convierte y dispersa en moneda local.
  *
- * Documentación oficial: https://harbor-developers.owlpay.com/docs/overview
+ * Docs: https://harbor-developers.owlpay.com/docs/overview
  *
- * Flujo del Escenario A (Corredor Institucional):
- *   1. createOnRampOrder()    → OwlPay crea la orden de conversión fiat → cripto
- *   2. OwlPay procesa el pago y envía los fondos a la wallet Stellar de destino
- *   3. owlPayWebhook()        → OwlPay notifica la confirmación con el stellarTxId
- *
- * COMPLIANCE: Terminología prohibida ausente.
- * Usar: crossBorderPayment, payin, onRamp, liquidation, institutionalTransfer.
- *
- * Entidad operadora: AV Finance LLC (Delaware)
- * Jurisdicción: usuarios corporativos (KYB) y clientes con origen EE.UU.
+ * COMPLIANCE: Terminología prohibida ausente (remesa/remittances).
+ * Usar: crossBorderPayment, payin, onRamp, offRamp, liquidation.
  */
 
 import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-// Base URL sin versión — cada endpoint incluye su prefijo /v1/ o /v2/ explícitamente.
-// Correcto: https://harbor-sandbox.owlpay.com/api + /v2/transfers = /api/v2/transfers
-// Incorrecto: .../api/v1 + /v2/transfers = /api/v1/v2/transfers (doble versión)
-//
-// Normalización:
-//   1. Quita slash final
-//   2. Garantiza sufijo /api (Harbor lo requiere)
-//   3. Elimina /v1 o /v2 (cada endpoint añade su propia versión)
+// Base URL sin versión — cada endpoint incluye /v1/ o /v2/ explícitamente.
 const OWLPAY_BASE_URL = (() => {
   let baseUrl = (process.env.OWLPAY_BASE_URL
               ?? process.env.OWLPAY_API_URL
@@ -43,11 +34,6 @@ const OWLPAY_BASE_URL = (() => {
   return baseUrl;
 })();
 
-/**
- * Obtiene el OWLPAY_API_KEY desde variables de entorno.
- * Lanza inmediatamente si no está definido — fail fast.
- * @returns {string}
- */
 export function getOwlPayApiKey() {
   const key = process.env.OWLPAY_API_KEY;
   if (!key || key.trim() === '') {
@@ -56,45 +42,39 @@ export function getOwlPayApiKey() {
   return key;
 }
 
-/** @returns {string} Base URL normalizada (lazy getter para tests / health checks) */
 export function getOwlPayBaseUrl() {
   return OWLPAY_BASE_URL;
 }
 
+function isSandbox() {
+  return /sandbox/i.test(OWLPAY_BASE_URL);
+}
+
 /**
- * Resuelve el customerUuid de Harbor para la entidad legal indicada.
- * Harbor requiere un customer previamente creado en el portal — no acepta IDs arbitrarios.
- *
+ * Resuelve el customerUuid de Harbor para la entidad legal.
+ * Exportado para que los controllers puedan resolverlo sin duplicar lógica.
  * @param {'LLC'|'SpA'|'SRL'} legalEntity
  * @returns {string}
- * @throws si no hay UUID configurado para la entidad
  */
-function resolveCustomerUuid(legalEntity) {
+export function getCustomerUuid(legalEntity) {
   const ENTITY_CUSTOMER_UUID = {
     LLC: process.env.OWLPAY_CUSTOMER_UUID_LLC,
     SpA: process.env.OWLPAY_CUSTOMER_UUID_SPA,
     SRL: process.env.OWLPAY_CUSTOMER_UUID_SRL,
   };
 
-  const customerUuid = ENTITY_CUSTOMER_UUID[legalEntity];
-
-  if (!customerUuid) {
+  const uuid = ENTITY_CUSTOMER_UUID[legalEntity];
+  if (!uuid) {
     throw new Error(
       `[OwlPay] No Harbor customerUuid configured for entity: ${legalEntity}. ` +
-      `Set OWLPAY_CUSTOMER_UUID_${(legalEntity ?? '').toUpperCase()} in environment variables.`,
+      `Set OWLPAY_CUSTOMER_UUID_${(legalEntity ?? '').toUpperCase()} in env.`,
     );
   }
-
-  return customerUuid;
+  return uuid;
 }
 
 /**
- * Helper interno: ejecuta una llamada autenticada a la API Harbor de OwlPay.
- *
- * @param {string} endpoint  - Path relativo (ej. '/v1/orders')
- * @param {object} options   - Opciones de fetch (method, body, etc.)
- * @returns {Promise<object>} Respuesta JSON de OwlPay
- * @throws {Error} Si la respuesta no es 2xx
+ * Helper interno: llamada autenticada a Harbor API.
  */
 async function owlPayRequest(endpoint, options = {}) {
   const apiKey = getOwlPayApiKey();
@@ -113,14 +93,14 @@ async function owlPayRequest(endpoint, options = {}) {
   try {
     response = await fetch(url, { ...options, headers });
   } catch (networkError) {
-    throw new Error(`[Alyto OwlPay] Error de red al contactar Harbor API: ${networkError.message}`);
+    throw new Error(`[Alyto OwlPay] Error de red: ${networkError.message}`);
   }
 
   let data;
   try {
     data = await response.json();
   } catch {
-    throw new Error(`[Alyto OwlPay] Respuesta no-JSON de Harbor API (status ${response.status})`);
+    throw new Error(`[Alyto OwlPay] Respuesta no-JSON de Harbor (status ${response.status})`);
   }
 
   if (!response.ok) {
@@ -138,38 +118,13 @@ async function owlPayRequest(endpoint, options = {}) {
   return data;
 }
 
-// ─── Funciones Exportadas ─────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// ON-RAMP (Escenario A — LLC): USD wire → USDC en wallet Stellar del cliente
+// ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Crea una orden de on-ramp (fiat → USDC) en Harbor/OwlPay usando el flujo Transfer v2.
- *
- * Flujo de 3 pasos:
- *   1. POST /v2/transfers/quotes    → obtener quote_id y pricing
- *   2. (requirements omitido — schema conocido para Stellar on-ramp desde US)
- *   3. POST /v2/transfers           → crear el transfer con on_behalf_of
- *
- * @param {object} params
- * @param {number} params.amount              - Monto en USD
- * @param {string} params.currency            - ISO 4217, debe ser 'USD'
- * @param {string} params.destinationWallet   - Stellar public key del cliente destino
- * @param {string} params.userId              - ID interno Alyto (metadata)
- * @param {string} params.alytoTransactionId  - Idempotency key
- * @param {'LLC'|'SpA'|'SRL'} params.legalEntity - Entidad legal que opera la transferencia
- * @param {string} [params.memo]              - Memo Stellar (opcional)
- * @param {string} [params.customerUuid]      - Override explícito del UUID del customer en Harbor.
- *                                              Si no se pasa, se resuelve vía OWLPAY_CUSTOMER_UUID_<ENTITY>.
- * @param {object} [params.beneficiary]       - Datos del beneficiario para Harbor
- * @returns {Promise<OnRampOrderResult>}
- *
- * @typedef {Object} OnRampOrderResult
- * @property {string}      orderId               - UUID del transfer en Harbor
- * @property {string}      status                - Estado inicial
- * @property {number}      amount                - Monto confirmado en USD
- * @property {string}      currency              - Moneda ('USD')
- * @property {string}      destinationWallet     - Stellar public key destino
- * @property {number|null} estimatedUSDC         - USDC estimado a entregar
- * @property {null}        paymentUrl            - No aplica en Harbor v2
- * @property {object|null} transferInstructions  - Instrucciones wire transfer de Harbor
+ * Crea una orden de on-ramp (fiat USD → USDC Stellar) para un cliente institucional LLC.
+ * Flujo v2: quote → transfer. Devuelve instrucciones wire transfer para el cliente.
  */
 export async function createOnRampOrder({
   amount,
@@ -188,23 +143,12 @@ export async function createOnRampOrder({
   }
   if (!amount || amount <= 0) throw new Error('[Alyto OwlPay] amount debe ser positivo en USD.');
 
-  // Resolver customerUuid: explícito > entidad legal. Harbor exige un UUID válido.
-  const resolvedCustomerUuid = customerUuid ?? resolveCustomerUuid(legalEntity);
+  const resolvedCustomerUuid = customerUuid ?? getCustomerUuid(legalEntity);
 
-  // ── PASO 1: Obtener quote ─────────────────────────────────────────────────
   const quotePayload = {
-    source: {
-      country: 'US',
-      asset:   'USD',
-      type:    'individual',
-    },
-    destination: {
-      chain:  'stellar',
-      asset:  'USDC',
-      amount,
-      type:   'individual',
-    },
-    commission: { amount: 0, percentage: 0 },
+    source:      { country: 'US', asset: 'USD', type: 'individual' },
+    destination: { chain: 'stellar', asset: 'USDC', amount, type: 'individual' },
+    commission:  { amount: 0, percentage: 0 },
   };
 
   const quoteRes = await owlPayRequest('/v2/transfers/quotes', {
@@ -214,19 +158,8 @@ export async function createOnRampOrder({
 
   const quote   = quoteRes.data?.[0] ?? quoteRes.data ?? quoteRes;
   const quoteId = quote.id ?? quote.quote_id;
-  if (!quoteId) throw new Error('[Alyto OwlPay] No se obtuvo quote_id de Harbor.');
+  if (!quoteId) throw new Error('[Alyto OwlPay] No se obtuvo quote_id (on-ramp).');
 
-  console.info('[Alyto OwlPay] Quote obtenido:', {
-    quoteId,
-    sourceAmount:      quote.source_amount,
-    destinationAmount: quote.destination_amount,
-    alytoTransactionId,
-    walletPrefix:      destinationWallet.substring(0, 8) + '...',
-  });
-
-  // ── PASO 2: Requirements (omitido — schema conocido para Stellar on-ramp) ─
-
-  // ── PASO 3: Crear el transfer ─────────────────────────────────────────────
   const transferPayload = {
     on_behalf_of:              resolvedCustomerUuid,
     quote_id:                  quoteId,
@@ -265,165 +198,379 @@ export async function createOnRampOrder({
   return {
     orderId:              transfer.uuid          ?? transfer.id,
     status:               transfer.status        ?? 'pending',
-    amount:               Number(transfer.source?.amount)      || amount,
-    currency:             transfer.source?.asset               ?? 'USD',
+    amount:               Number(transfer.source?.amount) || amount,
+    currency:             transfer.source?.asset ?? 'USD',
     destinationWallet:    transfer.destination?.payout_instrument?.address ?? destinationWallet,
     estimatedUSDC:        Number(transfer.destination?.amount) || null,
     paymentUrl:           null,
-    transferInstructions: transfer.transfer_instructions       ?? null,
+    transferInstructions: transfer.transfer_instructions ?? null,
   };
 }
 
-/**
- * Consulta el estado actual de una orden de on-ramp en OwlPay.
- * Útil para reconciliación y polling desde el orquestador.
- *
- * @param {string} orderId - ID de la orden retornado por createOnRampOrder
- * @returns {Promise<object>} Objeto Order de OwlPay
- */
 export async function getOnRampOrderStatus(orderId) {
   return owlPayRequest(`/v2/transfers/${orderId}`);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// OFF-RAMP (Escenarios A y C): USDC Stellar/ETH → fiat local
+// Flujo de 3 pasos: quote → requirements → transfer
+// ═════════════════════════════════════════════════════════════════════════════
+
 /**
- * Crea un desembolso (off-ramp) B2B a cuenta bancaria local vía Harbor/OwlPay.
- *
- * OwlPay recibe USD institucionales y los dispersa a una cuenta bancaria
- * en el país de destino. Ideal como proveedor primario o fallback de Vita
- * para los corredores SRL Bolivia → LatAm.
- *
- * Flujo:
- *   1. AV Finance SRL/LLC tiene fondos en USD en la cuenta Harbor
- *   2. createDisbursement() instruye a OwlPay a debitar esos fondos
- *   3. OwlPay convierte USD → moneda local y acredita en la cuenta del beneficiario
- *   4. OwlPay notifica vía webhook cuando el desembolso se completa
+ * PASO 1 — Obtiene una quote de off-ramp.
  *
  * @param {object} params
- * @param {number} params.amount                - Monto en USD (ya convertido de BOB si aplica)
- * @param {string} params.destinationCountry    - ISO alpha-2 (ej. 'CO', 'PE', 'AR')
- * @param {string} params.destinationCurrency   - ISO 4217 (ej. 'COP', 'PEN', 'ARS')
- * @param {object} params.beneficiary           - Datos del destinatario
- * @param {string} params.beneficiary.firstName
- * @param {string} params.beneficiary.lastName
- * @param {string} params.beneficiary.email
- * @param {string} params.beneficiary.documentType
- * @param {string} params.beneficiary.documentNumber
- * @param {string} params.beneficiary.bankCode          - Código del banco destino
- * @param {string} params.beneficiary.accountNumber     - Número de cuenta
- * @param {string} params.beneficiary.accountType       - 'checking' | 'savings'
- * @param {string} [params.beneficiary.address]
- * @param {object} [params.beneficiary.dynamicFields]   - Campos adicionales por país
- * @param {string} params.alytoTransactionId   - ID Alyto para correlación y auditoría
- * @param {string} params.userId               - ID del usuario Alyto
- * @returns {Promise<DisbursementResult>}
- *
- * @typedef {Object} DisbursementResult
- * @property {string}  disbursementId   - ID del desembolso en OwlPay
- * @property {string}  status           - Estado inicial ('pending' | 'processing')
- * @property {number}  amount           - Monto en USD confirmado
- * @property {string}  currency         - 'USD'
- * @property {string|null} trackingUrl  - URL de seguimiento Harbor (si disponible)
+ * @param {number} params.sourceAmount           USDC amount a enviar
+ * @param {string} params.sourceCurrency         'USDC'
+ * @param {string} params.sourceChain            'stellar' | 'ethereum' (pendiente Sam)
+ * @param {string} params.destCountry            ISO alpha-2 ej 'CN', 'NG'
+ * @param {string} params.destCurrency           ISO 4217 ej 'CNY', 'NGN'
+ * @param {string} params.customerUuid           Harbor customer UUID
+ * @param {number} [params.commissionPercent]    % comisión (default 0.5)
+ * @returns {Promise<object>} quote normalizado
  */
-export async function createDisbursement({
-  amount,
-  destinationCountry,
-  destinationCurrency,
-  beneficiary,
-  alytoTransactionId,
-  userId,
-  legalEntity,
-  corridorCode,
+export async function getHarborQuote({
+  sourceAmount,
+  sourceCurrency,
+  sourceChain,
+  destCountry,
+  destCurrency,
+  customerUuid,
+  commissionPercent,
 }) {
-  if (!amount || amount <= 0) {
-    throw new Error('[Alyto OwlPay] createDisbursement: amount debe ser un número positivo en USD.');
+  if (!sourceAmount || sourceAmount <= 0) {
+    throw new Error('[Harbor] sourceAmount debe ser positivo.');
   }
-  if (!destinationCountry || !destinationCurrency) {
-    throw new Error('[Alyto OwlPay] createDisbursement: destinationCountry y destinationCurrency son requeridos.');
+  if (!sourceCurrency || !sourceChain) {
+    throw new Error('[Harbor] sourceCurrency y sourceChain son requeridos.');
   }
-  if (!beneficiary?.firstName || !beneficiary?.accountNumber) {
-    throw new Error('[Alyto OwlPay] createDisbursement: beneficiary.firstName y accountNumber son requeridos.');
-  }
-
-  const ben = beneficiary;
-
-  // Merge dynamicFields (campos específicos por país: clabe, pix_key, etc.)
-  const extraFields = {};
-  if (ben.dynamicFields instanceof Map) {
-    for (const [k, v] of ben.dynamicFields.entries()) extraFields[k] = v;
-  } else if (ben.dynamicFields && typeof ben.dynamicFields === 'object') {
-    Object.assign(extraFields, ben.dynamicFields);
+  if (!destCountry || !destCurrency) {
+    throw new Error('[Harbor] destCountry y destCurrency son requeridos.');
   }
 
   const payload = {
-    source_currency:      'USD',
-    source_amount:        amount,
-    destination_country:  destinationCountry.toUpperCase(),
-    destination_currency: destinationCurrency.toUpperCase(),
-    beneficiary: {
-      first_name:      ben.firstName ?? ben.beneficiary_first_name ?? '',
-      last_name:       ben.lastName  ?? ben.beneficiary_last_name  ?? '',
-      email:           ben.email     ?? ben.beneficiary_email       ?? '',
-      document_type:   ben.documentType   ?? ben.beneficiary_document_type   ?? 'dni',
-      document_number: ben.documentNumber ?? ben.beneficiary_document_number ?? '',
-      bank_code:       ben.bankCode   ?? ben.bank_code    ?? '',
-      account_number:  ben.accountNumber ?? ben.account_bank ?? '',
-      account_type:    ben.accountType   ?? ben.account_type_bank ?? 'savings',
-      ...(ben.address ? { address: ben.address } : {}),
-      ...extraFields,
+    source: {
+      chain:   sourceChain,
+      country: 'US',
+      asset:   sourceCurrency,
+      amount:  Number(sourceAmount).toFixed(2),
     },
-    metadata: {
-      alyto_transaction_id: alytoTransactionId,
-      alyto_user_id:        String(userId ?? ''),
-      legal_entity:         legalEntity ?? 'unknown',
-      corridor:             corridorCode ?? 'unknown',
-      operation_type:       'manualPayinPayout',
+    destination: {
+      country: destCountry.toUpperCase(),
+      asset:   destCurrency.toUpperCase(),
+    },
+    commission: {
+      percentage: String(commissionPercent ?? 0.5),
+      amount:     0,
     },
   };
 
-  console.info('[Alyto OwlPay] Creando desembolso:', {
-    amount,
-    destinationCountry,
-    destinationCurrency,
-    alytoTransactionId,
-    beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
-  });
+  if (customerUuid) payload.on_behalf_of = customerUuid;
 
-  const data = await owlPayRequest('/v1/disbursements', {
+  const res   = await owlPayRequest('/v2/transfers/quotes', {
     method: 'POST',
     body:   JSON.stringify(payload),
   });
 
+  // Harbor puede devolver múltiples métodos de pago — tomar el primero (menor fee típicamente).
+  const list  = Array.isArray(res.data) ? res.data : (res.data ? [res.data] : [res]);
+  const quote = list[0];
+  if (!quote?.id && !quote?.quote_id) {
+    throw new Error('[Harbor] No se obtuvo quote_id en la respuesta.');
+  }
+
   return {
-    disbursementId: data.id ?? data.disbursement_id,
-    status:         data.status   ?? 'pending',
-    amount:         data.source_amount ?? amount,
-    currency:       'USD',
-    trackingUrl:    data.tracking_url ?? null,
+    quoteId:               quote.id ?? quote.quote_id,
+    paymentMethod:         quote.payment_method ?? quote.destination?.payment_method ?? null,
+    sourceAmount:          Number(quote.source?.amount   ?? quote.source_amount      ?? sourceAmount),
+    sourceCurrency:        quote.source?.asset           ?? quote.source_currency    ?? sourceCurrency,
+    destinationAmount:     Number(quote.destination?.amount ?? quote.destination_amount ?? 0),
+    destinationCurrency:   quote.destination?.asset      ?? quote.destination_currency ?? destCurrency,
+    exchangeRate:          Number(quote.exchange_rate    ?? quote.rate               ?? 0),
+    settlementTimeMin:     quote.settlement_time_min     ?? null,
+    settlementTimeMax:     quote.settlement_time_max     ?? null,
+    settlementTimeUnit:    quote.settlement_time_unit    ?? null,
+    quoteExpiresAt:        quote.expires_at              ?? quote.quote_expires_at   ?? null,
+    cryptoFundsExpiresAt:  quote.crypto_funds_settlement_expire_date
+                          ?? quote.crypto_funds_expires_at ?? null,
+    harborFee:             Number(quote.fees?.harbor_fee     ?? quote.harbor_fee     ?? 0),
+    commissionFee:         Number(quote.fees?.commission_fee ?? quote.commission_fee ?? 0),
+    raw:                   quote,
+  };
+}
+
+// ── Cache de requirements (JSON Schema) por quote y por país ─────────────────
+const requirementsCache = new Map();   // quoteId  → { requirements, cachedAt }
+const requirementsByCountryCache = new Map();  // destCountry → { requirements, cachedAt }
+const REQUIREMENTS_TTL_MS = 5 * 60 * 1000;
+
+function cacheGet(map, key) {
+  const hit = map.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.cachedAt > REQUIREMENTS_TTL_MS) {
+    map.delete(key);
+    return null;
+  }
+  return hit.requirements;
+}
+
+function cacheSet(map, key, requirements) {
+  map.set(key, { requirements, cachedAt: Date.now() });
+}
+
+/**
+ * PASO 2 — Obtiene el JSON Schema de campos requeridos por el beneficiario.
+ * Los campos cambian por país y por método de pago. Harbor los entrega dinámicos.
+ */
+export async function getHarborTransferRequirements({ quoteId, destCountry }) {
+  if (!quoteId) throw new Error('[Harbor] quoteId requerido para fetch requirements.');
+
+  const cached = cacheGet(requirementsCache, quoteId);
+  if (cached) return cached;
+
+  const res = await owlPayRequest(`/v2/transfers/quotes/${quoteId}/requirements`, {
+    method: 'GET',
+  });
+
+  const payload = res.data ?? res;
+  const normalized = {
+    schema:    payload.schema    ?? payload.json_schema ?? payload,
+    title:     payload.title     ?? null,
+    bankTitle: payload.bank_title ?? payload.bankTitle  ?? null,
+    raw:       payload,
+  };
+
+  cacheSet(requirementsCache, quoteId, normalized);
+  if (destCountry) cacheSet(requirementsByCountryCache, destCountry.toUpperCase(), normalized);
+
+  return normalized;
+}
+
+export function getCachedRequirementsByCountry(destCountry) {
+  if (!destCountry) return null;
+  return cacheGet(requirementsByCountryCache, destCountry.toUpperCase());
+}
+
+/**
+ * Construye el payout_instrument por país según la firma de Harbor.
+ * Lee de beneficiary.dynamicFields (o propiedades top-level como fallback).
+ */
+export function buildPayoutInstrument(beneficiary, destCountry) {
+  const df     = beneficiary?.dynamicFields instanceof Map
+               ? Object.fromEntries(beneficiary.dynamicFields.entries())
+               : (beneficiary?.dynamicFields ?? {});
+  const get    = (key) => df[key] ?? beneficiary?.[key] ?? null;
+  const must   = (key, label) => {
+    const v = get(key);
+    if (!v) throw new Error(`[Harbor] Missing required field for ${destCountry}: ${label ?? key}`);
+    return v;
+  };
+
+  const country = (destCountry ?? '').toUpperCase();
+
+  switch (country) {
+    case 'CN': {
+      const unionPay = get('cn_union_pay_card_number');
+      if (unionPay) return { cn_union_pay_card_number: unionPay };
+      return {
+        cn_bank_account_number: must('cn_bank_account_number'),
+        cn_cnaps_code:          must('cn_cnaps_code'),
+      };
+    }
+    case 'NG':
+      return {
+        ng_account_number: must('ng_account_number'),
+        ng_bank_code:      must('ng_bank_code'),
+      };
+    case 'BR': {
+      const pix = get('br_pix_key');
+      if (pix) return { br_pix_key: pix };
+      return {
+        br_bank_code:       must('br_bank_code'),
+        br_agency:          must('br_agency'),
+        br_account_number:  must('br_account_number'),
+      };
+    }
+    case 'MX': {
+      const clabe = get('mx_clabe');
+      if (clabe) return { mx_clabe: clabe };
+      const card = get('mx_debit_card_number');
+      if (card) return { mx_debit_card_number: card };
+      throw new Error(`[Harbor] Missing required field for MX: mx_clabe o mx_debit_card_number`);
+    }
+    case 'CO':
+      return {
+        co_bank_code:     must('co_bank_code'),
+        co_account_number: must('co_account_number'),
+        co_account_type:  must('co_account_type'),
+      };
+    case 'HK':
+      return {
+        account_number:      must('account_number'),
+        swift_code:          must('swift_code'),
+        bank_name:           must('bank_name'),
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+      };
+    default:
+      return {
+        account_number:      must('account_number'),
+        swift_code:          must('swift_code'),
+        bank_name:           must('bank_name'),
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+      };
+  }
+}
+
+/**
+ * PASO 3 — Crea el transfer en Harbor. Devuelve la instruction_address a la
+ * que Alyto debe enviar los USDC para activar el disbursement.
+ */
+export async function createHarborTransfer({
+  quoteId,
+  customerUuid,
+  alytoTransactionId,
+  sourceAddress,
+  beneficiary,
+  destCountry,
+  destCurrency,
+}) {
+  if (!quoteId)            throw new Error('[Harbor] quoteId requerido.');
+  if (!customerUuid)       throw new Error('[Harbor] customerUuid requerido.');
+  if (!alytoTransactionId) throw new Error('[Harbor] alytoTransactionId requerido (idempotency).');
+  if (!sourceAddress)      throw new Error('[Harbor] sourceAddress (wallet Alyto) requerido.');
+  if (!beneficiary)        throw new Error('[Harbor] beneficiary requerido.');
+  if (!destCountry)        throw new Error('[Harbor] destCountry requerido.');
+
+  const payoutInstrument = buildPayoutInstrument(beneficiary, destCountry);
+
+  const payload = {
+    on_behalf_of:              customerUuid,
+    quote_id:                  quoteId,
+    application_transfer_uuid: alytoTransactionId,
+    source: {
+      payment_instrument: { address: sourceAddress },
+    },
+    destination: {
+      beneficiary_info: {
+        beneficiary_name:          `${beneficiary.firstName ?? ''} ${beneficiary.lastName ?? ''}`.trim(),
+        beneficiary_dob:           beneficiary.dateOfBirth ?? beneficiary.dob ?? '1990-01-01',
+        beneficiary_id_doc_number: beneficiary.documentNumber ?? beneficiary.idDocNumber ?? '',
+        beneficiary_address: {
+          street:  beneficiary.address?.street  ?? beneficiary.address     ?? 'N/A',
+          city:    beneficiary.address?.city    ?? 'N/A',
+          country: (destCountry ?? '').toUpperCase(),
+        },
+      },
+      payout_instrument:  payoutInstrument,
+      transfer_purpose:   'FAMILY_MAINTENANCE',
+      is_self_transfer:   false,
+    },
+  };
+
+  const res      = await owlPayRequest('/v2/transfers', {
+    method: 'POST',
+    body:   JSON.stringify(payload),
+  });
+  const transfer = res.data ?? res;
+
+  const instructions = transfer.transfer_instructions
+                    ?? transfer.source?.transfer_instructions
+                    ?? {};
+  const instructionAddress = instructions.instruction_address
+                          ?? instructions.address
+                          ?? transfer.source?.payment_instrument?.address
+                          ?? null;
+  const instructionMemo    = instructions.instruction_memo
+                          ?? instructions.address_memo
+                          ?? instructions.memo
+                          ?? null;
+  const instructionChain   = instructions.chain
+                          ?? transfer.source?.chain
+                          ?? null;
+
+  return {
+    harborTransferId:     transfer.uuid ?? transfer.id,
+    status:               transfer.status ?? 'pending_customer_transfer_start',
+    instructionAddress,
+    instructionMemo,
+    instructionChain,
+    sourceAmount:         Number(transfer.source?.amount      ?? transfer.source_amount      ?? 0),
+    destinationAmount:    Number(transfer.destination?.amount ?? transfer.destination_amount ?? 0),
+    destinationCurrency:  transfer.destination?.asset         ?? destCurrency,
+    expiresAt:            transfer.crypto_funds_settlement_expire_date
+                        ?? transfer.expires_at ?? null,
+    raw:                  transfer,
+  };
+}
+
+export async function getHarborTransferStatus({ harborTransferId }) {
+  if (!harborTransferId) throw new Error('[Harbor] harborTransferId requerido.');
+  const res      = await owlPayRequest(`/v2/transfers/${harborTransferId}`, { method: 'GET' });
+  const transfer = res.data ?? res;
+  return {
+    status:         transfer.status ?? 'unknown',
+    sourceReceived: Number(transfer.source?.received_amount ?? transfer.source_received ?? 0),
+    updatedAt:      transfer.updated_at ?? null,
+    raw:            transfer,
   };
 }
 
 /**
- * Consulta el estado de un desembolso en OwlPay.
- *
- * @param {string} disbursementId
- * @returns {Promise<object>} Objeto Disbursement de OwlPay
+ * Sandbox-only — fuerza una transición de estado en un transfer (testing).
+ * Sin efecto en producción.
  */
-export async function getDisbursementStatus(disbursementId) {
-  return owlPayRequest(`/v1/disbursements/${disbursementId}`);
+export async function simulateHarborTransfer({ harborTransferId, status }) {
+  if (!isSandbox()) {
+    throw new Error('[Harbor] simulateHarborTransfer solo disponible en sandbox.');
+  }
+  return owlPayRequest(`/v2/transfers/${harborTransferId}/simulate`, {
+    method: 'POST',
+    body:   JSON.stringify({ status }),
+  });
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// USDC SEND PLACEHOLDER — paso final del off-ramp
+// Pendiente de confirmación de Sam sobre la cadena soportada por Harbor.
+// ═════════════════════════════════════════════════════════════════════════════
+
 /**
- * Verifica la firma HMAC-SHA256 del webhook de Harbor/OwlPay.
- * DEBE llamarse antes de procesar cualquier evento de webhook.
+ * Envía USDC desde la wallet de Alyto hacia la instruction_address de Harbor.
  *
- * Harbor envía el header 'harbor-signature' con el formato:
- *   "t=1689066169,v1=e997b87453fb8923..."
+ * ⚠️ IMPLEMENTACIÓN PENDIENTE — Sam debe confirmar la cadena que Harbor acepta
+ * para off-ramp de moneda local. Docs indican `ethereum`; nuestra infra usa Stellar.
  *
- * El signed_payload es: "<timestamp>.<rawBody>"
+ * Una vez confirmado, implementar:
+ *   A) Stellar → stellarService.buildInnerTransaction (USDC) + memo
+ *   B) Ethereum → ethers.js / web3 enviando USDC ERC-20
  *
- * @param {string} rawBody         - Body crudo de la request (string, no parseado)
- * @param {string} signatureHeader - Valor del header 'harbor-signature'
- * @returns {boolean} true si la firma es válida
+ * Mientras tanto, arroja para garantizar que OWLPAY_USDC_SEND_ENABLED=0 se respeta
+ * y que el flujo caiga al email manual al admin.
+ */
+export async function sendUSDCToHarbor({
+  instructionAddress,
+  instructionMemo,
+  instructionChain,
+  amount,
+  alytoTransactionId,
+}) {
+  throw new Error(
+    `[OwlPay] sendUSDCToHarbor not yet implemented. ` +
+    `Waiting for Harbor chain confirmation (chain: ${instructionChain ?? 'unknown'}). ` +
+    `Manual send required for tx: ${alytoTransactionId}`,
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// WEBHOOK SIGNATURE VERIFICATION
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Verifica la firma HMAC-SHA256 del webhook de Harbor.
+ * Header: 'harbor-signature' con formato "t=<ts>,v1=<hex>"
+ * signed_payload = "<timestamp>.<rawBody>"
  */
 export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
   const webhookSecret = process.env.OWLPAY_WEBHOOK_SECRET;
@@ -431,10 +578,8 @@ export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
     console.error('[Alyto OwlPay] OWLPAY_WEBHOOK_SECRET no configurado. Rechazando webhook.');
     return false;
   }
-
   if (!signatureHeader) return false;
 
-  // Parsear: "t=1689066169,v1=e997b87453fb8923..."
   const parts = {};
   signatureHeader.split(',').forEach(part => {
     const [key, ...rest] = part.trim().split('=');
@@ -443,15 +588,12 @@ export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
 
   const timestamp = parts['t'];
   const signature = parts['v1'];
-
   if (!timestamp || !signature) {
     console.warn('[Alyto OwlPay] Formato de harbor-signature inválido:', signatureHeader);
     return false;
   }
 
-  // signed_payload = "timestamp.rawBody"
   const signedPayload = `${timestamp}.${rawBody}`;
-
   const expected = crypto
     .createHmac('sha256', webhookSecret)
     .update(signedPayload, 'utf8')
@@ -463,7 +605,6 @@ export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
       Buffer.from(signature, 'hex'),
     );
   } catch {
-    // timingSafeEqual lanza si los buffers no tienen el mismo tamaño
     return false;
   }
 }
