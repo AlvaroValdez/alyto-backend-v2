@@ -38,7 +38,6 @@ const transactionConfigSchema = new Schema(
       unique:    true,
       trim:      true,
       lowercase: true,
-      index:     true,
     },
 
     // ── Geografía del corredor ────────────────────────────────────────────────

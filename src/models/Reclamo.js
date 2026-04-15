@@ -22,7 +22,6 @@ const reclamoSchema = new mongoose.Schema({
     type:    String,
     default: () => `REC-${Date.now()}-${shortId(6)}`,
     unique:  true,
-    index:   true,
   },
   userId: {
     type:     mongoose.Schema.Types.ObjectId,

@@ -81,8 +81,8 @@ const exchangeRateSchema = new Schema(
   },
 );
 
-// Índice único: solo una tasa activa por par
-exchangeRateSchema.index({ pair: 1 }, { unique: true });
+// El índice único sobre `pair` se crea implícitamente por `unique: true`
+// en el campo. No se redeclara aquí para evitar el warning de Mongoose.
 
 const ExchangeRate = mongoose.model('ExchangeRate', exchangeRateSchema);
 
