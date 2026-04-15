@@ -161,8 +161,11 @@ export async function initiateCorporateOnRamp(req, res) {
       destinationWallet,
       userId:            user._id.toString(),
       alytoTransactionId,
+      legalEntity:       user.legalEntity,
       memo,
-      customerUuid:      user.harborCustomerUuid ?? user._id.toString(),
+      // Si el usuario tiene un customer UUID propio creado en Harbor, prevalece;
+      // de lo contrario se usa el UUID de la entidad desde env vars.
+      customerUuid:      user.harborCustomerUuid ?? undefined,
     });
   } catch (error) {
     // Marcar la transacción como fallida antes de responder
@@ -245,7 +248,9 @@ export async function initiateCorporateOnRamp(req, res) {
  */
 export async function owlPayWebhook(req, res) {
   // ── 1. Verificar firma del webhook ────────────────────────────────────────
-  const signature = req.headers['harbor-signature'];
+  // Harbor envía 'harbor-signature'; aceptamos 'x-owlpay-signature' por
+  // compat con integraciones previas durante la transición.
+  const signature = req.headers['harbor-signature'] ?? req.headers['x-owlpay-signature'];
   const rawBody   = req.rawBody;
 
   if (!signature || !rawBody) {
