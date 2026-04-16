@@ -23,6 +23,12 @@ import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
+// ─── Dual auth mode ──────────────────────────────────────────────────────────
+// AUTH_MODE=cookie (default, VPS prod)  → HttpOnly cookie, no token in body
+// AUTH_MODE=header (Render staging)     → token in JSON body, no cookie
+const AUTH_MODE     = process.env.AUTH_MODE ?? 'cookie';
+const IS_HEADER_MODE = AUTH_MODE === 'header';
+
 const COUNTRY_TO_ENTITY = {
   CL: 'SpA',
   BO: 'SRL',
@@ -213,9 +219,10 @@ export async function registerUser(req, res) {
     const fullName = `${user.firstName} ${user.lastName}`.trim();
     notifyAdmins(NOTIFICATIONS.adminNewUser(fullName, user.email, legalEntity)).catch(() => {});
 
-    res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(false));
+    if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(false));
 
     return res.status(201).json({
+      ...(IS_HEADER_MODE && { token }),
       user: {
         id:          user._id,
         email:       user.email,
@@ -340,9 +347,10 @@ export async function loginUser(req, res) {
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
 
-    res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
+    if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
 
     return res.json({
+      ...(IS_HEADER_MODE && { token }),
       user: {
         id:          user._id,
         email:       user.email,
@@ -557,10 +565,10 @@ export async function logoutUser(req, res) {
       await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
       invalidateUserCache(String(userId));
     }
-    // Las opciones deben coincidir con las del set (incl. domain) o el browser
-    // no borra la cookie. Reutilizamos authCookieOptions sin maxAge.
-    const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
-    res.clearCookie(AUTH_COOKIE_NAME, clearOpts);
+    if (!IS_HEADER_MODE) {
+      const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
+      res.clearCookie(AUTH_COOKIE_NAME, clearOpts);
+    }
     return res.json({ message: 'Sesión cerrada.' });
   } catch (err) {
     console.error('[Auth] Error en logoutUser:', err.message);
