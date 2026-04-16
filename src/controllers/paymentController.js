@@ -61,7 +61,7 @@ import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate }          from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
-import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
+import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -863,6 +863,13 @@ export async function initCrossBorderPayment(req, res) {
       if (!clpBobTemplateId) {
         console.error('[Email] ⚠️ Falta SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS — email de instrucciones NO enviado.');
       } else {
+        // Beneficiario Bolivia — incluir en el email para confirmación visual
+        const beneName = `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim() || '—';
+        const beneBank = ben.bankName ?? ben.bankCode ?? '—';
+        const beneAcctRaw = ben.accountNumber ?? ben.accountBank ?? '';
+        const beneAcct = beneAcctRaw ? `****${String(beneAcctRaw).slice(-4)}` : '—';
+
+        console.log('[Payment] Sending CLP-BOB instructions to:', user.email, 'tx:', alytoTransactionId);
         sendEmail(
           user.email,
           clpBobTemplateId,
@@ -879,11 +886,20 @@ export async function initCrossBorderPayment(req, res) {
             totalDeducted:  totalDeductedReal.toLocaleString('es-CL'),
             destinationBOB: destinationBOB.toFixed(2),
             clpPerBob:      clpPerBob.toFixed(2),
+            // Beneficiario — confirmación visual antes de transferir
+            beneficiaryName:    beneName,
+            beneficiaryBank:    beneBank,
+            beneficiaryAccount: beneAcct,
+            destinationCountry: 'BO',
           },
-        ).catch(err => console.error('[Email] Error CLP-BOB instrucciones:', {
-          error: err.message, to: user.email, templateId: clpBobTemplateId,
-        }));
+        )
+          .then(() => console.log('[Payment] CLP-BOB instructions email sent OK:', user.email))
+          .catch(err => console.error('[Payment] CLP-BOB instructions email FAILED:', {
+            error: err.message, body: err.response?.body, to: user.email, templateId: clpBobTemplateId,
+          }));
       }
+    } else {
+      console.error('[Payment] ⚠️ No user/email para CLP-BOB instrucciones, userId:', userId);
     }
     // Alerta admin
     const adminClpBobTemplate = process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB
@@ -904,7 +920,7 @@ export async function initCrossBorderPayment(req, res) {
           bankName:        ben.bankName ?? '',
           accountNumber:   ben.accountNumber ?? '',
           hasProof:        paymentProofBase64 ? 'Si' : 'No',
-          ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+          ledgerUrl:       `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${alytoTransactionId}`,
         },
       ).catch(err => console.error('[Email] Error admin CLP-BOB alert:', {
         error: err.message, to: adminEmail, templateId: adminClpBobTemplate,
@@ -924,6 +940,9 @@ export async function initCrossBorderPayment(req, res) {
 
     // Notificar a admins — push + in-app
     notifyAdmins(NOTIFICATIONS.adminNewTransaction(alytoTransactionId, amount, 'CLP', 'CLP→BOB')).catch(() => {});
+
+    // Notificar al usuario — campana in-app + push (BUG 7)
+    notify(userId, NOTIFICATIONS.transferInitiated(amount, 'CLP', 'BO', alytoTransactionId)).catch(() => {});
 
     return res.status(201).json({
       alytoTransactionId,
@@ -1205,13 +1224,15 @@ export async function initCrossBorderPayment(req, res) {
     }
 
     const user = await User.findById(userId).select('email firstName').lean();
-    if (user) {
+    if (user?.email) {
+      console.log('[Payment] Sending manual payin instructions to:', user.email, 'tx:', alytoTransactionId);
       sendEmail(...EMAILS.manualPayinInstructions(user, transaction, manualPaymentInstructions))
-        .catch(err => console.error('[CrossBorder] Error email instrucciones:', {
-          error: err.message, to: user.email, txId: alytoTransactionId,
+        .then(() => console.log('[Payment] Manual payin instructions email sent OK:', user.email))
+        .catch(err => console.error('[Payment] Manual payin instructions email FAILED:', {
+          error: err.message, body: err.response?.body, to: user.email, txId: alytoTransactionId,
         }));
     } else {
-      console.error('[CrossBorder] ⚠️ Usuario no encontrado para email instrucciones, userId:', userId);
+      console.error('[Payment] ⚠️ Usuario no encontrado/sin email para instrucciones, userId:', userId);
     }
   }
 
@@ -1220,6 +1241,17 @@ export async function initCrossBorderPayment(req, res) {
   notifyAdmins(
     NOTIFICATIONS.adminNewTransaction(alytoTransactionId, transaction.originalAmount, transaction.originCurrency, corridorLabel),
     corridor.payinMethod === 'manual' ? { email: EMAILS.adminBoliviaAlert(transaction) } : {},
+  ).catch(() => {});
+
+  // Notificar al usuario — campana in-app + push (BUG 7)
+  notify(
+    transaction.userId,
+    NOTIFICATIONS.transferInitiated(
+      transaction.originalAmount,
+      transaction.originCurrency,
+      transaction.destinationCountry,
+      alytoTransactionId,
+    ),
   ).catch(() => {});
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────

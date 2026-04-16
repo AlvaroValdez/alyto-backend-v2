@@ -370,6 +370,17 @@ export const EMAILS = {
       ? formatCurrency(transaction.destinationAmount, transaction.destinationCurrency)
       : null;
 
+    // Datos del beneficiario — incluir en el email para que el usuario confirme
+    // visualmente que está pagando el envío correcto antes de transferir.
+    const ben      = transaction.beneficiary ?? {};
+    const df       = ben.dynamicFields ?? {};
+    const beneName = resolveBeneficiaryName(ben) || '—';
+    const beneBank = df.beneficiary_bank ?? ben.bankName ?? ben.bankCode ?? '—';
+    const beneAcctRaw = df.beneficiary_account ?? ben.accountNumber ?? ben.accountBank ?? '';
+    const beneAcct = beneAcctRaw
+      ? `****${String(beneAcctRaw).slice(-4)}`
+      : '—';
+
     return [
       user.email,
       process.env.SENDGRID_TEMPLATE_MANUAL_PAYIN ?? process.env.SENDGRID_TEMPLATE_INITIATED,
@@ -395,6 +406,11 @@ export const EMAILS = {
         reference:          instructions.reference,
         concept:            instructions.concept ?? instructions.reference,
         instructions:       instructions.instructions,
+
+        // Beneficiario — para confirmación visual del usuario
+        beneficiaryName:    beneName,
+        beneficiaryBank:    beneBank,
+        beneficiaryAccount: beneAcct,
 
         // Fecha y soporte
         createdAt:          formatDate(transaction.createdAt),
@@ -424,7 +440,7 @@ export const EMAILS = {
         accountNumber:     instructions.accountNumber,
         reference:         instructions.reference,
         createdAt:         formatDate(transaction.createdAt),
-        ledgerUrl:         `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`,
+        ledgerUrl:         `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
       },
     ];
   },
@@ -486,7 +502,8 @@ export const EMAILS = {
 
         userId:    transaction.userId?.toString(),
         createdAt: formatDate(transaction.createdAt),
-        ledgerUrl: `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`,
+        // Deep link al Ledger con ?tx=... — LedgerPage lee el query param y auto-scrollea.
+        ledgerUrl: `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
       },
     ];
   },
@@ -547,7 +564,7 @@ export const EMAILS = {
         bankName:        ben.bankName ?? '',
         accountNumber:   ben.accountNumber ?? '',
         hasProof:        transaction.paymentProof?.data ? 'Si' : 'No',
-        ledgerUrl:       `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+        ledgerUrl:       `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
         createdAt:       formatDate(transaction.createdAt),
       },
     ];
@@ -772,7 +789,7 @@ export const EMAILS = {
     const beneName    = resolveBeneficiaryName(ben) || '—';
     const destAmount  = formatCurrency(quote?.destinationAmount, quote?.destinationCurrency ?? transaction.destinationCurrency);
     const expiresStr  = transfer?.expiresAt ? formatDate(transfer.expiresAt) : '—';
-    const ledgerUrl   = `${process.env.APP_ADMIN_URL ?? 'http://localhost:3000'}/admin/ledger/${transaction.alytoTransactionId}`;
+    const ledgerUrl   = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`;
 
     const html = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 640px; margin: auto; background: #0A1A2F; color: #E8ECF3; border-radius: 12px; overflow: hidden;">

@@ -242,6 +242,22 @@ export async function notifyAdmins(notification, opts = {}) {
 export const NOTIFICATIONS = {
 
   /**
+   * Transferencia iniciada — el usuario acaba de crear la operación,
+   * aún no pagó. Notifica por push + in-app para que pueda hacer seguimiento.
+   * @param {number} originAmount
+   * @param {string} originCurrency
+   * @param {string} destinationCountry
+   * @param {string} txId  alytoTransactionId (para deep link desde la campana)
+   */
+  transferInitiated(originAmount, originCurrency, destinationCountry, txId) {
+    return {
+      title: '¡Transferencia iniciada! 🚀',
+      body:  `Tu transferencia de ${Number(originAmount).toLocaleString('es-CL')} ${originCurrency} a ${destinationCountry} fue creada. Te avisaremos cuando recibamos tu pago.`,
+      data:  { type: 'transfer_initiated', txId },
+    };
+  },
+
+  /**
    * Payin recibido — el usuario completó el pago y está en proceso.
    * @param {number} amount
    * @param {string} currency  ISO 4217 (ej. 'CLP')
