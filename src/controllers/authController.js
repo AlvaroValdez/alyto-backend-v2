@@ -67,15 +67,33 @@ function generateToken(userId, tokenVersion, expiresIn) {
 
 /**
  * Opciones estándar de la cookie HttpOnly de autenticación.
+ *
+ * Dos modos de despliegue soportados:
+ *  1. Cross-origin (default en Render): frontend y backend en subdominios
+ *     distintos de onrender.com (cross-site per Public Suffix List). XHR
+ *     credenciada requiere `SameSite=None + Secure`.
+ *  2. Same-site custom domain: setear `COOKIE_DOMAIN=.alyto.app` cuando
+ *     frontend y API vivan bajo el mismo registrable (ej: app.alyto.app +
+ *     api.alyto.app). Entonces `SameSite=Lax` basta y es más resiliente
+ *     frente a políticas estrictas de cookies de terceros en iOS/Android.
+ *
  * @param {boolean} rememberMe — true => 7 días; false => 24 horas
  */
 export function authCookieOptions(rememberMe) {
+  const isProd       = process.env.NODE_ENV === 'production';
+  const cookieDomain = process.env.COOKIE_DOMAIN || null;
+  // Si hay COOKIE_DOMAIN asumimos despliegue same-site (cookie compartida
+  // entre subdominios del mismo registrable) → Lax alcanza. Si no, asumimos
+  // cross-origin y necesitamos None+Secure.
+  const sameSite     = cookieDomain ? 'lax' : (isProd ? 'none' : 'lax');
+
   return {
     httpOnly: true,
-    secure:   process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    secure:   isProd,
+    sameSite,
     maxAge:   rememberMe ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000,
     path:     '/',
+    ...(cookieDomain && { domain: cookieDomain }),
   };
 }
 
@@ -539,12 +557,10 @@ export async function logoutUser(req, res) {
       await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
       invalidateUserCache(String(userId));
     }
-    res.clearCookie(AUTH_COOKIE_NAME, {
-      httpOnly: true,
-      secure:   process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      path:     '/',
-    });
+    // Las opciones deben coincidir con las del set (incl. domain) o el browser
+    // no borra la cookie. Reutilizamos authCookieOptions sin maxAge.
+    const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
+    res.clearCookie(AUTH_COOKIE_NAME, clearOpts);
     return res.json({ message: 'Sesión cerrada.' });
   } catch (err) {
     console.error('[Auth] Error en logoutUser:', err.message);
