@@ -217,7 +217,9 @@ export async function sendWelcomeEmail(user) {
     LLC: 'AV Finance LLC',
   }[user.legalEntity] ?? 'AV Finance';
 
-  const verifyUrl    = `${process.env.APP_URL ?? 'https://alyto.app'}/kyc`;
+  // FRONTEND_URL apunta al frontend (alyto-frontend-v2.onrender.com o alyto.app).
+  // APP_URL apunta al backend — NO usarlo aquí, produce 404 al hacer click en el CTA.
+  const verifyUrl    = `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/kyc`;
   const supportEmail = process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app';
 
   if (process.env.SENDGRID_TEMPLATE_WELCOME) {
@@ -596,7 +598,7 @@ export const EMAILS = {
         userName:      user.firstName,
         entityName,
         legalEntity:   user.legalEntity,
-        verifyUrl:     `${process.env.APP_URL ?? 'https://alyto.app'}/kyc`,
+        verifyUrl:     `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/kyc`,
         supportEmail:  process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
         supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },
