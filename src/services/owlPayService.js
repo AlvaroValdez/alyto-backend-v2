@@ -17,6 +17,7 @@
  */
 
 import crypto from 'crypto';
+import { BoundedCache } from '../utils/boundedCache.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
@@ -300,22 +301,18 @@ export async function getHarborQuote({
 }
 
 // ── Cache de requirements (JSON Schema) por quote y por país ─────────────────
-const requirementsCache = new Map();   // quoteId  → { requirements, cachedAt }
-const requirementsByCountryCache = new Map();  // destCountry → { requirements, cachedAt }
+// BoundedCache: max 500 entries, 5-min TTL → previene crecimiento ilimitado por quoteId.
 const REQUIREMENTS_TTL_MS = 5 * 60 * 1000;
+const requirementsCache          = new BoundedCache(500, REQUIREMENTS_TTL_MS);  // quoteId    → requirements
+const requirementsByCountryCache = new BoundedCache(50,  REQUIREMENTS_TTL_MS);  // destCountry → requirements
 
-function cacheGet(map, key) {
-  const hit = map.get(key);
-  if (!hit) return null;
-  if (Date.now() - hit.cachedAt > REQUIREMENTS_TTL_MS) {
-    map.delete(key);
-    return null;
-  }
-  return hit.requirements;
+function cacheGet(cache, key) {
+  const v = cache.get(key);
+  return v === undefined ? null : v;
 }
 
-function cacheSet(map, key, requirements) {
-  map.set(key, { requirements, cachedAt: Date.now() });
+function cacheSet(cache, key, requirements) {
+  cache.set(key, requirements);
 }
 
 /**

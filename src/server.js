@@ -487,8 +487,26 @@ async function dropLegacyIndexes() {
 async function startServer() {
   try {
     const uri = await resolveMongoUri();
-    await mongoose.connect(uri);
+    await mongoose.connect(uri, {
+      maxPoolSize:              10,     // default driver = 100 → exceso memoria en Render small
+      minPoolSize:              2,      // mantener 2 conexiones tibias
+      socketTimeoutMS:          45000,
+      serverSelectionTimeoutMS: 10000,
+      heartbeatFrequencyMS:     30000,
+    });
     console.info('[Alyto DB] MongoDB conectado.');
+
+    // ── Memory monitoring — log cada 5 min; warn si heap > 400MB ──────────
+    setInterval(() => {
+      const mem   = process.memoryUsage();
+      const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
+      const rssMB  = Math.round(mem.rss      / 1024 / 1024);
+      if (heapMB > 400) {
+        console.warn(`[Memory] HIGH: heap=${heapMB}MB rss=${rssMB}MB`);
+      } else {
+        console.log(`[Memory] heap=${heapMB}MB rss=${rssMB}MB`);
+      }
+    }, 5 * 60 * 1000).unref();
 
     await dropLegacyIndexes();
 
