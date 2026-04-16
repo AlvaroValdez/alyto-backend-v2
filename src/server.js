@@ -131,6 +131,9 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .map(o => o.trim())
   .filter(Boolean);
 
+console.log('[CORS] allowedOrigins:', allowedOrigins);
+console.log('[CORS] AUTH_MODE:', process.env.AUTH_MODE ?? '(not set, default cookie)');
+
 if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
   console.error('[Alyto Server] FATAL: ALLOWED_ORIGINS no configurado en producción. Abortando.');
   process.exit(1);
@@ -138,14 +141,15 @@ if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
 
 app.use(cors({
   origin(origin, callback) {
-    // Permitir peticiones sin Origin (mobile apps, curl, health checks)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn('[CORS] Blocked origin:', origin);
     return callback(new Error(`CORS: origen no permitido (${origin})`));
   },
   credentials:    true,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'ngrok-skip-browser-warning'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
+  exposedHeaders: ['Content-Disposition', 'Content-Type'],
 }));
 
 // Rate limiting general — protege todas las rutas contra DDoS/brute-force
