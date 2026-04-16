@@ -45,11 +45,26 @@ const router = Router();
  * Middleware que almacena el body crudo en req.rawBody.
  * Solo se aplica a los endpoints de webhook que necesitan verificar firmas.
  */
+const MAX_WEBHOOK_BODY_SIZE = 1 * 1024 * 1024; // 1MB — guard anti-DoS
+
 function captureRawBody(req, res, next) {
   let data = '';
+  let bodySize = 0;
+  let aborted = false;
   req.setEncoding('utf8');
-  req.on('data', chunk => { data += chunk; });
+  req.on('data', chunk => {
+    if (aborted) return;
+    bodySize += Buffer.byteLength(chunk, 'utf8');
+    if (bodySize > MAX_WEBHOOK_BODY_SIZE) {
+      aborted = true;
+      res.status(413).json({ error: 'Payload too large', maxSize: '1MB' });
+      req.destroy();
+      return;
+    }
+    data += chunk;
+  });
   req.on('end',  ()    => {
+    if (aborted) return;
     req.rawBody = data;
     try {
       req.body = JSON.parse(data);

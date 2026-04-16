@@ -1425,3 +1425,28 @@ export async function testPush(req, res) {
   )
   return res.json({ result })
 }
+
+// ─── Memory stats ─────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/health/memory
+ * Observabilidad de uso de memoria del proceso + tamaño de caches internos.
+ * Protegido por protect + checkAdmin en el router.
+ */
+export async function getMemoryStats(req, res) {
+  const { userCache } = await import('../middlewares/authMiddleware.js');
+  const mem  = process.memoryUsage();
+  const toMB = (bytes) => Math.round(bytes / 1024 / 1024 * 100) / 100;
+
+  res.json({
+    rss:       `${toMB(mem.rss)} MB`,
+    heapUsed:  `${toMB(mem.heapUsed)} MB`,
+    heapTotal: `${toMB(mem.heapTotal)} MB`,
+    external:  `${toMB(mem.external)} MB`,
+    caches: {
+      userCache: typeof userCache?.size === 'number' ? userCache.size : 'unknown',
+    },
+    uptime:      `${Math.round(process.uptime() / 60)} minutes`,
+    nodeVersion: process.version,
+  });
+}

@@ -41,6 +41,7 @@ import {
   vitaDiagnostic,
   vitaBalance,
   testPush,
+  getMemoryStats,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -558,5 +559,13 @@ router.post('/test-push', testPush);
  * Respuesta: { success: boolean, message: string }
  */
 router.post('/notifications/send', sendNotification);
+
+// ─── Observabilidad ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/health/memory
+ * Estadísticas de memoria del proceso Node + tamaño de caches internos.
+ */
+router.get('/health/memory', getMemoryStats);
 
 export default router;

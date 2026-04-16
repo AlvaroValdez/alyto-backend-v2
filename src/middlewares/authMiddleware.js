@@ -17,6 +17,7 @@
 import jwt  from 'jsonwebtoken';
 import User from '../models/User.js';
 import { setSentryUser } from './sentryContext.js';
+import { BoundedCache } from '../utils/boundedCache.js';
 
 // ─── Cache de usuarios autenticados ──────────────────────────────────────────
 // Evita una query MongoDB en cada request autenticado.
@@ -26,20 +27,16 @@ import { setSentryUser } from './sentryContext.js';
 // de 5 min es el delay aceptable antes de que el middleware lo detecte.
 
 const USER_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos — reducido para acotar ventana de revocación
-const userCache = new Map(); // userId → { user, expiresAt }
+const USER_CACHE_MAX    = 1000;
+// BoundedCache: evita crecimiento ilimitado bajo tráfico sostenido.
+export const userCache = new BoundedCache(USER_CACHE_MAX, USER_CACHE_TTL_MS);
 
 function getCachedUser(userId) {
-  const entry = userCache.get(userId);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    userCache.delete(userId);
-    return null;
-  }
-  return entry.user;
+  return userCache.get(userId) ?? null;
 }
 
 function setCachedUser(userId, user) {
-  userCache.set(userId, { user, expiresAt: Date.now() + USER_CACHE_TTL_MS });
+  userCache.set(userId, user);
 }
 
 /** Invalida el cache de un usuario (usar en logout o cambio de estado) */

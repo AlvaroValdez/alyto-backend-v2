@@ -123,9 +123,33 @@ function verifyVitaSignature(body, headers) {
  * @param {string} status
  * @param {*}      rawPayload
  */
+// Truncación de payloads grandes para acotar la memoria retenida por documento.
+const MAX_IPN_PAYLOAD_BYTES = 10 * 1024; // 10KB por entrada
+const MAX_IPN_LOG_ENTRIES   = 50;        // conservar solo las últimas 50 entradas
+
+function truncateIpnPayload(rawPayload) {
+  try {
+    const str = JSON.stringify(rawPayload);
+    if (str.length > MAX_IPN_PAYLOAD_BYTES) {
+      return {
+        _truncated:    true,
+        _originalSize: str.length,
+        preview:       str.substring(0, 500),
+      };
+    }
+    return rawPayload;
+  } catch {
+    return { _error: 'Could not serialize payload' };
+  }
+}
+
 async function appendIpnLog(transaction, eventType, provider, status, rawPayload) {
   try {
-    transaction.ipnLog.push({ provider, eventType, status, rawPayload, receivedAt: new Date() });
+    const safePayload = truncateIpnPayload(rawPayload);
+    transaction.ipnLog.push({ provider, eventType, status, rawPayload: safePayload, receivedAt: new Date() });
+    if (transaction.ipnLog.length > MAX_IPN_LOG_ENTRIES) {
+      transaction.ipnLog = transaction.ipnLog.slice(-MAX_IPN_LOG_ENTRIES);
+    }
     await transaction.save();
   } catch (err) {
     console.error('[Alyto IPN] Error guardando ipnLog:', {
