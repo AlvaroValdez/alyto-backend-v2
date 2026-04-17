@@ -590,18 +590,29 @@ export function createQuoteSocketServer(httpServer) {
   const wss = new WebSocketServer({
     server: httpServer,
     path:   '/ws/quote',
-    // Autenticación en el handshake: lee la cookie HttpOnly alyto_token
-    // y verifica el JWT antes de aceptar la conexión.
+    // Dual auth: try query param first (header mode), then cookie (cookie mode).
     verifyClient: (info, callback) => {
       try {
-        const token = getCookieFromHeader(info.req.headers.cookie, 'alyto_token');
-        if (!token) return callback(false, 401, 'Unauthorized: missing session cookie');
+        // 1. Try query param (header mode — Render staging)
+        const urlParams = new URLSearchParams(info.req.url.split('?')[1] ?? '');
+        const queryToken = urlParams.get('token');
+
+        // 2. Try cookie (cookie mode — VPS prod)
+        const cookieToken = getCookieFromHeader(info.req.headers.cookie, 'alyto_token');
+
+        const token = queryToken ?? cookieToken;
+        if (!token) {
+          console.warn('[WS] No token provided (no query param, no cookie)');
+          return callback(false, 401, 'Unauthorized: no token');
+        }
+
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         // Adjuntar datos al request para consumirlos en el handler de 'connection'
         info.req.authenticatedUserId       = decoded.id;
         info.req.authenticatedTokenVersion = decoded.tokenVersion ?? 0;
         callback(true);
-      } catch {
+      } catch (err) {
+        console.warn('[WS] Token verification failed:', err.message);
         callback(false, 401, 'Unauthorized: invalid or expired token');
       }
     },
