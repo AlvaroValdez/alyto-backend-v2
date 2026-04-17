@@ -45,6 +45,7 @@ const notificationSchema = new mongoose.Schema(
         'kyc',
         'system',
         'general',
+        'transfer_initiated',
         // ── Admin-facing ──
         'admin_new_user',
         'admin_new_transaction',
