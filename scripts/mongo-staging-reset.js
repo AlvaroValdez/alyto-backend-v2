@@ -33,6 +33,24 @@ console.log('');
 
 const db = mongoose.connection.db;
 
+const WIPE_COLLECTIONS = [
+  'transactions',
+  'notifications',
+  'fundingrecords',
+  'idempotencykeys',
+];
+
+console.log('🗑️  Wiping transactional collections...');
+for (const col of WIPE_COLLECTIONS) {
+  try {
+    const result = await db.collection(col).deleteMany({});
+    console.log(`   ✅ ${col}: deleted ${result.deletedCount} documents`);
+  } catch (err) {
+    console.log(`   ⚠️  ${col}: ${err.message} (may not exist)`);
+  }
+}
+console.log('');
+
 // ══════════════════════════════════════════════════════════
 // RESET 1 — tokenVersion: reset ALL users to 0
 // ══════════════════════════════════════════════════════════
