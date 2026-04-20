@@ -489,6 +489,16 @@ async function dropLegacyIndexes() {
   }
 }
 
+mongoose.connection.on('disconnected', () => {
+  console.warn('[MongoDB] Disconnected — attempting reconnect...');
+});
+mongoose.connection.on('reconnected', () => {
+  console.info('[MongoDB] Reconnected successfully');
+});
+mongoose.connection.on('error', (err) => {
+  console.error('[MongoDB] Connection error:', err.message);
+});
+
 async function startServer() {
   try {
     const uri = await resolveMongoUri();
@@ -498,6 +508,8 @@ async function startServer() {
       socketTimeoutMS:          45000,
       serverSelectionTimeoutMS: 10000,
       heartbeatFrequencyMS:     30000,
+      retryWrites:              true,
+      retryReads:               true,
     });
     console.info('[Alyto DB] MongoDB conectado.');
 
