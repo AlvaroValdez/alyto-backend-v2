@@ -1450,3 +1450,35 @@ export async function getMemoryStats(req, res) {
     nodeVersion: process.version,
   });
 }
+
+// ─── resetUserTokenVersion ───────────────────────────────────────────────────
+
+/**
+ * PATCH /api/v1/admin/users/:userId/reset-token-version
+ * Resetea el contador tokenVersion del usuario a 0. Útil cuando el JWT en
+ * el cliente quedó desincronizado respecto al DB (p. ej. tras logouts
+ * repetidos en staging). Invalida el cache para que el próximo request
+ * relea el documento desde MongoDB.
+ */
+export async function resetUserTokenVersion(req, res) {
+  const { userId } = req.params;
+  const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $set: { tokenVersion: 0 } },
+    { new: true },
+  ).select('_id email tokenVersion').lean();
+
+  if (!user) {
+    return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
+  }
+
+  invalidateUserCache(String(userId));
+
+  return res.json({
+    success: true,
+    message: 'tokenVersion reset to 0',
+    user: { id: user._id, email: user.email, tokenVersion: user.tokenVersion },
+  });
+}

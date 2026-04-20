@@ -567,7 +567,11 @@ export async function logoutUser(req, res) {
   try {
     const userId = req.user?.id ?? req.user?._id;
     if (userId) {
-      await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
+      // Sólo incrementar tokenVersion en producción. En dev, logout/login
+      // repetidos generan drift en el contador y rompen tokens cacheados.
+      if (process.env.NODE_ENV === 'production') {
+        await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
+      }
       invalidateUserCache(String(userId));
     }
     if (!IS_HEADER_MODE) {
