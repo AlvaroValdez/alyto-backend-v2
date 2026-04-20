@@ -135,9 +135,13 @@ const VALID_STATUSES = [
 export async function listTransactions(req, res) {
   // ── 1. Parsear y validar query params ─────────────────────────────────────
   const {
-    status, entity, startDate, endDate,
+    status: rawStatus, entity, startDate, endDate,
     corridorId: corridorSlug,
   } = req.query;
+
+  // 'all' es un sinónimo de "sin filtro de status" para el frontend.
+  const status  = rawStatus === 'all' ? undefined : rawStatus;
+  const showAll = req.query.showAll === 'true';
 
   let page  = parseInt(req.query.page,  10) || 1;
   let limit = parseInt(req.query.limit, 10) || 20;
@@ -200,9 +204,28 @@ export async function listTransactions(req, res) {
     }
   }
 
+  // Base para el conteo "pendientes sin comprobante" — respeta entity/fechas/corredor
+  // pero ignora el status y el filtro por defecto "accionables".
+  const pendingBaseFilter = { ...filter };
+
+  // ── 2b. Filtro por defecto "accionables" ──────────────────────────────────
+  // Cuando el admin no selecciona un status explícito y no pide showAll=true,
+  // excluimos las payin_pending que todavía no tienen paymentProof cargado.
+  if (!status && !showAll) {
+    filter.$or = [
+      { paymentProof: { $exists: true, $ne: null } },
+      { status: { $in: [
+        'payin_confirmed', 'payin_completed', 'processing',
+        'in_transit', 'payout_pending', 'payout_sent',
+        'payout_pending_usdc_send', 'payout_in_transit',
+        'completed', 'failed', 'refunded', 'pending_funding',
+      ] } },
+    ];
+  }
+
   // ── 3. Ejecutar en paralelo: agregación de resumen + consulta paginada ────
   try {
-    const [summaryResult, transactions] = await Promise.all([
+    const [summaryResult, transactions, pendingNoProofCount] = await Promise.all([
       // Agregación que calcula totales sobre TODA la selección filtrada
       Transaction.aggregate([
         { $match: filter },
@@ -219,13 +242,24 @@ export async function listTransactions(req, res) {
       ]).option({ maxTimeMS: 10000 }),
 
       // Consulta paginada con populate del usuario
+      // Excluimos paymentProof.data (base64 hasta 5MB/doc) para no inflar el payload;
+      // mantenemos la metadata (mimetype/filename/uploadedAt) para que el frontend
+      // pueda detectar si existe comprobante sin descargar su contenido.
       Transaction.find(filter)
         .populate('userId', 'email firstName lastName')
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
+        .select('-paymentProof.data')
         .maxTimeMS(10000)
         .lean(),
+
+      // Conteo para el banner: payin_pending sin comprobante dentro del scope base
+      Transaction.countDocuments({
+        ...pendingBaseFilter,
+        status: 'payin_pending',
+        paymentProof: { $exists: false },
+      }).maxTimeMS(10000),
     ]);
 
     const agg   = summaryResult[0] ?? { total: 0, totalVolume: 0, totalCompleted: 0, totalFailed: 0, totalFees: 0 };
@@ -240,10 +274,11 @@ export async function listTransactions(req, res) {
         totalPages: Math.ceil(total / limit),
       },
       summary: {
-        totalVolume:    agg.totalVolume    ?? 0,
-        totalCompleted: agg.totalCompleted ?? 0,
-        totalFailed:    agg.totalFailed    ?? 0,
-        totalFees:      agg.totalFees      ?? 0,
+        totalVolume:         agg.totalVolume    ?? 0,
+        totalCompleted:      agg.totalCompleted ?? 0,
+        totalFailed:         agg.totalFailed    ?? 0,
+        totalFees:           agg.totalFees      ?? 0,
+        pendingNoProofCount: pendingNoProofCount ?? 0,
       },
     });
 
