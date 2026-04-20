@@ -216,7 +216,7 @@ export async function listTransactions(req, res) {
             totalFees:      { $sum: '$feeBreakdown.totalFee' },
           },
         },
-      ]),
+      ]).option({ maxTimeMS: 10000 }),
 
       // Consulta paginada con populate del usuario
       Transaction.find(filter)
@@ -224,6 +224,7 @@ export async function listTransactions(req, res) {
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
+        .maxTimeMS(10000)
         .lean(),
     ]);
 
@@ -248,7 +249,13 @@ export async function listTransactions(req, res) {
 
   } catch (err) {
     console.error('[Admin listTransactions] Error:', err.message);
-    return res.status(500).json({ error: 'Error al obtener transacciones.' });
+    console.error('[Admin listTransactions] Stack:', err.stack);
+    return res.status(500).json({
+      error: 'Error al obtener transacciones.',
+      detail: process.env.NODE_ENV !== 'production'
+        ? err.message
+        : undefined,
+    });
   }
 }
 

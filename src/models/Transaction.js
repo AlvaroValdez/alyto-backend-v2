@@ -595,6 +595,7 @@ transactionSchema.index({ userId: 1, createdAt: -1 });
 transactionSchema.index({ legalEntity: 1, status: 1 });
 transactionSchema.index({ legalEntity: 1, createdAt: -1 });
 transactionSchema.index({ corridorId: 1, createdAt: -1 });
+transactionSchema.index({ createdAt: -1 });
 transactionSchema.index({ stellarTxId: 1 }, { sparse: true });
 transactionSchema.index({ alytoTransactionId: 1 }, { unique: true, sparse: true });
 
