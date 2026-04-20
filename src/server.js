@@ -56,6 +56,7 @@ if (!jwtSecret || jwtSecret.length < 32) {
   console.error('FATAL: JWT_SECRET must be set and at least 32 characters. Refusing to start.');
   process.exit(1);
 }
+console.log('[JWT] Secret stable, length:', jwtSecret.length);
 
 // ─── Verificación de variables de entorno ────────────────────────────────────
 // En producción, aborta el proceso si faltan variables críticas.
@@ -521,8 +522,6 @@ async function startServer() {
       console.info(`[Alyto Server] Escuchando en http://0.0.0.0:${PORT}`);
       console.info(`[Alyto Server] Entorno: ${process.env.NODE_ENV ?? 'development'}`);
       console.info(`[Alyto Server] Stellar network: ${process.env.STELLAR_NETWORK ?? 'testnet'}`);
-      console.log('[JWT] Secret length:', process.env.JWT_SECRET?.length ?? 'NOT SET');
-      console.log('[JWT] Secret preview:', process.env.JWT_SECRET?.substring(0, 8) ?? 'NOT SET');
     });
 
     // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP

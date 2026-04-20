@@ -346,8 +346,6 @@ export async function loginUser(req, res) {
     const token = generateToken(user._id, user.tokenVersion, jwtExpiry);
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
-    console.log('[Login] AUTH_MODE:', AUTH_MODE, '| IS_HEADER_MODE:', IS_HEADER_MODE);
-    console.log('[Login] Sending token in body:', IS_HEADER_MODE);
 
     if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
 
@@ -368,7 +366,6 @@ export async function loginUser(req, res) {
       },
     };
 
-    console.log('[Login] Response keys:', Object.keys(responseBody));
     return res.json(responseBody);
 
   } catch (err) {

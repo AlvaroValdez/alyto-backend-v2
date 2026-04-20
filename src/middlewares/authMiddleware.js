@@ -94,15 +94,19 @@ export async function protect(req, res, next) {
       });
     }
 
-    // Revocación server-side: el user puede haber invalidado tokens (logout,
-    // password reset, suspensión) incrementando tokenVersion.
-    const userTokenVersion = user.tokenVersion ?? 0;
-    const jwtTokenVersion  = decoded.tokenVersion ?? 0;
-    if (jwtTokenVersion !== userTokenVersion) {
-      console.warn('[Auth] Token version mismatch for user:', decoded.id);
-      return res.status(401).json({
-        error: 'Session expired',
-      });
+    // Revocación server-side: sólo en producción.
+    // En dev/staging se omite para evitar drift por logouts repetidos.
+    if (process.env.NODE_ENV === 'production') {
+      const userTokenVersion = user.tokenVersion ?? 0;
+      const jwtTokenVersion  = decoded.tokenVersion ?? 0;
+      if (jwtTokenVersion !== userTokenVersion) {
+        console.warn('[Auth] Token version mismatch for user:', decoded.id);
+        return res.status(401).json({
+          success: false,
+          message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
+          code:    'TOKEN_VERSION_MISMATCH',
+        });
+      }
     }
 
     req.user = user;
