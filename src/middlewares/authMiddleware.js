@@ -56,11 +56,19 @@ export function invalidateUserCache(userId) {
  *  4. Rechaza si el usuario fue eliminado o desactivado tras emitir el token
  */
 export async function protect(req, res, next) {
+  console.log('[Protect] Path:', req.path);
+  console.log('[Protect] Authorization header:',
+    req.headers.authorization?.substring(0, 30) ?? 'MISSING');
+  console.log('[Protect] Cookie alyto_token:',
+    req.cookies?.alyto_token?.substring(0, 20) ?? 'MISSING');
+
   // 1) Cookie HttpOnly (modo principal); 2) Authorization: Bearer (fallback para API/mobile)
   const token = req.cookies?.alyto_token
     ?? (req.headers.authorization?.startsWith('Bearer ')
         ? req.headers.authorization.split(' ')[1]
         : null);
+
+  console.log('[Protect] Extracted token:', token?.substring(0, 20) ?? 'NULL');
 
   if (!token) {
     return res.status(401).json({
@@ -70,6 +78,8 @@ export async function protect(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    console.log('[Protect] JWT decoded OK:', decoded.id,
+      'tokenVersion:', decoded.tokenVersion);
 
     // Cargar usuario desde cache o DB.
     // Cache TTL 2 min — acota la ventana de revocación por tokenVersion.
@@ -119,6 +129,8 @@ export async function protect(req, res, next) {
     next();
 
   } catch (err) {
+    console.error('[Protect] JWT verify failed:', err.message);
+
     // Distinguir token expirado de firma inválida para mejor diagnóstico
     const message = err.name === 'TokenExpiredError'
       ? 'No autorizado. Token expirado.'
