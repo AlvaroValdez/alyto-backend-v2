@@ -42,6 +42,7 @@ import {
   vitaBalance,
   testPush,
   getMemoryStats,
+  resetUserTokenVersion,
 } from '../controllers/adminController.js';
 import {
   createFunding,
@@ -122,6 +123,12 @@ const qrUpload = multer({
  * Lista todos los usuarios del sistema ordenados por fecha de creación.
  */
 router.get('/users', getAllUsers);
+
+/**
+ * PATCH /api/v1/admin/users/:userId/reset-token-version
+ * Resetea tokenVersion del usuario a 0 (rescate de sesiones desincronizadas).
+ */
+router.patch('/users/:userId/reset-token-version', resetUserTokenVersion);
 
 // ─── Ledger legacy ────────────────────────────────────────────────────────────
 
