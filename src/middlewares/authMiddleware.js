@@ -98,7 +98,12 @@ export async function protect(req, res, next) {
     // password reset, suspensión) incrementando tokenVersion.
     const userTokenVersion = user.tokenVersion ?? 0;
     const jwtTokenVersion  = decoded.tokenVersion ?? 0;
+    console.log('[Protect] JWT tokenVersion:', jwtTokenVersion,
+      '| DB tokenVersion:', userTokenVersion,
+      '| match:', jwtTokenVersion === userTokenVersion);
     if (jwtTokenVersion !== userTokenVersion) {
+      console.warn('[Protect] tokenVersion mismatch —',
+        'JWT:', jwtTokenVersion, '!== DB:', userTokenVersion);
       return res.status(401).json({
         error: 'Session expired',
       });
