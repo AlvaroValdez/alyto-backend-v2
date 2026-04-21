@@ -1170,6 +1170,7 @@ export async function initCrossBorderPayment(req, res) {
         fixedFee,
         payoutFee,
         profitRetention,
+        vitaRateMarkup:    corridor.vitaRateMarkup ?? 0.5,
         totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + payoutFee),
         totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
         feeCurrency:       corridor.originCurrency ?? 'USD',
@@ -1460,6 +1461,9 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
   // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
   const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+  if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
+    console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
+  }
   const adjustedRate      = round2(usdToDestRate * (1 - vitaMarkup / 100));
   const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
 
@@ -1816,6 +1820,9 @@ export async function getQuote(req, res) {
     const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
     // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
     const vitaMarkup      = corridor.vitaRateMarkup ?? 0.5;
+    if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
+      console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
+    }
     const adjustedRate    = round2(usdcToDestRate * (1 - vitaMarkup / 100));
     const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
 
@@ -1907,6 +1914,9 @@ export async function getQuote(req, res) {
 
   // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
   const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
+  if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
+    console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
+  }
   const adjustedRate      = round2(exchangeRate * (1 - vitaMarkup / 100));
   const destinationAmount = round2((amountAfterFees * adjustedRate) - payoutFee);
 
