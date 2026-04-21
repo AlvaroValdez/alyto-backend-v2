@@ -31,6 +31,8 @@ const feesSchema = new Schema(
     payoutFee:       { type: Number, default: 0 },
     /** Margen de ganancia retenido por Alyto (% sobre el originAmount) */
     profitRetention: { type: Number, default: 0 },
+    /** Markup aplicado sobre la tasa USD→destino de Vita al momento del quote (%). Snapshot auditable. */
+    vitaRateMarkup:  { type: Number, default: 0.5 },
     /** Total visible para el usuario (sin profitRetention) */
     totalDeducted:     { type: Number, default: 0 },
     /** Total real descontado incluyendo profitRetention (uso interno/auditoría) */
