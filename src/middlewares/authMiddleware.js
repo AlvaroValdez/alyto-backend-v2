@@ -63,6 +63,7 @@ export async function protect(req, res, next) {
         : null);
 
   if (!token) {
+    console.log('[Protect] REJECT: no token extracted | path:', req.path);
     return res.status(401).json({
       error: 'No autorizado. Token no proporcionado.',
     });
@@ -76,18 +77,26 @@ export async function protect(req, res, next) {
     let user = getCachedUser(decoded.id);
     if (!user) {
       user = await User.findById(decoded.id)
-        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId tokenVersion')
+        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId tokenVersion deletedAt')
         .lean();
       if (user) setCachedUser(decoded.id, user);
     }
 
     if (!user) {
+      console.log('[Protect] REJECT: user not found | userId:', decoded.id, '| path:', req.path);
       return res.status(401).json({
         error: 'No autorizado. Usuario no encontrado o eliminado.',
       });
     }
 
+    console.log('[Protect] user found:', String(user._id),
+      '| kycStatus:', user.kycStatus,
+      '| isActive:', user.isActive,
+      '| deletedAt:', user.deletedAt,
+      '| path:', req.path);
+
     if (!user.isActive) {
+      console.log('[Protect] REJECT: user not active | userId:', decoded.id, '| path:', req.path);
       invalidateUserCache(decoded.id); // Limpiar cache si la cuenta fue suspendida
       return res.status(401).json({
         error: 'No autorizado. Cuenta suspendida.',
@@ -96,17 +105,19 @@ export async function protect(req, res, next) {
 
     // Revocación server-side: sólo en producción.
     // En dev/staging se omite para evitar drift por logouts repetidos.
-    if (process.env.NODE_ENV === 'production') {
-      const userTokenVersion = user.tokenVersion ?? 0;
-      const jwtTokenVersion  = decoded.tokenVersion ?? 0;
-      if (jwtTokenVersion !== userTokenVersion) {
-        console.warn('[Auth] Token version mismatch for user:', decoded.id);
-        return res.status(401).json({
-          success: false,
-          message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
-          code:    'TOKEN_VERSION_MISMATCH',
-        });
-      }
+    const skipTokenVersionCheck = process.env.NODE_ENV !== 'production';
+    const userTokenVersion = user.tokenVersion ?? 0;
+    const jwtTokenVersion  = decoded.tokenVersion ?? 0;
+    if (!skipTokenVersionCheck && jwtTokenVersion !== userTokenVersion) {
+      console.log('[Protect] REJECT: tokenVersion mismatch | JWT:', jwtTokenVersion,
+        '| DB:', userTokenVersion,
+        '| SKIP:', skipTokenVersionCheck,
+        '| path:', req.path);
+      return res.status(401).json({
+        success: false,
+        message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
+        code:    'TOKEN_VERSION_MISMATCH',
+      });
     }
 
     req.user = user;
@@ -119,6 +130,7 @@ export async function protect(req, res, next) {
     next();
 
   } catch (err) {
+    console.log('[Protect] REJECT: JWT verify failed:', err.message, '| path:', req.path);
     // Distinguir token expirado de firma inválida para mejor diagnóstico
     const message = err.name === 'TokenExpiredError'
       ? 'No autorizado. Token expirado.'
