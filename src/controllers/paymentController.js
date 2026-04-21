@@ -725,6 +725,15 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
+  // ── Payin manual SRL: el comprobante bancario es obligatorio ───────────────
+  // Evita que el admin ledger reciba registros sin forma de verificar el pago.
+  if (corridor.payinMethod === 'manual' && !req.body.paymentProofBase64) {
+    return res.status(400).json({
+      error: 'El comprobante de pago es obligatorio para transferencias manuales SRL.',
+      code:  'PAYMENT_PROOF_REQUIRED',
+    });
+  }
+
   // ── 3a. Corredor cl-bo: CLP → BOB (anchorBolivia) ────────────────────────
   if (
     corridor.destinationCurrency === 'BOB' &&
@@ -2320,6 +2329,45 @@ export async function getTransactionQR(req, res) {
     amount:              transaction.originalAmount,
     currency:            transaction.originCurrency,
     status:              transaction.status,
+  });
+}
+
+// ─── GET /api/v1/payments/srl-payin-instructions ─────────────────────────────
+
+/**
+ * Retorna los datos bancarios y los QR estáticos de AV Finance SRL para que el
+ * frontend muestre las instrucciones de transferencia antes de crear la
+ * transacción (el comprobante se exige en initCrossBorderPayment).
+ *
+ * Auth: Bearer JWT — disponible para usuarios SRL.
+ */
+export async function getSRLPayinInstructions(req, res) {
+  if (req.user?.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'Este endpoint es exclusivo para usuarios SRL.' });
+  }
+
+  let bankData = {};
+  let qrImages = [];
+  try {
+    const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' })
+      .select('bankData qrImages')
+      .lean();
+    bankData = srlCfg?.bankData ?? {};
+    qrImages = (srlCfg?.qrImages ?? []).map(q => ({
+      label:       q.label,
+      imageBase64: q.imageBase64,
+    }));
+  } catch (err) {
+    console.warn('[SRLPayinInstructions] Fallback a env vars:', err.message);
+  }
+
+  return res.status(200).json({
+    bankName:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+    accountHolder: bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
+    accountNumber: bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
+    accountType:   bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+    currency:      'BOB',
+    qrImages,
   });
 }
 

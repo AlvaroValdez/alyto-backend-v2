@@ -26,6 +26,7 @@ import {
   getAvailableCorridors,
   getPayinMethods,
   getTransactionQR,
+  getSRLPayinInstructions,
   uploadPaymentProof,
   uploadComprobante,
 } from '../controllers/paymentController.js';
@@ -133,6 +134,16 @@ router.get('/methods', protect, getPayinMethods);
  * Auth: Bearer JWT
  */
 router.get('/spa-payin-instructions', protect, getSpAPayinInstructions);
+
+/**
+ * GET /api/v1/payments/srl-payin-instructions
+ *
+ * Datos bancarios de AV Finance SRL + QR estáticos para transferencia
+ * manual BOB. Se usa antes de crear la transacción para mostrar las
+ * instrucciones al usuario sin necesidad de un transactionId.
+ * Auth: Bearer JWT (SRL)
+ */
+router.get('/srl-payin-instructions', protect, getSRLPayinInstructions);
 
 /**
  * GET /api/v1/payments/withdrawal-rules/:countryCode
