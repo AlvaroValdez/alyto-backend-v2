@@ -26,7 +26,7 @@ import { BoundedCache } from '../utils/boundedCache.js';
 // Para cambios críticos post-login (ej. cuenta suspendida), el TTL máximo
 // de 5 min es el delay aceptable antes de que el middleware lo detecte.
 
-const USER_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos — reducido para acotar ventana de revocación
+const USER_CACHE_TTL_MS = 10 * 1000; // 10 s — mínimo práctico; permite propagar cambios de estado rápido
 const USER_CACHE_MAX    = 1000;
 // BoundedCache: evita crecimiento ilimitado bajo tráfico sostenido.
 export const userCache = new BoundedCache(USER_CACHE_MAX, USER_CACHE_TTL_MS);
@@ -43,6 +43,12 @@ function setCachedUser(userId, user) {
 export function invalidateUserCache(userId) {
   userCache.delete(String(userId));
 }
+
+/** Vacía completamente el cache — para uso en testing o post-migración. */
+export const clearUserCache = () => {
+  userCache.clear();
+  console.log('[Auth] userCache cleared');
+};
 
 // ─── protect ─────────────────────────────────────────────────────────────────
 
@@ -103,21 +109,24 @@ export async function protect(req, res, next) {
       });
     }
 
-    // Revocación server-side: sólo en producción.
-    // En dev/staging se omite para evitar drift por logouts repetidos.
-    const skipTokenVersionCheck = process.env.NODE_ENV !== 'production';
+    // Revocación server-side: sólo en producción, y sólo si no está
+    // deshabilitado explícitamente vía DISABLE_TOKEN_VERSION_CHECK.
+    // En dev/staging se omite implícitamente (la rama prod no ejecuta).
+    const skipTokenVersionCheck = process.env.DISABLE_TOKEN_VERSION_CHECK === 'true';
     const userTokenVersion = user.tokenVersion ?? 0;
     const jwtTokenVersion  = decoded.tokenVersion ?? 0;
-    if (!skipTokenVersionCheck && jwtTokenVersion !== userTokenVersion) {
-      console.log('[Protect] REJECT: tokenVersion mismatch | JWT:', jwtTokenVersion,
-        '| DB:', userTokenVersion,
-        '| SKIP:', skipTokenVersionCheck,
-        '| path:', req.path);
-      return res.status(401).json({
-        success: false,
-        message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
-        code:    'TOKEN_VERSION_MISMATCH',
-      });
+    if (process.env.NODE_ENV === 'production' && !skipTokenVersionCheck) {
+      if (jwtTokenVersion !== userTokenVersion) {
+        console.warn('[Protect] REJECT: tokenVersion mismatch | JWT:', jwtTokenVersion,
+          '| DB:', userTokenVersion,
+          '| userId:', decoded.id,
+          '| path:', req.path);
+        return res.status(401).json({
+          success: false,
+          message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
+          code:    'TOKEN_VERSION_MISMATCH',
+        });
+      }
     }
 
     req.user = user;
