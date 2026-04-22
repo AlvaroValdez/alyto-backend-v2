@@ -227,6 +227,8 @@ async function computeQuote(state) {
       destinationCurrency: 'BOB',
       exchangeRate:        effectiveRate,
       isManualCorridor:    true,
+      payinMethod:         corridor.payinMethod,
+      payoutMethod:        corridor.payoutMethod,
       fees: {
         payinFee:      round2(payinFee),
         alytoCSpread:  round2(alytoCSpread),
@@ -298,6 +300,8 @@ async function computeQuote(state) {
       exchangeRate:        quote.effectiveRate,
       conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
       isManualCorridor:    corridor.payoutMethod === 'anchorBolivia',
+      payinMethod:         corridor.payinMethod,
+      payoutMethod:        corridor.payoutMethod,
       usdcTransitAmount:   quote.digitalAssetAmount,
       bobPerUsdc,
       fees:                quote.fees,
@@ -334,11 +338,13 @@ async function computeQuote(state) {
     destinationAmount,
     destinationCurrency: corridor.destinationCurrency,
     exchangeRate,
+    payinMethod:         corridor.payinMethod,
+    payoutMethod:        corridor.payoutMethod,
     fees: {
       payinFee,
       alytoCSpread,
       fixedFee,
-      payoutFee:       0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
+      payoutFee:       0,
       profitRetention,
       totalDeducted:   round2(totalDeducted),
     },
