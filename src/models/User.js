@@ -303,8 +303,9 @@ const userSchema = new Schema(
      * para rechazar tokens emitidos antes del último bump.
      */
     tokenVersion: {
-      type:    Number,
-      default: 0,
+      type:     Number,
+      default:  0,
+      required: true,
     },
 
     // ── Reset de contraseña ──────────────────────────────────────────────────
