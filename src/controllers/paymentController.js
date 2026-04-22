@@ -727,14 +727,11 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── Payin manual SRL: el comprobante bancario es obligatorio ───────────────
-  // Evita que el admin ledger reciba registros sin forma de verificar el pago.
-  if (corridor.payinMethod === 'manual' && !req.body.paymentProofBase64) {
-    return res.status(400).json({
-      error: 'El comprobante de pago es obligatorio para transferencias manuales SRL.',
-      code:  'PAYMENT_PROOF_REQUIRED',
-    });
-  }
+  // ── Payin manual SRL: el comprobante se sube DESPUÉS (spec §2.3) ───────────
+  // La tx se crea sin comprobante en status 'payin_pending'. El usuario navega
+  // a Step 3 (/send/payment/:txId) donde sube el comprobante vía
+  // POST /payments/:transactionId/comprobante. Ese endpoint es el único punto
+  // que persiste Transaction.paymentProof y dispara broadcastToAdmins.
 
   // ── 3a. Corredor cl-bo: CLP → BOB (anchorBolivia) ────────────────────────
   if (
@@ -775,19 +772,6 @@ export async function initCrossBorderPayment(req, res) {
 
     const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'B'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
     const paymentRef = req.body.paymentRef ?? `ALY-${Date.now().toString(36).toUpperCase()}`;
-
-    // Extraer comprobante de pago (base64)
-    const { paymentProofBase64, paymentProofMimetype } = req.body;
-    let paymentProof = undefined;
-    if (paymentProofBase64) {
-      const ext = (paymentProofMimetype ?? 'image/jpeg').split('/')[1] ?? 'jpg';
-      paymentProof = {
-        data:       paymentProofBase64,
-        mimetype:   paymentProofMimetype ?? 'image/jpeg',
-        filename:   `comprobante-${alytoTransactionId}.${ext}`,
-        uploadedAt: new Date(),
-      };
-    }
 
     // Construir beneficiario
     const ben = beneficiaryData ?? legacyBeneficiary ?? {};
@@ -837,7 +821,6 @@ export async function initCrossBorderPayment(req, res) {
         },
 
         beneficiary:    beneficiaryDoc,
-        paymentProof,
 
         providersUsed:  ['payin:manual'],
         paymentLegs:    [{ stage: 'payin', provider: 'manual', status: 'pending' }],
@@ -930,7 +913,7 @@ export async function initCrossBorderPayment(req, res) {
           beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
           bankName:        ben.bankName ?? '',
           accountNumber:   ben.accountNumber ?? '',
-          hasProof:        paymentProofBase64 ? 'Si' : 'No',
+          hasProof:        'No',
           ledgerUrl:       `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${alytoTransactionId}`,
         },
       ).catch(err => console.error('[Email] Error admin CLP-BOB alert:', {
@@ -1149,39 +1132,12 @@ export async function initCrossBorderPayment(req, res) {
 
   // ── 6. Crear transacción en BD ────────────────────────────────────────────
   // alytoTransactionId ya fue generado antes del call a Fintoc (Fix: metadata del IPN)
-
-  // Extraer y validar paymentProof (payin manual SRL — comprobante obligatorio)
-  // La validación de presencia ya ocurrió arriba (PAYMENT_PROOF_REQUIRED).
-  // Aquí se normaliza el base64 (strip data URL prefix si viene), se mide el tamaño
-  // y se construye el sub-documento que se persiste en Transaction.paymentProof.
-  const { paymentProofBase64, paymentProofMimetype } = req.body;
-  let paymentProofData = null;
-  if (paymentProofBase64) {
-    const base64Data = paymentProofBase64.includes(',')
-      ? paymentProofBase64.split(',')[1]
-      : paymentProofBase64;
-    const sizeBytes = Math.ceil((base64Data.length * 3) / 4);
-    if (sizeBytes > 5 * 1024 * 1024) {
-      return res.status(400).json({
-        error: 'El comprobante excede el tamaño máximo de 5MB',
-        code:  'PROOF_TOO_LARGE',
-      });
-    }
-    paymentProofData = {
-      data:       base64Data,
-      mimetype:   paymentProofMimetype || 'image/jpeg',
-      filename:   req.body.paymentProofFilename || 'comprobante',
-      size:       sizeBytes,
-      uploadedAt: new Date(),
-    };
-    console.log('[Payment] paymentProof extracted:', {
-      mimetype: paymentProofData.mimetype,
-      size:     paymentProofData.size,
-      filename: paymentProofData.filename,
-    });
-  } else if (corridor.payinMethod === 'manual') {
-    console.warn('[Payment] paymentProofBase64 missing in SRL payin request');
-  }
+  //
+  // El comprobante NO se adjunta aquí (spec §2.3). La tx se crea sin
+  // paymentProof y queda en 'payin_pending'; el usuario navega a Step 3
+  // y sube el comprobante vía POST /payments/:transactionId/comprobante
+  // (uploadPaymentProof). Ese endpoint persiste Transaction.paymentProof,
+  // registra ipnLog y dispara broadcastToAdmins → tab Accionables.
 
   let transaction;
   try {
@@ -1221,7 +1177,6 @@ export async function initCrossBorderPayment(req, res) {
       },
 
       beneficiary: beneficiaryDoc,
-      paymentProof: paymentProofData ?? undefined,
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
@@ -1240,42 +1195,6 @@ export async function initCrossBorderPayment(req, res) {
     console.error('[Alyto CrossBorder] Error persistiendo transacción en BD:', {
       corridorId, error: err.message,
     });
-  }
-
-  // ── 6b. Registrar comprobante en ipnLog + broadcast SSE a admins ──────────
-  // Mismo patrón que uploadPaymentProof para que el tab "Accionables" del
-  // Ledger reciba la tx en tiempo real cuando llega con comprobante adjunto.
-  if (transaction && paymentProofData) {
-    try {
-      transaction.ipnLog.push({
-        provider:   'manual',
-        eventType:  'payment_proof_uploaded',
-        status:     transaction.status,
-        rawPayload: {
-          filename: paymentProofData.filename,
-          size:     paymentProofData.size,
-          mimetype: paymentProofData.mimetype,
-          source:   'user_initial_submit',
-        },
-        receivedAt: new Date(),
-      });
-      await transaction.save();
-    } catch (logErr) {
-      console.warn('[Payment] ipnLog paymentProof push failed:', logErr.message);
-    }
-
-    try {
-      broadcastToAdmins('tx_actionable', {
-        transactionId:      transaction.alytoTransactionId,
-        userId:             String(transaction.userId),
-        amount:             transaction.originalAmount,
-        currency:           transaction.originCurrency,
-        destinationCountry: transaction.destinationCountry,
-        timestamp:          new Date().toISOString(),
-      });
-    } catch (err) {
-      console.warn('[Payment] broadcastToAdmins failed:', err.message);
-    }
   }
 
   // ── 7. QR + Emails para payin manual ─────────────────────────────────────
