@@ -32,6 +32,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
+import { calculateQuote }   from '../services/quoteCalculator.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
 export const uploadComprobante = multer({
@@ -1213,7 +1214,7 @@ export async function initCrossBorderPayment(req, res) {
         fixedFee,
         payoutFee,
         profitRetention,
-        vitaRateMarkup:    corridor.vitaRateMarkup ?? 0.5,
+        vitaRateMarkup:    0,   // spec v1.0 §3.5, §6.9 — always zero for new tx
         totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + payoutFee),
         totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
         feeCurrency:       corridor.originCurrency ?? 'USD',
@@ -1523,42 +1524,34 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     });
   }
 
-  const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+  const { rate: usdToDestRate, validUntil } = vitaPricingUSD;
 
-  // ── 3. Calcular fees en BOB ───────────────────────────────────────────────
-  const payinFee        = amount * (corridor.payinFeePercent    / 100);
-  const alytoCSpread    = amount * (corridor.alytoCSpread       / 100);
-  const fixedFee        = corridor.fixedFee ?? 0;
-  const profitRetention = amount * (corridor.profitRetentionPercent / 100);
-  const netBOB          = amount - payinFee - alytoCSpread - fixedFee - profitRetention;
-
-  if (netBOB <= 0) {
+  // ── 3. Quote unificado — delegate to canonical calculator (spec §3.2) ─────
+  let quote;
+  try {
+    quote = calculateQuote({
+      amount,
+      corridor,
+      bobPerUsdc,
+      vitaRate: usdToDestRate,
+    });
+  } catch (err) {
+    console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
-  // ── 4. Conversión BOB → USDC → destino ────────────────────────────────────
-  const usdcTransitAmount = round2(netBOB / bobPerUsdc);
-  const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
-  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
-  if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
-    console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
-  }
-  const adjustedRate      = round2(usdToDestRate * (1 - vitaMarkup / 100));
-  const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
-
-  if (destinationAmount <= 0) {
+  if (quote.destinationAmount <= 0) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
-  // tasa efectiva: cuántas unidades de destino por 1 BOB
-  const effectiveRate   = round2(destinationAmount / amount);
-  const alytoProfitBOB  = payinFee + alytoCSpread + fixedFee + profitRetention;
-  const alytoProfitUSDC = round2(alytoProfitBOB / bobPerUsdc);
+  const alytoProfitUSDC = round2(
+    (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
+    / bobPerUsdc,
+  );
 
   console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate);
-  console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', effectiveRate);
-  console.log('[Quote BOB] netBOB:', netBOB, '| usdcTransit:', usdcTransitAmount, '| dest:', destinationAmount);
+  console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', quote.effectiveRate);
+  console.log('[Quote BOB] netBOB:', amount - quote.totalDeductedReal, '| usdcTransit:', quote.digitalAssetAmount, '| dest:', quote.destinationAmount);
 
   const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
   const vitaExpiry     = validUntil ? new Date(validUntil) : null;
@@ -1566,24 +1559,19 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
 
   return res.status(200).json({
     corridorId:          corridor.corridorId,
-    originAmount:        amount,
+    originAmount:        quote.originAmount,
     originCurrency:      'BOB',
-    destinationAmount,
+    destinationAmount:   quote.destinationAmount,
     destinationCurrency: corridor.destinationCurrency,
-    exchangeRate:        effectiveRate,
+    exchangeRate:        quote.effectiveRate,
     conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
     isManualCorridor:    corridor.payoutMethod === 'anchorBolivia',
     stellarAsset:        'USDC',
-    usdcTransitAmount,
+    usdcTransitAmount:   quote.digitalAssetAmount,
     bobPerUsdc,
     usdcToDestRate:      usdToDestRate,
     fees: {
-      payinFee:        round2(payinFee),
-      alytoCSpread:    round2(alytoCSpread),
-      fixedFee:        round2(fixedFee),
-      payoutFee:       0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
-      profitRetention: round2(profitRetention),
-      totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention),
+      ...quote.fees,
       alytoProfitUSDC,
     },
     payinMethod:   corridor.payinMethod,
@@ -1859,32 +1847,13 @@ export async function getQuote(req, res) {
   //
   // Sin tasa configurada (manualExchangeRate === 0): la cotización no puede procesarse.
   if (corridor.payinMethod === 'manual') {
-    // bobPerUsdc: tasa configurada por admin (BOB por 1 USDC).
-    // Fallback a BOB_USD_RATE cuando el admin aún no la ha fijado (USDC ≈ 1:1 USD).
+    // bobPerUsdc: admin-configured rate or DB/env fallback.
     const BOB_USD_RATE = await getBOBRate();
     const bobPerUsdc   = (corridor.manualExchangeRate && corridor.manualExchangeRate > 0)
       ? corridor.manualExchangeRate
       : BOB_USD_RATE;
 
-    console.info('[Alyto Quote] Corredor manual BOB — tasa aplicada:', {
-      corridorId:          corridor.corridorId,
-      userId,
-      source:              corridor.manualExchangeRate > 0 ? 'corridor_manualRate' : 'exchangeRate_db_or_env',
-      bobPerUsdc,
-    });
-
-    // ── Paso 1: BOB → USDC (tasa fijada por admin, refleja tasa ASFI) ────────
-    // amountAfterFees ya descuenta: alytoCSpread + fixedFee + profitRetention
-    const usdcTransitAmount = round2(amountAfterFees / bobPerUsdc);
-
-    if (usdcTransitAmount <= 0) {
-      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
-    }
-
-    // ── Paso 2: USDC → destino (tasa USD en tiempo real de Vita) ─────────────
-    // USDC ≈ 1:1 USD, por lo que usamos las tasas USD de Vita directamente.
     const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
-
     if (!vitaPricingUSD) {
       console.error('[Alyto Quote] Vita no tiene tasa USD→' + dest + ' para corredor manual.', {
         corridorId: corridor.corridorId, userId,
@@ -1894,70 +1863,62 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+    const { rate: usdcToDestRate, validUntil } = vitaPricingUSD;
 
-    // payoutFee: costo fijo de Vita para este destino (en moneda destino)
-    const payoutFee       = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
-    // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
-    const vitaMarkup      = corridor.vitaRateMarkup ?? 0.5;
-    if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
-      console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
-    }
-    const adjustedRate    = round2(usdcToDestRate * (1 - vitaMarkup / 100));
-    const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
-
-    if (destinationAmount <= 0) {
+    // ── Quote unificado — canonical formula (spec v1.0 §3.2) ─────────────────
+    let quote;
+    try {
+      quote = calculateQuote({
+        amount,
+        corridor,
+        bobPerUsdc,
+        vitaRate: usdcToDestRate,
+      });
+    } catch (err) {
+      console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
     }
 
-    // ── Tasa efectiva compuesta: BOB → dest ───────────────────────────────────
-    // effectiveRate = destAmount / originAmount = cuántas unidades dest recibe por 1 BOB
-    const effectiveExchangeRate = round2(destinationAmount / amount);
+    if (quote.destinationAmount <= 0) {
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
 
-    // ── Ganancia de Alyto en USDC ─────────────────────────────────────────────
-    // La ganancia es la diferencia entre el BOB bruto y el neto, convertida a USDC.
-    const alytoProfitBOB  = payinFee + alytoCSpread + fixedFee + profitRetention;
-    const alytoProfitUSDC = round2(alytoProfitBOB / bobPerUsdc);
+    const alytoProfitUSDC = round2(
+      (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
+      / bobPerUsdc,
+    );
 
     const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
     const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
     console.info('[Alyto Quote] Cotización manual BOB→USDC→' + dest + ':', {
-      corridorId:       corridor.corridorId,
+      corridorId:        corridor.corridorId,
       userId,
-      originAmount:     amount,
+      originAmount:      amount,
       bobPerUsdc,
-      usdcTransitAmount,
+      usdcTransitAmount: quote.digitalAssetAmount,
       usdcToDestRate,
-      destinationAmount,
+      destinationAmount: quote.destinationAmount,
       alytoProfitUSDC,
     });
 
     return res.status(200).json({
       corridorId:           corridor.corridorId,
-      originAmount:         amount,
+      originAmount:         quote.originAmount,
       originCurrency:       corridor.originCurrency,
-      destinationAmount,
+      destinationAmount:    quote.destinationAmount,
       destinationCurrency:  corridor.destinationCurrency,
-      exchangeRate:         effectiveExchangeRate,
-      // ── Ruta de conversión ───────────────────────────────────────────────
+      exchangeRate:         quote.effectiveRate,
       isManualCorridor:     corridor.payoutMethod === 'anchorBolivia',
       conversionPath:       `${corridor.originCurrency} → USDC → ${corridor.destinationCurrency}`,
       stellarAsset:         'USDC',
-      usdcTransitAmount,     // USDC que viajan por Stellar como highway
-      bobPerUsdc,            // Tasa admin: 1 USDC = N BOB
-      usdcToDestRate,        // Tasa Vita: 1 USDC → N dest
-      // ── Fees desglosados ─────────────────────────────────────────────────
+      usdcTransitAmount:    quote.digitalAssetAmount,
+      bobPerUsdc,
+      usdcToDestRate,
       fees: {
-        payinFee:          round2(payinFee),
-        alytoCSpread:      round2(alytoCSpread),
-        fixedFee:          round2(fixedFee),
-        payoutFee:         0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
-        profitRetention:   round2(profitRetention),
-        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee),
-        totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
-        alytoProfitUSDC,  // Ganancia total Alyto expresada en USDC
+        ...quote.fees,
+        alytoProfitUSDC,
       },
       quoteExpiresAt,
       payinMethod:  corridor.payinMethod,
@@ -1992,13 +1953,8 @@ export async function getQuote(req, res) {
   // estático del TransactionConfig actúa como fallback (ej. en mantenimiento de Vita)
   const payoutFee = vitaFixedCost > 0 ? vitaFixedCost : corridor.payoutFeeFixed;
 
-  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
-  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
-  if (corridor.vitaRateMarkup === undefined || corridor.vitaRateMarkup === null) {
-    console.warn('[Quote] vitaRateMarkup not in DB for corridor:', corridor.corridorId, '— using fallback 0.5');
-  }
-  const adjustedRate      = round2(exchangeRate * (1 - vitaMarkup / 100));
-  const destinationAmount = round2((amountAfterFees * adjustedRate) - payoutFee);
+  // Raw Vita rate — spec v1.0 §1.2, §6.1 forbid markup in any quote calculation
+  const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
 
   if (destinationAmount <= 0) {
     return res.status(400).json({
