@@ -185,18 +185,15 @@ const transactionConfigSchema = new Schema(
     },
 
     /**
-     * Markup porcentual sobre la tasa de Vita para proteger a Alyto del
-     * drift FX entre el momento del quote y el payout (especialmente en
-     * corredores con payin manual donde pueden pasar horas).
-     * Expresado en puntos porcentuales: 0.5 = descontar 0.5% de la tasa Vita.
-     * El usuario recibe la tasa con markup ya aplicado — sin sorpresas.
-     * 0 = sin markup (Alyto asume riesgo FX completo).
+     * DEPRECATED per Send Money Flow v1.0 (docs/SEND_MONEY_FLOW.md §1.2, §6.1).
+     * No longer applied in calculation. Field retained for schema compatibility.
+     * Must be 0 — spec forbids markup in any quote calculation.
      */
     vitaRateMarkup: {
       type:    Number,
       min:     0,
       max:     5,
-      default: 0.5,
+      default: 0,
     },
 
     /**

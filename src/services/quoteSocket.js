@@ -26,6 +26,7 @@ import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
 import { getBOBRate }      from './exchangeRateService.js';
+import { calculateQuote }  from './quoteCalculator.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -256,49 +257,50 @@ async function computeQuote(state) {
       return null;
     }
 
-    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+    const { rate: usdToDestRate, validUntil } = usdPricing;
 
-    const netBOB = round2(amount - payinFee - alytoCSpread - fixedFee - profitRetention);
-    if (netBOB <= 0) return null;
+    // Quote unificado — canonical formula (spec v1.0 §3.2)
+    let quote;
+    try {
+      quote = calculateQuote({
+        amount,
+        corridor,
+        bobPerUsdc,
+        vitaRate: usdToDestRate,
+      });
+    } catch (err) {
+      console.warn('[Alyto WS] calculateQuote rejected:', err.message);
+      return null;
+    }
 
-    const usdcTransitAmount = round2(netBOB / bobPerUsdc);
-    const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-    // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
-    const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
-    const adjustedRate      = round2(usdToDestRate * (1 - vitaMarkup / 100));
-    const destinationAmount = round2((usdcTransitAmount * adjustedRate) - payoutFee);
+    if (quote.destinationAmount <= 0) return null;
 
-    if (destinationAmount <= 0) return null;
-
-    const effectiveRate  = round2(destinationAmount / amount);
     const localExpiry    = new Date(Date.now() + QUOTE_VALIDITY_MS);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
     const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
 
     console.info('[Alyto WS] Quote BOB→' + destinationCountry + ':', {
-      amount, bobPerUsdc, netBOB, usdcTransitAmount, usdToDestRate, destinationAmount, effectiveRate,
+      amount,
+      bobPerUsdc,
+      usdcTransitAmount: quote.digitalAssetAmount,
+      usdToDestRate,
+      destinationAmount: quote.destinationAmount,
+      effectiveRate:     quote.effectiveRate,
     });
 
     return {
       type:                'quote_update',
       corridorId:          corridor.corridorId,
-      originAmount:        amount,
+      originAmount:        quote.originAmount,
       originCurrency:      'BOB',
-      destinationAmount,
+      destinationAmount:   quote.destinationAmount,
       destinationCurrency: corridor.destinationCurrency,
-      exchangeRate:        effectiveRate,
+      exchangeRate:        quote.effectiveRate,
       conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
       isManualCorridor:    corridor.payoutMethod === 'anchorBolivia',
-      usdcTransitAmount,
+      usdcTransitAmount:   quote.digitalAssetAmount,
       bobPerUsdc,
-      fees: {
-        payinFee,
-        alytoCSpread,
-        fixedFee,
-        payoutFee:       0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
-        profitRetention,
-        totalDeducted:   round2(payinFee + alytoCSpread + fixedFee + profitRetention),
-      },
+      fees:                quote.fees,
       quoteExpiresAt,
       updatedAt: new Date(),
       stale:     !vitaCache.prices,
@@ -315,10 +317,8 @@ async function computeQuote(state) {
   const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
   const amountAfterFees   = round2(amount - totalDeducted);
   const payoutFee         = vitaFixedCost > 0 ? vitaFixedCost : (corridor.payoutFeeFixed ?? 0);
-  // Aplicar markup sobre tasa Vita para proteger a Alyto del drift FX
-  const vitaMarkup        = corridor.vitaRateMarkup ?? 0.5;
-  const adjustedRate      = round2(exchangeRate * (1 - vitaMarkup / 100));
-  const destinationAmount = round2((amountAfterFees * adjustedRate) - payoutFee);
+  // Raw Vita rate — spec v1.0 §1.2, §6.1 forbid markup in any quote calculation
+  const destinationAmount = round2((amountAfterFees * exchangeRate) - payoutFee);
 
   if (destinationAmount <= 0) return null;
 

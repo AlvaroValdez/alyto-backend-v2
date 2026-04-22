@@ -667,9 +667,9 @@ export async function dispatchPayout(transaction) {
     }
 
     // ── Pre-cargar precios Vita (requerido por tryProvider) ────────────────────
-    // Ya NO recalculamos destinationAmount aquí. El quote incluye un markup
-    // (vitaRateMarkup) que protege a Alyto del drift FX entre quote y payout.
-    // El usuario recibe exactamente lo que se le cotizó — sin sorpresas.
+    // Ya NO recalculamos destinationAmount aquí. Per spec v1.0 §4.2 the quote
+    // amounts locked at Transaction.create are final; any live-rate drift is
+    // absorbed by Alyto (no post-execution user adjustment).
     // getPrices() solo se necesita para que Vita procese la transacción.
     let sharedLivePrices = null;
     if (payoutMethod === 'vitaWallet') {
