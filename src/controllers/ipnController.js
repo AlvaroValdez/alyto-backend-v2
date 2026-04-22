@@ -42,6 +42,7 @@ import FundingRecord from '../models/FundingRecord.js';
 import { registerAuditTrail }                  from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
+import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { getBOBRate }        from '../services/exchangeRateService.js';
 
@@ -396,6 +397,15 @@ async function tryOwlPayV2(transaction, corridor) {
       entity, available: availableUSDC, required: usdcAmount,
     });
 
+    broadcastToAdmins('tx_manual_payout', {
+      transactionId: transaction.alytoTransactionId,
+      status:        'pending_funding',
+      entity,
+      required:      usdcAmount,
+      available:     availableUSDC,
+      timestamp:     new Date().toISOString(),
+    });
+
     try {
       await sendRawEmail(
         process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
@@ -455,6 +465,14 @@ async function tryOwlPayV2(transaction, corridor) {
     usdcAmountRequired: transfer.sourceAmount,
     destinationAmount:  transfer.destinationAmount,
     expiresAt:          transfer.expiresAt,
+  });
+
+  broadcastToAdmins('tx_manual_payout', {
+    transactionId:      transaction.alytoTransactionId,
+    status:             'payout_pending_usdc_send',
+    harborTransferId:   transfer.harborTransferId,
+    usdcAmountRequired: transfer.sourceAmount,
+    timestamp:          new Date().toISOString(),
   });
 
   // ── 5. Enviar USDC a la instruction_address (o alertar al admin) ──────────
@@ -930,6 +948,15 @@ export async function dispatchPayout(transaction) {
     transaction.status = 'payout_pending';
     await appendIpnLog(transaction, 'anchor_bolivia_payout_pending', 'anchorBolivia', 'payout_pending', {
       note: 'Payout manual Bolivia — admin debe confirmar transferencia.',
+    });
+
+    broadcastToAdmins('tx_manual_payout', {
+      transactionId:      transaction.alytoTransactionId,
+      status:             'payout_pending',
+      payoutMethod:       'anchorBolivia',
+      destinationAmount:  transaction.destinationAmount,
+      destinationCurrency: transaction.destinationCurrency,
+      timestamp:          new Date().toISOString(),
     });
 
     notifyAdminManualPayout(transaction)

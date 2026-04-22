@@ -62,6 +62,7 @@ import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate }          from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
+import { broadcastToAdmins } from '../routes/adminSSE.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -1197,7 +1198,7 @@ export async function initCrossBorderPayment(req, res) {
 
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
-      status:              corridor.payinMethod === 'manual' ? 'initiated' : 'payin_pending',
+      status:              'payin_pending',
       alytoTransactionId,
     });
   } catch (err) {
@@ -1268,7 +1269,7 @@ export async function initCrossBorderPayment(req, res) {
   if (corridor.payinMethod === 'manual') {
     return res.status(201).json({
       transactionId:       alytoTransactionId,
-      status:              'initiated',
+      status:              'payin_pending',
       payinMethod:         'manual',
       paymentInstructions: manualPaymentInstructions,
       destinationAmount:   transaction.destinationAmount   ?? quotedDestAmount   ?? null,
@@ -2431,6 +2432,16 @@ export async function uploadPaymentProof(req, res) {
     console.error('[Comprobante] Error guardando en BD:', err.message);
     return res.status(500).json({ error: 'Error guardando el comprobante.' });
   }
+
+  // Broadcast SSE: nueva tx accionable (tab "Accionables" del admin Ledger)
+  broadcastToAdmins('tx_actionable', {
+    transactionId:     transaction.alytoTransactionId,
+    userId:            String(userId),
+    amount:            transaction.originalAmount,
+    currency:          transaction.originCurrency,
+    destinationCountry: transaction.destinationCountry,
+    timestamp:         new Date().toISOString(),
+  });
 
   // Notificar a admins — push + in-app + email
   const user = await User.findById(userId).select('firstName lastName').lean();

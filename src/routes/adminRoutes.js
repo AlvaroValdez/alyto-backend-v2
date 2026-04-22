@@ -27,6 +27,7 @@ import {
   getAllUsers,
   getGlobalLedger,
   listTransactions,
+  getLedgerCounts,
   getTransaction,
   updateTransactionStatus,
   listCorridors,
@@ -44,6 +45,7 @@ import {
   getMemoryStats,
   resetUserTokenVersion,
 } from '../controllers/adminController.js';
+import adminSSE from './adminSSE.js';
 import {
   createFunding,
   listFunding,
@@ -131,6 +133,20 @@ router.get('/users', getAllUsers);
 router.patch('/users/:userId/reset-token-version', resetUserTokenVersion);
 
 // ─── Ledger legacy ────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/ledger/counts
+ * Counts por tab (actionable, manual_payout, in_progress, history, unpaid).
+ * Debe ir ANTES de /ledger y del mount de adminSSE para evitar colisiones.
+ */
+router.get('/ledger/counts', getLedgerCounts);
+
+/**
+ * GET /api/v1/admin/ledger/events
+ * Server-Sent Events para notificaciones en tiempo real al admin.
+ * Auth: cookie alyto_token (inherited de router.use(protect, checkAdmin) arriba).
+ */
+router.use('/ledger', adminSSE);
 
 /**
  * GET /api/v1/admin/ledger
