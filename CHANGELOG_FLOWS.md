@@ -23,3 +23,11 @@ Unifies every quote-calculation site behind a single `calculateQuote` module and
 - No user-facing field names changed. Prior consumers that read `quote.destinationAmount`, `quote.commission`, `quote.exchangeRate` continue to work as before; the numbers they return are now deterministic from a single code path.
 
 **Frontend counterpart:** the matching 3-step flow ships in `alyto-frontend-v2` commits `460bd9b`, `fff63bf`, `fc8d4a3`.
+
+### Amendment — 2026-04-22 · Drop `PAYMENT_PROOF_REQUIRED` from create
+
+| Commit    | Scope | Summary                                                                                              |
+|-----------|-------|------------------------------------------------------------------------------------------------------|
+| `336f9fe` | fix   | `initCrossBorderPayment` no longer requires `paymentProofBase64`. Proof is uploaded in Step 3 via `POST /payments/:txId/comprobante` (`uploadPaymentProof`), which already persists `Transaction.paymentProof`, logs `payment_proof_uploaded` on `ipnLog`, and broadcasts `tx_actionable`. |
+
+Originally (commit `eafca09`) the SRL branch rejected requests without `paymentProofBase64` so that `Accionables` would never get a tx with no way to verify. Under the canonical SendMoney contract (SEND_MONEY_FLOW.md §2.2/§2.3) that gate must move to Step 3 — Step 2 is the point at which the user confirms the details and the tx must persist in `payin_pending` so the bank reference (`alytoTransactionId`) can be shown on Step 3. The gate was removed from both the CL→BO branch and the main SRL flow; the duplicate initial broadcast was deleted so `broadcastToAdmins` fires exclusively from `uploadPaymentProof`. **Frontend counterpart:** `alyto-frontend-v2` commits `d5cf312` + `737223d`.
