@@ -107,12 +107,48 @@ export async function getGlobalLedger(req, res) {
 
 // ─── BACKOFFICE LEDGER ────────────────────────────────────────────────────────
 
-// Status válidos según el enum del modelo Transaction
+// Status válidos según el enum del modelo Transaction (15 valores, alineado con Transaction.js)
 const VALID_STATUSES = [
   'pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed',
   'processing', 'in_transit', 'payout_pending', 'payout_sent',
+  'payout_pending_usdc_send', 'payout_in_transit', 'pending_funding',
   'completed', 'failed', 'refunded',
 ];
+
+// ─── TAB_FILTERS ──────────────────────────────────────────────────────────────
+// Filtros por tab del Ledger admin. El tab controla qué sección del flujo mira
+// el admin. `unpaid` es una vista debug que lista payin sin comprobante.
+export const TAB_FILTERS = {
+  actionable: {
+    status:       'payin_pending',
+    paymentProof: { $exists: true, $ne: null },
+  },
+  manual_payout: {
+    status: { $in: [
+      'pending_funding',
+      'payout_pending',
+      'payout_pending_usdc_send',
+    ] },
+  },
+  in_progress: {
+    status: { $in: [
+      'payin_confirmed', 'payin_completed', 'processing',
+      'in_transit', 'payout_sent', 'payout_in_transit',
+    ] },
+  },
+  history: {
+    status: { $in: ['completed', 'failed', 'refunded'] },
+  },
+  unpaid: {
+    $and: [
+      { status: { $in: ['pending', 'initiated', 'payin_pending'] } },
+      { $or: [
+        { paymentProof: { $exists: false } },
+        { paymentProof: null },
+      ] },
+    ],
+  },
+};
 
 // ─── listTransactions ─────────────────────────────────────────────────────────
 
@@ -208,19 +244,16 @@ export async function listTransactions(req, res) {
   // pero ignora el status y el filtro por defecto "accionables".
   const pendingBaseFilter = { ...filter };
 
-  // ── 2b. Filtro por defecto "accionables" ──────────────────────────────────
-  // Cuando el admin no selecciona un status explícito y no pide showAll=true,
-  // excluimos las payin_pending que todavía no tienen paymentProof cargado.
-  if (!status && !showAll) {
-    filter.$or = [
-      { paymentProof: { $exists: true, $ne: null } },
-      { status: { $in: [
-        'payin_confirmed', 'payin_completed', 'processing',
-        'in_transit', 'payout_pending', 'payout_sent',
-        'payout_pending_usdc_send', 'payout_in_transit',
-        'completed', 'failed', 'refunded', 'pending_funding',
-      ] } },
-    ];
+  // ── 2b. Filtro por tab ────────────────────────────────────────────────────
+  // `tab` controla qué sección del flujo ve el admin. Si el admin pasa un
+  // `status` explícito o `tab=all` / `showAll=true`, el filtro por tab se
+  // salta (el status explícito gana para backcompat con filtros manuales).
+  const rawTab = req.query.tab;
+  const bypassTab = rawTab === 'all' || showAll || !!status;
+  if (!bypassTab) {
+    const tab       = rawTab || 'actionable';
+    const tabFilter = TAB_FILTERS[tab] || TAB_FILTERS.actionable;
+    Object.assign(filter, tabFilter);
   }
 
   // ── 3. Ejecutar en paralelo: agregación de resumen + consulta paginada ────
@@ -291,6 +324,39 @@ export async function listTransactions(req, res) {
         ? err.message
         : undefined,
     });
+  }
+}
+
+// ─── getLedgerCounts ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/ledger/counts
+ *
+ * Devuelve los conteos por tab del Ledger admin. Usado por el frontend para
+ * mostrar badges en las pestañas y refrescar cada ~15 s.
+ */
+export async function getLedgerCounts(req, res) {
+  try {
+    const [actionable, manualPayout, inProgress, history, unpaid] = await Promise.all([
+      Transaction.countDocuments(TAB_FILTERS.actionable).maxTimeMS(5000),
+      Transaction.countDocuments(TAB_FILTERS.manual_payout).maxTimeMS(5000),
+      Transaction.countDocuments(TAB_FILTERS.in_progress).maxTimeMS(5000),
+      Transaction.countDocuments(TAB_FILTERS.history).maxTimeMS(5000),
+      Transaction.countDocuments(TAB_FILTERS.unpaid).maxTimeMS(5000),
+    ]);
+
+    return res.json({
+      actionable,
+      manual_payout: manualPayout,
+      in_progress:   inProgress,
+      history,
+      unpaid,
+      total:         actionable + manualPayout + inProgress + history + unpaid,
+      timestamp:     new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[Admin getLedgerCounts] Error:', err.message);
+    return res.status(500).json({ error: 'Error al obtener conteos.' });
   }
 }
 
