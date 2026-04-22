@@ -1149,6 +1149,39 @@ export async function initCrossBorderPayment(req, res) {
   // ── 6. Crear transacción en BD ────────────────────────────────────────────
   // alytoTransactionId ya fue generado antes del call a Fintoc (Fix: metadata del IPN)
 
+  // Extraer y validar paymentProof (payin manual SRL — comprobante obligatorio)
+  // La validación de presencia ya ocurrió arriba (PAYMENT_PROOF_REQUIRED).
+  // Aquí se normaliza el base64 (strip data URL prefix si viene), se mide el tamaño
+  // y se construye el sub-documento que se persiste en Transaction.paymentProof.
+  const { paymentProofBase64, paymentProofMimetype } = req.body;
+  let paymentProofData = null;
+  if (paymentProofBase64) {
+    const base64Data = paymentProofBase64.includes(',')
+      ? paymentProofBase64.split(',')[1]
+      : paymentProofBase64;
+    const sizeBytes = Math.ceil((base64Data.length * 3) / 4);
+    if (sizeBytes > 5 * 1024 * 1024) {
+      return res.status(400).json({
+        error: 'El comprobante excede el tamaño máximo de 5MB',
+        code:  'PROOF_TOO_LARGE',
+      });
+    }
+    paymentProofData = {
+      data:       base64Data,
+      mimetype:   paymentProofMimetype || 'image/jpeg',
+      filename:   req.body.paymentProofFilename || 'comprobante',
+      size:       sizeBytes,
+      uploadedAt: new Date(),
+    };
+    console.log('[Payment] paymentProof extracted:', {
+      mimetype: paymentProofData.mimetype,
+      size:     paymentProofData.size,
+      filename: paymentProofData.filename,
+    });
+  } else if (corridor.payinMethod === 'manual') {
+    console.warn('[Payment] paymentProofBase64 missing in SRL payin request');
+  }
+
   let transaction;
   try {
     transaction = await Transaction.create({
@@ -1187,6 +1220,7 @@ export async function initCrossBorderPayment(req, res) {
       },
 
       beneficiary: beneficiaryDoc,
+      paymentProof: paymentProofData ?? undefined,
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
@@ -1205,6 +1239,42 @@ export async function initCrossBorderPayment(req, res) {
     console.error('[Alyto CrossBorder] Error persistiendo transacción en BD:', {
       corridorId, error: err.message,
     });
+  }
+
+  // ── 6b. Registrar comprobante en ipnLog + broadcast SSE a admins ──────────
+  // Mismo patrón que uploadPaymentProof para que el tab "Accionables" del
+  // Ledger reciba la tx en tiempo real cuando llega con comprobante adjunto.
+  if (transaction && paymentProofData) {
+    try {
+      transaction.ipnLog.push({
+        provider:   'manual',
+        eventType:  'payment_proof_uploaded',
+        status:     transaction.status,
+        rawPayload: {
+          filename: paymentProofData.filename,
+          size:     paymentProofData.size,
+          mimetype: paymentProofData.mimetype,
+          source:   'user_initial_submit',
+        },
+        receivedAt: new Date(),
+      });
+      await transaction.save();
+    } catch (logErr) {
+      console.warn('[Payment] ipnLog paymentProof push failed:', logErr.message);
+    }
+
+    try {
+      broadcastToAdmins('tx_actionable', {
+        transactionId:      transaction.alytoTransactionId,
+        userId:             String(transaction.userId),
+        amount:             transaction.originalAmount,
+        currency:           transaction.originCurrency,
+        destinationCountry: transaction.destinationCountry,
+        timestamp:          new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('[Payment] broadcastToAdmins failed:', err.message);
+    }
   }
 
   // ── 7. QR + Emails para payin manual ─────────────────────────────────────
