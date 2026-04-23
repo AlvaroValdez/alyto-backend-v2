@@ -25,6 +25,7 @@ const round2 = n => Math.round(n * 100) / 100;
  * @param {object}  input.corridor      TransactionConfig doc or plain config
  * @param {number}  input.bobPerUsdc    BOB → USDC rate (admin-configured or env fallback)
  * @param {number}  input.vitaRate      USDC → destination currency rate (raw from Vita, no markup)
+ * @param {string}  [input.accountType] 'business' applies businessAlytoCSpread when set
  * @returns {{
  *   originAmount:       number,
  *   totalDeducted:      number,
@@ -37,7 +38,7 @@ const round2 = n => Math.round(n * 100) / 100;
  *   digitalAsset:       string
  * }}
  */
-export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate }) {
+export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate, accountType = 'personal' }) {
   if (!amount || amount <= 0) {
     throw new Error('calculateQuote: amount must be positive');
   }
@@ -53,7 +54,10 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate }) {
 
   // Step 1 — fees in origin currency (BOB)
   const payinFee         = amount * ((corridor.payinFeePercent         ?? 0) / 100);
-  const alytoCSpread     = amount * ((corridor.alytoCSpread            ?? 0) / 100);
+  const effectiveSpreadPct = (accountType === 'business' && corridor.businessAlytoCSpread != null)
+    ? corridor.businessAlytoCSpread
+    : (corridor.alytoCSpread ?? 0);
+  const alytoCSpread     = amount * (effectiveSpreadPct / 100);
   const fixedFee         = corridor.fixedFee                            ?? 0;
   const profitRetention  = amount * ((corridor.profitRetentionPercent  ?? 0) / 100);
 
