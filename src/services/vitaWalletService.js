@@ -157,6 +157,26 @@ export function generateVitaSignature(xDate, body = null) {
 
 // ─── Cliente HTTP base ────────────────────────────────────────────────────────
 
+// Default timeout (overridable via env). Individual endpoints may use shorter values.
+const VITA_REQUEST_TIMEOUT_MS = Number(process.env.VITA_REQUEST_TIMEOUT_MS ?? 30_000);
+
+// Tighter timeouts for endpoints where Vita is known to be fast or slow.
+const ENDPOINT_TIMEOUTS = {
+  '/prices':        10_000,
+  '/payins_prices': 10_000,
+  '/wallets':       15_000,
+  '/deposits':      15_000,
+  '/transactions':  30_000,
+  '/payment_orders': 30_000,
+};
+
+function getTimeout(endpoint) {
+  for (const [path, ms] of Object.entries(ENDPOINT_TIMEOUTS)) {
+    if (endpoint.includes(path)) return ms;
+  }
+  return VITA_REQUEST_TIMEOUT_MS;
+}
+
 /**
  * Realiza una petición autenticada a la Vita Wallet Business API.
  * Inyecta automáticamente todos los headers de autenticación HMAC-SHA256.
@@ -201,16 +221,35 @@ async function vitaRequest(method, path, body = null) {
     'Authorization': `V2-HMAC-SHA256, Signature: ${signature}`,
   };
 
-  const options = {
-    method,
-    headers,
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  };
+  const url        = `${VITA_BASE_URL}${path}`;
+  const timeoutMs  = getTimeout(path);
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
 
-  const url = `${VITA_BASE_URL}${path}`;
-  console.info(`[VitaWallet] ${method} ${url}`);
+  console.info(`[VitaWallet] ${method} ${url} (timeout: ${timeoutMs}ms)`);
 
-  const res = await fetch(url, options);
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.warn(`[VitaWallet] Timeout: ${method} ${path} after ${timeoutMs}ms`);
+      const timeoutErr = new Error(`Vita API timeout after ${timeoutMs}ms for ${method} ${path}`);
+      timeoutErr.code        = 'VITA_TIMEOUT';
+      timeoutErr.isTransient = true;
+      throw timeoutErr;
+    }
+    // Network errors (ECONNRESET, ENOTFOUND, etc.) — mark transient for callers
+    err.isTransient = true;
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   // Vita devuelve 422 para errores de negocio con body JSON
   const data = await res.json().catch(() => ({}));
