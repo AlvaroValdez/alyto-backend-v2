@@ -164,9 +164,9 @@ app.post(
   handleStripeWebhook,
 );
 
-// IPN webhooks (Vita, Fintoc, OwlPay): capturar rawBody para verificación HMAC
-// byte-exacta y parsear body como JSON para los handlers. DEBE ir antes de express.json().
-app.use('/api/v1/ipn', (req, res, next) => {
+// Webhook routes that need rawBody for HMAC verification — MUST run before express.json().
+// Pattern: express.raw() captures Buffer → store as req.rawBody → parse to req.body for handlers.
+function captureRawBodyMiddleware(req, res, next) {
   express.raw({ type: 'application/json', limit: '1mb' })(req, res, (err) => {
     if (err) return next(err);
     if (Buffer.isBuffer(req.body)) {
@@ -179,7 +179,10 @@ app.use('/api/v1/ipn', (req, res, next) => {
     }
     next();
   });
-});
+}
+
+app.use('/api/v1/ipn',                              captureRawBodyMiddleware);
+app.use('/api/v1/institutional/webhooks/owlpay',    captureRawBodyMiddleware);
 
 // Parseo de JSON con límite de payload
 app.use(express.json({ limit: '1mb' }));
