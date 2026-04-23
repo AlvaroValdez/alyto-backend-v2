@@ -512,6 +512,26 @@ const transactionSchema = new Schema(
     failureReason: {
       type: String,
     },
+    /** Razón del estado actual — visible en admin, no al usuario final */
+    statusReason: {
+      type:    String,
+      default: null,
+    },
+    /** Quote ID de OwlPay Harbor usado para el payout off-ramp */
+    payoutQuoteId: {
+      type:    String,
+      default: null,
+    },
+    /** Expiración de la quote de OwlPay Harbor */
+    payoutQuoteExpiresAt: {
+      type:    Date,
+      default: null,
+    },
+    /** Hash de la transacción Stellar que envió USDC a Harbor instruction_address */
+    stellarTxHash: {
+      type:    String,
+      default: null,
+    },
     /** Timestamp de completado final */
     completedAt: {
       type: Date,
