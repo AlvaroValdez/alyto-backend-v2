@@ -597,6 +597,12 @@ const transactionSchema = new Schema(
       type: businessInvoiceSchema,
     },
 
+    /** Marca de prioridad para cuentas Business — eleva la tx en el Ledger admin */
+    isPrioritySupport: {
+      type:    Boolean,
+      default: false,
+    },
+
     // ── Metadatos ─────────────────────────────────────────────────────────────
     /** ID interno generado por el orquestador (ALY-{scenario}-{ts}-{random}) */
     alytoTransactionId: {
