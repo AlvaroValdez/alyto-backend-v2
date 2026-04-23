@@ -662,20 +662,60 @@ export async function getTransferStatus(transferId) {
   return owlPayRequest(`/v2/transfers/${transferId}`, { method: 'GET', timeoutMs: 10000 });
 }
 
+// ─── Harbor webhook signature verification ───────────────────────────────────
+
 /**
- * Verify webhook HMAC-SHA256 — low-level version that takes raw buffer + hex signature.
- * For the full harbor-signature header parser (t=ts,v1=hex format) use verifyOwlPayWebhookSignature.
+ * Verify Harbor webhook HMAC-SHA256.
+ *
+ * Header format: "harbor-signature: t=<unix_ts>,v1=<hmac_hex>"
+ * signed_payload: "<timestamp>.<rawBody>"
+ *
+ * Source: https://harbor-developers.owlpay.com/docs/verifying-requests-from-harbor
+ *
+ * @param {Buffer|string} rawPayloadBuffer — raw request body
+ * @param {string}        harborSignatureHeader — value of 'harbor-signature' header
+ * @returns {boolean}
  */
-export function verifyWebhookSignature(rawPayloadBuffer, receivedSignature) {
+export function verifyWebhookSignature(rawPayloadBuffer, harborSignatureHeader) {
   const secret = process.env.OWLPAY_WEBHOOK_SECRET;
   if (!secret) {
     console.warn('[OwlPay] OWLPAY_WEBHOOK_SECRET not set — rejecting webhook');
     return false;
   }
-  if (!receivedSignature || typeof receivedSignature !== 'string') return false;
+  if (!harborSignatureHeader || typeof harborSignatureHeader !== 'string') return false;
 
-  const expected    = crypto.createHmac('sha256', secret).update(rawPayloadBuffer).digest('hex');
-  const expectedBuf = Buffer.from(expected, 'hex');
+  // Parse "t=<ts>,v1=<hex>"
+  const parts = harborSignatureHeader.split(',').reduce((acc, part) => {
+    const [key, ...rest] = part.trim().split('=');
+    acc[key] = rest.join('=');
+    return acc;
+  }, {});
+
+  const timestamp         = parts['t'];
+  const receivedSignature = parts['v1'];
+  if (!timestamp || !receivedSignature) {
+    console.warn('[OwlPay] harbor-signature missing t= or v1=');
+    return false;
+  }
+
+  // Reject webhooks with timestamps older than 5 minutes (replay attack prevention)
+  const now = Math.floor(Date.now() / 1000);
+  const ts  = parseInt(timestamp, 10);
+  if (isNaN(ts) || Math.abs(now - ts) > 300) {
+    console.warn('[OwlPay] Webhook timestamp out of tolerance:', timestamp, 'now:', now);
+    return false;
+  }
+
+  const rawBody     = Buffer.isBuffer(rawPayloadBuffer)
+    ? rawPayloadBuffer.toString('utf8')
+    : String(rawPayloadBuffer);
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const expected      = crypto
+    .createHmac('sha256', secret)
+    .update(signedPayload)
+    .digest('hex');
+
+  const expectedBuf  = Buffer.from(expected, 'hex');
   let   receivedBuf;
   try {
     receivedBuf = Buffer.from(receivedSignature, 'hex');
@@ -686,46 +726,7 @@ export function verifyWebhookSignature(rawPayloadBuffer, receivedSignature) {
   return crypto.timingSafeEqual(expectedBuf, receivedBuf);
 }
 
-// ─── Full harbor-signature header verification (t=ts,v1=hex) ─────────────────
-
-/**
- * Verifica la firma HMAC-SHA256 del webhook de Harbor.
- * Header: 'harbor-signature' con formato "t=<ts>,v1=<hex>"
- * signed_payload = "<timestamp>.<rawBody>"
- */
+/** @deprecated Use verifyWebhookSignature — kept for backward compat. */
 export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
-  const webhookSecret = process.env.OWLPAY_WEBHOOK_SECRET;
-  if (!webhookSecret) {
-    console.error('[Alyto OwlPay] OWLPAY_WEBHOOK_SECRET no configurado. Rechazando webhook.');
-    return false;
-  }
-  if (!signatureHeader) return false;
-
-  const parts = {};
-  signatureHeader.split(',').forEach(part => {
-    const [key, ...rest] = part.trim().split('=');
-    parts[key] = rest.join('=');
-  });
-
-  const timestamp = parts['t'];
-  const signature = parts['v1'];
-  if (!timestamp || !signature) {
-    console.warn('[Alyto OwlPay] Formato de harbor-signature inválido:', signatureHeader);
-    return false;
-  }
-
-  const signedPayload = `${timestamp}.${rawBody}`;
-  const expected = crypto
-    .createHmac('sha256', webhookSecret)
-    .update(signedPayload, 'utf8')
-    .digest('hex');
-
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(expected,  'hex'),
-      Buffer.from(signature, 'hex'),
-    );
-  } catch {
-    return false;
-  }
+  return verifyWebhookSignature(rawBody, signatureHeader);
 }
