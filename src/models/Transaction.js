@@ -284,6 +284,12 @@ const transactionSchema = new Schema(
       index: true,
     },
 
+    contactId: {
+      type:  Schema.Types.ObjectId,
+      ref:   'Contact',
+      index: true,
+    },
+
     // ── Jurisdicción (heredada del usuario, desnormalizada para auditoría) ──
     /**
      * Entidad legal que procesó esta transacción.

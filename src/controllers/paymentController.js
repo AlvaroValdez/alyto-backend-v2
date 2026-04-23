@@ -196,6 +196,7 @@ export async function initiateFintocPayin(req, res) {
       routingScenario: 'B',                     // Escenario B: origen Chile
 
       ...(corridor ? { corridorId: corridor._id } : {}),
+      ...(contactId ? { contactId } : {}),
 
       originalAmount:  Number(amount),
       originCurrency:  'CLP',
@@ -654,6 +655,7 @@ export async function initCrossBorderPayment(req, res) {
     originAmount,
     beneficiaryData,
     beneficiary: legacyBeneficiary,
+    contactId,
     // Datos de la cotización previa (opcionales — si el frontend los pasa se guardan)
     destinationAmount:   quotedDestAmount,
     exchangeRate:        quotedExchangeRate,
@@ -800,6 +802,7 @@ export async function initCrossBorderPayment(req, res) {
         operationType:       'crossBorderPayment',
         routingScenario:     corridor.routingScenario ?? 'B',
         corridorId:          corridor._id,
+        ...(contactId ? { contactId } : {}),
 
         originalAmount:      amount,
         originCurrency:      'CLP',
@@ -1147,6 +1150,7 @@ export async function initCrossBorderPayment(req, res) {
       operationType:   'crossBorderPayment',
       routingScenario: corridor.routingScenario ?? 'D',
       corridorId:      corridor._id,
+      ...(contactId ? { contactId } : {}),
 
       originalAmount:      amount,
       originCurrency:      corridor.originCurrency,
