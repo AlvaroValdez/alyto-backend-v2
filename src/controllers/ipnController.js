@@ -36,10 +36,16 @@ import {
   getHarborQuote,
   createHarborTransfer,
   getCustomerUuid,
-  sendUSDCToHarbor,
+  createQuote,
+  getRequirementsSchema,
+  createTransfer as createOwlPayTransfer,
 } from '../services/owlPayService.js';
 import FundingRecord from '../models/FundingRecord.js';
-import { registerAuditTrail }                  from '../services/stellarService.js';
+import {
+  registerAuditTrail,
+  sendUSDCToHarbor,
+  getStellarUSDCBalance,
+} from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
@@ -341,181 +347,271 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
   return { usdcAmount, bobPerUsdc };
 }
 
+// ─── buildOwlPayBeneficiary ───────────────────────────────────────────────────
+
+/**
+ * Maps Alyto beneficiaryDetails to the shape OwlPay Harbor requires.
+ * Uses the requirements schema from getRequirementsSchema() for required-field
+ * validation warnings — mapping is best-effort; unknown fields are skipped.
+ */
+function buildOwlPayBeneficiary(beneficiaryDetails, schema) {
+  if (!beneficiaryDetails) {
+    throw new Error('beneficiaryDetails missing on transaction');
+  }
+
+  const FIELD_MAP = {
+    first_name:      ['firstName', 'first_name', 'nombre'],
+    last_name:       ['lastName', 'last_name', 'apellido'],
+    email:           ['email'],
+    phone:           ['phone', 'telefono'],
+    account_number:  ['accountNumber', 'account_number', 'numeroCuenta'],
+    bank_code:       ['bankCode', 'bank_code', 'codigoBanco'],
+    bank_name:       ['bankName', 'bank_name', 'banco'],
+    routing_number:  ['routingNumber', 'routing_number'],
+    iban:            ['iban', 'IBAN'],
+    swift_code:      ['swiftCode', 'swift', 'bic'],
+    document_type:   ['documentType', 'tipoDocumento'],
+    document_number: ['documentNumber', 'documentoNumero', 'ci'],
+    country:         ['country', 'pais', 'residenceCountry'],
+    city:            ['city', 'ciudad'],
+    address:         ['address', 'direccion'],
+    postal_code:     ['postalCode', 'postal_code', 'codigoPostal'],
+  };
+
+  const result   = {};
+  const required = schema?.required ?? [];
+
+  for (const [owlField, sources] of Object.entries(FIELD_MAP)) {
+    let value;
+    for (const src of sources) {
+      if (beneficiaryDetails[src] !== undefined &&
+          beneficiaryDetails[src] !== null &&
+          beneficiaryDetails[src] !== '') {
+        value = beneficiaryDetails[src];
+        break;
+      }
+    }
+    if (value !== undefined) {
+      result[owlField] = String(value).trim();
+    } else if (required.includes(owlField)) {
+      console.warn(`[OwlPay] Required beneficiary field missing: ${owlField}`);
+    }
+  }
+
+  const missing = required.filter((f) => !result[f]);
+  if (missing.length > 0) {
+    console.warn('[OwlPay] Missing required beneficiary fields:', missing);
+  }
+
+  return result;
+}
+
 // ─── tryOwlPayV2 — Harbor off-ramp v2 (SRL/LLC) ─────────────────────────────
 
 /**
  * Flujo off-ramp OwlPay Harbor v2: USDC → fiat local.
  *
- *   1. Asegura conversión BOB→USDC si corridor.originCurrency === 'BOB'.
- *   2. Pre-check de liquidez USDC en la treasury de la entidad.
- *   3. getHarborQuote → createHarborTransfer (obtiene instruction_address).
- *   4. Envía USDC automáticamente (si OWLPAY_USDC_SEND_ENABLED=1) o alerta al admin.
+ *   A. Pre-check liquidez USDC en wallet Stellar SRL.
+ *   B. createQuote  → POST /v2/transfers/quotes
+ *   C. getRequirementsSchema → GET /v2/transfers/quotes/:id/requirements
+ *   D. buildOwlPayBeneficiary → mapea beneficiaryDetails al schema
+ *   E. createOwlPayTransfer  → POST /v2/transfers (obtiene instruction_address)
+ *   F. sendUSDCToHarbor (si OWLPAY_USDC_SEND_ENABLED=true) o alerta al admin.
  *
  * Estados que puede dejar en la transacción:
- *   pending_funding            — liquidez USDC insuficiente
- *   payout_pending_usdc_send   — Harbor transfer creado, falta enviar USDC
- *   payout_in_transit          — USDC enviado, esperando Harbor
+ *   pending_funding            — liquidez USDC insuficiente en wallet Stellar
+ *   payout_pending_usdc_send   — Harbor transfer creado, envío USDC en espera
+ *   payout_sent                — USDC enviado, Harbor procesando
  *
- * @param {object} transaction — Documento Mongoose
- * @param {object} corridor    — TransactionConfig lean
+ * @param {object} transaction  — Documento Mongoose
+ * @param {object} corridor     — TransactionConfig lean
+ * @param {number} netAmountUSD — Monto en USD/USDC a enviar (ya convertido de BOB si aplica)
  */
-async function tryOwlPayV2(transaction, corridor) {
-  const entity = transaction.legalEntity ?? corridor?.legalEntity;
+async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
+  const entity = transaction.legalEntity;
 
-  // ── 1. Conversión BOB→USDC si aplica (replica lógica de la rama común) ──
-  const netAmountNative = resolveNetAmountForPayout(transaction);
-  let usdcAmount = netAmountNative;
+  // ── STEP A: Pre-check liquidez USDC en wallet Stellar SRL ────────────────
+  const usdcBalance = await getStellarUSDCBalance();
+  const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
 
-  if (corridor.originCurrency === 'BOB') {
-    if (transaction.digitalAssetAmount > 0) {
-      usdcAmount = transaction.digitalAssetAmount;
-    } else {
-      const conv = await convertBobToUsdc(netAmountNative, corridor);
-      usdcAmount = conv.usdcAmount;
-      transaction.conversionRate = {
-        fromCurrency:    'BOB',
-        toCurrency:      'USDC',
-        rate:            conv.bobPerUsdc,
-        convertedAmount: usdcAmount,
-      };
-      transaction.digitalAsset       = 'USDC';
-      transaction.digitalAssetAmount = usdcAmount;
-      await transaction.save().catch(() => {});
-    }
-  }
+  if (usdcBalance < needed) {
+    console.warn('[OwlPay] Insufficient USDC balance:',
+      { usdcBalance, needed, tx: transaction.alytoTransactionId });
 
-  if (!usdcAmount || usdcAmount <= 0) {
-    throw new Error(`Monto USDC inválido para Harbor transfer: ${usdcAmount}`);
-  }
-
-  // ── 2. Pre-check liquidez USDC en tesorería ───────────────────────────────
-  const availableUSDC = await FundingRecord.getAvailableUSDC(entity);
-  if (availableUSDC < usdcAmount) {
-    transaction.status        = 'pending_funding';
-    transaction.failureReason = `Liquidez USDC insuficiente (${entity}): disponible ${availableUSDC.toFixed(2)}, requerido ${usdcAmount.toFixed(2)}`;
-    await appendIpnLog(transaction, 'payout_pending_funding', 'owlPay', 'pending_funding', {
-      entity, available: availableUSDC, required: usdcAmount,
-    });
+    transaction.status       = 'pending_funding';
+    transaction.statusReason =
+      `Insufficient USDC: has ${usdcBalance}, needs ${needed}`;
+    await transaction.save();
 
     broadcastToAdmins('tx_manual_payout', {
       transactionId: transaction.alytoTransactionId,
-      status:        'pending_funding',
-      entity,
-      required:      usdcAmount,
-      available:     availableUSDC,
-      timestamp:     new Date().toISOString(),
+      reason:        'pending_funding_usdc',
+      required:      needed,
+      available:     usdcBalance,
     });
 
     try {
       await sendRawEmail(
         process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
         `⚠️ USDC Liquidez Insuficiente — ${transaction.alytoTransactionId}`,
-        `<p>Transaction <strong>${transaction.alytoTransactionId}</strong> requiere <strong>${usdcAmount.toFixed(2)} USDC</strong>, pero solo hay <strong>${availableUSDC.toFixed(2)} USDC</strong> disponibles para ${entity}.</p><p>Registra un FundingRecord para liberar el payout.</p>`,
+        `<p>Transaction <strong>${transaction.alytoTransactionId}</strong> requiere ` +
+        `<strong>${needed.toFixed(2)} USDC</strong>, pero hay ` +
+        `<strong>${usdcBalance.toFixed(2)} USDC</strong> disponibles.</p>` +
+        `<p>Fondea la wallet Stellar SRL y vuelve a ejecutar el payout.</p>`,
       );
     } catch (e) { console.error('[tryOwlPayV2] Error email admin (pending_funding):', e.message); }
 
-    return { success: false, reason: 'pending_funding' };
+    return { provider: 'owlpay', status: 'pending_funding' };
   }
 
-  // ── 3. Harbor quote + transfer ────────────────────────────────────────────
-  const customerUuid = getCustomerUuid(entity);
-  const beneficiary  = transaction.beneficiary ?? transaction.beneficiaryDetails ?? {};
+  // ── STEP B: Create quote ──────────────────────────────────────────────────
+  const customerUuidEnvKey = {
+    SRL: 'OWLPAY_CUSTOMER_UUID_SRL',
+    SpA: 'OWLPAY_CUSTOMER_UUID_SPA',
+    LLC: 'OWLPAY_CUSTOMER_UUID_LLC',
+  }[entity] ?? 'OWLPAY_CUSTOMER_UUID_SRL';
 
-  const quote = await getHarborQuote({
-    sourceAmount:      usdcAmount,
-    sourceCurrency:    'USDC',
-    sourceChain:       process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-    destCountry:       corridor.destinationCountry,
-    destCurrency:      corridor.destinationCurrency,
-    customerUuid,
-    commissionPercent: corridor.alytoCSpread ?? 0.5,
+  const quote = await createQuote({
+    source_amount:              netAmountUSD,
+    destination_country:        corridor.destinationCountry,
+    destination_currency:       corridor.destinationCurrency,
+    destination_payment_method: 'bank_transfer',
+    source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+    customer_uuid:              process.env[customerUuidEnvKey],
   });
 
-  const sourceAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? process.env.STELLAR_LLC_PUBLIC_KEY;
+  // Harbor may nest the quote object; normalise to top level
+  const quoteData  = quote.data?.[0] ?? quote.data ?? quote;
+  const quoteId    = quoteData.id ?? quoteData.quote_id;
+  const expiresAt  = quoteData.expires_at ?? quoteData.crypto_funds_settlement_expire_date;
 
-  const transfer = await createHarborTransfer({
-    quoteId:            quote.quoteId,
-    customerUuid,
-    alytoTransactionId: transaction.alytoTransactionId,
-    sourceAddress,
-    beneficiary,
-    destCountry:        corridor.destinationCountry,
-    destCurrency:       corridor.destinationCurrency,
-  });
+  if (!quoteId) throw new Error('[OwlPay] No quote_id in createQuote response');
 
-  // ── 4. Persistir detalles del transfer ────────────────────────────────────
-  transaction.payoutReference = transfer.harborTransferId;
-  transaction.harborTransfer  = {
-    transferId:         transfer.harborTransferId,
-    instructionAddress: transfer.instructionAddress,
-    instructionMemo:    transfer.instructionMemo,
-    instructionChain:   transfer.instructionChain,
-    usdcAmountRequired: transfer.sourceAmount,
-    expiresAt:          transfer.expiresAt,
-    quoteId:            quote.quoteId,
-    status:             transfer.status,
-  };
-  transaction.status          = 'payout_pending_usdc_send';
-  transaction.providersUsed   = [...(transaction.providersUsed ?? []), 'payout:owlPay-v2'];
+  transaction.payoutQuoteId       = quoteId;
+  transaction.payoutQuoteExpiresAt = new Date(expiresAt ?? Date.now() + 5 * 60 * 1000);
   await transaction.save();
 
-  await appendIpnLog(transaction, 'harbor_transfer_created', 'owlPay', 'payout_pending_usdc_send', {
-    harborTransferId:   transfer.harborTransferId,
-    quoteId:            quote.quoteId,
-    usdcAmountRequired: transfer.sourceAmount,
-    destinationAmount:  transfer.destinationAmount,
-    expiresAt:          transfer.expiresAt,
+  console.log('[OwlPay] Quote created:', quoteId);
+
+  // ── STEP C: Get requirements schema ──────────────────────────────────────
+  const schema = await getRequirementsSchema(quoteId);
+
+  // ── STEP D: Build beneficiary ─────────────────────────────────────────────
+  const rawBeneficiary     = transaction.beneficiaryDetails ?? transaction.beneficiary ?? {};
+  const beneficiaryPayload = buildOwlPayBeneficiary(rawBeneficiary, schema?.data ?? schema);
+
+  // ── STEP E: Create transfer ───────────────────────────────────────────────
+  const transfer = await createOwlPayTransfer({
+    quote_id:           quoteId,
+    beneficiary:        beneficiaryPayload,
+    external_reference: transaction.alytoTransactionId,
   });
 
-  broadcastToAdmins('tx_manual_payout', {
-    transactionId:      transaction.alytoTransactionId,
-    status:             'payout_pending_usdc_send',
-    harborTransferId:   transfer.harborTransferId,
-    usdcAmountRequired: transfer.sourceAmount,
-    timestamp:          new Date().toISOString(),
-  });
+  const transferData = transfer.data ?? transfer;
+  const transferId   = transferData.uuid ?? transferData.id ?? transferData.transfer_id;
+  const instructions = transferData.transfer_instructions
+    ?? transferData.source?.transfer_instructions ?? {};
+  const instructionAddress = instructions.instruction_address ?? instructions.address ?? null;
+  const instructionMemo    = instructions.instruction_memo    ?? instructions.memo    ?? null;
 
-  // ── 5. Enviar USDC a la instruction_address (o alertar al admin) ──────────
-  if (process.env.OWLPAY_USDC_SEND_ENABLED === '1') {
+  transaction.payoutReference = transferId;
+  transaction.harborTransfer  = {
+    transferId,
+    instructionAddress,
+    instructionMemo,
+    instructionChain: instructions.chain ?? process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+    usdcAmountRequired: netAmountUSD,
+    expiresAt:          transferData.crypto_funds_settlement_expire_date ?? expiresAt ?? null,
+    quoteId,
+    status: transferData.status ?? 'pending',
+  };
+  transaction.status        = 'payout_pending_usdc_send';
+  transaction.statusReason  = null;
+  transaction.providersUsed = [...(transaction.providersUsed ?? []), 'payout:owlPay-v2'];
+
+  transaction.ipnLog.push({
+    event:      'owlpay_transfer_created',
+    source:     'owlpay',
+    rawPayload: {
+      transfer_id:         transferId,
+      instruction_address: instructionAddress,
+      instruction_memo:    instructionMemo,
+      expires_at:          transaction.harborTransfer.expiresAt,
+      destination_amount:  transferData.destination?.amount ?? null,
+    },
+    timestamp: new Date(),
+  });
+  await transaction.save();
+
+  console.log('[OwlPay] Transfer created:', transferId, 'memo:', instructionMemo);
+
+  // ── STEP F: Send USDC via Stellar ─────────────────────────────────────────
+  const usdcSendEnabled = process.env.OWLPAY_USDC_SEND_ENABLED === 'true';
+
+  if (!usdcSendEnabled) {
+    transaction.statusReason =
+      `OWLPAY_USDC_SEND_ENABLED=false — admin must send ` +
+      `${netAmountUSD} USDC to ${instructionAddress} ` +
+      `with memo: ${instructionMemo}`;
+    await transaction.save();
+
+    broadcastToAdmins('tx_manual_payout', {
+      transactionId:       transaction.alytoTransactionId,
+      reason:              'awaiting_manual_usdc_send',
+      instruction_address: instructionAddress,
+      instruction_memo:    instructionMemo,
+      amount_usdc:         netAmountUSD,
+      transfer_id:         transferId,
+    });
+
     try {
-      await sendUSDCToHarbor({
-        instructionAddress: transfer.instructionAddress,
-        instructionMemo:    transfer.instructionMemo,
-        instructionChain:   transfer.instructionChain,
-        amount:             transfer.sourceAmount,
-        alytoTransactionId: transaction.alytoTransactionId,
-      });
-      transaction.status = 'payout_in_transit';
-      await transaction.save();
-      await appendIpnLog(transaction, 'usdc_sent_to_harbor', 'owlPay', 'payout_in_transit', {
-        amount: transfer.sourceAmount, to: transfer.instructionAddress,
-      });
-    } catch (sendErr) {
-      console.error('[tryOwlPayV2] sendUSDCToHarbor falló — alertando admin:', sendErr.message);
-      Sentry.captureException(sendErr, {
-        tags:  { component: 'tryOwlPayV2', step: 'sendUSDCToHarbor' },
-        extra: { transactionId: transaction.alytoTransactionId },
-      });
-      try {
-        await sendRawEmail(...EMAILS.adminUSDCSendRequired({ transaction, transfer, quote }));
-      } catch (e) { console.error('[tryOwlPayV2] Error email admin (send fallido):', e.message); }
-    }
-  } else {
-    console.log(
-      `[OwlPay] MANUAL USDC SEND REQUIRED:\n` +
-      `  Transaction: ${transaction.alytoTransactionId}\n` +
-      `  Send: ${transfer.sourceAmount} USDC\n` +
-      `  To: ${transfer.instructionAddress}\n` +
-      `  Memo: ${transfer.instructionMemo ?? 'none'}\n` +
-      `  Chain: ${transfer.instructionChain}\n` +
-      `  Expires: ${transfer.expiresAt}`,
-    );
-    try {
-      await sendRawEmail(...EMAILS.adminUSDCSendRequired({ transaction, transfer, quote }));
+      await sendRawEmail(...EMAILS.adminUSDCSendRequired({
+        transaction,
+        transfer: transaction.harborTransfer,
+        quote:    quoteData,
+      }));
     } catch (e) { console.error('[tryOwlPayV2] Error email admin (manual send):', e.message); }
+
+    return {
+      provider:   'owlpay',
+      status:     'payout_pending_usdc_send',
+      transferId,
+    };
   }
 
-  return { success: true, transferId: transfer.harborTransferId };
+  // Auto-send USDC via Stellar
+  const memoForStellar = (instructionMemo ?? transaction.alytoTransactionId).slice(0, 28);
+  const stellarResult  = await sendUSDCToHarbor({
+    destinationAddress: instructionAddress,
+    amount:             netAmountUSD,
+    memo:               memoForStellar,
+    transactionId:      transaction.alytoTransactionId,
+  });
+
+  transaction.stellarTxHash = stellarResult.hash;
+  transaction.status        = 'payout_sent';
+  transaction.statusReason  = null;
+  transaction.ipnLog.push({
+    event:      'usdc_sent_to_harbor',
+    source:     'stellar',
+    rawPayload: {
+      hash:     stellarResult.hash,
+      ledger:   stellarResult.ledger,
+      amount:   netAmountUSD,
+      memo:     memoForStellar,
+      existing: stellarResult.existing ?? false,
+    },
+    timestamp: new Date(),
+  });
+  await transaction.save();
+
+  console.log('[OwlPay] USDC sent:', stellarResult.hash);
+  return {
+    provider:     'owlpay',
+    status:       'payout_sent',
+    transferId,
+    stellarHash:  stellarResult.hash,
+  };
 }
 
 // ─── dispatchPayout ───────────────────────────────────────────────────────────
@@ -583,8 +679,33 @@ export async function dispatchPayout(transaction) {
 
   // ── Ruta v2: OwlPay Harbor off-ramp (SRL/LLC) ─────────────────────────────
   if (payoutMethod === 'owlPay' && ['SRL', 'LLC'].includes(transaction.legalEntity)) {
+    // Compute net USD amount before calling tryOwlPayV2
+    const _netAmountNative = resolveNetAmountForPayout(transaction);
+    let _netAmountUSD = _netAmountNative;
+
+    if (corridor.originCurrency === 'BOB') {
+      let usdcAmount, bobPerUsdc;
+      if (transaction.digitalAssetAmount > 0) {
+        usdcAmount = transaction.digitalAssetAmount;
+        bobPerUsdc = corridor.manualExchangeRate > 0
+          ? corridor.manualExchangeRate
+          : await getBOBRate();
+      } else {
+        const convResult = await convertBobToUsdc(_netAmountNative, corridor);
+        usdcAmount = convResult.usdcAmount;
+        bobPerUsdc = convResult.bobPerUsdc;
+      }
+      transaction.conversionRate       = { fromCurrency: 'BOB', toCurrency: 'USDC', rate: bobPerUsdc, convertedAmount: usdcAmount };
+      transaction.digitalAsset         = 'USDC';
+      transaction.digitalAssetAmount   = usdcAmount;
+      await transaction.save().catch(err =>
+        console.error('[dispatchPayout] Error guardando conversionRate/USDC (owlPay):', err.message),
+      );
+      _netAmountUSD = usdcAmount;
+    }
+
     try {
-      await tryOwlPayV2(transaction, corridor);
+      await tryOwlPayV2(transaction, corridor, _netAmountUSD);
     } catch (err) {
       console.error('[Alyto Payout] tryOwlPayV2 falló:', {
         transactionId: transaction.alytoTransactionId,
