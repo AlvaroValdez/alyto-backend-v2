@@ -109,9 +109,10 @@ export function generateVitaIPNHeaders(body, xDate = null) {
   const secret  = process.env.VITA_SECRET ?? 'test_vita_secret';
   const date    = xDate ?? new Date().toISOString();
 
+  // IPN verification uses ONLY sortedBody (not xLogin+xDate — those are for outgoing requests).
+  // Per ipnController.js verifyVitaSignature: the IPN message is only the sorted body.
   const sortedBody = buildSortedBody(body);
-  const message    = xLogin + date + sortedBody;
-  const sig        = crypto.createHmac('sha256', secret).update(message).digest('hex');
+  const sig        = crypto.createHmac('sha256', secret).update(sortedBody).digest('hex');
 
   return {
     'x-login':       xLogin,
@@ -164,7 +165,14 @@ export function vitaPayoutFailedIPN(transactionId, overrides = {}) {
   };
 }
 
-// ─── Helper privado (misma lógica que vitaWalletService.js:buildSortedBody) ──
+// ─── Helper privado (misma lógica que ipnController.js:sortAndStringify) ─────
+
+function sortObjectKeys(obj) {
+  if (typeof obj !== 'object' || obj === null) return obj;
+  const sorted = {};
+  Object.keys(obj).sort().forEach(key => { sorted[key] = sortObjectKeys(obj[key]); });
+  return sorted;
+}
 
 function buildSortedBody(body = null) {
   if (!body || Object.keys(body).length === 0) return '';
@@ -174,7 +182,7 @@ function buildSortedBody(body = null) {
     .map((k) => {
       const v = body[k];
       const strVal = (typeof v === 'object' && v !== null)
-        ? JSON.stringify(v)
+        ? JSON.stringify(sortObjectKeys(v))
         : String(v);
       return `${k}${strVal}`;
     })
