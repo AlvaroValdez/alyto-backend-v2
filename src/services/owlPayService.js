@@ -78,10 +78,14 @@ export function getCustomerUuid(legalEntity) {
  * Helper interno: llamada autenticada a Harbor API.
  */
 async function owlPayRequest(endpoint, options = {}) {
-  const apiKey = getOwlPayApiKey();
-  const url    = `${OWLPAY_BASE_URL}${endpoint}`;
+  const apiKey    = getOwlPayApiKey();
+  const url       = `${OWLPAY_BASE_URL}${endpoint}`;
+  const method    = options.method ?? 'GET';
+  const timeoutMs = options.timeoutMs ?? 10000;
 
-  console.info(`[OwlPay] ${options.method ?? 'GET'} ${url}`);
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt  = Date.now();
 
   const headers = {
     'X-API-KEY':    apiKey,
@@ -90,33 +94,52 @@ async function owlPayRequest(endpoint, options = {}) {
     ...(options.headers ?? {}),
   };
 
-  let response;
   try {
-    response = await fetch(url, { ...options, headers });
-  } catch (networkError) {
-    throw new Error(`[Alyto OwlPay] Error de red: ${networkError.message}`);
-  }
+    let response;
+    try {
+      response = await fetch(url, { ...options, headers, signal: controller.signal });
+    } catch (networkError) {
+      if (networkError.name === 'AbortError') {
+        const err = new Error(`OwlPay API timeout after ${timeoutMs}ms for ${method} ${endpoint}`);
+        err.code        = 'OWLPAY_TIMEOUT';
+        err.isTransient = true;
+        throw err;
+      }
+      const err = new Error(`[Alyto OwlPay] Error de red: ${networkError.message}`);
+      err.isTransient = true;
+      throw err;
+    }
 
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    throw new Error(`[Alyto OwlPay] Respuesta no-JSON de Harbor (status ${response.status})`);
-  }
+    const latencyMs = Date.now() - startedAt;
+    console.info(`[OwlPay] ${method} ${endpoint} → ${response.status} (${latencyMs}ms)`);
 
-  if (!response.ok) {
-    console.error('[Alyto OwlPay] API error:', {
-      status:    response.status,
-      endpoint,
-      errorCode: data?.code    ?? data?.error?.code    ?? 'unknown',
-      message:   data?.message ?? data?.error?.message ?? 'Sin detalle',
-    });
-    throw new Error(
-      `[Alyto OwlPay] Error ${response.status}: ${data?.message ?? data?.error?.message ?? 'Error desconocido'}`,
-    );
-  }
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`[Alyto OwlPay] Respuesta no-JSON de Harbor (status ${response.status})`);
+    }
 
-  return data;
+    if (!response.ok) {
+      console.error('[Alyto OwlPay] API error:', {
+        status:    response.status,
+        endpoint,
+        errorCode: data?.code    ?? data?.error?.code    ?? 'unknown',
+        message:   data?.message ?? data?.error?.message ?? 'Sin detalle',
+      });
+      const err = new Error(
+        `[Alyto OwlPay] Error ${response.status}: ${data?.message ?? data?.error?.message ?? 'Error desconocido'}`,
+      );
+      err.status      = response.status;
+      err.data        = data;
+      err.isTransient = response.status >= 500;
+      throw err;
+    }
+
+    return data;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -529,22 +552,13 @@ export async function simulateHarborTransfer({ harborTransferId, status }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// USDC SEND PLACEHOLDER — paso final del off-ramp
-// Pendiente de confirmación de Sam sobre la cadena soportada por Harbor.
+// USDC SEND — delegated to stellarService (implemented in Prompt 1 Phase 4)
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Envía USDC desde la wallet de Alyto hacia la instruction_address de Harbor.
- *
- * ⚠️ IMPLEMENTACIÓN PENDIENTE — Sam debe confirmar la cadena que Harbor acepta
- * para off-ramp de moneda local. Docs indican `ethereum`; nuestra infra usa Stellar.
- *
- * Una vez confirmado, implementar:
- *   A) Stellar → stellarService.buildInnerTransaction (USDC) + memo
- *   B) Ethereum → ethers.js / web3 enviando USDC ERC-20
- *
- * Mientras tanto, arroja para garantizar que OWLPAY_USDC_SEND_ENABLED=0 se respeta
- * y que el flujo caiga al email manual al admin.
+ * Envía USDC desde la wallet SRL de Alyto hacia la instruction_address de Harbor.
+ * Implementación real en stellarService.sendUSDCToHarbor.
+ * Este wrapper mantiene la API surface en owlPayService para compatibilidad.
  */
 export async function sendUSDCToHarbor({
   instructionAddress,
@@ -553,16 +567,126 @@ export async function sendUSDCToHarbor({
   amount,
   alytoTransactionId,
 }) {
-  throw new Error(
-    `[OwlPay] sendUSDCToHarbor not yet implemented. ` +
-    `Waiting for Harbor chain confirmation (chain: ${instructionChain ?? 'unknown'}). ` +
-    `Manual send required for tx: ${alytoTransactionId}`,
-  );
+  const { sendUSDCToHarbor: stellarSend } = await import('./stellarService.js');
+  return stellarSend({
+    destinationAddress: instructionAddress,
+    amount,
+    memo:              instructionMemo ?? alytoTransactionId?.slice(0, 28),
+    transactionId:     alytoTransactionId,
+  });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // WEBHOOK SIGNATURE VERIFICATION
 // ═════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLEAN v2 EXPORTS — thin wrappers for orchestration layer (Prompt 2)
+// Simpler signatures that map 1:1 to Harbor API v2 endpoints.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Cache for requirements schemas — stable per quote_id
+const requirementsSchemaCache = new BoundedCache(500, 5 * 60 * 1000);
+
+/**
+ * Create an off-ramp quote (USDC → local fiat).
+ * Simple wrapper around POST /v2/transfers/quotes.
+ */
+export async function createQuote({
+  source_amount,
+  destination_country,
+  destination_currency,
+  destination_payment_method = 'bank_transfer',
+  source_chain = process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+  customer_uuid,
+}) {
+  if (!source_amount || source_amount <= 0) throw new Error('source_amount must be positive');
+  if (!destination_country || !destination_currency) {
+    throw new Error('destination_country and destination_currency required');
+  }
+  if (!customer_uuid) throw new Error('customer_uuid required');
+
+  return owlPayRequest('/v2/transfers/quotes', {
+    method: 'POST',
+    body:   JSON.stringify({
+      source_amount,
+      source_currency: 'USD',
+      destination_country,
+      destination_currency,
+      destination_payment_method,
+      source_chain,
+      customer_uuid,
+    }),
+    timeoutMs: 10000,
+  });
+}
+
+/**
+ * Get transfer requirements schema for a quote (cached per quote_id).
+ */
+export async function getRequirementsSchema(quoteId) {
+  if (!quoteId) throw new Error('quoteId required');
+
+  const cached = requirementsSchemaCache.get(quoteId);
+  if (cached) return cached;
+
+  const schema = await owlPayRequest(
+    `/v2/transfers/quotes/${quoteId}/requirements`,
+    { method: 'GET', timeoutMs: 10000 },
+  );
+
+  requirementsSchemaCache.set(quoteId, schema);
+  return schema;
+}
+
+/**
+ * Create a transfer in Harbor. Returns instruction_address to send USDC to.
+ */
+export async function createTransfer({ quote_id, beneficiary, external_reference }) {
+  if (!quote_id)           throw new Error('quote_id required');
+  if (!beneficiary)        throw new Error('beneficiary required');
+  if (!external_reference) throw new Error('external_reference required');
+
+  return owlPayRequest('/v2/transfers', {
+    method: 'POST',
+    body:   JSON.stringify({ quote_id, beneficiary, external_reference }),
+    timeoutMs: 20000,
+  });
+}
+
+/**
+ * Get transfer status by Harbor transfer ID.
+ */
+export async function getTransferStatus(transferId) {
+  if (!transferId) throw new Error('transferId required');
+  return owlPayRequest(`/v2/transfers/${transferId}`, { method: 'GET', timeoutMs: 10000 });
+}
+
+/**
+ * Verify webhook HMAC-SHA256 — low-level version that takes raw buffer + hex signature.
+ * For the full harbor-signature header parser (t=ts,v1=hex format) use verifyOwlPayWebhookSignature.
+ */
+export function verifyWebhookSignature(rawPayloadBuffer, receivedSignature) {
+  const secret = process.env.OWLPAY_WEBHOOK_SECRET;
+  if (!secret) {
+    console.warn('[OwlPay] OWLPAY_WEBHOOK_SECRET not set — rejecting webhook');
+    return false;
+  }
+  if (!receivedSignature || typeof receivedSignature !== 'string') return false;
+
+  const expected    = crypto.createHmac('sha256', secret).update(rawPayloadBuffer).digest('hex');
+  const expectedBuf = Buffer.from(expected, 'hex');
+  let   receivedBuf;
+  try {
+    receivedBuf = Buffer.from(receivedSignature, 'hex');
+  } catch {
+    return false;
+  }
+  if (expectedBuf.length !== receivedBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, receivedBuf);
+}
+
+// ─── Full harbor-signature header verification (t=ts,v1=hex) ─────────────────
 
 /**
  * Verifica la firma HMAC-SHA256 del webhook de Harbor.
