@@ -21,6 +21,7 @@
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import BusinessProfile   from '../models/BusinessProfile.js';
 import Sentry            from '../services/sentry.js';
 import { ENTITY_CURRENCY_MAP, ENTITY_COUNTRY_MAP } from '../utils/entityMaps.js';
 import {
@@ -729,6 +730,29 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
+  // ── Límite operativo Business (KYB aprobado) ──────────────────────────────
+  // Solo aplica cuando el límite y la moneda de origen coinciden.
+  if (req.user?.accountType === 'business') {
+    try {
+      const bizProfile = await BusinessProfile.findOne({ userId: req.user._id })
+        .select('transactionLimits')
+        .lean();
+      if (bizProfile?.transactionLimits?.currency === corridor.originCurrency) {
+        const { maxSingleTransaction } = bizProfile.transactionLimits;
+        if (maxSingleTransaction > 0 && amount > maxSingleTransaction) {
+          return res.status(400).json({
+            error:    `El monto supera el límite por transacción de tu cuenta Business.`,
+            code:     'BUSINESS_TX_LIMIT_EXCEEDED',
+            limit:    maxSingleTransaction,
+            currency: corridor.originCurrency,
+          });
+        }
+      }
+    } catch (bizErr) {
+      console.error('[CrossBorder] Error verificando límites Business:', bizErr.message);
+    }
+  }
+
   // ── Payin manual SRL: el comprobante se sube DESPUÉS (spec §2.3) ───────────
   // La tx se crea sin comprobante en status 'payin_pending'. El usuario navega
   // a Step 3 (/send/payment/:txId) donde sube el comprobante vía
@@ -761,7 +785,10 @@ export async function initCrossBorderPayment(req, res) {
     } else {
       payinFeeVal = round2(amount * (corridor.payinFeePercent / 100));
     }
-    const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
+    const clboSpreadPct     = (req.user?.accountType === 'business' && corridor.businessAlytoCSpread != null)
+      ? corridor.businessAlytoCSpread
+      : corridor.alytoCSpread;
+    const spreadFee         = round2(amount * (clboSpreadPct / 100));
     const fixedFeeVal       = corridor.fixedFee ?? 0;
     const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
     const totalDeductedReal = round2(payinFeeVal + spreadFee + fixedFeeVal + profitFee);
@@ -840,6 +867,7 @@ export async function initCrossBorderPayment(req, res) {
           reference:     paymentRef,
         },
 
+        isPrioritySupport:  req.user?.accountType === 'business',
         status:             'payin_pending',
         alytoTransactionId,
       });
@@ -1192,6 +1220,7 @@ export async function initCrossBorderPayment(req, res) {
 
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
+      isPrioritySupport:   req.user?.accountType === 'business',
       status:              'payin_pending',
       alytoTransactionId,
     });
@@ -1457,6 +1486,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
       corridor,
       bobPerUsdc,
       vitaRate: usdToDestRate,
+      accountType: req.user?.accountType,
     });
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
@@ -1796,6 +1826,7 @@ export async function getQuote(req, res) {
         corridor,
         bobPerUsdc,
         vitaRate: usdcToDestRate,
+        accountType: req.user?.accountType,
       });
     } catch (err) {
       console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);
@@ -2384,12 +2415,13 @@ export async function uploadPaymentProof(req, res) {
 
   // Broadcast SSE: nueva tx accionable (tab "Accionables" del admin Ledger)
   broadcastToAdmins('tx_actionable', {
-    transactionId:     transaction.alytoTransactionId,
-    userId:            String(userId),
-    amount:            transaction.originalAmount,
-    currency:          transaction.originCurrency,
+    transactionId:      transaction.alytoTransactionId,
+    userId:             String(userId),
+    amount:             transaction.originalAmount,
+    currency:           transaction.originCurrency,
     destinationCountry: transaction.destinationCountry,
-    timestamp:         new Date().toISOString(),
+    isPriority:         transaction.isPrioritySupport ?? false,
+    timestamp:          new Date().toISOString(),
   });
 
   // Notificar a admins — push + in-app + email
