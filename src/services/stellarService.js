@@ -813,6 +813,174 @@ export async function unfreezeUserTrustline(stellarPublicKey, assetCode = 'USDC'
   }
 }
 
+// ─── 9. USDC Balance + Trustline Check — para pre-flight Harbor sends ────────
+
+let _srlBalanceCache = { value: null, expiresAt: 0 };
+
+export function __resetSRLBalanceCacheForTest() {
+  _srlBalanceCache = { value: null, expiresAt: 0 };
+}
+
+/**
+ * Returns the USDC balance of the SRL corporate Stellar account.
+ * Result is cached for 30 seconds to avoid hammering Horizon.
+ */
+export async function getStellarUSDCBalance() {
+  if (Date.now() < _srlBalanceCache.expiresAt && _srlBalanceCache.value !== null) {
+    return _srlBalanceCache.value;
+  }
+
+  const publicKey = process.env.STELLAR_SRL_PUBLIC_KEY;
+  if (!publicKey) throw new Error('[Stellar] STELLAR_SRL_PUBLIC_KEY not set');
+
+  const account = await horizonServer.loadAccount(publicKey);
+  const usdcEntry = account.balances.find(
+    (b) => b.asset_type !== 'native'
+         && b.asset_code   === ASSETS.USDC.code
+         && b.asset_issuer === ASSETS.USDC.issuer,
+  );
+
+  const balance = usdcEntry ? parseFloat(usdcEntry.balance) : 0;
+  _srlBalanceCache = { value: balance, expiresAt: Date.now() + 30_000 };
+  return balance;
+}
+
+/**
+ * Returns true if the given Stellar address has a USDC trustline active.
+ */
+export async function hasUSDCTrustline(address) {
+  try {
+    const account = await horizonServer.loadAccount(address);
+    return account.balances.some(
+      (b) => b.asset_type !== 'native'
+           && b.asset_code   === ASSETS.USDC.code
+           && b.asset_issuer === ASSETS.USDC.issuer,
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ─── 10. sendUSDCToHarbor — SRL sends USDC to Harbor instruction_address ─────
+
+async function _findTransactionByMemo(sourcePublicKey, memo, lookbackCount = 200) {
+  try {
+    const page = await horizonServer
+      .transactions()
+      .forAccount(sourcePublicKey)
+      .limit(lookbackCount)
+      .order('desc')
+      .call();
+
+    const match = page.records.find(
+      (tx) => tx.memo_type === 'text' && tx.memo === memo && tx.successful,
+    );
+    return match
+      ? { hash: match.hash, ledger: match.ledger_attr, successful: true, existing: true }
+      : null;
+  } catch (err) {
+    console.warn('[Stellar] Memo idempotency lookup failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Sends USDC from the SRL corporate Stellar account to a Harbor instruction_address.
+ *
+ * Features:
+ *   - Idempotency: if memo was already used in a successful tx, returns that hash
+ *   - Balance pre-check: throws with isPermanent if insufficient USDC
+ *   - Retry: up to 3 attempts on transient Stellar errors (tx_bad_seq, etc.)
+ *   - Cache invalidation: clears balance cache on success
+ *
+ * Uses direct submit (no Fee Bump) — SRL corporate account pays its own fees.
+ */
+export async function sendUSDCToHarbor({ destinationAddress, amount, memo, transactionId }) {
+  if (!destinationAddress) throw new Error('[Stellar] destinationAddress required');
+  if (!amount || amount <= 0) throw new Error('[Stellar] amount must be positive');
+  if (!memo) throw new Error('[Stellar] memo required');
+  if (memo.length > 28) {
+    throw new Error(`[Stellar] memo exceeds 28 chars (got ${memo.length}): ${memo}`);
+  }
+
+  const secretKey = process.env.STELLAR_SRL_SECRET_KEY;
+  if (!secretKey) throw new Error('[Stellar] STELLAR_SRL_SECRET_KEY not set');
+
+  const srlKeypair  = Keypair.fromSecret(secretKey);
+  const srlPublic   = srlKeypair.publicKey();
+
+  console.log('[Stellar] sendUSDCToHarbor:', { destinationAddress, amount, memo, transactionId });
+
+  const existing = await _findTransactionByMemo(srlPublic, memo);
+  if (existing) {
+    console.warn('[Stellar] Memo already used, returning existing tx:', existing.hash);
+    return existing;
+  }
+
+  const balance = await getStellarUSDCBalance();
+  const needed  = amount + 1;
+  if (balance < needed) {
+    const err = new Error(
+      `[Stellar] Insufficient USDC balance: has ${balance}, needs ${needed}`,
+    );
+    err.code        = 'INSUFFICIENT_USDC';
+    err.isPermanent = true;
+    throw err;
+  }
+
+  const maxRetries = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const account = await horizonServer.loadAccount(srlPublic);
+      const fee     = await horizonServer.fetchBaseFee();
+
+      const tx = new TransactionBuilder(account, {
+        fee:               String(Math.max(fee, 100000)),
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(Operation.payment({
+          destination: destinationAddress,
+          asset:       ASSETS.USDC,
+          amount:      String(amount),
+        }))
+        .addMemo(Memo.text(memo))
+        .setTimeout(TX_TIMEOUT_SECONDS)
+        .build();
+
+      tx.sign(srlKeypair);
+
+      const result = await horizonServer.submitTransaction(tx);
+
+      _srlBalanceCache = { value: null, expiresAt: 0 };
+
+      console.log('[Stellar] USDC sent to Harbor:', result.hash, '| tx:', transactionId);
+      return { hash: result.hash, ledger: result.ledger, successful: result.successful, existing: false };
+
+    } catch (err) {
+      lastError = err;
+      const txCode = err.response?.data?.extras?.result_codes?.transaction;
+      const opCode = err.response?.data?.extras?.result_codes?.operations?.[0];
+
+      if (['op_underfunded', 'op_no_destination', 'op_no_trust'].includes(opCode)) {
+        err.isPermanent = true;
+        throw err;
+      }
+
+      if (['tx_bad_seq', 'tx_too_late', 'tx_too_early'].includes(txCode) && attempt < maxRetries) {
+        console.warn(`[Stellar] Transient error (attempt ${attempt}): ${txCode}, retrying…`);
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      throw err;
+    }
+  }
+
+  throw lastError;
+}
+
 // ─── Fase 35: Detección de Depósitos USDC Entrantes (Stub Manual) ─────────────
 
 /**
