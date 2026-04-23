@@ -90,7 +90,7 @@ export async function getGlobalLedger(req, res) {
         'status stellarTxId providersUsed createdAt userId',
       )
       .populate('userId', 'firstName lastName email legalEntity')
-      .sort({ createdAt: -1 })
+      .sort({ isPrioritySupport: -1, createdAt: -1 })
       .limit(100)
       .lean();
 
@@ -280,7 +280,7 @@ export async function listTransactions(req, res) {
       // pueda detectar si existe comprobante sin descargar su contenido.
       Transaction.find(filter)
         .populate('userId', 'email firstName lastName')
-        .sort({ createdAt: -1 })
+        .sort({ isPrioritySupport: -1, createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .select('-paymentProof.data')
