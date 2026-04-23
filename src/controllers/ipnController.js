@@ -51,6 +51,7 @@ import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { getBOBRate }        from '../services/exchangeRateService.js';
+import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
 
@@ -983,6 +984,10 @@ export async function dispatchPayout(transaction) {
           });
           await tx.save();
 
+          if (tx.contactId) {
+            recordSent(tx.contactId, tx.destinationAmount, tx.destinationCurrency).catch(() => {});
+          }
+
           // Stellar audit trail (best-effort)
           try {
             const stellarTxId = await registerAuditTrail(tx);
@@ -1257,6 +1262,10 @@ export async function handleVitaIPN(req, res) {
         transaction.status      = 'completed';
         transaction.completedAt = new Date();
         await transaction.save();
+
+        if (transaction.contactId) {
+          recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
+        }
 
         await appendIpnLog(transaction, 'payout_completed', 'vitaWallet', 'completed', req.body);
 
@@ -1598,6 +1607,10 @@ export async function handleOwlPayIPN(req, res) {
       transaction.completedAt = new Date();
       if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';
       await transaction.save();
+
+      if (transaction.contactId) {
+        recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
+      }
 
       await appendIpnLog(transaction, 'payout_completed', 'owlPay', 'completed', req.body);
 
