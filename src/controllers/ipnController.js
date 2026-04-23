@@ -32,7 +32,7 @@ import {
   getPrices,
 } from '../services/vitaWalletService.js';
 import {
-  verifyOwlPayWebhookSignature,
+  verifyWebhookSignature,
   getHarborQuote,
   createHarborTransfer,
   getCustomerUuid,
@@ -1485,16 +1485,17 @@ export async function handleFintocIPN(req, res) {
  * }
  */
 export async function handleOwlPayIPN(req, res) {
-  // ── 1. Verificar firma HMAC-SHA256 ────────────────────────────────────────
-  const signature = req.headers['harbor-signature'] ?? req.headers['x-owlpay-signature'];
-  const rawBody   = req.rawBody ?? JSON.stringify(req.body);
+  // ── 1. Verificar firma HMAC-SHA256 (harbor-signature: t=<ts>,v1=<hex>) ──────
+  // Source: https://harbor-developers.owlpay.com/docs/verifying-requests-from-harbor
+  const harborSignature = req.headers['harbor-signature'];
+  const rawBody         = req.rawBody ?? JSON.stringify(req.body);
 
-  if (!signature) {
-    console.warn('[OwlPay IPN] Missing signature header from IP:', req.ip);
+  if (!harborSignature) {
+    console.warn('[OwlPay IPN] Missing harbor-signature header from IP:', req.ip);
     return res.status(401).json({ error: 'Missing signature' });
   }
-  if (!verifyOwlPayWebhookSignature(rawBody, signature)) {
-    console.warn('[OwlPay IPN] Invalid signature from IP:', req.ip);
+  if (!verifyWebhookSignature(rawBody, harborSignature)) {
+    console.warn('[OwlPay IPN] Invalid harbor-signature from IP:', req.ip);
     return res.status(401).json({ error: 'Firma inválida.' });
   }
 
