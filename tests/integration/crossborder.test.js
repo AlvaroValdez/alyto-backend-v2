@@ -39,17 +39,43 @@ await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => 
   VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
+await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
+  verifyOwlPayWebhookSignature:   jest.fn().mockResolvedValue(true),
+  verifyWebhookSignature:         jest.fn().mockReturnValue(true),
+  getOwlPayApiKey:                jest.fn().mockReturnValue('test_key'),
+  getOwlPayBaseUrl:               jest.fn().mockReturnValue('https://test.owlpay.example'),
+  getCustomerUuid:                jest.fn().mockReturnValue('test_customer_uuid'),
+  getHarborQuote:                 jest.fn(),
+  createHarborTransfer:           jest.fn(),
+  getHarborTransferRequirements:  jest.fn().mockResolvedValue({ fields: [] }),
+  getHarborTransferStatus:        jest.fn(),
+  simulateHarborTransfer:         jest.fn(),
+  getCachedRequirementsByCountry: jest.fn().mockReturnValue(null),
+  buildPayoutInstrument:          jest.fn().mockReturnValue({}),
+  createOnRampOrder:              jest.fn(),
+  getOnRampOrderStatus:           jest.fn(),
+  sendUSDCToHarbor:               jest.fn(),
+  createQuote:                    jest.fn(),
+  getRequirementsSchema:          jest.fn(),
+  createTransfer:                 jest.fn(),
+  getTransferStatus:              jest.fn(),
+}));
+
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
-  executeWeb3Transit:      jest.fn().mockResolvedValue({ txid: 'mock_stellar_txid' }),
-  buildFeeBumpTransaction: jest.fn(),
-  buildInnerTransaction:   jest.fn(),
-  ensureTrustline:         jest.fn(),
-  submitTransaction:       jest.fn(),
-  executeStellarPayment:   jest.fn(),
-  registerAuditTrail:      jest.fn().mockResolvedValue(null),
-  getAuditTrail:           jest.fn().mockResolvedValue(null),
-  freezeUserTrustline:     jest.fn().mockResolvedValue(null),
-  unfreezeUserTrustline:   jest.fn().mockResolvedValue(null),
+  executeWeb3Transit:             jest.fn().mockResolvedValue({ txid: 'mock_stellar_txid' }),
+  buildFeeBumpTransaction:        jest.fn(),
+  buildInnerTransaction:          jest.fn(),
+  ensureTrustline:                jest.fn(),
+  submitTransaction:              jest.fn(),
+  executeStellarPayment:          jest.fn(),
+  registerAuditTrail:             jest.fn().mockResolvedValue(null),
+  getAuditTrail:                  jest.fn().mockResolvedValue(null),
+  freezeUserTrustline:            jest.fn().mockResolvedValue(null),
+  unfreezeUserTrustline:          jest.fn().mockResolvedValue(null),
+  sendUSDCToHarbor:               jest.fn().mockResolvedValue({ hash: 'mock_hash', ledger: 1, successful: true }),
+  getStellarUSDCBalance:          jest.fn().mockResolvedValue(9999),
+  hasUSDCTrustline:               jest.fn().mockResolvedValue(true),
+  __resetSRLBalanceCacheForTest:  jest.fn(),
 }));
 
 // ─── Importaciones diferidas ──────────────────────────────────────────────────
