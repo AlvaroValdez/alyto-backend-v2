@@ -53,20 +53,29 @@ await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => 
     const sorted  = buildSortedBodyLocal(body);
     return crypto.createHmac('sha256', secret).update(xLogin + xDate + sorted).digest('hex');
   },
-  createPayout:       mockCreatePayout,
-  createPayin:        jest.fn(),
-  getWithdrawalRules: jest.fn(),
-  getPaymentMethods:  jest.fn(),
-  getPayinPrices:     jest.fn(),
+  createPayout:             mockCreatePayout,
+  createVitaSentPayout:     jest.fn(),
+  createPayin:              jest.fn(),
+  getWithdrawalRules:       jest.fn(),
+  getPaymentMethods:        jest.fn(),
+  getPayinPrices:           jest.fn(),
+  getWallets:               jest.fn(),
+  getDeposits:              jest.fn(),
+  getCryptoPrices:          jest.fn(),
+  VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
-  executeWeb3Transit: jest.fn().mockResolvedValue({ txid: 'mock_stellar_txid' }),
+  executeWeb3Transit:      jest.fn().mockResolvedValue({ txid: 'mock_stellar_txid' }),
   buildFeeBumpTransaction: jest.fn(),
-  buildInnerTransaction: jest.fn(),
-  ensureTrustline: jest.fn(),
-  submitTransaction: jest.fn(),
-  executeStellarPayment: jest.fn(),
+  buildInnerTransaction:   jest.fn(),
+  ensureTrustline:         jest.fn(),
+  submitTransaction:       jest.fn(),
+  executeStellarPayment:   jest.fn(),
+  registerAuditTrail:      jest.fn().mockResolvedValue(null),
+  getAuditTrail:           jest.fn().mockResolvedValue(null),
+  freezeUserTrustline:     jest.fn().mockResolvedValue(null),
+  unfreezeUserTrustline:   jest.fn().mockResolvedValue(null),
 }));
 
 // ─── Importaciones diferidas ──────────────────────────────────────────────────

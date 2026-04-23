@@ -16,18 +16,27 @@ import { mockVitaPricesResponse } from '../helpers/vitaMock.js';
 const mockGetPrices = jest.fn();
 
 await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => ({
-  getPrices:             mockGetPrices,
-  generateVitaSignature: jest.fn().mockReturnValue('mock_signature'),
-  createPayout:          jest.fn(),
-  createPayin:           jest.fn(),
-  getWithdrawalRules:    jest.fn(),
-  getPaymentMethods:     jest.fn(),
-  getPayinPrices:        jest.fn(),
+  getPrices:                mockGetPrices,
+  generateVitaSignature:    jest.fn().mockReturnValue('mock_signature'),
+  createPayout:             jest.fn(),
+  createVitaSentPayout:     jest.fn(),
+  createPayin:              jest.fn(),
+  getWithdrawalRules:       jest.fn(),
+  getPaymentMethods:        jest.fn(),
+  getPayinPrices:           jest.fn(),
+  getWallets:               jest.fn(),
+  getDeposits:              jest.fn(),
+  getCryptoPrices:          jest.fn(),
+  VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
 // Mock de stellarService para evitar conexiones reales a Stellar
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
   executeWeb3Transit: jest.fn().mockResolvedValue({ txid: 'mock_txid' }),
+  registerAuditTrail:    jest.fn().mockResolvedValue(null),
+  getAuditTrail:         jest.fn().mockResolvedValue(null),
+  freezeUserTrustline:   jest.fn().mockResolvedValue(null),
+  unfreezeUserTrustline: jest.fn().mockResolvedValue(null),
 }));
 
 // ─── Importaciones diferidas (después de mocks) ───────────────────────────────
