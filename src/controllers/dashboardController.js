@@ -13,6 +13,8 @@
 
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import WalletBOB         from '../models/WalletBOB.js';
+import WalletUSDC        from '../models/WalletUSDC.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 
 // Statuses que representan una operación en curso (no terminal)
@@ -105,6 +107,34 @@ export async function getDashboard(req, res) {
 
     const totalSent = totalSentAgg[0]?.total ?? 0;
 
+    // Wallet data — solo para usuarios SRL (Bolivia)
+    let walletData = null;
+    if (legalEntity === 'SRL') {
+      try {
+        const [bobWallet, usdcWallet] = await Promise.all([
+          WalletBOB.findOne({ userId }).lean(),
+          WalletUSDC.findOne({ userId }).lean(),
+        ]);
+        walletData = {
+          bob: {
+            currency:         'BOB',
+            balance:          bobWallet?.balance          ?? 0,
+            balanceAvailable: Math.max(0, (bobWallet?.balance ?? 0) - (bobWallet?.balanceReserved ?? 0)),
+            status:           bobWallet?.status           ?? 'pending',
+          },
+          usdc: {
+            currency:         'USDC',
+            balance:          usdcWallet?.balance         ?? 0,
+            balanceAvailable: Math.max(0, (usdcWallet?.balance ?? 0) - (usdcWallet?.balanceReserved ?? 0)),
+            stellarAddress:   usdcWallet?.stellarAddress  ?? null,
+            status:           usdcWallet?.status          ?? 'pending',
+          },
+        };
+      } catch (err) {
+        console.warn('[Dashboard] Wallet fetch failed (non-blocking):', err.message);
+      }
+    }
+
     // Formatear transacciones recientes
     const formattedTransactions = recentTransactions.map((tx) => ({
       transactionId:       tx.alytoTransactionId ?? tx._id,
@@ -144,6 +174,7 @@ export async function getDashboard(req, res) {
       },
       recentTransactions: formattedTransactions,
       availableCorridors: formattedCorridors,
+      wallet:             walletData,
     });
 
   } catch (err) {

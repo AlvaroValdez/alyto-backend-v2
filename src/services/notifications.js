@@ -69,7 +69,7 @@ const INVALID_TOKEN_ERRORS = new Set([
  */
 export async function sendPushNotification(userId, notification) {
   if (!firebaseAdmin) {
-    console.log('[FCM] Push deshabilitado — omitiendo para userId:', userId?.toString());
+    console.warn('[FCM] Firebase Admin not initialized — push disabled. Check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY in env. userId:', userId?.toString());
     return null;
   }
 

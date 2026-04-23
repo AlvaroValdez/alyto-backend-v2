@@ -63,6 +63,10 @@ console.log('[JWT] Secret stable, length:', jwtSecret.length);
 // En desarrollo, emite warnings y continúa.
 checkEnv({ fatal: process.env.NODE_ENV === 'production' });
 
+if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
+  console.warn('[FCM] FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY not set — push notifications disabled');
+}
+
 // Rate limiters importados desde src/config/rateLimiters.js
 // La configuración es consciente del entorno: solo aplica en producción.
 
