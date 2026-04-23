@@ -49,7 +49,23 @@ const mockSendUSDCToHarbor  = jest.fn();
 const mockGetStellarBalance = jest.fn();
 
 await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
-  verifyOwlPayWebhookSignature:      jest.fn().mockResolvedValue(true),
+  verifyOwlPayWebhookSignature: (rawBody, signatureHeader) => {
+    // Real implementation — matches owlPayService.verifyOwlPayWebhookSignature
+    const secret = process.env.OWLPAY_WEBHOOK_SECRET ?? 'test_owlpay_webhook_secret';
+    if (!signatureHeader) return false;
+    const parts = {};
+    signatureHeader.split(',').forEach(part => {
+      const [k, ...rest] = part.trim().split('=');
+      parts[k] = rest.join('=');
+    });
+    const { t: timestamp, v1: sig } = parts;
+    if (!timestamp || !sig) return false;
+    const expected = crypto.createHmac('sha256', secret)
+      .update(`${timestamp}.${rawBody}`, 'utf8').digest('hex');
+    try {
+      return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(sig, 'hex'));
+    } catch { return false; }
+  },
   verifyWebhookSignature:            jest.fn().mockReturnValue(true),
   getOwlPayApiKey:                   jest.fn().mockReturnValue('test_key'),
   getOwlPayBaseUrl:                  jest.fn().mockReturnValue('https://test.owlpay.example'),
@@ -522,6 +538,282 @@ describe('POST /api/v1/ipn/fintoc — cross-border', () => {
 
     // Fintoc IPN handler siempre devuelve 200 para evitar reintentos
     expect(res.status).toBe(200);
+  });
+
+});
+
+// ─── Tests: OwlPay Harbor webhook ────────────────────────────────────────────
+
+/**
+ * Genera el header harbor-signature válido para el webhook de OwlPay.
+ * Formato: "t=<timestamp>,v1=<hmac_hex>"
+ * signed_payload = "<timestamp>.<rawBody>"
+ */
+function generateOwlPayWebhookHeaders(rawBody) {
+  const secret    = process.env.OWLPAY_WEBHOOK_SECRET ?? 'test_owlpay_webhook_secret';
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const payload   = `${timestamp}.${rawBody}`;
+  const sig       = crypto.createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+
+  return {
+    'harbor-signature': `t=${timestamp},v1=${sig}`,
+    'content-type':     'application/json',
+  };
+}
+
+/** Envía un webhook de OwlPay con firma válida */
+function sendOwlPayWebhook(body) {
+  const rawBody = JSON.stringify(body);
+  const headers = generateOwlPayWebhookHeaders(rawBody);
+  return request(app)
+    .post('/api/v1/ipn/owlpay')
+    .set(headers)
+    .send(rawBody);
+}
+
+/** Crea una Transaction SRL en estado payout_sent con harborTransfer */
+async function createOwlPaySentTransaction(corridorDoc, overrides = {}) {
+  const mongoose = await import('mongoose');
+  const transferId = `harbor_transfer_${Date.now()}`;
+  const alytoId    = `ALY-C-${Date.now()}-OWL`;
+  return Transaction.create({
+    alytoTransactionId:  alytoId,
+    userId:              new mongoose.default.Types.ObjectId(),
+    corridorId:          corridorDoc._id,
+    legalEntity:         'SRL',
+    operationType:       'crossBorderPayment',
+    routingScenario:     'C',
+    status:              'payout_sent',
+    originalAmount:      931,
+    digitalAssetAmount:  100,
+    originCurrency:      'BOB',
+    originCountry:       'BO',
+    destinationCurrency: 'CNY',
+    destinationCountry:  'CN',
+    destinationAmount:   654,
+    digitalAsset:        'USDC',
+    exchangeRate:        6.54,
+    payoutReference:     transferId,
+    harborTransfer: {
+      transferId,
+      instructionAddress: 'GBTEST_HARBOR_ADDR',
+      instructionMemo:    alytoId.slice(0, 28),
+      instructionChain:   'stellar',
+      usdcAmountRequired: 100,
+      status:             'pending',
+    },
+    beneficiary: {
+      firstName: 'Wei', lastName: 'Zhang', email: 'wei@example.com',
+      accountNumber: '6228480402564890018', bankCode: 'CCB', country: 'CN',
+    },
+    paymentLegs: [
+      { stage: 'payin', provider: 'manual', status: 'completed', externalId: `manual_${Date.now()}` },
+    ],
+    ...overrides,
+  });
+}
+
+describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
+
+  let owlCorr2;
+
+  beforeAll(async () => {
+    const { default: TransactionConfig } = await import('../../src/models/TransactionConfig.js');
+    owlCorr2 = await TransactionConfig.create({
+      corridorId: `bo-cn-owlpay-webhook-${Date.now()}`,
+      originCountry: 'BO', destinationCountry: 'CN',
+      originCurrency: 'BOB', destinationCurrency: 'CNY',
+      payinMethod: 'manual', payoutMethod: 'owlPay',
+      legalEntity: 'SRL', routingScenario: 'C',
+      alytoCSpread: 1.5, fixedFee: 0, payinFeePercent: 0,
+      payoutFeeFixed: 0, profitRetentionPercent: 0,
+      manualExchangeRate: 9.31, minAmountOrigin: 100, isActive: true,
+    });
+  });
+
+  afterEach(async () => {
+    await Transaction.deleteMany({});
+  });
+
+  test('401 — firma ausente rechazada', async () => {
+    const body    = { event: 'transfer.completed', data: {} };
+    const rawBody = JSON.stringify(body);
+
+    const res = await request(app)
+      .post('/api/v1/ipn/owlpay')
+      .set('content-type', 'application/json')
+      .send(rawBody);
+
+    expect(res.status).toBe(401);
+  });
+
+  test('401 — firma inválida rechazada', async () => {
+    const body    = { event: 'transfer.completed', data: {} };
+    const rawBody = JSON.stringify(body);
+
+    const res = await request(app)
+      .post('/api/v1/ipn/owlpay')
+      .set('harbor-signature', 't=1234567890,v1=deadbeefdeadbeef')
+      .set('content-type', 'application/json')
+      .send(rawBody);
+
+    expect(res.status).toBe(401);
+  });
+
+  test('200 — evento no-transfer ignorado con firma válida', async () => {
+    const body = { event: 'account.verified', data: { id: 'acc_test' } };
+    const res  = await sendOwlPayWebhook(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body.received).toBe(true);
+  });
+
+  test('200 — transacción no encontrada (external_reference desconocido)', async () => {
+    const body = {
+      event: 'transfer.completed',
+      data:  { transfer_id: 'unknown_transfer', external_reference: 'ALY-X-NONEXISTENT-999', status: 'completed' },
+    };
+    const res = await sendOwlPayWebhook(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body.received).toBe(true);
+  });
+
+  test('transfer.completed → status completed, ipnLog updated', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2);
+
+    const body = {
+      event: 'transfer.completed',
+      data:  {
+        transfer_id:          tx.harborTransfer.transferId,
+        external_reference:   tx.alytoTransactionId,
+        status:               'completed',
+        destination_amount:   '654.00',
+        destination_currency: 'CNY',
+      },
+    };
+
+    const res = await sendOwlPayWebhook(body);
+    expect(res.status).toBe(200);
+    expect(res.body.received).toBe(true);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const updated = await Transaction.findById(tx._id);
+    expect(updated.status).toBe('completed');
+    expect(updated.completedAt).toBeTruthy();
+    expect(updated.ipnLog.some(e => e.provider === 'owlPay')).toBe(true);
+  });
+
+  test('transfer.failed → status failed, failureReason stored', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2);
+
+    const body = {
+      event: 'transfer.failed',
+      data:  {
+        transfer_id:        tx.harborTransfer.transferId,
+        external_reference: tx.alytoTransactionId,
+        status:             'failed',
+        failure_reason:     'Bank account not found',
+      },
+    };
+
+    const res = await sendOwlPayWebhook(body);
+    expect(res.status).toBe(200);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const updated = await Transaction.findById(tx._id);
+    expect(updated.status).toBe('failed');
+    expect(updated.failureReason).toContain('Bank account not found');
+  });
+
+  test('transfer.expired → status failed', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2);
+
+    const body = {
+      event: 'transfer.expired',
+      data:  {
+        transfer_id:        tx.harborTransfer.transferId,
+        external_reference: tx.alytoTransactionId,
+        status:             'expired',
+      },
+    };
+
+    const res = await sendOwlPayWebhook(body);
+    expect(res.status).toBe(200);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const updated = await Transaction.findById(tx._id);
+    expect(updated.status).toBe('failed');
+    expect(updated.failureReason).toContain('expired');
+  });
+
+  test('transfer.source_received → status payout_sent (intermediate)', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2, {
+      status: 'payout_pending_usdc_send',
+    });
+
+    const body = {
+      event: 'transfer.source_received',
+      data:  {
+        transfer_id:        tx.harborTransfer.transferId,
+        external_reference: tx.alytoTransactionId,
+        status:             'source_received',
+      },
+    };
+
+    const res = await sendOwlPayWebhook(body);
+    expect(res.status).toBe(200);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const updated = await Transaction.findById(tx._id);
+    expect(updated.status).toBe('payout_sent');
+  });
+
+  test('duplicate event — idempotency returns { duplicate: true }', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2);
+
+    const body = {
+      event: 'transfer.completed',
+      data:  {
+        transfer_id:        tx.harborTransfer.transferId,
+        external_reference: tx.alytoTransactionId,
+        status:             'completed',
+      },
+    };
+
+    // First call
+    await sendOwlPayWebhook(body);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Second call — same transfer_id + status
+    const res2 = await sendOwlPayWebhook(body);
+    expect(res2.status).toBe(200);
+    expect(res2.body.duplicate).toBe(true);
+  });
+
+  test('lookup by harborTransfer.transferId when external_reference absent', async () => {
+    const tx = await createOwlPaySentTransaction(owlCorr2);
+
+    const body = {
+      event: 'transfer.completed',
+      data:  {
+        transfer_id: tx.harborTransfer.transferId,
+        // no external_reference — fallback to harborTransfer.transferId lookup
+        status: 'completed',
+      },
+    };
+
+    const res = await sendOwlPayWebhook(body);
+    expect(res.status).toBe(200);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const updated = await Transaction.findById(tx._id);
+    expect(updated.status).toBe('completed');
   });
 
 });
