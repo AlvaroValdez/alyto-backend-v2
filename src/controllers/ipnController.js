@@ -1504,27 +1504,30 @@ export async function handleOwlPayIPN(req, res) {
   const eventKind = isV2 ? 'v2' : isV1 ? 'v1' : 'unknown';
 
   const transferId            = data?.id ?? data?.transfer_id ?? data?.uuid;
+  const externalReference     = data?.external_reference;                        // our ALY-* ID
   const applicationTransferId = data?.application_transfer_uuid ?? data?.applicationTransferUuid;
   const disbursementId        = data?.id ?? data?.disbursement_id;
   const status                = data?.status;
   const failureReason         = data?.failure_reason ?? data?.failureReason;
 
   console.info('[Alyto IPN/OwlPay] Webhook recibido.', {
-    event, kind: eventKind, transferId, applicationTransferId, disbursementId, status,
+    event, kind: eventKind, transferId, externalReference, applicationTransferId, status,
   });
 
   // ── 2. Buscar transacción ────────────────────────────────────────────────
   let transaction;
   try {
     if (isV2) {
-      if (applicationTransferId) {
-        transaction = await Transaction.findOne({ alytoTransactionId: applicationTransferId });
+      // Primary: external_reference holds our ALY-* ID (set in createTransfer)
+      if (externalReference) {
+        transaction = await Transaction.findOne({ alytoTransactionId: externalReference });
       }
+      // Fallback: Harbor's own transfer ID stored in harborTransfer sub-schema
       if (!transaction && transferId) {
         transaction = await Transaction.findOne({
           $or: [
-            { payoutReference: transferId },
             { 'harborTransfer.transferId': transferId },
+            { payoutReference: transferId },
           ],
         });
       }
@@ -1539,9 +1542,21 @@ export async function handleOwlPayIPN(req, res) {
 
   if (!transaction) {
     console.warn('[Alyto IPN/OwlPay] Transacción no encontrada.', {
-      event, transferId, applicationTransferId, disbursementId,
+      event, transferId, externalReference, applicationTransferId,
     });
     return res.status(200).json({ received: true });
+  }
+
+  // ── 3. Idempotency — skip if this exact (transferId, status) was already logged ──
+  // rawPayload stored by appendIpnLog is req.body = { event, data: { transfer_id, status } }
+  const alreadyProcessed = transaction.ipnLog?.some(
+    entry => entry.provider === 'owlPay'
+          && (entry.rawPayload?.data?.transfer_id ?? entry.rawPayload?.transfer_id) === transferId
+          && (entry.rawPayload?.data?.status ?? entry.rawPayload?.status) === status,
+  );
+  if (alreadyProcessed) {
+    console.log('[OwlPay IPN] Duplicate event skipped:', event, transferId, status);
+    return res.status(200).json({ received: true, duplicate: true });
   }
 
   await appendIpnLog(transaction, 'owlpay_webhook_received', 'owlPay', status, req.body);
@@ -1618,6 +1633,14 @@ export async function handleOwlPayIPN(req, res) {
         const user = await User.findById(transaction.userId).lean();
         if (user?.email) await sendEmail(...EMAILS.paymentCompleted(user, transaction));
       } catch (e) { console.error('[OwlPay IPN] Error email completed:', e.message); }
+
+      try {
+        broadcastToAdmins('tx_status_changed', {
+          transactionId: transaction.alytoTransactionId,
+          newStatus:     'completed',
+          provider:      'owlpay',
+        });
+      } catch (e) { console.warn('[OwlPay IPN] Broadcast error (completed):', e.message); }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1646,6 +1669,15 @@ export async function handleOwlPayIPN(req, res) {
         const user = await User.findById(transaction.userId).lean();
         if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
       } catch (e) { console.error('[OwlPay IPN] Error email failed:', e.message); }
+
+      try {
+        broadcastToAdmins('tx_status_changed', {
+          transactionId: transaction.alytoTransactionId,
+          newStatus:     'failed',
+          provider:      'owlpay',
+          reason:        failureReason ?? 'Sin detalle',
+        });
+      } catch (e) { console.warn('[OwlPay IPN] Broadcast error (failed):', e.message); }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
