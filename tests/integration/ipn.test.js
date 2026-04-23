@@ -49,24 +49,37 @@ const mockSendUSDCToHarbor  = jest.fn();
 const mockGetStellarBalance = jest.fn();
 
 await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
-  verifyOwlPayWebhookSignature: (rawBody, signatureHeader) => {
-    // Real implementation — matches owlPayService.verifyOwlPayWebhookSignature
+  verifyWebhookSignature: (rawPayloadBuffer, harborSignatureHeader) => {
+    // Real implementation — matches owlPayService.verifyWebhookSignature
+    // signed_payload = "<timestamp>.<rawBody>" per Harbor docs
     const secret = process.env.OWLPAY_WEBHOOK_SECRET ?? 'test_owlpay_webhook_secret';
-    if (!signatureHeader) return false;
-    const parts = {};
-    signatureHeader.split(',').forEach(part => {
+    if (!harborSignatureHeader || typeof harborSignatureHeader !== 'string') return false;
+    const parts = harborSignatureHeader.split(',').reduce((acc, part) => {
       const [k, ...rest] = part.trim().split('=');
-      parts[k] = rest.join('=');
-    });
-    const { t: timestamp, v1: sig } = parts;
-    if (!timestamp || !sig) return false;
+      acc[k] = rest.join('=');
+      return acc;
+    }, {});
+    const { t: timestamp, v1: receivedSig } = parts;
+    if (!timestamp || !receivedSig) return false;
+    const rawBody = Buffer.isBuffer(rawPayloadBuffer)
+      ? rawPayloadBuffer.toString('utf8')
+      : String(rawPayloadBuffer);
     const expected = crypto.createHmac('sha256', secret)
-      .update(`${timestamp}.${rawBody}`, 'utf8').digest('hex');
+      .update(`${timestamp}.${rawBody}`).digest('hex');
     try {
-      return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(sig, 'hex'));
+      return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(receivedSig, 'hex'));
     } catch { return false; }
   },
-  verifyWebhookSignature:            jest.fn().mockReturnValue(true),
+  verifyOwlPayWebhookSignature:      (rawBody, sig) => {
+    // Delegates to verifyWebhookSignature (deprecated alias)
+    const secret = process.env.OWLPAY_WEBHOOK_SECRET ?? 'test_owlpay_webhook_secret';
+    if (!sig || typeof sig !== 'string') return false;
+    const parts = sig.split(',').reduce((acc, p) => { const [k, ...r] = p.trim().split('='); acc[k] = r.join('='); return acc; }, {});
+    const { t: ts, v1: rsig } = parts;
+    if (!ts || !rsig) return false;
+    const expected = crypto.createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex');
+    try { return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(rsig, 'hex')); } catch { return false; }
+  },
   getOwlPayApiKey:                   jest.fn().mockReturnValue('test_key'),
   getOwlPayBaseUrl:                  jest.fn().mockReturnValue('https://test.owlpay.example'),
   getCustomerUuid:                   jest.fn().mockReturnValue('test_customer_uuid'),
