@@ -186,10 +186,13 @@ async function computeQuote(state) {
     };
   }
 
-  const payinFee        = round2(amount * (corridor.payinFeePercent        / 100));
-  const alytoCSpread    = round2(amount * (corridor.alytoCSpread           / 100));
-  const fixedFee        = corridor.fixedFee                                ?? 0;
-  const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
+  const payinFee         = round2(amount * (corridor.payinFeePercent        / 100));
+  const spreadPct        = (state.accountType === 'business' && corridor.businessAlytoCSpread != null)
+    ? corridor.businessAlytoCSpread
+    : (corridor.alytoCSpread ?? 0);
+  const alytoCSpread     = round2(amount * (spreadPct / 100));
+  const fixedFee         = corridor.fixedFee                               ?? 0;
+  const profitRetention  = round2(amount * (corridor.profitRetentionPercent / 100));
 
   // ── BRANCH 1: CLP→BOB con payout anchorBolivia — usa SpAConfig, no Vita ────
   // Cubre: corredor cl-bo (legalEntity:SRL, payinMethod:fintoc, payout:anchorBolivia)
@@ -269,6 +272,7 @@ async function computeQuote(state) {
         corridor,
         bobPerUsdc,
         vitaRate: usdToDestRate,
+        accountType: state.accountType,
       });
     } catch (err) {
       console.warn('[Alyto WS] calculateQuote rejected:', err.message);
@@ -480,11 +484,12 @@ async function handleSubscribe(ws, msg) {
   registerConnection(userId, ws);
   ws.quoteState.userId = userId;
 
-  // ── 3. Obtener país de origen desde el perfil del usuario ─────────────────
+  // ── 3. Obtener país de origen y tipo de cuenta desde el perfil del usuario ─
   let originCountry = 'CL';
   try {
-    const user = await User.findById(userId).select('residenceCountry').lean();
+    const user = await User.findById(userId).select('residenceCountry accountType').lean();
     if (user?.residenceCountry) originCountry = user.residenceCountry.toUpperCase();
+    if (user?.accountType)      ws.quoteState.accountType = user.accountType;
   } catch { /* no fatal — usar fallback */ }
 
   // ── 4. Buscar corredor activo ─────────────────────────────────────────────
