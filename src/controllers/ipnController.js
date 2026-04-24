@@ -39,6 +39,7 @@ import {
   createQuote,
   getRequirementsSchema,
   createTransfer as createOwlPayTransfer,
+  buildPayoutInstrument,
 } from '../services/owlPayService.js';
 import FundingRecord from '../models/FundingRecord.js';
 import {
@@ -351,60 +352,66 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
 // ─── buildOwlPayBeneficiary ───────────────────────────────────────────────────
 
 /**
- * Maps Alyto beneficiaryDetails to the shape OwlPay Harbor requires.
- * Uses the requirements schema from getRequirementsSchema() for required-field
- * validation warnings — mapping is best-effort; unknown fields are skipped.
+ * Maps Alyto beneficiaryDetails to the Harbor transfer destination structure:
+ *   { beneficiary_info, payout_instrument }
+ *
+ * beneficiary_info: name + address (required by all corridors)
+ * payout_instrument: bank fields per country (via buildPayoutInstrument)
+ *
+ * Reads rawBeneficiary top-level keys as set by the frontend form.
+ * For CN: requires street, city, state_province (ISO), postal_code (6 digits),
+ *         account_holder_name, bank_name, account_number, swift_code.
  */
-function buildOwlPayBeneficiary(beneficiaryDetails, schema) {
-  if (!beneficiaryDetails) {
-    throw new Error('beneficiaryDetails missing on transaction');
-  }
+function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
+  if (!rawBeneficiary) throw new Error('beneficiaryDetails missing on transaction');
 
-  const FIELD_MAP = {
-    first_name:      ['firstName', 'first_name', 'nombre'],
-    last_name:       ['lastName', 'last_name', 'apellido'],
-    email:           ['email'],
-    phone:           ['phone', 'telefono'],
-    account_number:  ['accountNumber', 'account_number', 'numeroCuenta'],
-    bank_code:       ['bankCode', 'bank_code', 'codigoBanco'],
-    bank_name:       ['bankName', 'bank_name', 'banco'],
-    routing_number:  ['routingNumber', 'routing_number'],
-    iban:            ['iban', 'IBAN'],
-    swift_code:      ['swiftCode', 'swift', 'bic'],
-    document_type:   ['documentType', 'tipoDocumento'],
-    document_number: ['documentNumber', 'documentoNumero', 'ci'],
-    country:         ['country', 'pais', 'residenceCountry'],
-    city:            ['city', 'ciudad'],
-    address:         ['address', 'direccion'],
-    postal_code:     ['postalCode', 'postal_code', 'codigoPostal'],
+  const dest = (destCountry ?? '').toUpperCase();
+
+  // Helper: first non-empty value from a list of field aliases
+  const get = (...keys) => {
+    for (const k of keys) {
+      const v = rawBeneficiary[k];
+      if (v !== undefined && v !== null && v !== '') return String(v).trim();
+    }
+    return null;
   };
 
-  const result   = {};
-  const required = schema?.required ?? [];
+  // beneficiary_name: prefer firstName+lastName, fall back to account_holder_name
+  const firstName = get('firstName', 'first_name', 'nombre') ?? '';
+  const lastName  = get('lastName',  'last_name',  'apellido') ?? '';
+  const fullName  = `${firstName} ${lastName}`.trim()
+    || get('account_holder_name', 'accountHolderName', 'beneficiary_name')
+    || '';
 
-  for (const [owlField, sources] of Object.entries(FIELD_MAP)) {
-    let value;
-    for (const src of sources) {
-      if (beneficiaryDetails[src] !== undefined &&
-          beneficiaryDetails[src] !== null &&
-          beneficiaryDetails[src] !== '') {
-        value = beneficiaryDetails[src];
-        break;
-      }
-    }
-    if (value !== undefined) {
-      result[owlField] = String(value).trim();
-    } else if (required.includes(owlField)) {
-      console.warn(`[OwlPay] Required beneficiary field missing: ${owlField}`);
-    }
-  }
+  // beneficiary_address
+  const street        = get('street', 'address', 'direccion') ?? 'N/A';
+  const city          = get('city', 'ciudad');
+  const stateProvince = get('state_province', 'stateProvince', 'provincia');
+  const postalCode    = get('postal_code', 'postalCode', 'codigoPostal');
 
-  const missing = required.filter((f) => !result[f]);
-  if (missing.length > 0) {
-    console.warn('[OwlPay] Missing required beneficiary fields:', missing);
-  }
+  const beneficiary_address = {
+    street,
+    country: dest,
+    ...(city          ? { city }                          : {}),
+    ...(stateProvince ? { state_province: stateProvince } : {}),
+    ...(postalCode    ? { postal_code: postalCode }       : {}),
+  };
 
-  return result;
+  const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
+  const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
+
+  const beneficiary_info = {
+    beneficiary_name: fullName,
+    beneficiary_address,
+    ...(dob         ? { beneficiary_dob: dob }                  : {}),
+    ...(idDocNumber ? { beneficiary_id_doc_number: idDocNumber } : {}),
+  };
+
+  const payout_instrument = buildPayoutInstrument(rawBeneficiary, dest);
+
+  console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, fullName, payout_instrument });
+
+  return { beneficiary_info, payout_instrument };
 }
 
 // ─── tryOwlPayV2 — Harbor off-ramp v2 (SRL/LLC) ─────────────────────────────
@@ -498,14 +505,27 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const schema = await getRequirementsSchema(quoteId);
 
   // ── STEP D: Build beneficiary ─────────────────────────────────────────────
-  const rawBeneficiary     = transaction.beneficiaryDetails ?? transaction.beneficiary ?? {};
-  const beneficiaryPayload = buildOwlPayBeneficiary(rawBeneficiary, schema?.data ?? schema);
+  const rawBeneficiary = transaction.beneficiaryDetails ?? transaction.beneficiary ?? {};
+  const { beneficiary_info, payout_instrument } = buildOwlPayBeneficiary(
+    rawBeneficiary,
+    schema?.data ?? schema,
+    corridor.destinationCountry,
+  );
 
   // ── STEP E: Create transfer ───────────────────────────────────────────────
+  const sourceAddress = process.env.STELLAR_MASTER_PUBLIC
+                     ?? process.env.STELLAR_SRL_PUBLIC_KEY
+                     ?? '';
+
   const transfer = await createOwlPayTransfer({
-    quote_id:           quoteId,
-    beneficiary:        beneficiaryPayload,
-    external_reference: transaction.alytoTransactionId,
+    quote_id:                  quoteId,
+    on_behalf_of:              process.env[customerUuidEnvKey],
+    application_transfer_uuid: transaction.alytoTransactionId,
+    source_address:            sourceAddress,
+    beneficiary_info,
+    payout_instrument,
+    transfer_purpose:          transaction.transferPurpose ?? 'FAMILY_MAINTENANCE',
+    is_self_transfer:          false,
   });
 
   const transferData = transfer.data ?? transfer;
