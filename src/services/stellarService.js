@@ -33,6 +33,7 @@ import {
   Operation,
   Keypair,
   Memo,
+  Asset,
 } from '@stellar/stellar-sdk';
 
 import {
@@ -81,6 +82,23 @@ function _getSRLPublicKey() {
     );
   }
   return Keypair.fromSecret(secret).publicKey();
+}
+
+/**
+ * Returns the USDC Asset for the current network, preferring the STELLAR_USDC_ISSUER
+ * env var so the issuer can be overridden without touching stellar.js config.
+ * Throws with a clear message if the env var is not set — required for sendUSDCToHarbor.
+ */
+function getUSDCAsset() {
+  const code   = process.env.STELLAR_USDC_CODE   ?? 'USDC';
+  const issuer = process.env.STELLAR_USDC_ISSUER;
+  if (!issuer) {
+    throw new Error(
+      '[Stellar] STELLAR_USDC_ISSUER not set. ' +
+      'For testnet use: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+    );
+  }
+  return new Asset(code, issuer);
 }
 
 /**
@@ -850,24 +868,46 @@ export function __resetSRLBalanceCacheForTest() {
 }
 
 /**
- * Returns the USDC balance of the SRL corporate Stellar account.
+ * Returns the USDC balance of a Stellar account (defaults to SRL corporate account).
+ *
+ * @param {string} [publicKey]  Optional — explicit account to check.
+ *                              Defaults to STELLAR_MASTER_PUBLIC → SRL key derivation.
+ *
+ * Issuer resolution (in order):
+ *   1. STELLAR_USDC_ISSUER env var (explicit override)
+ *   2. Any balance with asset_code === STELLAR_USDC_CODE ?? 'USDC' (resilient fallback)
+ *
  * Result is cached for 30 seconds to avoid hammering Horizon.
  */
-export async function getStellarUSDCBalance() {
+export async function getStellarUSDCBalance(publicKey) {
   if (Date.now() < _srlBalanceCache.expiresAt && _srlBalanceCache.value !== null) {
     return _srlBalanceCache.value;
   }
 
-  const publicKey = _getSRLPublicKey();
+  const key = publicKey
+    ?? process.env.STELLAR_MASTER_PUBLIC
+    ?? _getSRLPublicKey();
 
-  const account = await horizonServer.loadAccount(publicKey);
-  const usdcEntry = account.balances.find(
-    (b) => b.asset_type !== 'native'
-         && b.asset_code   === ASSETS.USDC.code
-         && b.asset_issuer === ASSETS.USDC.issuer,
-  );
+  const account = await horizonServer.loadAccount(key);
+
+  const usdcCode   = process.env.STELLAR_USDC_CODE   ?? 'USDC';
+  const usdcIssuer = process.env.STELLAR_USDC_ISSUER ?? null;
+
+  console.log('[Stellar] Balances on account:', account.balances.map((b) => ({
+    code:    b.asset_code,
+    issuer:  b.asset_issuer?.slice(0, 8),
+    balance: b.balance,
+  })));
+
+  const usdcEntry = usdcIssuer
+    ? account.balances.find((b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer)
+    : account.balances.find((b) => b.asset_code === usdcCode);
 
   const balance = usdcEntry ? parseFloat(usdcEntry.balance) : 0;
+
+  console.log('[Stellar] USDC balance:', balance,
+    usdcIssuer ? `(issuer: ${usdcIssuer.slice(0, 8)})` : '(any issuer)');
+
   _srlBalanceCache = { value: balance, expiresAt: Date.now() + 30_000 };
   return balance;
 }
@@ -966,7 +1006,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
       })
         .addOperation(Operation.payment({
           destination: destinationAddress,
-          asset:       ASSETS.USDC,
+          asset:       getUSDCAsset(),
           amount:      String(amount),
         }))
         .addMemo(Memo.text(memo))
