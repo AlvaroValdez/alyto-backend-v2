@@ -1499,20 +1499,13 @@ export async function handleOwlPayIPN(req, res) {
   const harborSignature = req.headers['harbor-signature'];
   const rawBody         = req.rawBody ?? JSON.stringify(req.body);
 
-  const skipVerify = process.env.OWLPAY_SKIP_WEBHOOK_VERIFY === 'true'
-    && process.env.NODE_ENV !== 'production';
-
-  if (!skipVerify) {
-    if (!harborSignature) {
-      console.warn('[OwlPay IPN] Missing harbor-signature header from IP:', req.ip);
-      return res.status(401).json({ error: 'Missing signature' });
-    }
-    if (!verifyWebhookSignature(rawBody, harborSignature)) {
-      console.warn('[OwlPay IPN] Invalid harbor-signature from IP:', req.ip);
-      return res.status(401).json({ error: 'Firma inválida.' });
-    }
-  } else {
-    console.warn('[OwlPay IPN] ⚠️ Signature verification SKIPPED — sandbox mode');
+  if (!harborSignature) {
+    console.warn('[OwlPay IPN] Missing harbor-signature header from IP:', req.ip);
+    return res.status(401).json({ error: 'Missing signature' });
+  }
+  if (!verifyWebhookSignature(rawBody, harborSignature)) {
+    console.warn('[OwlPay IPN] Invalid harbor-signature from IP:', req.ip);
+    return res.status(401).json({ error: 'Firma inválida.' });
   }
 
   const { event, data } = req.body ?? {};
