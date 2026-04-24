@@ -274,12 +274,14 @@ export async function getHarborQuote({
 
   const payload = {
     source: {
+      type:    'crypto',
       chain:   sourceChain,
       country: 'US',
       asset:   sourceCurrency,
       amount:  Number(sourceAmount).toFixed(2),
     },
     destination: {
+      type:    'fiat',
       country: destCountry.toUpperCase(),
       asset:   destCurrency.toUpperCase(),
     },
@@ -630,13 +632,19 @@ export async function createQuote({
   return owlPayRequest('/v2/transfers/quotes', {
     method: 'POST',
     body:   JSON.stringify({
-      source_amount,
-      source_currency: 'USD',
-      destination_country,
-      destination_currency,
-      destination_payment_method,
-      source_chain,
-      customer_uuid,
+      source: {
+        type:   'crypto',
+        chain:  source_chain,
+        asset:  'USDC',
+        amount: String(source_amount),
+      },
+      destination: {
+        type:           'fiat',
+        country:        destination_country,
+        asset:          destination_currency,
+        payment_method: destination_payment_method,
+      },
+      on_behalf_of: customer_uuid,
     }),
     timeoutMs: 10000,
   });
