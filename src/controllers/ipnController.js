@@ -352,66 +352,135 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
 // ─── buildOwlPayBeneficiary ───────────────────────────────────────────────────
 
 /**
- * Maps Alyto beneficiaryDetails to the Harbor transfer destination structure:
- *   { beneficiary_info, payout_instrument }
+ * Maps form values (stored in transaction.beneficiary.dynamicFields) to the
+ * Harbor transfer structure: { beneficiary_info, payout_instrument,
+ * transfer_purpose, is_self_transfer }.
  *
- * beneficiary_info: name + address (required by all corridors)
- * payout_instrument: bank fields per country (via buildPayoutInstrument)
+ * Form fields are defined in owlPayForms.js (frontend). The backend does NOT
+ * depend on the Harbor requirements schema to build this — form ↔ schema
+ * mapping is owned here.
  *
- * Reads rawBeneficiary top-level keys as set by the frontend form.
- * For CN: requires street, city, state_province (ISO), postal_code (6 digits),
- *         account_holder_name, bank_name, account_number, swift_code.
+ * CN: beneficiary_info includes full address + SWIFT payout_instrument.
+ * NG: beneficiary_info is name-only + account_number/bank_name payout_instrument.
  */
 function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
   if (!rawBeneficiary) throw new Error('beneficiaryDetails missing on transaction');
 
   const dest = (destCountry ?? '').toUpperCase();
 
-  // Helper: first non-empty value from a list of field aliases
+  // Normalise dynamicFields (Mongoose Map or plain object)
+  const df = rawBeneficiary?.dynamicFields instanceof Map
+    ? Object.fromEntries(rawBeneficiary.dynamicFields.entries())
+    : (rawBeneficiary?.dynamicFields ?? {});
+
+  // Read a field: dynamicFields first, then top-level beneficiary subdoc
   const get = (...keys) => {
     for (const k of keys) {
-      const v = rawBeneficiary[k];
+      const v = df[k] ?? rawBeneficiary[k];
       if (v !== undefined && v !== null && v !== '') return String(v).trim();
     }
     return null;
   };
 
-  // beneficiary_name: prefer firstName+lastName, fall back to account_holder_name
-  const firstName = get('firstName', 'first_name', 'nombre') ?? '';
-  const lastName  = get('lastName',  'last_name',  'apellido') ?? '';
-  const fullName  = `${firstName} ${lastName}`.trim()
-    || get('account_holder_name', 'accountHolderName', 'beneficiary_name')
-    || '';
+  // beneficiary_name: new form sends it directly; legacy format uses firstName+lastName
+  const beneficiaryName =
+    get('beneficiary_name') ||
+    (`${get('firstName', 'first_name') ?? ''} ${get('lastName', 'last_name') ?? ''}`.trim()) ||
+    get('account_holder_name', 'accountHolderName') ||
+    '';
 
-  // beneficiary_address
-  const street        = get('street', 'address', 'direccion') ?? 'N/A';
-  const city          = get('city', 'ciudad');
-  const stateProvince = get('state_province', 'stateProvince', 'provincia');
-  const postalCode    = get('postal_code', 'postalCode', 'codigoPostal');
+  // transfer_purpose + is_self_transfer come from the new OwlPay form
+  const transferPurpose = get('transfer_purpose') ?? null;
+  const isSelfTransferRaw = df.is_self_transfer ?? rawBeneficiary.is_self_transfer;
+  const isSelfTransfer = isSelfTransferRaw === true || isSelfTransferRaw === 'true';
 
-  const beneficiary_address = {
-    street,
-    country: dest,
-    ...(city          ? { city }                          : {}),
-    ...(stateProvince ? { state_province: stateProvince } : {}),
-    ...(postalCode    ? { postal_code: postalCode }       : {}),
+  let beneficiary_info, payout_instrument;
+
+  if (dest === 'CN') {
+    const street = get('street', 'address', 'direccion') ?? 'N/A';
+    const city   = get('city', 'ciudad');
+    const state  = get('state_province', 'stateProvince', 'provincia');
+    const postal = get('postal_code', 'postalCode', 'codigoPostal');
+
+    beneficiary_info = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: {
+        street,
+        country: 'CN',
+        ...(city   ? { city }                     : {}),
+        ...(state  ? { state_province: state }    : {}),
+        ...(postal ? { postal_code:    postal }   : {}),
+      },
+    };
+
+    const holderName = get('account_holder_name', 'accountHolderName') ?? beneficiaryName;
+    const bankName   = get('bank_name', 'bankName');
+    const accountNum = get('account_number', 'accountNumber');
+    const swiftCode  = get('swift_code', 'swiftCode');
+
+    if (!bankName)   throw new Error('[Harbor] Missing bank_name for CN');
+    if (!accountNum) throw new Error('[Harbor] Missing account_number for CN');
+    if (!swiftCode)  throw new Error('[Harbor] Missing swift_code for CN');
+
+    payout_instrument = {
+      account_holder_name: holderName,
+      bank_name:           bankName,
+      account_number:      accountNum,
+      swift_code:          swiftCode,
+    };
+
+  } else if (dest === 'NG') {
+    beneficiary_info = {
+      beneficiary_name: beneficiaryName,
+    };
+
+    const holderName = get('account_holder_name', 'accountHolderName') ?? beneficiaryName;
+    const bankName   = get('bank_name', 'bankName');
+    const accountNum = get('account_number', 'accountNumber');
+
+    if (!bankName)   throw new Error('[Harbor] Missing bank_name for NG');
+    if (!accountNum) throw new Error('[Harbor] Missing account_number for NG');
+
+    payout_instrument = {
+      account_holder_name: holderName,
+      bank_name:           bankName,
+      account_number:      accountNum,
+    };
+
+  } else {
+    // Generic: address + SWIFT (same shape as CN but without strict required checks)
+    const street = get('street', 'address', 'direccion') ?? 'N/A';
+    const city   = get('city', 'ciudad');
+    const state  = get('state_province', 'stateProvince', 'provincia');
+    const postal = get('postal_code', 'postalCode', 'codigoPostal');
+
+    const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
+    const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
+
+    beneficiary_info = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: {
+        street,
+        country: dest,
+        ...(city   ? { city }                     : {}),
+        ...(state  ? { state_province: state }    : {}),
+        ...(postal ? { postal_code:    postal }   : {}),
+      },
+      ...(dob         ? { beneficiary_dob:           dob         } : {}),
+      ...(idDocNumber ? { beneficiary_id_doc_number: idDocNumber } : {}),
+    };
+
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, dest);
+  }
+
+  console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, beneficiaryName, payout_instrument });
+
+  return {
+    beneficiary_info,
+    payout_instrument,
+    transfer_purpose: transferPurpose,
+    is_self_transfer: isSelfTransfer,
   };
-
-  const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
-  const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
-
-  const beneficiary_info = {
-    beneficiary_name: fullName,
-    beneficiary_address,
-    ...(dob         ? { beneficiary_dob: dob }                  : {}),
-    ...(idDocNumber ? { beneficiary_id_doc_number: idDocNumber } : {}),
-  };
-
-  const payout_instrument = buildPayoutInstrument(rawBeneficiary, dest);
-
-  console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, fullName, payout_instrument });
-
-  return { beneficiary_info, payout_instrument };
 }
 
 // ─── tryOwlPayV2 — Harbor off-ramp v2 (SRL/LLC) ─────────────────────────────
@@ -501,18 +570,18 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
 
   console.log('[OwlPay] Quote created:', quoteId);
 
-  // ── STEP C: Get requirements schema ──────────────────────────────────────
-  const schema = await getRequirementsSchema(quoteId);
-
-  // ── STEP D: Build beneficiary ─────────────────────────────────────────────
+  // ── STEP C: Build beneficiary from stored form values ────────────────────
+  // Schema fetching removed — form fields are defined statically in owlPayForms.js.
+  // buildOwlPayBeneficiary reads from transaction.beneficiary.dynamicFields.
   const rawBeneficiary = transaction.beneficiaryDetails ?? transaction.beneficiary ?? {};
-  const { beneficiary_info, payout_instrument } = buildOwlPayBeneficiary(
-    rawBeneficiary,
-    schema?.data ?? schema,
-    corridor.destinationCountry,
-  );
+  const {
+    beneficiary_info,
+    payout_instrument,
+    transfer_purpose: beneficiaryPurpose,
+    is_self_transfer: isSelfTransfer,
+  } = buildOwlPayBeneficiary(rawBeneficiary, null, corridor.destinationCountry);
 
-  // ── STEP E: Create transfer ───────────────────────────────────────────────
+  // ── STEP D: Create transfer ───────────────────────────────────────────────
   const sourceAddress = process.env.STELLAR_MASTER_PUBLIC
                      ?? process.env.STELLAR_SRL_PUBLIC_KEY
                      ?? '';
@@ -524,8 +593,8 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     source_address:            sourceAddress,
     beneficiary_info,
     payout_instrument,
-    transfer_purpose:          transaction.transferPurpose ?? 'FAMILY_MAINTENANCE',
-    is_self_transfer:          false,
+    transfer_purpose:          beneficiaryPurpose ?? transaction.transferPurpose ?? 'FAMILY_MAINTENANCE',
+    is_self_transfer:          isSelfTransfer,
   });
 
   const transferData = transfer.data ?? transfer;

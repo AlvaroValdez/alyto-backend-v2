@@ -404,9 +404,14 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
       };
     }
     case 'NG':
+      // Harbor NG uses standard keys (not ng_ prefixed).
+      // account_number = NUBAN (10 digits). Legacy ng_account_number accepted as fallback.
       return {
-        ng_account_number: must('ng_account_number'),
-        ng_bank_code:      must('ng_bank_code'),
+        account_holder_name: get('account_holder_name') ?? (
+          `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim() || null
+        ),
+        bank_name:    must('bank_name'),
+        account_number: get('account_number') ?? must('ng_account_number'),
       };
     case 'BR': {
       const pix = get('br_pix_key');
