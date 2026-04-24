@@ -541,6 +541,16 @@ async function startServer() {
       console.info(`[Alyto Server] Escuchando en http://0.0.0.0:${PORT}`);
       console.info(`[Alyto Server] Entorno: ${process.env.NODE_ENV ?? 'development'}`);
       console.info(`[Alyto Server] Stellar network: ${process.env.STELLAR_NETWORK ?? 'testnet'}`);
+
+      // Stellar keypair availability check (non-fatal — warns but doesn't crash)
+      const hasStellarSRL = !!(process.env.STELLAR_SRL_SECRET_KEY ?? process.env.STELLAR_MASTER_SECRET);
+      if (!hasStellarSRL) {
+        console.warn('[Stellar] ⚠️ No SRL keypair configured. ' +
+          'sendUSDCToHarbor and getStellarUSDCBalance will fail. ' +
+          'Set STELLAR_SRL_SECRET_KEY or STELLAR_MASTER_SECRET.');
+      } else {
+        console.log('[Stellar] ✅ SRL keypair configured');
+      }
       console.log('[Env] NODE_ENV:', process.env.NODE_ENV);
       console.log('[Env] DISABLE_TOKEN_VERSION_CHECK:',
         process.env.DISABLE_TOKEN_VERSION_CHECK,
