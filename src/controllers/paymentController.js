@@ -558,38 +558,14 @@ export async function getWithdrawalRulesController(req, res) {
     return res.status(200).json(cached.payload);
   }
 
-  // ── 3a. Harbor (OwlPay) — requirements dinámicos ───────────────────────────
+  // ── 3a. Harbor (OwlPay) — form config estático en el frontend ───────────────
+  // Los campos que se muestran al usuario están definidos en owlPayForms.js
+  // (frontend). El backend NO necesita consultar Harbor para renderizar el form.
+  // Harbor solo se llama en tryOwlPayV2() cuando se ejecuta el payout real.
   if (payoutMethod === 'owlPay') {
-    try {
-      const customerUuid = getCustomerUuid(legalEntity ?? 'SRL');
-      const quote = await getHarborQuote({
-        sourceAmount:      100,
-        sourceCurrency:    'USDC',
-        sourceChain:       process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-        destCountry:       countryCode,
-        destCurrency:      corridor?.destinationCurrency ?? 'USD',
-        customerUuid,
-        commissionPercent: corridor?.alytoCSpread ?? 0.5,
-      });
-
-      const requirements = await getHarborTransferRequirements({
-        quoteId:     quote.quoteId,
-        destCountry: countryCode,
-      });
-
-      const fields = flattenHarborSchema(requirements.schema);
-      const payload = { destCountry: countryCode, payoutMethod: 'owlPay', fields };
-      withdrawalRulesCache.set(cacheKey, { payload, cachedAt: Date.now() });
-
-      console.info(`[Alyto WithdrawalRules] Harbor requirements para ${countryCode}: ${fields.length} campos.`);
-      return res.status(200).json(payload);
-    } catch (err) {
-      console.warn(`[Alyto WithdrawalRules] Harbor no disponible para ${countryCode} — fallback a reglas locales.`, err.message);
-      Sentry.captureMessage(`WithdrawalRules Harbor fallback ${countryCode}`, {
-        level: 'warning', extra: { error: err.message, countryCode },
-      });
-      // Cae al flujo Vita/fallback de abajo
-    }
+    const payload = { destCountry: countryCode, payoutMethod: 'owlPay', fields: [] };
+    withdrawalRulesCache.set(cacheKey, { payload, cachedAt: Date.now() });
+    return res.status(200).json(payload);
   }
 
   // ── 3b. Vita Wallet — flujo existente ──────────────────────────────────────
@@ -1209,6 +1185,11 @@ export async function initCrossBorderPayment(req, res) {
       },
 
       beneficiary: beneficiaryDoc,
+
+      // transferPurpose: read from beneficiaryData for OwlPay corridors (Harbor requirement)
+      ...((beneficiaryData ?? legacyBeneficiary)?.transfer_purpose
+        ? { transferPurpose: String((beneficiaryData ?? legacyBeneficiary).transfer_purpose) }
+        : {}),
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
