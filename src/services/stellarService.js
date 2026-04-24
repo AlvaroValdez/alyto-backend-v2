@@ -55,6 +55,34 @@ import ExchangeRate from '../models/ExchangeRate.js';
 
 const CLP_USD_FALLBACK = parseFloat(process.env.CLP_USD_RATE || '966');
 
+// ─── SRL keypair helpers ──────────────────────────────────────────────────────
+// Try entity-specific key first, fall back to STELLAR_MASTER_SECRET.
+// The public key is always derived from the secret — no need for a separate env var
+// if you set STELLAR_SRL_SECRET_KEY or STELLAR_MASTER_SECRET.
+
+function _getSRLSecret() {
+  const secret = process.env.STELLAR_SRL_SECRET_KEY ?? process.env.STELLAR_MASTER_SECRET;
+  if (!secret) {
+    throw new Error(
+      '[Stellar] SRL keypair not configured. ' +
+      'Set STELLAR_SRL_SECRET_KEY or STELLAR_MASTER_SECRET in environment.',
+    );
+  }
+  return secret;
+}
+
+function _getSRLPublicKey() {
+  if (process.env.STELLAR_SRL_PUBLIC_KEY) return process.env.STELLAR_SRL_PUBLIC_KEY;
+  const secret = process.env.STELLAR_SRL_SECRET_KEY ?? process.env.STELLAR_MASTER_SECRET;
+  if (!secret) {
+    throw new Error(
+      '[Stellar] SRL public key not configured. ' +
+      'Set STELLAR_SRL_PUBLIC_KEY, STELLAR_SRL_SECRET_KEY, or STELLAR_MASTER_SECRET.',
+    );
+  }
+  return Keypair.fromSecret(secret).publicKey();
+}
+
 /**
  * Obtiene la tasa CLP/USDC desde MongoDB (par CLP-USD o CLP-USDT).
  * Fallback: env CLP_USD_RATE → 950 hardcoded de último recurso.
@@ -830,8 +858,7 @@ export async function getStellarUSDCBalance() {
     return _srlBalanceCache.value;
   }
 
-  const publicKey = process.env.STELLAR_SRL_PUBLIC_KEY;
-  if (!publicKey) throw new Error('[Stellar] STELLAR_SRL_PUBLIC_KEY not set');
+  const publicKey = _getSRLPublicKey();
 
   const account = await horizonServer.loadAccount(publicKey);
   const usdcEntry = account.balances.find(
@@ -903,10 +930,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
     throw new Error(`[Stellar] memo exceeds 28 chars (got ${memo.length}): ${memo}`);
   }
 
-  const secretKey = process.env.STELLAR_SRL_SECRET_KEY;
-  if (!secretKey) throw new Error('[Stellar] STELLAR_SRL_SECRET_KEY not set');
-
-  const srlKeypair  = Keypair.fromSecret(secretKey);
+  const srlKeypair  = Keypair.fromSecret(_getSRLSecret());
   const srlPublic   = srlKeypair.publicKey();
 
   console.log('[Stellar] sendUSDCToHarbor:', { destinationAddress, amount, memo, transactionId });
