@@ -603,6 +603,16 @@ const transactionSchema = new Schema(
       default: false,
     },
 
+    /**
+     * Propósito del pago declarado al proveedor (Harbor requires this for compliance).
+     * Valor enviado al crear el transfer en Harbor createTransfer().
+     * Default: 'FAMILY_MAINTENANCE' — el más común para bo-cn/bo-ng.
+     */
+    transferPurpose: {
+      type:    String,
+      default: 'FAMILY_MAINTENANCE',
+    },
+
     // ── Metadatos ─────────────────────────────────────────────────────────────
     /** ID interno generado por el orquestador (ALY-{scenario}-{ts}-{random}) */
     alytoTransactionId: {
