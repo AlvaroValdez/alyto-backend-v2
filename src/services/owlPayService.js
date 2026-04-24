@@ -274,14 +274,14 @@ export async function getHarborQuote({
 
   const payload = {
     source: {
-      type:    'crypto',
+      type:    'individual',
       chain:   sourceChain,
       country: 'US',
       asset:   sourceCurrency,
       amount:  Number(sourceAmount).toFixed(2),
     },
     destination: {
-      type:    'fiat',
+      type:    'individual',
       country: destCountry.toUpperCase(),
       asset:   destCurrency.toUpperCase(),
     },
@@ -633,16 +633,20 @@ export async function createQuote({
     method: 'POST',
     body:   JSON.stringify({
       source: {
-        type:   'crypto',
-        chain:  source_chain,
-        asset:  'USDC',
-        amount: String(source_amount),
+        type:    'individual',
+        chain:   source_chain,
+        country: 'US',
+        asset:   'USDC',
+        amount:  Number(source_amount).toFixed(2),
       },
       destination: {
-        type:           'fiat',
-        country:        destination_country,
-        asset:          destination_currency,
-        payment_method: destination_payment_method,
+        type:    'individual',
+        country: destination_country,
+        asset:   destination_currency,
+      },
+      commission: {
+        percentage: '0.5',
+        amount:     0,
       },
       on_behalf_of: customer_uuid,
     }),
