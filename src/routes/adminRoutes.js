@@ -100,6 +100,7 @@ import {
 import {
   adminGetBusinessInvoice,
 } from '../controllers/businessInvoiceController.js';
+import { simulateTransferCompleted } from '../services/owlPayService.js';
 import multer from 'multer';
 
 const router = Router();
@@ -590,5 +591,30 @@ router.post('/notifications/send', sendNotification);
  * Estadísticas de memoria del proceso Node + tamaño de caches internos.
  */
 router.get('/health/memory', getMemoryStats);
+
+// ─── Sandbox helpers (non-production only) ───────────────────────────────────
+
+/**
+ * POST /api/v1/admin/sandbox/owlpay/simulate/:transferId
+ *
+ * Triggers the Harbor transfer.completed webhook for sandbox E2E testing.
+ * Calls POST /v1/transfers/{uuid}/simulate-completed per Sam's docs (2026-04-23).
+ * Returns 403 in production.
+ *
+ * Params:
+ *   transferId — Harbor transfer UUID (from createHarborTransfer / Transaction.harborTransfer.id)
+ */
+router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Sandbox-only endpoint' });
+  }
+  const { transferId } = req.params;
+  try {
+    const result = await simulateTransferCompleted(transferId);
+    res.json({ success: true, transferId, result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;
