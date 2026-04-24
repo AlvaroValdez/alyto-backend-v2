@@ -392,11 +392,15 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
 
   switch (country) {
     case 'CN': {
-      const unionPay = get('cn_union_pay_card_number');
-      if (unionPay) return { cn_union_pay_card_number: unionPay };
+      // Harbor CN uses CIPS rails — requires SWIFT fields, not UnionPay/CNAPS.
+      // Per Harbor requirements schema (confirmed 2026-04-24 via /v2/transfers/quotes/:id/requirements)
+      const nameFromParts = `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim();
+      const holderName    = get('account_holder_name') ?? (nameFromParts || null);
       return {
-        cn_bank_account_number: must('cn_bank_account_number'),
-        cn_cnaps_code:          must('cn_cnaps_code'),
+        account_holder_name: holderName ?? must('account_holder_name'),
+        bank_name:           must('bank_name'),
+        account_number:      must('account_number'),
+        swift_code:          must('swift_code'),
       };
     }
     case 'NG':
@@ -673,16 +677,51 @@ export async function getRequirementsSchema(quoteId) {
 }
 
 /**
- * Create a transfer in Harbor. Returns instruction_address to send USDC to.
+ * Create a transfer in Harbor. Returns the full Harbor response (instruction_address inside).
+ *
+ * @param {object} params
+ * @param {string} params.quote_id                   - Harbor quote ID
+ * @param {string} params.on_behalf_of               - Harbor customer UUID
+ * @param {string} params.application_transfer_uuid  - Alyto tx ID (idempotency key)
+ * @param {string} params.source_address             - Stellar wallet sending USDC
+ * @param {object} params.beneficiary_info           - Harbor beneficiary_info object
+ * @param {object} params.payout_instrument          - Harbor payout_instrument object
+ * @param {string} [params.transfer_purpose]         - Harbor enum, default FAMILY_MAINTENANCE
+ * @param {boolean} [params.is_self_transfer]        - default false
  */
-export async function createTransfer({ quote_id, beneficiary, external_reference }) {
-  if (!quote_id)           throw new Error('quote_id required');
-  if (!beneficiary)        throw new Error('beneficiary required');
-  if (!external_reference) throw new Error('external_reference required');
+export async function createTransfer({
+  quote_id,
+  on_behalf_of,
+  application_transfer_uuid,
+  source_address,
+  beneficiary_info,
+  payout_instrument,
+  transfer_purpose  = 'FAMILY_MAINTENANCE',
+  is_self_transfer  = false,
+}) {
+  if (!quote_id)                  throw new Error('quote_id required');
+  if (!on_behalf_of)              throw new Error('on_behalf_of required');
+  if (!application_transfer_uuid) throw new Error('application_transfer_uuid required');
+  if (!source_address)            throw new Error('source_address required');
+  if (!beneficiary_info)          throw new Error('beneficiary_info required');
+  if (!payout_instrument)         throw new Error('payout_instrument required');
 
   return owlPayRequest('/v2/transfers', {
     method: 'POST',
-    body:   JSON.stringify({ quote_id, beneficiary, external_reference }),
+    body:   JSON.stringify({
+      quote_id,
+      on_behalf_of,
+      application_transfer_uuid,
+      source: {
+        payment_instrument: { address: source_address },
+      },
+      destination: {
+        beneficiary_info,
+        payout_instrument,
+        transfer_purpose,
+        is_self_transfer,
+      },
+    }),
     timeoutMs: 20000,
   });
 }
