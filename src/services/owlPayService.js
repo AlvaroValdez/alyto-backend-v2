@@ -551,6 +551,27 @@ export async function simulateHarborTransfer({ harborTransferId, status }) {
   });
 }
 
+/**
+ * Sandbox only — triggers the full transfer.completed webhook lifecycle.
+ * Per Sam (OwlPay) 2026-04-23: POST /v1/transfers/{uuid}/simulate-completed
+ * Docs: https://harbor-developers.owlpay.com/docs/simulate-transfer-status-apis
+ *
+ * @param {string} transferId — Harbor transfer UUID (from createHarborTransfer response)
+ */
+export async function simulateTransferCompleted(transferId) {
+  if (!isSandbox()) {
+    throw new Error('[Harbor] simulateTransferCompleted is sandbox-only');
+  }
+  if (!transferId) throw new Error('[Harbor] simulateTransferCompleted: transferId required');
+
+  console.log('[OwlPay Sandbox] Simulating transfer.completed for:', transferId);
+
+  return owlPayRequest(`/v1/transfers/${transferId}/simulate-completed`, {
+    method:    'POST',
+    timeoutMs: 15000,
+  });
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // USDC SEND — delegated to stellarService (implemented in Prompt 1 Phase 4)
 // ═════════════════════════════════════════════════════════════════════════════
