@@ -61,7 +61,7 @@ import {
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
-import { getBOBRate }          from '../services/exchangeRateService.js';
+import { getBOBRate, resolveMinAmountOrigin } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
@@ -675,11 +675,12 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
-  if (corridor.minAmountOrigin && amount < corridor.minAmountOrigin) {
+  const minAmount = await resolveMinAmountOrigin(corridor);
+  if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
-      error:    `El monto mínimo para este corredor es ${corridor.minAmountOrigin} ${corridor.originCurrency}.`,
+      error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
       code:     'BELOW_MINIMUM',
-      min:      corridor.minAmountOrigin,
+      min:      minAmount,
       currency: corridor.originCurrency,
     });
   }
@@ -1615,10 +1616,11 @@ export async function getQuote(req, res) {
   }
 
   // Validar monto mínimo del corredor
-  if (amount < corridor.minAmountOrigin) {
+  const minAmountOrigin = await resolveMinAmountOrigin(corridor);
+  if (amount < minAmountOrigin) {
     return res.status(400).json({
-      error:  `El monto mínimo para este corredor es ${corridor.minAmountOrigin} ${corridor.originCurrency}.`,
-      min:    corridor.minAmountOrigin,
+      error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
+      min:    minAmountOrigin,
       currency: corridor.originCurrency,
     });
   }

@@ -25,7 +25,7 @@ import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
-import { getBOBRate }      from './exchangeRateService.js';
+import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
 import { calculateQuote }  from './quoteCalculator.js';
 import Sentry              from './sentry.js';
 
@@ -175,7 +175,7 @@ async function computeQuote(state) {
   const round2 = n => Math.round(n * 100) / 100;
 
   // Validar monto mínimo del corredor
-  const minAmount = corridor.minAmountOrigin ?? 0;
+  const minAmount = await resolveMinAmountOrigin(corridor);
   if (minAmount > 0 && amount < minAmount) {
     return {
       type:           'quote_error',

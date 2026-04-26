@@ -244,6 +244,17 @@ const transactionConfigSchema = new Schema(
       default: 1,
     },
     /**
+     * Mínimo en USD. Cuando está presente y originCurrency === 'BOB',
+     * el mínimo en BOB se calcula dinámicamente con la tasa live
+     * (minAmountUSD × BOB/USDC) en lugar de usar minAmountOrigin fijo.
+     * Usar para corredores OwlPay donde Harbor impone un mínimo en USD.
+     */
+    minAmountUSD: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    /**
      * Monto máximo permitido por transacción, en moneda de origen.
      * Null = sin límite superior (sujeto a KYC del usuario).
      */
