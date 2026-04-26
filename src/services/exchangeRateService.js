@@ -38,3 +38,22 @@ export async function getBOBRate() {
   console.log('[getBOBRate] Tasa desde .env:', envRate);
   return envRate;
 }
+
+/**
+ * Resuelve el monto mínimo en moneda de origen para un corredor.
+ *
+ * Si el corredor tiene minAmountUSD y originCurrency === 'BOB',
+ * calcula el mínimo en BOB usando la tasa live (BOB/USDC) para que
+ * el umbral se ajuste automáticamente cuando la tasa cambia.
+ * En cualquier otro caso devuelve minAmountOrigin estático.
+ *
+ * @param {{ minAmountUSD?: number, minAmountOrigin?: number, originCurrency?: string }} corridor
+ * @returns {Promise<number>}
+ */
+export async function resolveMinAmountOrigin(corridor) {
+  if (corridor.minAmountUSD && corridor.originCurrency === 'BOB') {
+    const rate = await getBOBRate();
+    return Math.ceil(corridor.minAmountUSD * rate);
+  }
+  return corridor.minAmountOrigin ?? 1;
+}
