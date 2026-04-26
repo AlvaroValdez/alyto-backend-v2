@@ -542,11 +542,10 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   }
 
   // ── STEP B: Create quote ──────────────────────────────────────────────────
-  const customerUuidEnvKey = {
-    SRL: 'OWLPAY_CUSTOMER_UUID_SRL',
-    SpA: 'OWLPAY_CUSTOMER_UUID_SPA',
-    LLC: 'OWLPAY_CUSTOMER_UUID_LLC',
-  }[entity] ?? 'OWLPAY_CUSTOMER_UUID_SRL';
+  // AV Finance LLC is the Harbor-approved entity for all off-ramp
+  // transfers regardless of which legal entity processes the payin.
+  // SRL handles BOB payin internally; LLC is the Harbor counterpart.
+  const customerUuidEnvKey = 'OWLPAY_CUSTOMER_UUID_LLC';
 
   const quote = await createQuote({
     source_amount:              netAmountUSD,
