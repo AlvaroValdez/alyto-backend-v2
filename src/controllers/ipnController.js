@@ -554,6 +554,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     destination_payment_method: 'bank_transfer',
     source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
     customer_uuid:              process.env[customerUuidEnvKey],
+    customer_type:              'business',
   });
 
   // Harbor may nest the quote object; normalise to top level

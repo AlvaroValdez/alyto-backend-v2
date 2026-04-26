@@ -631,6 +631,7 @@ export async function createQuote({
   destination_payment_method = 'bank_transfer',
   source_chain = process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
   customer_uuid,
+  customer_type = 'business',
 }) {
   if (!source_amount || source_amount <= 0) throw new Error('source_amount must be positive');
   if (!destination_country || !destination_currency) {
@@ -642,14 +643,14 @@ export async function createQuote({
     method: 'POST',
     body:   JSON.stringify({
       source: {
-        type:    'individual',
+        type:    customer_type,
         chain:   source_chain,
         country: 'US',
         asset:   'USDC',
         amount:  Number(source_amount).toFixed(2),
       },
       destination: {
-        type:    'individual',
+        type:    customer_type,
         country: destination_country,
         asset:   destination_currency,
       },
