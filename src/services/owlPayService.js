@@ -712,22 +712,26 @@ export async function createTransfer({
   if (!beneficiary_info)          throw new Error('beneficiary_info required');
   if (!payout_instrument)         throw new Error('payout_instrument required');
 
+  const payload = {
+    quote_id,
+    on_behalf_of,
+    application_transfer_uuid,
+    source: {
+      payment_instrument: { address: source_address },
+    },
+    destination: {
+      beneficiary_info,
+      payout_instrument,
+      transfer_purpose,
+      is_self_transfer,
+    },
+  };
+
+  console.log('[OwlPay DEBUG] createTransfer payload:', JSON.stringify(payload, null, 2));
+
   return owlPayRequest('/v2/transfers', {
     method: 'POST',
-    body:   JSON.stringify({
-      quote_id,
-      on_behalf_of,
-      application_transfer_uuid,
-      source: {
-        payment_instrument: { address: source_address },
-      },
-      destination: {
-        beneficiary_info,
-        payout_instrument,
-        transfer_purpose,
-        is_self_transfer,
-      },
-    }),
+    body:   JSON.stringify(payload),
     timeoutMs: 20000,
   });
 }
