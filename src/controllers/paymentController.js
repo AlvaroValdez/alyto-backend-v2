@@ -983,7 +983,10 @@ export async function initCrossBorderPayment(req, res) {
   } else {
     payinFee = round2(amount * (corridor.payinFeePercent / 100));
   }
-  const alytoCSpread    = round2(amount * (corridor.alytoCSpread / 100));
+  const effectiveSpreadPct = (req.user?.accountType === 'business' && corridor.businessAlytoCSpread != null)
+    ? corridor.businessAlytoCSpread
+    : (corridor.alytoCSpread ?? 0);
+  const alytoCSpread    = round2(amount * (effectiveSpreadPct / 100));
   const fixedFee        = corridor.fixedFee ?? 0;
   const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
   const payoutFee       = corridor.payoutFeeFixed ?? 0;
