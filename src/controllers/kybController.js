@@ -139,8 +139,9 @@ export async function applyKYB(req, res) {
     });
 
     // ── Actualizar User ───────────────────────────────────────────────────────
+    // accountType permanece 'personal' hasta que admin apruebe el KYB.
+    // El cambio a 'business' ocurre en reviewKyb cuando status === 'approved'.
     await User.findByIdAndUpdate(user._id, {
-      accountType:       'business',
       kybStatus:         'pending',
       businessProfileId: profile._id,
     });
@@ -462,6 +463,8 @@ export async function reviewKYBApplication(req, res) {
     const userUpdate = { kybStatus: status };
     if (status === 'approved') {
       userUpdate.accountType = 'business';
+    } else if (status === 'rejected') {
+      userUpdate.accountType = 'personal';
     }
     await User.findByIdAndUpdate(profile.userId, userUpdate);
 
