@@ -2042,12 +2042,9 @@ export async function getTransactionHistory(req, res) {
  *   - El ipnLog y datos internos nunca se exponen al frontend.
  *   - accountNumber se enmascara: muestra solo los últimos 4 dígitos.
  *
- * Mapeo de fees (feeBreakdown del modelo → campos del response):
- *   payinFee      ← feeBreakdown.providerFee  (fee del proveedor de pay-in)
- *   alytyCSpread  ← feeBreakdown.alytoFee     (spread de Alyto)
- *   fixedFee      ← 0                          (no almacenado por separado)
- *   payoutFee     ← feeBreakdown.networkFee   (fee de tránsito/red)
- *   totalDeducted ← feeBreakdown.totalFee
+ * Mapeo de fees: lee del schema actual `fees` (Transaction.feesSchema).
+ * Para transacciones legacy sin `fees.totalDeducted`, cae al
+ * `feeBreakdown` antiguo (alytoFee/providerFee/networkFee/totalFee).
  *
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
@@ -2129,8 +2126,10 @@ export async function getTransactionStatus(req, res) {
   const concept = transaction.concept ?? transaction.reference
     ?? dynFields.concept ?? dynFields.reference ?? '';
 
-  // ── 3. Mapear fees desde feeBreakdown ────────────────────────────────────
-  const fb = transaction.feeBreakdown ?? {};
+  // ── 3. Mapear fees desde el schema actual; fallback a feeBreakdown legacy ─
+  const useFees = transaction.fees && (transaction.fees.totalDeducted ?? 0) > 0;
+  const f       = useFees ? transaction.fees : null;
+  const fb      = useFees ? null : (transaction.feeBreakdown ?? {});
 
   // ── 4. Construir respuesta (sin ipnLog ni campos internos) ────────────────
   return res.status(200).json({
@@ -2142,13 +2141,24 @@ export async function getTransactionStatus(req, res) {
     destinationCurrency: transaction.destinationCurrency ?? '',
     destinationCountry,
     exchangeRate:        transaction.exchangeRate        ?? 0,
-    fees: {
-      payinFee:      fb.providerFee ?? 0,
-      alytyCSpread:  fb.alytoFee    ?? 0,
-      fixedFee:      0,
-      payoutFee:     fb.networkFee  ?? 0,
-      totalDeducted: fb.totalFee    ?? 0,
-    },
+    fees: f
+      ? {
+          alytoCSpread:    f.alytoCSpread    ?? 0,
+          fixedFee:        f.fixedFee        ?? 0,
+          payinFee:        f.payinFee        ?? 0,
+          payoutFee:       f.payoutFee       ?? 0,
+          profitRetention: f.profitRetention ?? 0,
+          totalDeducted:   f.totalDeducted   ?? 0,
+          feeCurrency:     f.feeCurrency     ?? transaction.originCurrency ?? 'USD',
+        }
+      : {
+          alytoCSpread:  fb.alytoFee    ?? 0,
+          fixedFee:      0,
+          payinFee:      fb.providerFee ?? 0,
+          payoutFee:     fb.networkFee  ?? 0,
+          totalDeducted: fb.totalFee    ?? 0,
+          feeCurrency:   fb.feeCurrency ?? transaction.originCurrency ?? 'USD',
+        },
     beneficiary: {
       fullName,
       bankName,
