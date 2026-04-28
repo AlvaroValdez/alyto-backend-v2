@@ -444,6 +444,7 @@ const CORREDORES = [
     manualExchangeRate:     0,                // CONFIGURAR vía: PATCH /api/v1/admin/corridors/:corridorId/rate
     stellarAsset:           'USDC',
     alytoCSpread:           spread,
+    businessAlytoCSpread:   0.5,
     fixedFee:               fixed,
     payinFeePercent:        0,
     payoutFeeFixed:         0,
