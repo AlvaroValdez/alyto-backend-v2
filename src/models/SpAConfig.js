@@ -40,7 +40,7 @@ const spAConfigSchema = new mongoose.Schema(
     isActive:  { type: Boolean, default: true },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
-  { timestamps: true },
+  { timestamps: true, collection: 'spaconfigs' },
 );
 
 export default mongoose.model('SpAConfig', spAConfigSchema);

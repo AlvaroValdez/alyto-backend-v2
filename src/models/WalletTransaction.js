@@ -115,7 +115,7 @@ const walletTransactionSchema = new mongoose.Schema({
     type:    Date,
     default: null,
   },
-}, { timestamps: true })
+}, { timestamps: true, collection: 'wallettransactions' })
 
 // ─── Índices ──────────────────────────────────────────────────────────────────
 

@@ -37,7 +37,7 @@ const sanctionsListSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true, index: true },
   addedBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   notes:    { type: String, default: null },
-}, { timestamps: true })
+}, { timestamps: true, collection: 'sanctionslists' })
 
 // Índice de texto para búsqueda rápida por nombre y aliases
 sanctionsListSchema.index({ fullName: 'text', aliases: 'text' })

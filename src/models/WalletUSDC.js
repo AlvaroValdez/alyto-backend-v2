@@ -110,7 +110,7 @@ const walletUSDCSchema = new mongoose.Schema({
     ref:     'User',
     default: null,
   },
-}, { timestamps: true })
+}, { timestamps: true, collection: 'walletusdcs' })
 
 // ─── Virtual: saldo disponible real ──────────────────────────────────────────
 

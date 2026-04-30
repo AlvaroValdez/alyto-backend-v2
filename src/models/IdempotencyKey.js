@@ -30,6 +30,6 @@ const idempotencyKeySchema = new mongoose.Schema({
     default: Date.now,
     expires: 86400, // TTL — MongoDB borra el doc tras 24 horas
   },
-});
+}, { collection: 'idempotencykeys' });
 
 export default mongoose.model('IdempotencyKey', idempotencyKeySchema);

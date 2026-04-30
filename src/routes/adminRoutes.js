@@ -23,6 +23,7 @@
 import { Router }    from 'express';
 import { protect }   from '../middlewares/authMiddleware.js';
 import { checkAdmin } from '../middlewares/checkAdmin.js';
+import { idempotencyCheck } from '../middlewares/idempotency.js';
 import {
   getAllUsers,
   getGlobalLedger,
@@ -205,7 +206,7 @@ router.get('/transactions/:transactionId/business-invoice', adminGetBusinessInvo
  * Actualización manual del status. Registra la intervención en ipnLog.
  * Body: { status: String, note: String }
  */
-router.patch('/transactions/:transactionId/status', updateTransactionStatus);
+router.patch('/transactions/:transactionId/status', idempotencyCheck, updateTransactionStatus);
 
 // ─── Corredores ───────────────────────────────────────────────────────────────
 

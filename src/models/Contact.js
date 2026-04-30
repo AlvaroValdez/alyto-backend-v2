@@ -42,7 +42,7 @@ const contactSchema = new mongoose.Schema({
   lastCurrency: { type: String, default: null },
 
   isFavorite: { type: Boolean, default: false },
-}, { timestamps: true })
+}, { timestamps: true, collection: 'contacts' })
 
 contactSchema.index({ userId: 1, destinationCountry: 1 })
 contactSchema.index({ userId: 1, isFavorite: -1, lastSentAt: -1 })

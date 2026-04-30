@@ -74,7 +74,7 @@ const reclamoSchema = new mongoose.Schema({
   plazoVence:    { type: Date },
   /** Nota interna del admin — NO visible al usuario */
   internalNote:  { type: String,  default: null },
-}, { timestamps: true })
+}, { timestamps: true, collection: 'reclamos' })
 
 // ─── Pre-save: calcular plazoVence (10 días hábiles) ─────────────────────────
 

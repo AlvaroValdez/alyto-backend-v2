@@ -65,7 +65,7 @@ const notificationSchema = new mongoose.Schema(
     read:   { type: Boolean, default: false },
     readAt: { type: Date,    default: null  },
   },
-  { timestamps: true },
+  { timestamps: true, collection: 'notifications' },
 );
 
 // Consulta principal: notificaciones del usuario, no leídas primero, más recientes primero
