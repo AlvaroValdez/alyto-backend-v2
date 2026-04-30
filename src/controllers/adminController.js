@@ -509,42 +509,50 @@ export async function updateTransactionStatus(req, res) {
   // transferencia bancaria y cambia el status a 'payin_confirmed'.
   // En ese momento se dispara automáticamente el payout a Vita.
   if (newStatus === 'payin_confirmed') {
-    console.info('[Admin] Disparando dispatchPayout para payin manual confirmado:', {
-      transactionId,
-      legalEntity:  transaction.legalEntity,
-      corridor:     transaction.corridorId?.toString(),
-      destCountry:  transaction.destinationCountry,
-      amount:       transaction.originalAmount,
-      currency:     transaction.originCurrency,
-    });
-    dispatchPayout(transaction).catch(async (err) => {
-      console.error('[Admin] ❌ Error en dispatchPayout tras confirmación manual:', {
-        transactionId,
-        error:  err.message,
-        stack:  err.stack?.split('\n').slice(0, 3).join(' | '),
+    // Evitar doble dispatch: solo disparar si el status anterior era payin_pending
+    if (previousStatus !== 'payin_pending') {
+      console.warn('[Admin] dispatchPayout bloqueado — status ya avanzado:', {
+        transactionId: transaction.alytoTransactionId,
+        previousStatus,
       });
-      // Enviar alerta admin por email — el payout falló después de confirmar payin
-      try {
-        const adminEmail = process.env.ADMIN_EMAIL ?? process.env.SENDGRID_ADMIN_EMAIL;
-        if (adminEmail) {
-          await sendEmail(
-            adminEmail,
-            process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA ?? process.env.SENDGRID_TEMPLATE_FAILED,
-            {
-              transactionId,
-              originAmount:   `${transaction.originalAmount} ${transaction.originCurrency}`,
-              destinationCountry: transaction.destinationCountry,
-              error:          err.message,
-              createdAt:      new Date().toISOString(),
-              ledgerUrl:      `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
-              userName:       'ALERTA: Payout falló tras confirmación manual',
-            },
-          );
+    } else {
+      console.info('[Admin] Disparando dispatchPayout para payin manual confirmado:', {
+        transactionId,
+        legalEntity:  transaction.legalEntity,
+        corridor:     transaction.corridorId?.toString(),
+        destCountry:  transaction.destinationCountry,
+        amount:       transaction.originalAmount,
+        currency:     transaction.originCurrency,
+      });
+      dispatchPayout(transaction).catch(async (err) => {
+        console.error('[Admin] ❌ Error en dispatchPayout tras confirmación manual:', {
+          transactionId,
+          error:  err.message,
+          stack:  err.stack?.split('\n').slice(0, 3).join(' | '),
+        });
+        // Enviar alerta admin por email — el payout falló después de confirmar payin
+        try {
+          const adminEmail = process.env.ADMIN_EMAIL ?? process.env.SENDGRID_ADMIN_EMAIL;
+          if (adminEmail) {
+            await sendEmail(
+              adminEmail,
+              process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA ?? process.env.SENDGRID_TEMPLATE_FAILED,
+              {
+                transactionId,
+                originAmount:   `${transaction.originalAmount} ${transaction.originCurrency}`,
+                destinationCountry: transaction.destinationCountry,
+                error:          err.message,
+                createdAt:      new Date().toISOString(),
+                ledgerUrl:      `${process.env.FRONTEND_URL ?? ''}/admin/transactions`,
+                userName:       'ALERTA: Payout falló tras confirmación manual',
+              },
+            );
+          }
+        } catch (emailErr) {
+          console.error('[Admin] Error enviando alerta admin de payout fallido:', emailErr.message);
         }
-      } catch (emailErr) {
-        console.error('[Admin] Error enviando alerta admin de payout fallido:', emailErr.message);
-      }
-    });
+      });
+    }
   }
 
   return res.json({ transaction });

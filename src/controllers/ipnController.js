@@ -507,6 +507,15 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
 async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
+  // Guard idempotencia: si ya tiene transferId, no procesar de nuevo
+  if (transaction.harborTransfer?.transferId) {
+    console.warn('[tryOwlPayV2] Transfer ya existe para esta tx, abortando duplicado:', {
+      transactionId: transaction.alytoTransactionId,
+      existingTransferId: transaction.harborTransfer.transferId,
+    });
+    return;
+  }
+
   // ── STEP A: Pre-check liquidez USDC en wallet Stellar SRL ────────────────
   const usdcBalance = await getStellarUSDCBalance();
   const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
@@ -721,6 +730,16 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
  * @param {object} transaction — Documento Mongoose con .save() disponible
  */
 export async function dispatchPayout(transaction) {
+  // Defensa en profundidad: no procesar si ya fue despachado
+  const TERMINAL_STATUSES = ['payout_sent', 'payout_pending_usdc_send', 'completed', 'failed'];
+  if (TERMINAL_STATUSES.includes(transaction.status)) {
+    console.warn('[dispatchPayout] Bloqueado — transacción ya en status terminal:', {
+      transactionId: transaction.alytoTransactionId,
+      status: transaction.status,
+    });
+    return;
+  }
+
   console.log('[dispatchPayout] Iniciando para:', transaction.alytoTransactionId,
     '| status:', transaction.status,
     '| NODE_ENV:', process.env.NODE_ENV);
