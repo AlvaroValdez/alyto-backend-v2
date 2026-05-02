@@ -105,6 +105,8 @@ app.use(helmet({
       frameAncestors: [
         "'self'",
         'https://alyto-frontend-v2.onrender.com',
+        'https://staging.alyto.app',
+        'https://alyto.app',
       ],
       connectSrc:  [
         "'self'",
@@ -112,6 +114,8 @@ app.use(helmet({
         'https://wizard.fintoc.com',
         'https://widget.fintoc.com',
         'https://api.stripe.com',
+        'https://api-staging.alyto.app',
+        'https://api.alyto.app',
         ...(isProd ? [] : [
           'wss://192.168.1.94:3000',
           'ws://192.168.1.94:3000',
