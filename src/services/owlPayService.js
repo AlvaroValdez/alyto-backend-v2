@@ -812,3 +812,79 @@ export function verifyWebhookSignature(rawPayloadBuffer, harborSignatureHeader) 
 export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
   return verifyWebhookSignature(rawBody, signatureHeader);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FRONTEND HELPER — descubrir métodos + schemas para construir formularios
+// ═════════════════════════════════════════════════════════════════════════════
+
+const harborMethodsCache = new BoundedCache(50, 5 * 60 * 1000);
+
+/**
+ * Para un corredor (destCountry + destCurrency), devuelve TODOS los métodos
+ * de pago disponibles en Harbor con su tasa, settlement time y JSON Schema
+ * de campos requeridos. Permite al frontend renderizar formularios dinámicos
+ * sin hardcodear campos por país.
+ *
+ * El schema NO depende del monto; las tasas devueltas son indicativas y se
+ * recotizan al momento de crear el transfer real.
+ *
+ * Cacheado 5 min por (destCountry, destCurrency, customerUuid).
+ *
+ * @param {object} params
+ * @param {string}  params.destCountry   - ISO-2 (CN, NG, MX, …)
+ * @param {string}  params.destCurrency  - ISO-3 (CNY, NGN, MXN, …)
+ * @param {string}  [params.amountUSDC]  - default '100'
+ * @param {string}  [params.customerUuid] - mejora precisión de tasa cuando se conoce la entidad
+ */
+export async function getHarborMethodsWithSchemas({
+  destCountry,
+  destCurrency,
+  amountUSDC   = '100',
+  customerUuid = null,
+}) {
+  if (!destCountry || !destCurrency) {
+    throw new Error('[Harbor] destCountry y destCurrency son requeridos.');
+  }
+  const country  = destCountry.toUpperCase();
+  const currency = destCurrency.toUpperCase();
+  const cacheKey = `${country}|${currency}|${customerUuid ?? 'anon'}`;
+
+  const cached = harborMethodsCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const payload = {
+    source:      { type: 'individual', chain: 'stellar', country: 'US', asset: 'USDC', amount: String(amountUSDC) },
+    destination: { type: 'individual', country, asset: currency },
+    commission:  { percentage: '0.5', amount: '0' },
+  };
+  if (customerUuid) payload.on_behalf_of = customerUuid;
+
+  const quotesRes = await owlPayRequest('/v2/transfers/quotes', {
+    method: 'POST',
+    body:   JSON.stringify(payload),
+    timeoutMs: 10000,
+  });
+
+  const quotes = Array.isArray(quotesRes?.data) ? quotesRes.data : [];
+  if (quotes.length === 0) {
+    throw new Error(`[Harbor] No hay métodos disponibles para ${country}/${currency}.`);
+  }
+
+  const methods = await Promise.all(quotes.map(async (q) => {
+    const req = await getHarborTransferRequirements({ quoteId: q.id, destCountry: country });
+    return {
+      paymentMethod:       q.payment_method,
+      paymentMethodLabel:  q.payment_method_label ?? q.payment_method,
+      exchangeRate:        Number(q.exchange_rate ?? 0),
+      exchangePair:        q.exchange_pair ?? `USDC/${currency}`,
+      settlementTimeMin:   q.fiat_settlement_time_min ?? null,
+      settlementTimeMax:   q.fiat_settlement_time_max ?? null,
+      settlementTimeUnit:  q.fiat_settlement_time_unit ?? null,
+      schema:              req.schema,
+      title:               req.title,
+    };
+  }));
+
+  harborMethodsCache.set(cacheKey, methods);
+  return methods;
+}

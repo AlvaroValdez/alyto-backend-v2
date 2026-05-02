@@ -29,6 +29,7 @@ import {
   getSRLPayinInstructions,
   uploadPaymentProof,
   uploadComprobante,
+  getHarborMethodsRequirements,
 } from '../controllers/paymentController.js';
 import { protect, requireEntity, requireKycApproved }      from '../middlewares/authMiddleware.js';
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
@@ -125,6 +126,18 @@ router.get('/corridors', protect, getAvailableCorridors);
  * Auth: Bearer JWT
  */
 router.get('/methods', protect, getPayinMethods);
+
+/**
+ * GET /api/v1/payments/harbor/requirements
+ *
+ * Métodos de pago Harbor disponibles para un corredor + JSON Schema dinámico
+ * de campos requeridos por método. El frontend lo usa para renderizar
+ * formularios de beneficiario sin hardcodear campos por país.
+ *
+ * Query: destCountry (ISO-2), destCurrency (ISO-3), amountUSDC (opcional)
+ * Auth: Bearer JWT
+ */
+router.get('/harbor/requirements', protect, getHarborMethodsRequirements);
 
 /**
  * GET /api/v1/payments/spa-payin-instructions

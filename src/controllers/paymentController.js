@@ -57,6 +57,7 @@ import {
 import {
   getHarborQuote,
   getHarborTransferRequirements,
+  getHarborMethodsWithSchemas,
   getCustomerUuid,
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
@@ -2667,4 +2668,48 @@ export async function getPayinMethods(req, res) {
     referenceAmount:    REFERENCE_AMOUNT,
     methods,
   });
+}
+
+// ─── GET /api/v1/payments/harbor/requirements ────────────────────────────────
+
+/**
+ * Devuelve los métodos de pago Harbor disponibles para un corredor (destCountry
+ * + destCurrency) junto con el JSON Schema de cada método. El frontend usa esto
+ * para renderizar formularios dinámicos de beneficiario sin hardcodear campos.
+ *
+ * Resuelve el customerUuid del legalEntity del usuario cuando está configurado
+ * para que las tasas reflejen su tier real; si no, hace el quote anónimo.
+ *
+ * Query: destCountry (ISO-2), destCurrency (ISO-3), amountUSDC (opcional)
+ */
+export async function getHarborMethodsRequirements(req, res) {
+  const { destCountry, destCurrency, amountUSDC } = req.query;
+  if (!destCountry || !destCurrency) {
+    return res.status(400).json({ error: 'destCountry y destCurrency son requeridos' });
+  }
+
+  let customerUuid = null;
+  try {
+    const legalEntity = req.user?.legalEntity;
+    if (legalEntity) customerUuid = getCustomerUuid(legalEntity);
+  } catch {
+    customerUuid = null;
+  }
+
+  try {
+    const methods = await getHarborMethodsWithSchemas({
+      destCountry,
+      destCurrency,
+      amountUSDC: amountUSDC ?? '100',
+      customerUuid,
+    });
+    return res.json({
+      destCountry:  destCountry.toUpperCase(),
+      destCurrency: destCurrency.toUpperCase(),
+      methods,
+    });
+  } catch (err) {
+    console.error('[Harbor Requirements]', err.message);
+    return res.status(502).json({ error: 'No se pudo obtener métodos Harbor', detail: err.message });
+  }
 }
