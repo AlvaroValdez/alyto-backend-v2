@@ -20,6 +20,25 @@
 const round2 = n => Math.round(n * 100) / 100;
 
 /**
+ * Devuelve el spread efectivo (%) aplicable a una transacción según el tier
+ * del usuario. Fuente única para todos los flujos de quote (HTTP + WS).
+ *
+ *   - Cuenta business + corredor con businessAlytoCSpread configurado
+ *     → tarifa business (descuento).
+ *   - Cualquier otro caso → tarifa retail (alytoCSpread) o 0 si no está
+ *     configurado.
+ *
+ * @param {{ alytoCSpread?: number, businessAlytoCSpread?: number }} corridor
+ * @param {{ accountType?: string }} [user]
+ * @returns {number} Porcentaje de spread (0–100), ej. 0.5 = 0.5%.
+ */
+export function getEffectiveSpreadPct(corridor, user) {
+  return (user?.accountType === 'business' && corridor?.businessAlytoCSpread != null)
+    ? corridor.businessAlytoCSpread
+    : (corridor?.alytoCSpread ?? 0);
+}
+
+/**
  * @param {object}  input
  * @param {number}  input.amount        Origin amount in BOB (user input)
  * @param {object}  input.corridor      TransactionConfig doc or plain config

@@ -33,8 +33,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
-import { calculateQuote }   from '../services/quoteCalculator.js';
-import { getEffectiveSpreadPct } from '../utils/pricing.js';
+import { calculateQuote, getEffectiveSpreadPct } from '../services/quoteCalculator.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
 export const uploadComprobante = multer({
@@ -198,7 +197,7 @@ export async function initiateFintocPayin(req, res) {
       operationType: 'payin',
       routingScenario: 'B',                     // Escenario B: origen Chile
 
-      ...(corridor ? { corridorId: corridor._id } : {}),
+      ...(corridor ? { corridorId: corridor._id, corridorCode: corridor.corridorId } : {}),
       ...(contactId ? { contactId } : {}),
 
       originalAmount:  Number(amount),
@@ -813,6 +812,7 @@ export async function initCrossBorderPayment(req, res) {
         operationType:       'crossBorderPayment',
         routingScenario:     corridor.routingScenario ?? 'B',
         corridorId:          corridor._id,
+        corridorCode:        corridor.corridorId,
         ...(contactId ? { contactId } : {}),
 
         originalAmount:      amount,
@@ -1162,6 +1162,7 @@ export async function initCrossBorderPayment(req, res) {
       operationType:   'crossBorderPayment',
       routingScenario: corridor.routingScenario ?? 'D',
       corridorId:      corridor._id,
+      corridorCode:    corridor.corridorId,
       ...(contactId ? { contactId } : {}),
 
       originalAmount:      amount,

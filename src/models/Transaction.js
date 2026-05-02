@@ -283,6 +283,17 @@ const transactionSchema = new Schema(
       ref:   'TransactionConfig',
       index: true,
     },
+    /**
+     * Código humano del corredor (ej. 'bo-cn', 'cl-co').
+     * Persistido junto al ObjectId porque los reseeds de TransactionConfig
+     * cambian _id y dejan corridorId huérfano para lookup histórico.
+     * Las transacciones nuevas tienen ambos; las viejas solo el ObjectId.
+     */
+    corridorCode: {
+      type:  String,
+      trim:  true,
+      index: true,
+    },
 
     contactId: {
       type:  Schema.Types.ObjectId,
