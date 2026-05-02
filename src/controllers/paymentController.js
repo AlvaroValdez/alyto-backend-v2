@@ -34,6 +34,7 @@ import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
 import { calculateQuote }   from '../services/quoteCalculator.js';
+import { getEffectiveSpreadPct } from '../utils/pricing.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
 export const uploadComprobante = multer({
@@ -771,10 +772,7 @@ export async function initCrossBorderPayment(req, res) {
     } else {
       payinFeeVal = round2(amount * (corridor.payinFeePercent / 100));
     }
-    const clboSpreadPct     = (req.user?.accountType === 'business' && corridor.businessAlytoCSpread != null)
-      ? corridor.businessAlytoCSpread
-      : corridor.alytoCSpread;
-    const spreadFee         = round2(amount * (clboSpreadPct / 100));
+    const spreadFee         = round2(amount * (getEffectiveSpreadPct(corridor, req.user) / 100));
     const fixedFeeVal       = corridor.fixedFee ?? 0;
     const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
     const totalDeductedReal = round2(payinFeeVal + spreadFee + fixedFeeVal + profitFee);
@@ -992,10 +990,7 @@ export async function initCrossBorderPayment(req, res) {
   } else {
     payinFee = round2(amount * (corridor.payinFeePercent / 100));
   }
-  const effectiveSpreadPct = (req.user?.accountType === 'business' && corridor.businessAlytoCSpread != null)
-    ? corridor.businessAlytoCSpread
-    : (corridor.alytoCSpread ?? 0);
-  const alytoCSpread    = round2(amount * (effectiveSpreadPct / 100));
+  const alytoCSpread    = round2(amount * (getEffectiveSpreadPct(corridor, req.user) / 100));
   const fixedFee        = corridor.fixedFee ?? 0;
   const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
   const payoutFee       = corridor.payoutFeeFixed ?? 0;
@@ -1688,7 +1683,7 @@ export async function getQuote(req, res) {
     } else {
       payinFee = round2(amount * (corridor.payinFeePercent / 100));
     }
-    const spreadFee         = round2(amount * (corridor.alytoCSpread / 100));
+    const spreadFee         = round2(amount * (getEffectiveSpreadPct(corridor, req.user) / 100));
     const fixedFee          = corridor.fixedFee ?? 0;
     const profitFee         = round2(amount * (corridor.profitRetentionPercent / 100));
     const totalDeductedReal = round2(payinFee + spreadFee + fixedFee + profitFee);
@@ -1766,7 +1761,7 @@ export async function getQuote(req, res) {
   } else {
     payinFee = amount * (corridor.payinFeePercent / 100);
   }
-  const alytoCSpread    = amount * (corridor.alytoCSpread / 100);
+  const alytoCSpread    = amount * (getEffectiveSpreadPct(corridor, req.user) / 100);
   const fixedFee        = corridor.fixedFee;
   const profitRetention = amount * (corridor.profitRetentionPercent / 100);
   const amountAfterFees = amount - payinFee - alytoCSpread - fixedFee - profitRetention;
@@ -2531,7 +2526,7 @@ export async function getAvailableCorridors(req, res) {
   let corridors;
   try {
     corridors = await TransactionConfig.find(corridorFilter)
-      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin maxAmountOrigin')
+      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin maxAmountOrigin')
       .lean();
   } catch (err) {
     console.error('[Alyto Corridors] Error:', err.message);
@@ -2595,7 +2590,7 @@ export async function getPayinMethods(req, res) {
       destinationCountry: dest,
       originCurrency:     userOriginCurrency,
     })
-      .select('corridorId payinMethod payoutMethod alytoCSpread fixedFee payinFeePercent fintocConfig payoutFeeFixed originCurrency destinationCurrency manualExchangeRate profitRetentionPercent')
+      .select('corridorId payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig payoutFeeFixed originCurrency destinationCurrency manualExchangeRate profitRetentionPercent')
       .lean();
   } catch (err) {
     console.error('[Alyto PayinMethods] Error:', err.message);
