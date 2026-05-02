@@ -528,6 +528,17 @@ const transactionSchema = new Schema(
       type:    String,
       default: null,
     },
+    /**
+     * Método de pago Harbor preferido por el usuario al crear la tx.
+     * Solo aplica a corredores con múltiples opciones (ej. CN/CNY: CIPS|WIRE).
+     * tryOwlPayV2 lo respeta al elegir el quote; si el método no está
+     * disponible en el momento del payout, hace fallback al primero.
+     */
+    owlPayMethod: {
+      type:    String,
+      enum:    ['CIPS', 'WIRE', null],
+      default: null,
+    },
     /** Expiración de la quote de OwlPay Harbor */
     payoutQuoteExpiresAt: {
       type:    Date,

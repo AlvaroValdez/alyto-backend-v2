@@ -566,8 +566,36 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     customer_type:              'business',
   });
 
-  // Harbor may nest the quote object; normalise to top level
-  const quoteData  = quote.data?.[0] ?? quote.data ?? quote;
+  // Harbor returns `{ data: [...] }` con un quote por método de pago disponible
+  // (ej. CN/CNY: CIPS + WIRE). Si la transacción tiene owlPayMethod definido por
+  // el usuario, lo respetamos; si el método ya no está disponible al momento del
+  // payout, hacemos fallback al primero y dejamos un warning en logs.
+  const quotesList     = Array.isArray(quote.data)
+    ? quote.data
+    : (quote.data ? [quote.data] : [quote]);
+  const preferredMethod = transaction.owlPayMethod ?? null;
+  let   quoteData       = preferredMethod
+    ? quotesList.find(q => q?.payment_method === preferredMethod)
+    : null;
+
+  if (!quoteData) {
+    if (preferredMethod) {
+      console.warn(
+        '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
+        preferredMethod, corridor.corridorId, quotesList[0]?.payment_method,
+      );
+    }
+    quoteData = quotesList[0];
+  }
+  if (!quoteData) {
+    throw new Error('[OwlPay] No hay quotes disponibles para este corredor');
+  }
+
+  console.log(
+    '[OwlPay] Método seleccionado: %s | rate: %s',
+    quoteData.payment_method, quoteData.exchange_rate,
+  );
+
   const quoteId    = quoteData.id ?? quoteData.quote_id;
   const expiresAt  = quoteData.expires_at ?? quoteData.crypto_funds_settlement_expire_date;
 

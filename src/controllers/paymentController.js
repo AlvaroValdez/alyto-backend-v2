@@ -638,6 +638,11 @@ export async function initCrossBorderPayment(req, res) {
     destinationAmount:   quotedDestAmount,
     exchangeRate:        quotedExchangeRate,
     usdcTransitAmount:   quotedUsdcTransitAmount,
+    // Selección de método Harbor por parte del usuario (corredores multi-método).
+    // harborQuoteId: aceptado pero descartado — los quotes expiran ~60 s y
+    // tryOwlPayV2 siempre re-cotiza al despachar el payout.
+    owlPayMethod,
+    harborQuoteId: _harborQuoteIdIgnored,
   } = req.body;
   const userId = req.user?._id;
 
@@ -651,6 +656,9 @@ export async function initCrossBorderPayment(req, res) {
   }
   if (!beneficiaryData && !legacyBeneficiary) {
     return res.status(400).json({ error: 'Se requiere beneficiaryData o beneficiary.' });
+  }
+  if (owlPayMethod && !['CIPS', 'WIRE'].includes(owlPayMethod)) {
+    return res.status(400).json({ error: 'owlPayMethod debe ser "CIPS" o "WIRE".' });
   }
 
   // ── 2. Buscar corredor activo ─────────────────────────────────────────────
@@ -1195,6 +1203,8 @@ export async function initCrossBorderPayment(req, res) {
       ...((beneficiaryData ?? legacyBeneficiary)?.transfer_purpose
         ? { transferPurpose: String((beneficiaryData ?? legacyBeneficiary).transfer_purpose) }
         : {}),
+
+      ...(owlPayMethod ? { owlPayMethod } : {}),
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
