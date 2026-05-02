@@ -166,8 +166,8 @@ export async function initiateFintocPayin(req, res) {
         userId:       user._id.toString(),
         legalEntity:  'SpA',
       },
-      success_url: `${process.env.APP_URL}/success`,
-      cancel_url:  `${process.env.APP_URL}/send`,
+      success_url: `${process.env.FRONTEND_URL}/success`,
+      cancel_url:  `${process.env.FRONTEND_URL}/send`,
     });
   } catch (error) {
     console.error('[Alyto Controller] Error creando PaymentIntent Fintoc:', {
@@ -1028,8 +1028,8 @@ export async function initCrossBorderPayment(req, res) {
           transactionId: alytoTransactionId,
           corridorId:    corridor.corridorId,
         },
-        success_url:    `${process.env.APP_URL}/success`,
-        cancel_url:     `${process.env.APP_URL}/cancel`,
+        success_url:    `${process.env.FRONTEND_URL}/success`,
+        cancel_url:     `${process.env.FRONTEND_URL}/cancel`,
         customer_email: user?.email,
       });
     } catch (err) {
@@ -1091,7 +1091,7 @@ export async function initCrossBorderPayment(req, res) {
         amount:               amount,
         country_iso_code:     corridor.originCountry ?? 'CL',
         issue:                `Pago Alyto — ${corridor.corridorId}`,
-        success_redirect_url: `${process.env.APP_URL ?? 'https://app.alyto.com'}/success`,
+        success_redirect_url: `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/success`,
       });
     } catch (err) {
       console.error('[Alyto CrossBorder] Error creando payment_order en Vita:', {

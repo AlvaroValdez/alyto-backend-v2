@@ -669,7 +669,7 @@ export const EMAILS = {
         businessId:  profile.businessId,
         legalName:   profile.legalName ?? profile.tradeName ?? 'tu empresa',
         submittedAt: formatDate(profile.createdAt ?? new Date()),
-        statusUrl:   `${process.env.APP_URL ?? 'https://alyto.app'}/business/kyb-status`,
+        statusUrl:   `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/business/kyb-status`,
         supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
       },
     ];
@@ -698,7 +698,7 @@ export const EMAILS = {
         ),
         kybNote:     profile.kybNote ?? null,
         approvedAt:  formatDate(profile.kybReviewedAt ?? new Date()),
-        dashboardUrl: `${process.env.APP_URL ?? 'https://alyto.app'}/dashboard`,
+        dashboardUrl: `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/dashboard`,
         supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
       },
     ];
@@ -744,7 +744,7 @@ export const EMAILS = {
         businessId:        profile.businessId,
         legalName:         profile.legalName ?? profile.tradeName,
         kybNote:           profile.kybNote ?? 'Por favor sube los documentos faltantes.',
-        uploadUrl:         `${process.env.APP_URL ?? 'https://alyto.app'}/business/kyb-documents`,
+        uploadUrl:         `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/business/kyb-documents`,
         supportEmail:      process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
         supportWhatsapp:   process.env.SUPPORT_WHATSAPP ?? '+56988321490',
       },

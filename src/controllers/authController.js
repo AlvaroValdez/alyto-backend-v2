@@ -413,8 +413,8 @@ export async function forgotPassword(req, res) {
     await user.save()
 
     // Enviar email con el link de reset
-    const APP_URL   = process.env.APP_URL ?? 'http://localhost:5173'
-    const resetLink = `${APP_URL}/reset-password/${rawToken}`
+    const FRONTEND_URL = process.env.FRONTEND_URL ?? 'http://localhost:5173'
+    const resetLink    = `${FRONTEND_URL}/reset-password/${rawToken}`
 
     // Fire-and-forget: no bloquea la respuesta si el email falla
     if (process.env.SENDGRID_API_KEY) {
