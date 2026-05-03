@@ -388,6 +388,48 @@ const transactionSchema = new Schema(
       type: Date,
     },
 
+    // ── Provider quote metadata (Harbor real cotization) ──────────────────────
+    /**
+     * ID del quote del provider que usamos para cotizar (Harbor `quote_xxx`).
+     * Permite reuso en dispatchPayout si todavía no expiró (evita re-quote).
+     */
+    providerQuoteId: {
+      type:    String,
+      default: null,
+    },
+    /**
+     * Origen de la tasa que se le mostró al usuario al cotizar.
+     * harbor:METHOD = quote real de Harbor con ese payment_method.
+     * vita = extrapolación desde tabla Vita (corredores Vita o anchorBolivia).
+     * vita_fallback = se intentó Harbor pero falló; se mostró Vita con disclaimer.
+     */
+    rateSource: {
+      type:    String,
+      enum:    [
+        'harbor:CIPS', 'harbor:WIRE', 'harbor:NEQUI',
+        'harbor:SPEI', 'harbor:PIX', 'harbor:BANK-TRANSFER',
+        'harbor:ACH_PUSH', 'harbor:DOMESTIC_WIRE', 'harbor:FEDWIRE',
+        'harbor:IMPS', 'harbor:CIPS-WIRE',
+        'vita', 'vita_fallback', null,
+      ],
+      default: null,
+    },
+    /** Cuándo expira el quote del provider (Harbor: ~60s desde creación). */
+    rateExpiresAt: {
+      type:    Date,
+      default: null,
+    },
+    /**
+     * exact = rate viene del provider real para el monto exacto (Harbor cotizó).
+     * estimated = rate fue extrapolado (tabla Vita asume linealidad — el monto
+     * real puede variar levemente). Frontend debe mostrar disclaimer.
+     */
+    rateConfidence: {
+      type:    String,
+      enum:    ['exact', 'estimated', null],
+      default: null,
+    },
+
     // ── Fees ──────────────────────────────────────────────────────────────────
     /** Desglose granular de fees calculado desde TransactionConfig al crear la tx */
     fees: {
