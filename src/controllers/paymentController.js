@@ -33,7 +33,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
-import { calculateQuote, getEffectiveSpreadPct } from '../services/quoteCalculator.js';
+import { calculateQuote, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -1438,6 +1438,74 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
  * @param {number} amount    — originAmount en BOB
  * @param {string} dest      — destinationCountry ISO alpha-2 mayúsculas
  */
+/**
+ * resolveProviderQuote — Para corredores con payoutMethod=owlPay, llama a Harbor
+ * con el monto USDC real (quote.digitalAssetAmount) y override quote.destinationAmount
+ * + quote.effectiveRate con los valores que Harbor entregará realmente.
+ *
+ * Para corredores Vita o anchorBolivia, no toca el quote — devuelve la metadata
+ * con rateSource='vita' / rateConfidence='estimated'.
+ *
+ * Si Harbor falla (timeout, 5xx, etc.), no rompe la cotización: deja el quote
+ * con la extrapolación Vita pero marca rateSource='vita_fallback' para que el
+ * frontend muestre disclaimer de "tasa referencial".
+ *
+ * Mutates `quote.destinationAmount` y `quote.effectiveRate` cuando aplica override.
+ *
+ * @returns {{providerQuoteId, rateSource, rateExpiresAt, rateConfidence}}
+ */
+async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
+  const meta = {
+    providerQuoteId: null,
+    rateSource:      'vita',
+    rateExpiresAt:   null,
+    rateConfidence:  'estimated',
+  };
+
+  if (corridor.payoutMethod !== 'owlPay') return meta;
+
+  try {
+    const customerUuid = process.env.OWLPAY_CUSTOMER_UUID_LLC ?? null;
+    const harborQuotes = await getHarborQuote({
+      sourceAmount:   quote.digitalAssetAmount,
+      sourceCurrency: 'USDC',
+      sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+      destCountry:    corridor.destinationCountry,
+      destCurrency:   corridor.destinationCurrency,
+      customerUuid,
+      returnAll:      true,
+    });
+
+    const selected = requestedMethod
+      ? harborQuotes.find(q => q.paymentMethod === requestedMethod) ?? harborQuotes[0]
+      : harborQuotes[0];
+
+    if (!selected) throw new Error('Harbor devolvió 0 quotes');
+
+    quote.destinationAmount = selected.destinationAmount;
+    quote.effectiveRate     = round6(selected.destinationAmount / quote.originAmount);
+
+    meta.providerQuoteId = selected.quoteId;
+    meta.rateSource      = `harbor:${selected.paymentMethod}`;
+    meta.rateExpiresAt   = selected.quoteExpiresAt ? new Date(selected.quoteExpiresAt) : null;
+    meta.rateConfidence  = 'exact';
+
+    console.info('[Quote] Harbor real cotization aplicada:', {
+      method:            selected.paymentMethod,
+      sourceAmount:      quote.digitalAssetAmount,
+      destinationAmount: selected.destinationAmount,
+      effectiveRate:     quote.effectiveRate,
+      expiresAt:         meta.rateExpiresAt,
+    });
+  } catch (err) {
+    console.warn('[Quote] Harbor cotization falló — fallback Vita extrapolado:', err.message);
+    meta.rateSource     = 'vita_fallback';
+    meta.rateConfidence = 'estimated';
+  }
+
+  return meta;
+}
+
 async function calculateBOBQuote(req, res, corridor, amount, dest) {
   const round2      = n => Math.round(n * 100) / 100;
   const userId      = req.user?._id?.toString();
@@ -1492,6 +1560,14 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
+  // Provider-aware override: para corredores owlPay, recotizar con Harbor real.
+  // Mutates quote.destinationAmount + quote.effectiveRate cuando aplica.
+  const providerMeta = await resolveProviderQuote({
+    quote,
+    corridor,
+    requestedMethod: req.query.method ?? null,
+  });
+
   const alytoProfitUSDC = round2(
     (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
     / bobPerUsdc,
@@ -1503,7 +1579,10 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
 
   const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
   const vitaExpiry     = validUntil ? new Date(validUntil) : null;
-  const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
+  const harborExpiry   = providerMeta.rateExpiresAt;
+  // El más restrictivo: local 3min vs Vita validUntil vs Harbor expiry
+  const candidates     = [localExpiry, vitaExpiry, harborExpiry].filter(Boolean);
+  const quoteExpiresAt = candidates.reduce((a, b) => (a < b ? a : b));
 
   return res.status(200).json({
     corridorId:          corridor.corridorId,
@@ -1526,6 +1605,11 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     payoutMethod:  corridor.payoutMethod,
     entity:        'SRL',
     quoteExpiresAt,
+    // Provider quote metadata (commit 4 — response shape)
+    providerQuoteId: providerMeta.providerQuoteId,
+    rateSource:      providerMeta.rateSource,
+    rateExpiresAt:   providerMeta.rateExpiresAt,
+    rateConfidence:  providerMeta.rateConfidence,
   });
 }
 
@@ -1836,6 +1920,13 @@ export async function getQuote(req, res) {
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
     }
 
+    // Provider-aware override (mismo helper que calculateBOBQuote).
+    const providerMeta = await resolveProviderQuote({
+      quote,
+      corridor,
+      requestedMethod: req.query.method ?? null,
+    });
+
     const alytoProfitUSDC = round2(
       (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
       / bobPerUsdc,
@@ -1843,9 +1934,11 @@ export async function getQuote(req, res) {
 
     const localExpiry    = new Date(Date.now() + 3 * 60 * 1000);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
-    const quoteExpiresAt = (vitaExpiry && vitaExpiry < localExpiry) ? vitaExpiry : localExpiry;
+    const harborExpiry   = providerMeta.rateExpiresAt;
+    const candidates     = [localExpiry, vitaExpiry, harborExpiry].filter(Boolean);
+    const quoteExpiresAt = candidates.reduce((a, b) => (a < b ? a : b));
 
-    console.info('[Alyto Quote] Cotización manual BOB→USDC→' + dest + ':', {
+    console.info('[Alyto Quote] Cotización manual ' + corridor.originCurrency + '→USDC→' + dest + ':', {
       corridorId:        corridor.corridorId,
       userId,
       originAmount:      amount,
@@ -1854,6 +1947,7 @@ export async function getQuote(req, res) {
       usdcToDestRate,
       destinationAmount: quote.destinationAmount,
       alytoProfitUSDC,
+      rateSource:        providerMeta.rateSource,
     });
 
     return res.status(200).json({
@@ -1877,6 +1971,11 @@ export async function getQuote(req, res) {
       payinMethod:  corridor.payinMethod,
       payoutMethod: corridor.payoutMethod,
       legalEntity:  corridor.legalEntity,
+      // Provider quote metadata (commit 4 — response shape)
+      providerQuoteId: providerMeta.providerQuoteId,
+      rateSource:      providerMeta.rateSource,
+      rateExpiresAt:   providerMeta.rateExpiresAt,
+      rateConfidence:  providerMeta.rateConfidence,
     });
   }
 

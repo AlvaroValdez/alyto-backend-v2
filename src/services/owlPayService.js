@@ -261,6 +261,7 @@ export async function getHarborQuote({
   destCurrency,
   customerUuid,
   commissionPercent,
+  returnAll = false,
 }) {
   if (!sourceAmount || sourceAmount <= 0) {
     throw new Error('[Harbor] sourceAmount debe ser positivo.');
@@ -298,31 +299,35 @@ export async function getHarborQuote({
     body:   JSON.stringify(payload),
   });
 
-  // Harbor puede devolver múltiples métodos de pago — tomar el primero (menor fee típicamente).
+  // Harbor puede devolver múltiples métodos de pago. Por default tomamos el primero
+  // (mejor rate típicamente). Pasar returnAll: true para recibir el array completo
+  // (útil cuando el caller necesita elegir por payment_method, ej. CIPS vs WIRE).
   const list  = Array.isArray(res.data) ? res.data : (res.data ? [res.data] : [res]);
-  const quote = list[0];
-  if (!quote?.id && !quote?.quote_id) {
+  if (!list.length || (!list[0]?.id && !list[0]?.quote_id)) {
     throw new Error('[Harbor] No se obtuvo quote_id en la respuesta.');
   }
 
-  return {
-    quoteId:               quote.id ?? quote.quote_id,
-    paymentMethod:         quote.payment_method ?? quote.destination?.payment_method ?? null,
-    sourceAmount:          Number(quote.source?.amount   ?? quote.source_amount      ?? sourceAmount),
-    sourceCurrency:        quote.source?.asset           ?? quote.source_currency    ?? sourceCurrency,
-    destinationAmount:     Number(quote.destination?.amount ?? quote.destination_amount ?? 0),
-    destinationCurrency:   quote.destination?.asset      ?? quote.destination_currency ?? destCurrency,
-    exchangeRate:          Number(quote.exchange_rate    ?? quote.rate               ?? 0),
-    settlementTimeMin:     quote.settlement_time_min     ?? null,
-    settlementTimeMax:     quote.settlement_time_max     ?? null,
-    settlementTimeUnit:    quote.settlement_time_unit    ?? null,
-    quoteExpiresAt:        quote.expires_at              ?? quote.quote_expires_at   ?? null,
-    cryptoFundsExpiresAt:  quote.crypto_funds_settlement_expire_date
-                          ?? quote.crypto_funds_expires_at ?? null,
-    harborFee:             Number(quote.fees?.harbor_fee     ?? quote.harbor_fee     ?? 0),
-    commissionFee:         Number(quote.fees?.commission_fee ?? quote.commission_fee ?? 0),
-    raw:                   quote,
-  };
+  const normalize = (q) => ({
+    quoteId:               q.id ?? q.quote_id,
+    paymentMethod:         q.payment_method ?? q.destination?.payment_method ?? null,
+    paymentMethodLabel:    q.payment_method_label ?? q.payment_method ?? null,
+    sourceAmount:          Number(q.source?.amount   ?? q.source_amount      ?? sourceAmount),
+    sourceCurrency:        q.source?.asset           ?? q.source_currency    ?? sourceCurrency,
+    destinationAmount:     Number(q.destination?.amount ?? q.destination_amount ?? 0),
+    destinationCurrency:   q.destination?.asset      ?? q.destination_currency ?? destCurrency,
+    exchangeRate:          Number(q.exchange_rate    ?? q.rate               ?? 0),
+    settlementTimeMin:     q.settlement_time_min     ?? q.fiat_settlement_time_min ?? null,
+    settlementTimeMax:     q.settlement_time_max     ?? q.fiat_settlement_time_max ?? null,
+    settlementTimeUnit:    q.settlement_time_unit    ?? q.fiat_settlement_time_unit ?? null,
+    quoteExpiresAt:        q.expires_at              ?? q.quote_expires_at   ?? q.quote_expire_date ?? null,
+    cryptoFundsExpiresAt:  q.crypto_funds_settlement_expire_date
+                          ?? q.crypto_funds_expires_at ?? null,
+    harborFee:             Number(q.fees?.harbor_fee     ?? q.harbor_fee     ?? 0),
+    commissionFee:         Number(q.fees?.commission_fee ?? q.commission_fee ?? 0),
+    raw:                   q,
+  });
+
+  return returnAll ? list.map(normalize) : normalize(list[0]);
 }
 
 // ── Cache de requirements (JSON Schema) por quote y por país ─────────────────

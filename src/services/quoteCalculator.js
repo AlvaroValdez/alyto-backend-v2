@@ -20,7 +20,7 @@
 const round2 = n => Math.round(n * 100) / 100;
 // FX rates necesitan 6 decimales: rates < 1 (ej. BOB→USD ≈ 0.107) pierden ~95% de la
 // info con round2. round2 sigue siendo correcto para amounts en moneda fiat.
-const round6 = n => Math.round(n * 1e6) / 1e6;
+export const round6 = n => Math.round(n * 1e6) / 1e6;
 
 /**
  * Devuelve el spread efectivo (%) aplicable a una transacción según el tier
