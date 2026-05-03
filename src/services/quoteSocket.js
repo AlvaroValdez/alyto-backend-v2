@@ -240,6 +240,10 @@ async function computeQuote(state) {
         totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
       },
       quoteExpiresAt,
+      // Live quote por WS = rate Vita extrapolado (no llamamos Harbor por
+      // latencia). Frontend muestra disclaimer "tasa referencial". El rate
+      // exacto se obtiene en GET /payments/quote antes del confirm.
+      rateConfidence:      'estimated',
       updatedAt: new Date(),
       stale:     false,
     };
@@ -310,6 +314,9 @@ async function computeQuote(state) {
       bobPerUsdc,
       fees:                quote.fees,
       quoteExpiresAt,
+      // Live quote por WS = rate Vita extrapolado (Harbor no se llama por
+      // latencia). El rate exacto se obtiene en GET /payments/quote.
+      rateConfidence:      'estimated',
       updatedAt: new Date(),
       stale:     !vitaCache.prices,
     };
@@ -353,6 +360,9 @@ async function computeQuote(state) {
       totalDeducted:   round2(totalDeducted),
     },
     quoteExpiresAt,
+    // Live quote por WS = rate Vita extrapolado. El rate exacto Harbor (cuando
+    // payoutMethod=owlPay) se obtiene en GET /payments/quote antes del confirm.
+    rateConfidence:    'estimated',
     updatedAt:  new Date(),
     stale:      !vitaCache.prices,
   };
