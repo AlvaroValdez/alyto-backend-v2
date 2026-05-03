@@ -808,11 +808,6 @@ export function verifyWebhookSignature(rawPayloadBuffer, harborSignatureHeader) 
   return crypto.timingSafeEqual(expectedBuf, receivedBuf);
 }
 
-/** @deprecated Use verifyWebhookSignature — kept for backward compat. */
-export function verifyOwlPayWebhookSignature(rawBody, signatureHeader) {
-  return verifyWebhookSignature(rawBody, signatureHeader);
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 // FRONTEND HELPER — descubrir métodos + schemas para construir formularios
 // ═════════════════════════════════════════════════════════════════════════════
