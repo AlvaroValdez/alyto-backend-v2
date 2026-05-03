@@ -550,56 +550,76 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     return { provider: 'owlpay', status: 'pending_funding' };
   }
 
-  // ── STEP B: Create quote ──────────────────────────────────────────────────
-  // AV Finance LLC is the Harbor-approved entity for all off-ramp
-  // transfers regardless of which legal entity processes the payin.
-  // SRL handles BOB payin internally; LLC is the Harbor counterpart.
+  // ── STEP B: Quote ─────────────────────────────────────────────────────────
+  // Reusar providerQuoteId del initCrossBorderPayment si aún está vigente (+5s
+  // de margen). Para payin manual SRL el admin tarda minutos/horas → siempre
+  // expira y se crea un quote nuevo. Reuso solo ocurre si la confirmación fue
+  // ultra-rápida (< ~55 s desde la creación de la tx).
   const customerUuidEnvKey = 'OWLPAY_CUSTOMER_UUID_LLC';
 
-  const quote = await createQuote({
-    source_amount:              netAmountUSD,
-    destination_country:        corridor.destinationCountry,
-    destination_currency:       corridor.destinationCurrency,
-    destination_payment_method: 'bank_transfer',
-    source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-    customer_uuid:              process.env[customerUuidEnvKey],
-    customer_type:              'business',
-  });
-
-  // Harbor returns `{ data: [...] }` con un quote por método de pago disponible
-  // (ej. CN/CNY: CIPS + WIRE). Si la transacción tiene owlPayMethod definido por
-  // el usuario, lo respetamos; si el método ya no está disponible al momento del
-  // payout, hacemos fallback al primero y dejamos un warning en logs.
-  const quotesList     = Array.isArray(quote.data)
-    ? quote.data
-    : (quote.data ? [quote.data] : [quote]);
-  const preferredMethod = transaction.owlPayMethod ?? null;
-  let   quoteData       = preferredMethod
-    ? quotesList.find(q => q?.payment_method === preferredMethod)
-    : null;
-
-  if (!quoteData) {
-    if (preferredMethod) {
-      console.warn(
-        '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
-        preferredMethod, corridor.corridorId, quotesList[0]?.payment_method,
-      );
-    }
-    quoteData = quotesList[0];
-  }
-  if (!quoteData) {
-    throw new Error('[OwlPay] No hay quotes disponibles para este corredor');
-  }
-
-  console.log(
-    '[OwlPay] Método seleccionado: %s | rate: %s',
-    quoteData.payment_method, quoteData.exchange_rate,
+  const hasValidProviderQuote = Boolean(
+    transaction.providerQuoteId &&
+    transaction.rateExpiresAt &&
+    new Date(transaction.rateExpiresAt) > new Date(Date.now() + 5_000),
   );
 
-  const quoteId    = quoteData.id ?? quoteData.quote_id;
-  const expiresAt  = quoteData.expires_at ?? quoteData.crypto_funds_settlement_expire_date;
+  let quoteId;
+  let expiresAt;
 
-  if (!quoteId) throw new Error('[OwlPay] No quote_id in createQuote response');
+  if (hasValidProviderQuote) {
+    console.log('[tryOwlPayV2] Reutilizando providerQuoteId vigente:', transaction.providerQuoteId);
+    quoteId   = transaction.providerQuoteId;
+    expiresAt = transaction.rateExpiresAt;
+  } else {
+    if (transaction.providerQuoteId) {
+      console.warn('[tryOwlPayV2] providerQuoteId expirado — creando nuevo quote. Posible diferencia de monto.');
+    }
+
+    const quote = await createQuote({
+      source_amount:              netAmountUSD,
+      destination_country:        corridor.destinationCountry,
+      destination_currency:       corridor.destinationCurrency,
+      destination_payment_method: 'bank_transfer',
+      source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+      customer_uuid:              process.env[customerUuidEnvKey],
+      customer_type:              'business',
+    });
+
+    // Harbor returns `{ data: [...] }` con un quote por método de pago disponible
+    // (ej. CN/CNY: CIPS + WIRE). Si la transacción tiene owlPayMethod definido por
+    // el usuario, lo respetamos; si el método ya no está disponible al momento del
+    // payout, hacemos fallback al primero y dejamos un warning en logs.
+    const quotesList      = Array.isArray(quote.data)
+      ? quote.data
+      : (quote.data ? [quote.data] : [quote]);
+    const preferredMethod = transaction.owlPayMethod ?? null;
+    let   quoteData       = preferredMethod
+      ? quotesList.find(q => q?.payment_method === preferredMethod)
+      : null;
+
+    if (!quoteData) {
+      if (preferredMethod) {
+        console.warn(
+          '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
+          preferredMethod, corridor.corridorId, quotesList[0]?.payment_method,
+        );
+      }
+      quoteData = quotesList[0];
+    }
+    if (!quoteData) {
+      throw new Error('[OwlPay] No hay quotes disponibles para este corredor');
+    }
+
+    console.log(
+      '[OwlPay] Método seleccionado: %s | rate: %s',
+      quoteData.payment_method, quoteData.exchange_rate,
+    );
+
+    quoteId   = quoteData.id ?? quoteData.quote_id;
+    expiresAt = quoteData.expires_at ?? quoteData.crypto_funds_settlement_expire_date;
+  }
+
+  if (!quoteId) throw new Error('[OwlPay] No quote_id en la respuesta de Harbor');
 
   transaction.payoutQuoteId       = quoteId;
   transaction.payoutQuoteExpiresAt = new Date(expiresAt ?? Date.now() + 5 * 60 * 1000);
