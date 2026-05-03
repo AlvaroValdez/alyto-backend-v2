@@ -130,10 +130,19 @@ export async function processBoliviaManualPayout(req, res) {
   // (semántica consistente desde fase 18B). El viejo Transaction.exchangeRate
   // tiene semántica ambigua según corredor (ver Transaction.js:375 @deprecated).
   if (!tipoCambioManual && !transaction.conversionRate?.rate) {
+    // Este endpoint solo recibe tx SRL (legalEntity check arriba en línea 88).
+    // Las tx SRL bo-* siempre tienen conversionRate seteado por
+    // ipnController.dispatchPayout (líneas 835/910) antes de llegar aquí.
+    // Si esto se invoca con legalEntity distinta a SRL, el guard de arriba
+    // debería haber rechazado primero. Si no, hay drift en el flow.
     return res.status(422).json({
       success: false,
-      error:   `No se pudo determinar tipo de cambio para tx ${transaction.alytoTransactionId}. ` +
-               `Pasa manualExchangeRate en el body o asegurá que la tx tenga conversionRate.rate.`,
+      error:  'No se pudo determinar tipo de cambio',
+      detail: `tx ${transaction.alytoTransactionId}: ` +
+              `manualExchangeRate=${tipoCambioManual} ` +
+              `conversionRate.rate=${transaction.conversionRate?.rate} ` +
+              `| legalEntity=${transaction.legalEntity}`,
+      hint:   'Verificar que dispatchPayout haya seteado conversionRate antes de llamar a payout',
     });
   }
   const tipoCambioBob     = tipoCambioManual ?? transaction.conversionRate.rate;
