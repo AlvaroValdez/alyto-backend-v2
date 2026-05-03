@@ -11,6 +11,7 @@
 
 import sgMail from '@sendgrid/mail';
 import Sentry  from './sentry.js';
+import { getDisplayRate } from '../utils/rateDisplay.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? '');
 
@@ -534,7 +535,11 @@ export const EMAILS = {
         bankEmail:       spaCfg.bankEmail,
         totalDeducted:   formatCurrency(transaction.fees?.totalDeducted, 'CLP'),
         destinationBOB:  formatCurrency(transaction.destinationAmount, 'BOB'),
-        clpPerBob:       (transaction.exchangeRate ?? 0).toFixed(2),
+        // getDisplayRate da BOB/CLP (~0.105). Display "1 BOB = X CLP" invierte.
+        clpPerBob:       (() => {
+                            const r = getDisplayRate(transaction);
+                            return r > 0 ? (1 / r).toFixed(2) : '0.00';
+                          })(),
         createdAt:       formatDate(transaction.createdAt),
         supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
       },

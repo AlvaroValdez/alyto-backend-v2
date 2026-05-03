@@ -34,6 +34,7 @@ import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
 import { calculateQuote, getEffectiveSpreadPct } from '../services/quoteCalculator.js';
+import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
 export const uploadComprobante = multer({
@@ -1289,7 +1290,9 @@ export async function initCrossBorderPayment(req, res) {
       paymentInstructions: manualPaymentInstructions,
       destinationAmount:   transaction.destinationAmount   ?? quotedDestAmount   ?? null,
       destinationCurrency: transaction.destinationCurrency ?? null,
-      exchangeRate:        transaction.exchangeRate        ?? quotedExchangeRate ?? null,
+      // Rate user-facing dest/origin desde amounts — independiente de la
+      // semántica inconsistente de Transaction.exchangeRate (deprecated).
+      exchangeRate:        getDisplayRate(transaction) || quotedExchangeRate || null,
       // QR dinámico: codifica datos bancarios para apps de homebanking
       paymentQR,
       // QR estáticos: imágenes subidas por el admin (Tigo Money, Banco Bisa, etc.)
@@ -1710,7 +1713,10 @@ export async function getQuote(req, res) {
       originAmount:           amount,
       destinationAmount:      destinationBOB,
       exchangeRate:           clpPerBob,
-      exchangeRateDisplay:    `1 BOB = ${clpPerBob.toFixed(2)} CLP`,
+      exchangeRateDisplay:    (() => {
+        const r = getDisplayRate(transaction);
+        return r > 0 ? `1 BOB = ${(1 / r).toFixed(2)} CLP` : '—';
+      })(),
       payinMethod:            'manual',
       payoutMethod:           'anchorBolivia',
       isManualCorridor:       true,
@@ -2147,7 +2153,8 @@ export async function getTransactionStatus(req, res) {
     destinationAmount:   transaction.destinationAmount   ?? 0,
     destinationCurrency: transaction.destinationCurrency ?? '',
     destinationCountry,
-    exchangeRate:        transaction.exchangeRate        ?? 0,
+    // Rate dest/origin desde amounts — fuente única (ver utils/rateDisplay.js).
+    exchangeRate:        getDisplayRate(transaction),
     fees: f
       ? {
           alytoCSpread:    f.alytoCSpread    ?? 0,
