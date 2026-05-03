@@ -126,6 +126,17 @@ export async function processBoliviaManualPayout(req, res) {
   }
 
   // ── 6. Actualizar la transacción a COMPLETED ──────────────────────────────
+  // Resolver tipo de cambio una sola vez. conversionRate.rate = BOB/USDC
+  // (semántica consistente desde fase 18B). El viejo Transaction.exchangeRate
+  // tiene semántica ambigua según corredor (ver Transaction.js:375 @deprecated).
+  if (!tipoCambioManual && !transaction.conversionRate?.rate) {
+    return res.status(422).json({
+      success: false,
+      error:   `No se pudo determinar tipo de cambio para tx ${transaction.alytoTransactionId}. ` +
+               `Pasa manualExchangeRate en el body o asegurá que la tx tenga conversionRate.rate.`,
+    });
+  }
+  const tipoCambioBob     = tipoCambioManual ?? transaction.conversionRate.rate;
   const numeroComprobante = generarNumeroCorrelativo('BOL', transaction);
   const ahora             = new Date();
 
@@ -137,7 +148,7 @@ export async function processBoliviaManualPayout(req, res) {
         'boliviaCompliance.comprobanteGeneratedAt': ahora,
         'boliviaCompliance.clientTaxId':            user.taxId ?? user.identityDocument?.number,
         'boliviaCompliance.amountBob':              transaction.originalAmount,
-        'boliviaCompliance.exchangeRateBob':        tipoCambioManual ?? transaction.exchangeRate ?? 6.98,
+        'boliviaCompliance.exchangeRateBob':        tipoCambioBob,
       },
       $push: {
         providersUsed: 'payout:anchorBolivia',
@@ -162,7 +173,7 @@ export async function processBoliviaManualPayout(req, res) {
 
   // ── 7. Generar el Comprobante Oficial de Transacción (PDF) ────────────────
   // Construimos el DTO completo con todos los datos exigidos por Compliance_Bolivia_Alyto
-  const tipoCambio        = tipoCambioManual ?? transaction.exchangeRate ?? 6.98;
+  const tipoCambio        = tipoCambioBob;
   const comisionServicio  = transaction.feeBreakdown?.alytoFee ?? 0;
   const totalLiquidado    = transaction.originalAmount - comisionServicio;
 

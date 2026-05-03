@@ -465,6 +465,9 @@ async function seedDevUser() {
       { stage: 'payin',   provider: 'fintoc',  status: 'completed' },
       { stage: 'transit', provider: 'stellar', status: 'completed' },
     ],
+    // Seed dev-only — protegido por guard ALYTO_ENABLE_DEV_ROUTES (línea 310).
+    // Valor histórico legacy; el campo está @deprecated. No usar en cálculos
+    // — ver Transaction.js:375.
     exchangeRate:    6.98,
   };
 

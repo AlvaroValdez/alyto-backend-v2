@@ -371,7 +371,14 @@ const transactionSchema = new Schema(
     },
 
     // ── Tipo de Cambio ────────────────────────────────────────────────────────
-    /** Tipo de cambio aplicado: 1 [originCurrency] = exchangeRate [destinationCurrency] */
+    /**
+     * @deprecated Use conversionRate.rate instead (BOB/USDC, semántica consistente).
+     *
+     * Field kept for backwards compat con tx históricas. La semántica varía por
+     * corredor — en cl-bo guarda CLP/BOB (≈9.5), en bo-* guarda destCurrency/BOB
+     * (rate < 1 para BOB→USD). No usar para cálculos. Display en frontend debe
+     * migrarse a conversionRate.rate.
+     */
     exchangeRate: {
       type: Number,
       min:  0,

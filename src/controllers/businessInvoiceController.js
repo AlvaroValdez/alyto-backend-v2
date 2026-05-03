@@ -32,8 +32,15 @@ import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
  */
 function buildInvoiceDTO(transaction, profile, invoiceNumber) {
   const comisionServicio = transaction.fees?.totalDeducted ?? transaction.feeBreakdown?.alytoFee ?? 0;
-  // conversionRate.rate = tasa BOB/USDC real; exchangeRate = tasa efectiva BOB→destino (NO usar)
-  const tipoCambio       = transaction.conversionRate?.rate ?? 6.98;
+  // conversionRate.rate = tasa BOB/USDC real; Transaction.exchangeRate está
+  // @deprecated (semántica ambigua según corredor) — no usar para cálculos.
+  if (!transaction.conversionRate?.rate) {
+    throw new Error(
+      `[BusinessInvoice] Falta conversionRate.rate para tx ${transaction.alytoTransactionId}. ` +
+      `No se puede generar el comprobante sin tipo de cambio real.`,
+    );
+  }
+  const tipoCambio       = transaction.conversionRate.rate;
   const totalLiquidado   = transaction.originalAmount - comisionServicio;
 
   const repLegal = profile.legalRepresentative;
