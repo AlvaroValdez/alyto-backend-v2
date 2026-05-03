@@ -640,10 +640,16 @@ export async function initCrossBorderPayment(req, res) {
     exchangeRate:        quotedExchangeRate,
     usdcTransitAmount:   quotedUsdcTransitAmount,
     // Selección de método Harbor por parte del usuario (corredores multi-método).
-    // harborQuoteId: aceptado pero descartado — los quotes expiran ~60 s y
-    // tryOwlPayV2 siempre re-cotiza al despachar el payout.
     owlPayMethod,
-    harborQuoteId: _harborQuoteIdIgnored,
+    // Provider quote metadata (heredado del response de GET /quote).
+    // providerQuoteId NO se reusa en dispatchPayout (los quotes Harbor expiran
+    // ~60 s y el payin manual tarda horas) — se persiste solo para auditoría.
+    providerQuoteId,
+    rateSource,
+    rateExpiresAt,
+    rateConfidence,
+    // Legacy alias (backward compat con frontend viejo que mandaba harborQuoteId).
+    harborQuoteId,
   } = req.body;
   const userId = req.user?._id;
 
@@ -1202,6 +1208,12 @@ export async function initCrossBorderPayment(req, res) {
         : {}),
 
       ...(owlPayMethod ? { owlPayMethod } : {}),
+
+      // Provider quote metadata — heredada del GET /quote previo.
+      ...((providerQuoteId ?? harborQuoteId) ? { providerQuoteId: providerQuoteId ?? harborQuoteId } : {}),
+      ...(rateSource     ? { rateSource }     : {}),
+      ...(rateExpiresAt  ? { rateExpiresAt: new Date(rateExpiresAt) } : {}),
+      ...(rateConfidence ? { rateConfidence } : {}),
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
