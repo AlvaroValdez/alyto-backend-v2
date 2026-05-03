@@ -190,7 +190,6 @@ function captureRawBodyMiddleware(req, res, next) {
 }
 
 app.use('/api/v1/ipn',                              captureRawBodyMiddleware);
-app.use('/api/v1/institutional/webhooks/owlpay',    captureRawBodyMiddleware);
 
 // Parseo de JSON con límite de payload
 app.use(express.json({ limit: '1mb' }));
