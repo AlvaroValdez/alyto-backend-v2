@@ -435,6 +435,8 @@ const transactionSchema = new Schema(
       at:             { type: Date,   required: true },
       previousAmount: { type: Number, required: true },
       newAmount:      { type: Number, required: true },
+      previousRate:   { type: Number, default: null },
+      newRate:        { type: Number, default: null },
       difference:     { type: Number, required: true },
       diffPercent:    { type: String, required: true },
       reason:         { type: String, required: true },

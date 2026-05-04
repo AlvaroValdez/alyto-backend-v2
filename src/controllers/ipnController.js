@@ -714,10 +714,18 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       ? ((difference / previousAmount) * 100).toFixed(2)
       : '0.00';
 
-    console.log('[tryOwlPayV2] Actualizando destinationAmount al monto real Harbor:', {
+    const previousRate    = transaction.exchangeRate ?? null;
+    const originalAmount  = transaction.originalAmount ?? 0;
+    const newExchangeRate = originalAmount > 0
+      ? parseFloat((harborDestAmount / originalAmount).toFixed(6))
+      : null;
+
+    console.log('[tryOwlPayV2] Actualizando montos al rate real Harbor:', {
       transactionId: transaction.alytoTransactionId,
       previousAmount,
       realAmount:    harborDestAmount,
+      previousRate:  previousRate?.toFixed(6),
+      newRate:       newExchangeRate?.toFixed(6),
       difference:    difference.toFixed(2),
       diffPercent:   `${diffPercent}%`,
     });
@@ -728,6 +736,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       ?? 'unknown';
 
     transaction.destinationAmount = harborDestAmount;
+    if (newExchangeRate !== null) transaction.exchangeRate = newExchangeRate;
     transaction.rateConfidence    = 'exact';
     transaction.rateSource        = `harbor:${harborPaymentMethod}`;
     transaction.rateHistory       = transaction.rateHistory ?? [];
@@ -735,6 +744,8 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       at:             new Date(),
       previousAmount,
       newAmount:      harborDestAmount,
+      previousRate,
+      newRate:        newExchangeRate,
       difference,
       diffPercent,
       reason:         'harbor_transfer_locked',
