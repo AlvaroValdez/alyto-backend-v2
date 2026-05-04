@@ -76,11 +76,14 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate, account
 
   // Step 1 — fees in origin currency (BOB)
   const payinFee         = amount * ((corridor.payinFeePercent         ?? 0) / 100);
-  const effectiveSpreadPct = (accountType === 'business' && corridor.businessAlytoCSpread != null)
+  const isBusiness       = accountType === 'business';
+  const effectiveSpreadPct = (isBusiness && corridor.businessAlytoCSpread != null)
     ? corridor.businessAlytoCSpread
     : (corridor.alytoCSpread ?? 0);
   const alytoCSpread     = amount * (effectiveSpreadPct / 100);
-  const fixedFee         = corridor.fixedFee                            ?? 0;
+  const fixedFee         = (isBusiness && corridor.businessFixedFee != null)
+    ? corridor.businessFixedFee
+    : (corridor.fixedFee ?? 0);
   const profitRetention  = amount * ((corridor.profitRetentionPercent  ?? 0) / 100);
 
   // Step 2 — user-facing total (no hidden retention)
