@@ -388,6 +388,18 @@ const withdrawalRulesCache = new Map();
 const RULES_CACHE_TTL_MS   = 60 * 60 * 1000;  // 1 hour
 
 /**
+ * Vita no expone claves ISO 2-letter para todos los países.
+ * Usa claves regionales o de moneda para algunos destinos.
+ * Mapeo: ISO alpha-2 del corredor → clave real en la respuesta de Vita.
+ */
+const VITA_COUNTRY_KEY_MAP = {
+  ES: 'eu',      // España → SEPA EUR (IBAN + SWIFT)
+  PL: 'eu',      // Polonia → SEPA EUR (IBAN + SWIFT)
+  CA: 'causd',   // Canadá → USD rail
+  HK: 'hkusd',  // Hong Kong → USD rail
+};
+
+/**
  * Reglas de retiro hardcodeadas para CO y PE.
  * Se usan cuando Vita no responde o no devuelve campos para ese país.
  * Los keys siguen la nomenclatura exacta que espera el endpoint de withdrawal de Vita.
@@ -574,8 +586,8 @@ export async function getWithdrawalRulesController(req, res) {
   let fields;
   try {
     const vitaResponse = await getVitaWithdrawalRules();
-    const country      = countryCode.toLowerCase();
-    const vitaFields   = vitaResponse?.rules?.[country]?.fields ?? [];
+    const vitaKey      = (VITA_COUNTRY_KEY_MAP[countryCode] ?? countryCode).toLowerCase();
+    const vitaFields   = vitaResponse?.rules?.[vitaKey]?.fields ?? [];
 
     if (vitaFields.length === 0) {
       throw new Error(`Vita no devuelve campos para ${countryCode}`);
