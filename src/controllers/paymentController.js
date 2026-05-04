@@ -1215,7 +1215,22 @@ export async function initCrossBorderPayment(req, res) {
       ...((providerQuoteId ?? harborQuoteId) ? { providerQuoteId: providerQuoteId ?? harborQuoteId } : {}),
       ...(rateSource    && corridor.payoutMethod !== 'owlPay' ? { rateSource }                       : {}),
       ...(rateExpiresAt && corridor.payoutMethod !== 'owlPay' ? { rateExpiresAt: new Date(rateExpiresAt) } : {}),
-      rateConfidence: corridor.payoutMethod === 'owlPay' ? 'estimated' : (rateConfidence ?? null),
+      rateConfidence: (() => {
+        // owlPay: siempre 'estimated' hasta que tryOwlPayV2 fije el rate real con Harbor.
+        if (corridor.payoutMethod === 'owlPay') return 'estimated';
+        // Cualquier otro corredor: usar lo que envió el frontend; si falta, default 'estimated'.
+        // El WS emite rateConfidence:'estimated' en las 3 ramas — debería llegar siempre.
+        // El fallback evita null en clientes con bundle cacheado antes del fix de Step4Confirm.
+        if (!rateConfidence) {
+          console.warn('[CrossBorder] rateConfidence ausente en body — usando default "estimated"', {
+            alytoTransactionId,
+            corridorId: corridor.corridorId,
+            payoutMethod: corridor.payoutMethod,
+            bodyHasField: 'rateConfidence' in req.body,
+          });
+        }
+        return rateConfidence ?? 'estimated';
+      })(),
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{
