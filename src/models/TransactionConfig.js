@@ -128,12 +128,21 @@ const transactionConfigSchema = new Schema(
     },
     /**
      * Spread porcentual preferencial para cuentas Business (KYB aprobado).
-     * null = usar alytoCSpread (sin diferenciación). Típico: 0.5%.
+     * null = usar alytoCSpread (sin diferenciación).
      */
     businessAlytoCSpread: {
       type:    Number,
       min:     0,
       max:     20,
+      default: null,
+    },
+    /**
+     * Fee fija por transacción para cuentas Business, en moneda de origen.
+     * null = usar fixedFee (personal rate) como fallback.
+     */
+    businessFixedFee: {
+      type:    Number,
+      min:     0,
       default: null,
     },
     /**
