@@ -69,6 +69,16 @@ function _getSRLSecret() {
       'Set STELLAR_SRL_SECRET_KEY or STELLAR_MASTER_SECRET in environment.',
     );
   }
+  // Guard: secret keys start with 'S' (version byte 144). A 'G' key here means
+  // the env var was accidentally set to a public key — catch early before Keypair.fromSecret
+  // throws the cryptic "invalid version byte. expected 144, got 48" error.
+  if (!secret.startsWith('S')) {
+    throw new Error(
+      `[Stellar] STELLAR_SRL_SECRET_KEY starts with '${secret[0]}' — ` +
+      'expected an S... secret key, got a G... public key or invalid value. ' +
+      'Check that STELLAR_SRL_SECRET_KEY and STELLAR_SRL_PUBLIC_KEY are not swapped.',
+    );
+  }
   return secret;
 }
 
@@ -981,7 +991,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
     return existing;
   }
 
-  const balance = await getStellarUSDCBalance();
+  const balance = await getStellarUSDCBalance(srlPublic);
   const needed  = amount + 1;
   if (balance < needed) {
     const err = new Error(
