@@ -588,6 +588,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
 
   let quoteId;
   let expiresAt;
+  let quoteData = null;
 
   if (hasValidProviderQuote) {
     console.log('[tryOwlPayV2] Reutilizando providerQuoteId vigente:', transaction.providerQuoteId);
@@ -616,7 +617,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       ? quote.data
       : (quote.data ? [quote.data] : [quote]);
     const preferredMethod = transaction.owlPayMethod ?? null;
-    let   quoteData       = preferredMethod
+    quoteData             = preferredMethod
       ? quotesList.find(q => q?.payment_method === preferredMethod)
       : null;
 
@@ -743,12 +744,16 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     if (Math.abs(difference) >= 0.01 * previousAmount && previousAmount > 0) {
       const user = await User.findById(transaction.userId).select('email firstName').lean();
       if (user?.email) {
-        sendEmail(...EMAILS.rateUpdated(user, transaction, {
+        // rateUpdated devuelve [email, templateId, dynamicData] si hay template,
+        // o [email, subject, html] como fallback — sendRawEmail maneja el segundo.
+        const useTemplate   = !!process.env.SENDGRID_TEMPLATE_REQUOTE_NOTIFICATION;
+        const rateEmailArgs = EMAILS.rateUpdated(user, transaction, {
           previousAmount,
           newAmount:  harborDestAmount,
           difference,
           diffPercent,
-        })).catch(err =>
+        });
+        (useTemplate ? sendEmail : sendRawEmail)(...rateEmailArgs).catch(err =>
           console.error('[tryOwlPayV2] Error enviando email rateUpdated:', err.message),
         );
       }
