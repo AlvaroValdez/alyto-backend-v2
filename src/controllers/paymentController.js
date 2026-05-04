@@ -2299,6 +2299,16 @@ export async function getTransactionStatus(req, res) {
     estimatedDelivery: transaction.corridorId?.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
     createdAt:         transaction.createdAt,
     updatedAt:         transaction.updatedAt,
+    // Confianza en la tasa y historial de ajustes (MSA Section 4.2 — UI Liability)
+    rateConfidence:    transaction.rateConfidence ?? null,
+    rateHistory:       (transaction.rateHistory ?? []).map(h => ({
+      at:             h.at,
+      previousAmount: h.previousAmount,
+      newAmount:      h.newAmount,
+      difference:     h.difference,
+      diffPercent:    h.diffPercent,
+      reason:         h.reason,
+    })),
   });
 }
 
