@@ -54,23 +54,28 @@ function isSandbox() {
 /**
  * Resuelve el customerUuid de Harbor para la entidad legal.
  * Exportado para que los controllers puedan resolverlo sin duplicar lógica.
- * @param {'LLC'|'SpA'|'SRL'} legalEntity
- * @returns {string}
+ *
+ * Arquitectura MSA: AV Finance LLC firma el MSA; SRL y SpA operan como
+ * Affiliates con sus propios customer UUIDs en Harbor (Schedule A).
+ *
+ * Variables de entorno:
+ *   OWLPAY_CUSTOMER_UUID_SRL — Bolivia operations (activo)
+ *   OWLPAY_CUSTOMER_UUID_LLC — Institutional B2B (futuro, vacío hasta crear customer LLC)
+ *   OWLPAY_CUSTOMER_UUID_SPA — Chile operations (futuro)
+ *
+ * @param {'LLC'|'SpA'|'SRL'|string|null} legalEntity
+ * @returns {string|null} UUID o null si no está configurado
  */
 export function getCustomerUuid(legalEntity) {
-  const ENTITY_CUSTOMER_UUID = {
-    LLC: process.env.OWLPAY_CUSTOMER_UUID_LLC,
-    SpA: process.env.OWLPAY_CUSTOMER_UUID_SPA,
-    SRL: process.env.OWLPAY_CUSTOMER_UUID_SRL,
-  };
+  const entity = (legalEntity ?? 'SRL').toUpperCase();
+  const envKey = `OWLPAY_CUSTOMER_UUID_${entity}`;
+  const uuid   = process.env[envKey];
 
-  const uuid = ENTITY_CUSTOMER_UUID[legalEntity];
   if (!uuid) {
-    throw new Error(
-      `[OwlPay] No Harbor customerUuid configured for entity: ${legalEntity}. ` +
-      `Set OWLPAY_CUSTOMER_UUID_${(legalEntity ?? '').toUpperCase()} in env.`,
-    );
+    console.warn(`[OwlPay] Customer UUID no configurado: ${envKey}`);
+    return null;
   }
+
   return uuid;
 }
 

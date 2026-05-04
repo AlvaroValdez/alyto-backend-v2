@@ -555,7 +555,30 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // de margen). Para payin manual SRL el admin tarda minutos/horas → siempre
   // expira y se crea un quote nuevo. Reuso solo ocurre si la confirmación fue
   // ultra-rápida (< ~55 s desde la creación de la tx).
-  const customerUuidEnvKey = 'OWLPAY_CUSTOMER_UUID_LLC';
+  // Customer UUID dinámico por legalEntity de la transacción.
+  // MSA arquitectura: AV Finance LLC firma el MSA; SRL/SpA operan como
+  // Affiliates con sus propios customer UUIDs en Harbor (Schedule A).
+  const legalEntity        = (transaction.legalEntity ?? 'SRL').toUpperCase();
+  const customerUuidEnvKey = `OWLPAY_CUSTOMER_UUID_${legalEntity}`;
+  const customerUuid       = getCustomerUuid(transaction.legalEntity);
+
+  if (!customerUuid) {
+    const err = new Error(
+      `[OwlPay] Customer UUID no configurado para entity ${legalEntity}. ` +
+      `Variable esperada: ${customerUuidEnvKey}`,
+    );
+    console.error('[tryOwlPayV2]', err.message, {
+      transactionId: transaction.alytoTransactionId,
+      legalEntity,
+    });
+    throw err;
+  }
+
+  console.log('[tryOwlPayV2] Customer UUID resuelto:', {
+    legalEntity,
+    customerUuidEnvKey,
+    uuid: customerUuid.slice(0, 16) + '...',
+  });
 
   const hasValidProviderQuote = Boolean(
     transaction.providerQuoteId &&
@@ -581,7 +604,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       destination_currency:       corridor.destinationCurrency,
       destination_payment_method: 'bank_transfer',
       source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-      customer_uuid:              process.env[customerUuidEnvKey],
+      customer_uuid:              customerUuid,
       customer_type:              'business',
     });
 
@@ -645,7 +668,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
 
   const transfer = await createOwlPayTransfer({
     quote_id:                  quoteId,
-    on_behalf_of:              process.env[customerUuidEnvKey],
+    on_behalf_of:              customerUuid,
     application_transfer_uuid: transaction.alytoTransactionId,
     source_address:            sourceAddress,
     beneficiary_info,

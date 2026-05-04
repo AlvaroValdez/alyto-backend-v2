@@ -1501,7 +1501,17 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
   if (corridor.payoutMethod !== 'owlPay') return meta;
 
   try {
-    const customerUuid = process.env.OWLPAY_CUSTOMER_UUID_LLC ?? null;
+    const legalEntity       = (corridor.legalEntity ?? 'SRL').toUpperCase();
+    const customerUuidEnvKey = `OWLPAY_CUSTOMER_UUID_${legalEntity}`;
+    const customerUuid       = getCustomerUuid(corridor.legalEntity);
+
+    if (!customerUuid) {
+      console.warn('[Quote] Customer UUID no configurado para Harbor quote:', {
+        corridorId:     corridor.corridorId,
+        legalEntity,
+        expectedEnvVar: customerUuidEnvKey,
+      });
+    }
     const harborQuotes = await getHarborQuote({
       sourceAmount:   quote.digitalAssetAmount,
       sourceCurrency: 'USDC',
