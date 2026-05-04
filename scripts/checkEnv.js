@@ -45,6 +45,8 @@ const IMPORTANT = [
   { name: 'ALLOWED_ORIGINS',        desc: 'Orígenes permitidos para CORS (producción)' },
   { name: 'OWLPAY_API_KEY',         desc: 'OwlPay Harbor — API key (recibida post-KYB)' },
   { name: 'OWLPAY_WEBHOOK_SECRET',  desc: 'OwlPay — verificación webhooks harbor-signature' },
+  { name: 'STELLAR_USDC_ISSUER',    desc: 'Stellar — emisor USDC (requerido por getUSDCAsset; sin esto sendUSDCToHarbor lanza Error)' },
+  { name: 'STELLAR_SRL_PUBLIC_KEY', desc: 'Stellar — public key cuenta SRL (sin esto se deriva en runtime, frágil)' },
   { name: 'QR_HMAC_SECRET',         desc: 'Fase 29 — secreto HMAC para firmar QR codes Bolivia' },
 ];
 
