@@ -54,6 +54,7 @@ import {
   getWithdrawalRules as getVitaWithdrawalRules,
   createPayin,
   VITA_SENT_ONLY_COUNTRIES,
+  getVitaCountryKey,
 }                              from '../services/vitaWalletService.js';
 import {
   getHarborQuote,
@@ -387,17 +388,7 @@ export async function fintocWebhook(req, res) {
 const withdrawalRulesCache = new Map();
 const RULES_CACHE_TTL_MS   = 60 * 60 * 1000;  // 1 hour
 
-/**
- * Vita no expone claves ISO 2-letter para todos los países.
- * Usa claves regionales o de moneda para algunos destinos.
- * Mapeo: ISO alpha-2 del corredor → clave real en la respuesta de Vita.
- */
-const VITA_COUNTRY_KEY_MAP = {
-  ES: 'eu',      // España → SEPA EUR (IBAN + SWIFT)
-  PL: 'eu',      // Polonia → SEPA EUR (IBAN + SWIFT)
-  CA: 'causd',   // Canadá → USD rail
-  HK: 'hkusd',  // Hong Kong → USD rail
-};
+// Nota: VITA_COUNTRY_KEY_MAP y getVitaCountryKey importados desde vitaWalletService.js
 
 /**
  * Reglas de retiro hardcodeadas para CO y PE.
@@ -586,7 +577,7 @@ export async function getWithdrawalRulesController(req, res) {
   let fields;
   try {
     const vitaResponse = await getVitaWithdrawalRules();
-    const vitaKey      = (VITA_COUNTRY_KEY_MAP[countryCode] ?? countryCode).toLowerCase();
+    const vitaKey      = getVitaCountryKey(countryCode);
     const vitaFields   = vitaResponse?.rules?.[vitaKey]?.fields ?? [];
 
     if (vitaFields.length === 0) {
@@ -1398,7 +1389,11 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
   const attrs = attrsSource ?? vitaPricesResponse?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
-  const countryKey = destinationCountry.toLowerCase();
+  // vita_sent (ES/PL/GT/SV): las claves ISO directas existen en la tabla — no mapear.
+  // withdrawal (todos los demás): CA→'causd', HK→'hkusd', etc.
+  const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? destinationCountry.toLowerCase()
+    : getVitaCountryKey(destinationCountry);
   const origin     = originCurrency.toUpperCase();
   let rate;
 

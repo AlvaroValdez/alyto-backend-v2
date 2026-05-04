@@ -328,6 +328,46 @@ export function getPaymentMethods(countryIso) {
  */
 export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'ES', 'PL']);
 
+/**
+ * Vita no usa códigos ISO alpha-2 puro para todos los países.
+ * Este mapa convierte ISO → clave real en la respuesta de Vita para:
+ *   1. withdrawal_rules API (campos de formulario del beneficiario)
+ *   2. prices.attributes (tasas de cambio), solo para corredores fuera de VITA_SENT_ONLY_COUNTRIES
+ *
+ * Notas:
+ *  - Eurozona: Vita usa una sola clave 'eu' en withdrawal_rules para todos los países EUR/IBAN.
+ *    En vita_sent.prices, ES/PL sí tienen claves ISO directas ('es', 'pl') — más precisas.
+ *  - CA, HK: usan sufijo 'usd' en AMBAS tablas (withdrawal_rules y prices).
+ *  - GT, SV: en vita_sent.prices tienen claves ISO directas ('gt', 'sv').
+ *    En withdrawal_rules no tienen entrada — usar FALLBACK_WITHDRAWAL_RULES si es necesario.
+ */
+export const VITA_COUNTRY_KEY_MAP = {
+  // Eurozona — withdrawal_rules usa 'eu' para todos los países SEPA/IBAN
+  ES: 'eu', PL: 'eu',
+  IT: 'eu', DE: 'eu', FR: 'eu', NL: 'eu', AT: 'eu', BE: 'eu',
+  PT: 'eu', IE: 'eu', GR: 'eu', FI: 'eu', LU: 'eu', SK: 'eu',
+  SI: 'eu', EE: 'eu', LV: 'eu', LT: 'eu', CY: 'eu', MT: 'eu',
+
+  // Triangulación USD — sufijo 'usd' en precios y reglas
+  CA: 'causd',
+  HK: 'hkusd',
+};
+
+/**
+ * Traduce un código ISO alpha-2 a la clave real que usa Vita Wallet en su API.
+ * Usar en:
+ *   - Lookup de withdrawal_rules (campos formulario beneficiario)
+ *   - Lookup de prices.attributes (tasas, solo en withdrawal path)
+ *
+ * @param {string} countryCode — ISO 3166-1 alpha-2 (ej. 'ES', 'CA')
+ * @returns {string} clave Vita (ej. 'eu', 'causd') o ISO en minúsculas si no hay mapeo
+ */
+export function getVitaCountryKey(countryCode) {
+  if (!countryCode) return null;
+  const upper = countryCode.toUpperCase();
+  return VITA_COUNTRY_KEY_MAP[upper] ?? upper.toLowerCase();
+}
+
 // ─── Endpoints Transaccionales ────────────────────────────────────────────────
 
 /**
