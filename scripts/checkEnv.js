@@ -47,6 +47,8 @@ const IMPORTANT = [
   { name: 'OWLPAY_WEBHOOK_SECRET',  desc: 'OwlPay — verificación webhooks harbor-signature' },
   { name: 'STELLAR_USDC_ISSUER',    desc: 'Stellar — emisor USDC (requerido por getUSDCAsset; sin esto sendUSDCToHarbor lanza Error)' },
   { name: 'STELLAR_SRL_PUBLIC_KEY', desc: 'Stellar — public key cuenta SRL (sin esto se deriva en runtime, frágil)' },
+  { name: 'VITA_DEPOSIT_ADDRESS',   desc: 'Vita — address crypto (TRC20/ERC20) para fondear Pool A desde Binance' },
+  { name: 'VITA_DEPOSIT_NETWORK',   desc: 'Vita — red de depósito crypto (TRC20 | ERC20 | BEP20)' },
   { name: 'QR_HMAC_SECRET',         desc: 'Fase 29 — secreto HMAC para firmar QR codes Bolivia' },
 ];
 
