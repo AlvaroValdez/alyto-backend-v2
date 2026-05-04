@@ -38,6 +38,7 @@ import {
   deactivateCorridor,
   getCorridorAnalytics,
   getGlobalAnalytics,
+  updateGlobalPricing,
   getTransactionComprobante,
   getCorridorRates,
   vitaDiagnostic,
@@ -254,6 +255,7 @@ router.patch('/corridors/:corridorId/rate', setCorridorRate);
  * Actualiza parámetros de un corredor con registro en changeLog.
  * corridorId es inmutable.
  */
+router.patch('/pricing/global', updateGlobalPricing);
 router.patch('/corridors/:corridorId', updateCorridor);
 
 /**

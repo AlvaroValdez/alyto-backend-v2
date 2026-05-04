@@ -812,6 +812,109 @@ export async function updateCorridor(req, res) {
   return res.json({ corridor });
 }
 
+// ─── updateGlobalPricing ──────────────────────────────────────────────────────
+
+/**
+ * PATCH /api/v1/admin/pricing/global
+ *
+ * Actualiza pricing personal y/o business en múltiples corredores de una vez.
+ *
+ * Body:
+ *   legalEntity   — 'SRL' | 'SpA' | 'LLC' | 'all'
+ *   corridorGroup — 'all' | 'standard' | 'harbor'  (default: 'all')
+ *   personal      — { spreadPercent, fixedFee }     (alytoCSpread + fixedFee)
+ *   business      — { spreadPercent, fixedFee }     (businessAlytoCSpread + businessFixedFee)
+ */
+export async function updateGlobalPricing(req, res) {
+  const { legalEntity, corridorGroup = 'all', personal, business } = req.body;
+
+  if (!legalEntity) {
+    return res.status(400).json({ error: 'legalEntity requerido (SRL | SpA | LLC | all).' });
+  }
+  if (!personal && !business) {
+    return res.status(400).json({ error: 'Al menos personal o business requerido.' });
+  }
+
+  const filter = {};
+  if (legalEntity !== 'all') filter.legalEntity = legalEntity;
+  if (corridorGroup === 'standard') filter.payoutMethod = { $in: ['vitaWallet', 'anchorBolivia'] };
+  else if (corridorGroup === 'harbor') filter.payoutMethod = 'owlPay';
+
+  const $set = { updatedAt: new Date() };
+  if (personal?.spreadPercent != null) $set.alytoCSpread           = personal.spreadPercent;
+  if (personal?.fixedFee      != null) $set.fixedFee               = personal.fixedFee;
+  if (business?.spreadPercent != null) $set.businessAlytoCSpread   = business.spreadPercent;
+  if (business?.fixedFee      != null) $set.businessFixedFee       = business.fixedFee;
+
+  let affected;
+  try {
+    affected = await TransactionConfig
+      .find(filter)
+      .select('_id corridorId alytoCSpread fixedFee businessAlytoCSpread businessFixedFee')
+      .lean();
+  } catch (err) {
+    console.error('[Admin updateGlobalPricing] Error buscando corredores:', err.message);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (affected.length === 0) {
+    return res.status(404).json({ error: 'No se encontraron corredores con los filtros indicados.' });
+  }
+
+  try {
+    await TransactionConfig.updateMany(filter, { $set });
+
+    const now    = new Date();
+    const adminId = req.user._id;
+    await Promise.all(affected.map(c =>
+      TransactionConfig.updateOne(
+        { _id: c._id },
+        { $push: { changeLog: {
+            changedAt: now,
+            changedBy: adminId,
+            field:     'global_pricing_update',
+            oldValue:  JSON.stringify({
+              alytoCSpread:         c.alytoCSpread,
+              fixedFee:             c.fixedFee,
+              businessAlytoCSpread: c.businessAlytoCSpread,
+              businessFixedFee:     c.businessFixedFee,
+            }),
+            newValue: JSON.stringify($set),
+          }},
+        },
+      )
+    ));
+  } catch (err) {
+    console.error('[Admin updateGlobalPricing] Error aplicando update:', err.message);
+    return res.status(500).json({ error: 'Error al actualizar los corredores.' });
+  }
+
+  console.info('[Admin] Global pricing actualizado:', {
+    legalEntity, corridorGroup,
+    corridorsUpdated: affected.length,
+    adminId: req.user._id.toString(),
+    applied: $set,
+  });
+
+  return res.json({
+    success:          true,
+    corridorsUpdated: affected.length,
+    legalEntity,
+    corridorGroup,
+    applied: {
+      personal: personal ?? 'no change',
+      business: business ?? 'no change',
+    },
+    preview: affected.map(c => ({
+      corridorId:      c.corridorId,
+      personalSpread:  $set.alytoCSpread         ?? c.alytoCSpread,
+      personalFixed:   $set.fixedFee             ?? c.fixedFee,
+      businessSpread:  $set.businessAlytoCSpread ?? c.businessAlytoCSpread,
+      businessFixed:   $set.businessFixedFee     ?? c.businessFixedFee,
+    })),
+  });
+}
+
 // ─── deactivateCorridor ───────────────────────────────────────────────────────
 
 /**
