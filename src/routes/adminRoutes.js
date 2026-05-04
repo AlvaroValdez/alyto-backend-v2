@@ -618,4 +618,19 @@ router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
   }
 });
 
+import { cleanupOrphanTransactions } from '../jobs/cleanupOrphanTransactions.js';
+
+/**
+ * POST /api/v1/admin/cleanup-orphans
+ * Ejecuta manualmente el job de limpieza de transacciones huérfanas.
+ */
+router.post('/cleanup-orphans', async (req, res) => {
+  try {
+    const deleted = await cleanupOrphanTransactions();
+    res.json({ deleted, runAt: new Date() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

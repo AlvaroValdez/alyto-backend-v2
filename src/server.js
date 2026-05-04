@@ -14,6 +14,7 @@ import * as Sentry from '@sentry/node';
 
 import 'dotenv/config';
 import { checkEnv }  from '../scripts/checkEnv.js';
+import { cleanupOrphanTransactions } from './jobs/cleanupOrphanTransactions.js';
 import express        from 'express';
 import cors           from 'cors';
 import helmet         from 'helmet';
@@ -565,6 +566,11 @@ async function startServer() {
         process.env.NODE_ENV !== 'production' ||
         process.env.DISABLE_TOKEN_VERSION_CHECK === 'true');
     });
+
+    // Job de limpieza de transacciones huérfanas (payin_pending expiradas sin comprobante)
+    cleanupOrphanTransactions();
+    setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
+    console.info('[Server] Cleanup job de huérfanas programado cada 1h');
 
     // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP
     const wss = createQuoteSocketServer(httpServer);

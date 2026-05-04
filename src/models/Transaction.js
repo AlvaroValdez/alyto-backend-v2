@@ -623,6 +623,16 @@ const transactionSchema = new Schema(
     completedAt: {
       type: Date,
     },
+    /**
+     * Expiración de las instrucciones de pago manual (QR / transferencia bancaria).
+     * Default: 24h desde createdAt. Usado por el job de cleanup automático para
+     * eliminar transacciones huérfanas (payin_pending sin comprobante subido).
+     */
+    paymentInstructionsExpiresAt: {
+      type:    Date,
+      index:   true,
+      default: function() { return new Date(Date.now() + 24 * 60 * 60 * 1000); },
+    },
 
     // ── Beneficiario ──────────────────────────────────────────────────────────
     /**
