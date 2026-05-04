@@ -429,6 +429,16 @@ const transactionSchema = new Schema(
       enum:    ['exact', 'estimated', null],
       default: null,
     },
+    /** Historial de cambios de tasa — se popula cuando tryOwlPayV2 corrige el
+     *  destinationAmount estimado con el monto real del transfer Harbor. */
+    rateHistory: [{
+      at:             { type: Date,   required: true },
+      previousAmount: { type: Number, required: true },
+      newAmount:      { type: Number, required: true },
+      difference:     { type: Number, required: true },
+      diffPercent:    { type: String, required: true },
+      reason:         { type: String, required: true },
+    }],
 
     // ── Fees ──────────────────────────────────────────────────────────────────
     /** Desglose granular de fees calculado desde TransactionConfig al crear la tx */

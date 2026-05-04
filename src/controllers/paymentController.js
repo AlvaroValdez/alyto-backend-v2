@@ -1002,51 +1002,6 @@ export async function initCrossBorderPayment(req, res) {
   const profitRetention = round2(amount * (corridor.profitRetentionPercent / 100));
   const payoutFee       = corridor.payoutFeeFixed ?? 0;
 
-  // ── Provider-aware quote: Harbor real para corredores owlPay ─────────────
-  // Recotizamos con Harbor aquí (no en GET /quote) para garantizar que
-  // destinationAmount persistido = lo que Harbor entregará realmente,
-  // independientemente de si el frontend usó el WS o el endpoint HTTP.
-  let resolvedDestAmount      = quotedDestAmount    ?? null;
-  let resolvedUsdcAmount      = quotedUsdcTransitAmount != null ? Number(quotedUsdcTransitAmount) : null;
-  let resolvedProviderQuoteId = providerQuoteId ?? harborQuoteId ?? null;
-  let resolvedRateSource      = rateSource      ?? null;
-  let resolvedRateExpiresAt   = rateExpiresAt   ? new Date(rateExpiresAt) : null;
-  let resolvedRateConfidence  = rateConfidence  ?? null;
-
-  if (corridor.payoutMethod === 'owlPay') {
-    try {
-      const BOB_USD_RATE   = await getBOBRate();
-      const bobRate        = corridor.manualExchangeRate > 0 ? corridor.manualExchangeRate : BOB_USD_RATE;
-      const netBOB         = round2(amount - payinFee - alytoCSpread - fixedFee - profitRetention);
-      const usdcForHarbor  = resolvedUsdcAmount ?? round2(netBOB / bobRate);
-
-      const quoteForHarbor = {
-        digitalAssetAmount: usdcForHarbor,
-        originAmount:       amount,
-        destinationAmount:  resolvedDestAmount ?? 0,
-      };
-
-      const providerMeta = await resolveProviderQuote({
-        quote:           quoteForHarbor,
-        corridor,
-        requestedMethod: owlPayMethod ?? null,
-      });
-
-      resolvedDestAmount      = quoteForHarbor.destinationAmount;
-      resolvedUsdcAmount      = usdcForHarbor;
-      resolvedProviderQuoteId = providerMeta.providerQuoteId;
-      resolvedRateSource      = providerMeta.rateSource;
-      resolvedRateExpiresAt   = providerMeta.rateExpiresAt;
-      resolvedRateConfidence  = providerMeta.rateConfidence;
-
-      console.log('[initCrossBorder] Harbor quote aplicado:', {
-        usdcForHarbor, destinationAmount: resolvedDestAmount, rateSource: resolvedRateSource,
-      });
-    } catch (err) {
-      console.warn('[initCrossBorder] resolveProviderQuote falló, usando quote del frontend:', err.message);
-    }
-  }
-
   console.log('[CrossBorder] Fees desde TransactionConfig:');
   console.log('  corridorId:', corridorId);
   console.log('  Fees calculados:', { payinFee, alytoCSpread, fixedFee, profitRetention, payoutFee });
@@ -1224,13 +1179,15 @@ export async function initCrossBorderPayment(req, res) {
       destinationCurrency: corridor.destinationCurrency,
       // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
       ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
-      // USDC de tránsito: calculado en resolveProviderQuote (owlPay) o cotización previa.
-      ...(resolvedUsdcAmount != null && corridor.legalEntity === 'SRL'
-        ? { digitalAssetAmount: resolvedUsdcAmount }
+      // usdcTransitAmount cotizado: almacenado para que dispatchPayout use el mismo
+      // monto que se le mostró al usuario, sin recalcular.
+      ...(quotedUsdcTransitAmount != null && corridor.legalEntity === 'SRL'
+        ? { digitalAssetAmount: Number(quotedUsdcTransitAmount) }
         : {}),
-      // destinationAmount: Harbor real (owlPay) o cotización del frontend (Vita/WS)
-      ...(resolvedDestAmount  != null ? { destinationAmount: resolvedDestAmount }     : {}),
-      ...(quotedExchangeRate  != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
+      // destinationAmount estimado del WS/getQuote. tryOwlPayV2 lo sobreescribirá
+      // con el monto real de Harbor al crear el transfer (rateConfidence='exact').
+      ...(quotedDestAmount   != null ? { destinationAmount: quotedDestAmount }         : {}),
+      ...(quotedExchangeRate != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
 
       fees: {
         payinFee,
@@ -1253,11 +1210,12 @@ export async function initCrossBorderPayment(req, res) {
 
       ...(owlPayMethod ? { owlPayMethod } : {}),
 
-      // Provider quote metadata — de Harbor real (owlPay) o del GET /quote previo.
-      ...(resolvedProviderQuoteId ? { providerQuoteId: resolvedProviderQuoteId } : {}),
-      ...(resolvedRateSource      ? { rateSource:      resolvedRateSource }      : {}),
-      ...(resolvedRateExpiresAt   ? { rateExpiresAt:   resolvedRateExpiresAt }   : {}),
-      ...(resolvedRateConfidence  ? { rateConfidence:  resolvedRateConfidence }  : {}),
+      // Provider quote metadata del GET /quote previo (solo para auditoría).
+      // owlPay: forzar 'estimated' — el rate real se fija en tryOwlPayV2 al despachar.
+      ...((providerQuoteId ?? harborQuoteId) ? { providerQuoteId: providerQuoteId ?? harborQuoteId } : {}),
+      ...(rateSource    && corridor.payoutMethod !== 'owlPay' ? { rateSource }                       : {}),
+      ...(rateExpiresAt && corridor.payoutMethod !== 'owlPay' ? { rateExpiresAt: new Date(rateExpiresAt) } : {}),
+      rateConfidence: corridor.payoutMethod === 'owlPay' ? 'estimated' : (rateConfidence ?? null),
 
       providersUsed: [`payin:${payinProvider}`],
       paymentLegs: [{

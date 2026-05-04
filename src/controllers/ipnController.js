@@ -676,6 +676,62 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   transaction.statusReason  = null;
   transaction.providersUsed = [...(transaction.providersUsed ?? []), 'payout:owlPay-v2'];
 
+  // ── Actualizar destinationAmount al monto real del transfer Harbor ────────
+  // El frontend mostró un estimado (extrapolación Vita o quote de GET /quote).
+  // Harbor confirma el monto exacto al crear el transfer. Se sobrescribe aquí
+  // para que el historial de la tx refleje lo que el beneficiario recibirá.
+  const harborDestAmount = parseFloat(
+    transferData.destination?.amount ?? transferData.destination_amount ?? 0,
+  );
+  if (harborDestAmount > 0) {
+    const previousAmount = transaction.destinationAmount ?? 0;
+    const difference     = harborDestAmount - previousAmount;
+    const diffPercent    = previousAmount > 0
+      ? ((difference / previousAmount) * 100).toFixed(2)
+      : '0.00';
+
+    console.log('[tryOwlPayV2] Actualizando destinationAmount al monto real Harbor:', {
+      transactionId: transaction.alytoTransactionId,
+      previousAmount,
+      realAmount:    harborDestAmount,
+      difference:    difference.toFixed(2),
+      diffPercent:   `${diffPercent}%`,
+    });
+
+    const harborPaymentMethod = transferData.destination?.payment_method
+      ?? transferData.payment_method
+      ?? transaction.owlPayMethod
+      ?? 'unknown';
+
+    transaction.destinationAmount = harborDestAmount;
+    transaction.rateConfidence    = 'exact';
+    transaction.rateSource        = `harbor:${harborPaymentMethod}`;
+    transaction.rateHistory       = transaction.rateHistory ?? [];
+    transaction.rateHistory.push({
+      at:             new Date(),
+      previousAmount,
+      newAmount:      harborDestAmount,
+      difference,
+      diffPercent,
+      reason:         'harbor_transfer_locked',
+    });
+
+    // Notificar al usuario si el ajuste supera 1%
+    if (Math.abs(difference) >= 0.01 * previousAmount && previousAmount > 0) {
+      const user = await User.findById(transaction.userId).select('email firstName').lean();
+      if (user?.email) {
+        sendEmail(...EMAILS.rateUpdated(user, transaction, {
+          previousAmount,
+          newAmount:  harborDestAmount,
+          difference,
+          diffPercent,
+        })).catch(err =>
+          console.error('[tryOwlPayV2] Error enviando email rateUpdated:', err.message),
+        );
+      }
+    }
+  }
+
   transaction.ipnLog.push({
     event:      'owlpay_transfer_created',
     source:     'owlpay',

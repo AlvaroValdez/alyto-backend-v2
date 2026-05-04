@@ -828,4 +828,73 @@ export const EMAILS = {
       html,
     ];
   },
+
+  // ── Rate updated — monto real Harbor difiere del estimado ─────────────────
+
+  /**
+   * Notifica al usuario que el monto a recibir fue ajustado al crear el
+   * transfer Harbor (el rate real difiere del estimado al cotizar).
+   * Se envía solo cuando |diff| >= 1% del monto estimado.
+   *
+   * Usa SENDGRID_TEMPLATE_REQUOTE_NOTIFICATION si está configurado;
+   * si no, construye HTML inline como fallback.
+   *
+   * @param {object} user
+   * @param {object} transaction
+   * @param {{ previousAmount: number, newAmount: number, difference: number, diffPercent: string }} diff
+   * @returns {[string, string, object] | [string, string, string]}
+   */
+  rateUpdated(user, transaction, { previousAmount, newAmount, difference, diffPercent }) {
+    const templateId = process.env.SENDGRID_TEMPLATE_REQUOTE_NOTIFICATION;
+    const destCurrency = transaction.destinationCurrency ?? '';
+    const direction    = difference > 0 ? 'aumentó' : 'disminuyó';
+    const absDiff      = Math.abs(difference).toFixed(2);
+    const absPct       = Math.abs(parseFloat(diffPercent)).toFixed(2);
+
+    if (templateId) {
+      return [
+        user.email,
+        templateId,
+        {
+          userName:            user.firstName,
+          transactionId:       transaction.alytoTransactionId,
+          previousAmount:      `${Number(previousAmount).toFixed(2)} ${destCurrency}`,
+          newAmount:           `${Number(newAmount).toFixed(2)} ${destCurrency}`,
+          difference:          `${difference > 0 ? '+' : '-'}${absDiff} ${destCurrency}`,
+          diffPercent:         `${difference > 0 ? '+' : '-'}${absPct}%`,
+          originAmount:        formatCurrency(transaction.originalAmount, transaction.originCurrency),
+          beneficiaryName:     resolveBeneficiaryName(transaction.beneficiary),
+          corridorLabel:       `${transaction.originCurrency} → ${destCurrency}`,
+          supportEmail:        process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+          supportWhatsapp:     process.env.SUPPORT_WHATSAPP ?? '+56988321490',
+        },
+      ];
+    }
+
+    // Fallback HTML inline (sin template SendGrid configurado)
+    const html = `
+      <div style="font-family: sans-serif; background: #0A1A2F; color: #E8ECF3; padding: 24px; border-radius: 12px;">
+        <h2 style="color: #F5C518;">Actualización de tu transferencia</h2>
+        <p>Hola <strong>${user.firstName}</strong>,</p>
+        <p>Al procesar tu envío <strong>${transaction.alytoTransactionId}</strong>, el monto
+           que recibirá tu beneficiario ${direction} levemente respecto al estimado:</p>
+        <table style="width:100%; border-collapse:collapse; margin: 16px 0;">
+          <tr><td style="padding:8px 0; color:#8A96B8;">Monto estimado</td>
+              <td style="padding:8px 0;">${Number(previousAmount).toFixed(2)} ${destCurrency}</td></tr>
+          <tr><td style="padding:8px 0; color:#8A96B8;">Monto real confirmado</td>
+              <td style="padding:8px 0; color:#22C55E;"><strong>${Number(newAmount).toFixed(2)} ${destCurrency}</strong></td></tr>
+          <tr><td style="padding:8px 0; color:#8A96B8;">Diferencia</td>
+              <td style="padding:8px 0;">${difference > 0 ? '+' : '-'}${absDiff} ${destCurrency} (${difference > 0 ? '+' : '-'}${absPct}%)</td></tr>
+        </table>
+        <p style="color:#8A96B8; font-size:13px;">Esta diferencia se debe a la variación normal del tipo de cambio entre la cotización
+           inicial y el momento de procesamiento. Tu transferencia continúa en curso.</p>
+        <p style="font-size:13px;">¿Tienes dudas? Escríbenos a
+           <a href="mailto:${process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app'}" style="color:#F5C518;">
+             ${process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app'}
+           </a></p>
+      </div>
+    `;
+
+    return [user.email, `Actualización de tu envío — ${transaction.alytoTransactionId}`, html];
+  },
 };
