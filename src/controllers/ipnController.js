@@ -517,7 +517,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   }
 
   // ── STEP A: Pre-check liquidez USDC en wallet Stellar SRL ────────────────
-  const usdcBalance = await getStellarUSDCBalance();
+  const usdcBalance = await getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY);
   const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
 
   if (usdcBalance < needed) {
@@ -663,9 +663,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   } = buildOwlPayBeneficiary(rawBeneficiary, null, corridor.destinationCountry);
 
   // ── STEP D: Create transfer ───────────────────────────────────────────────
-  const sourceAddress = process.env.STELLAR_MASTER_PUBLIC
-                     ?? process.env.STELLAR_SRL_PUBLIC_KEY
-                     ?? '';
+  const sourceAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? '';
 
   const transfer = await createOwlPayTransfer({
     quote_id:                  quoteId,
@@ -764,16 +762,17 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
           difference,
           diffPercent,
         });
-        (useTemplate ? sendEmail : sendRawEmail)(...rateEmailArgs).catch(err =>
-          console.error('[tryOwlPayV2] Error enviando email rateUpdated:', err.message),
-        );
+        Promise.resolve()
+          .then(() => (useTemplate ? sendEmail : sendRawEmail)(...rateEmailArgs))
+          .catch(err => console.error('[tryOwlPayV2] Error enviando email rateUpdated:', err.message));
       }
     }
   }
 
   transaction.ipnLog.push({
-    event:      'owlpay_transfer_created',
-    source:     'owlpay',
+    provider:   'owlPay',
+    eventType:  'owlpay_transfer_created',
+    status:     'payout_pending_usdc_send',
     rawPayload: {
       transfer_id:         transferId,
       instruction_address: instructionAddress,
@@ -781,7 +780,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       expires_at:          transaction.harborTransfer.expiresAt,
       destination_amount:  transferData.destination?.amount ?? null,
     },
-    timestamp: new Date(),
+    receivedAt: new Date(),
   });
   await transaction.save();
 
@@ -834,8 +833,9 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   transaction.status        = 'payout_sent';
   transaction.statusReason  = null;
   transaction.ipnLog.push({
-    event:      'usdc_sent_to_harbor',
-    source:     'stellar',
+    provider:   'stellar',
+    eventType:  'usdc_sent_to_harbor',
+    status:     'payout_sent',
     rawPayload: {
       hash:     stellarResult.hash,
       ledger:   stellarResult.ledger,
@@ -843,7 +843,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       memo:     memoForStellar,
       existing: stellarResult.existing ?? false,
     },
-    timestamp: new Date(),
+    receivedAt: new Date(),
   });
   await transaction.save();
 
