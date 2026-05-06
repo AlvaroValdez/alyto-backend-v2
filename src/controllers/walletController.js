@@ -780,3 +780,70 @@ export async function adminUnfreezeWallet(req, res) {
     session.endSession()
   }
 }
+
+// ─── FUNCIÓN 12: POST /api/v1/wallet/deposit/:wtxId/comprobante ───────────────
+
+/**
+ * El usuario sube el comprobante de su depósito BOB pendiente.
+ * Se almacena en metadata.paymentProof y se notifica a admins.
+ *
+ * Auth: Bearer JWT
+ * Content-Type: multipart/form-data (campo: 'comprobante')
+ */
+export async function uploadDepositProof(req, res) {
+  const { wtxId } = req.params
+  const userId    = req.user._id
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'No se recibió ningún archivo.' })
+  }
+
+  let wtx
+  try {
+    wtx = await WalletTransaction.findOne({ wtxId, userId, type: 'deposit' })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'uploadDepositProof' } })
+    return res.status(500).json({ error: 'Error interno del servidor.' })
+  }
+
+  if (!wtx) {
+    return res.status(404).json({ error: 'Depósito no encontrado.' })
+  }
+
+  if (wtx.status !== 'pending') {
+    return res.status(400).json({ error: 'Este depósito ya fue procesado.' })
+  }
+
+  if (wtx.metadata?.paymentProof) {
+    return res.status(409).json({ error: 'Ya se subió un comprobante para este depósito.' })
+  }
+
+  const file = req.file
+  wtx.metadata = {
+    ...wtx.metadata,
+    paymentProof: {
+      data:       file.buffer.toString('base64'),
+      mimetype:   file.mimetype,
+      filename:   file.originalname,
+      size:       file.size,
+      uploadedAt: new Date(),
+    },
+  }
+
+  try {
+    await wtx.save()
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'uploadDepositProof' } })
+    console.error('[WalletDeposit] Error guardando comprobante:', err.message)
+    return res.status(500).json({ error: 'Error guardando el comprobante.' })
+  }
+
+  const user = await User.findById(userId).select('firstName lastName').lean()
+  const userName = user ? `${user.firstName} ${user.lastName}`.trim() : 'Usuario'
+  notifyAdmins(NOTIFICATIONS.adminPaymentProof(wtx.wtxId, userName)).catch(() => {})
+
+  return res.status(200).json({
+    ok:      true,
+    message: 'Comprobante recibido. Verificaremos tu depósito en 2–4 horas hábiles.',
+  })
+}

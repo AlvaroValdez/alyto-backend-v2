@@ -7,23 +7,35 @@
  * Las rutas admin están en adminRoutes.js bajo /api/v1/admin/wallet/*.
  *
  * Endpoints:
- *   GET  /balance              — Saldo actual del usuario SRL
- *   GET  /transactions         — Historial paginado de movimientos
- *   POST /deposit/initiate     — Inicia depósito, retorna instrucciones bancarias
- *   POST /send                 — Envío P2P a otro usuario SRL
- *   POST /withdraw/request     — Solicitud de retiro a cuenta bancaria boliviana
+ *   GET  /balance                          — Saldo actual del usuario SRL
+ *   GET  /transactions                     — Historial paginado de movimientos
+ *   POST /deposit/initiate                 — Inicia depósito, retorna instrucciones bancarias
+ *   POST /deposit/:wtxId/comprobante       — Sube comprobante de depósito pendiente
+ *   POST /send                             — Envío P2P a otro usuario SRL
+ *   POST /withdraw/request                 — Solicitud de retiro a cuenta bancaria boliviana
  */
 
-import { Router } from 'express'
+import { Router }  from 'express'
+import multer      from 'multer'
 import { protect, requireKycApproved } from '../middlewares/authMiddleware.js'
 import { idempotencyCheck } from '../middlewares/idempotency.js'
 import {
   getWalletBalance,
   getWalletTransactions,
   initiateDeposit,
+  uploadDepositProof,
   sendP2P,
   requestWithdrawal,
 } from '../controllers/walletController.js'
+
+const uploadComprobante = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'application/pdf']
+    cb(allowed.includes(file.mimetype) ? null : new Error('Solo JPG, PNG o PDF.'), allowed.includes(file.mimetype))
+  },
+})
 import {
   generateWalletQR,
   scanAndPayQR,
@@ -42,7 +54,8 @@ const router = Router()
 
 router.get('/balance',           protect, requireKycApproved, getWalletBalance)
 router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
-router.post('/deposit/initiate', protect, requireKycApproved, idempotencyCheck, initiateDeposit)
+router.post('/deposit/initiate',              protect, requireKycApproved, idempotencyCheck, initiateDeposit)
+router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
 router.post('/send',             protect, requireKycApproved, sendP2P)
 router.post('/withdraw/request', protect, requireKycApproved, requestWithdrawal)
 
