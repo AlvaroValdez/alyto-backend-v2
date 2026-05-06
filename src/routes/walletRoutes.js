@@ -23,6 +23,7 @@ import {
   getWalletBalance,
   getWalletTransactions,
   initiateDeposit,
+  getDepositQRImages,
   uploadDepositProof,
   sendP2P,
   requestWithdrawal,
@@ -54,7 +55,8 @@ const router = Router()
 
 router.get('/balance',           protect, requireKycApproved, getWalletBalance)
 router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
-router.post('/deposit/initiate',              protect, requireKycApproved, idempotencyCheck, initiateDeposit)
+router.get('/deposit/qr-images',             protect, requireKycApproved, getDepositQRImages)
+router.post('/deposit/initiate',             protect, requireKycApproved, idempotencyCheck, initiateDeposit)
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
 router.post('/send',             protect, requireKycApproved, sendP2P)
 router.post('/withdraw/request', protect, requireKycApproved, requestWithdrawal)

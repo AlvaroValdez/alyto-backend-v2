@@ -781,7 +781,31 @@ export async function adminUnfreezeWallet(req, res) {
   }
 }
 
-// ─── FUNCIÓN 12: POST /api/v1/wallet/deposit/:wtxId/comprobante ───────────────
+// ─── FUNCIÓN 12: GET /api/v1/wallet/deposit/qr-images ────────────────────────
+
+/**
+ * Retorna los QRs activos de depósito Wallet BOB configurados por el admin.
+ * Solo accesible por usuarios SRL con KYC aprobado.
+ */
+export async function getDepositQRImages(req, res) {
+  try {
+    const SRLConfig = (await import('../models/SRLConfig.js')).default
+    const doc = await SRLConfig.findOne({ key: 'srl_bolivia' })
+      .select('walletQrImages')
+      .lean()
+
+    const qrImages = (doc?.walletQrImages ?? [])
+      .filter(q => q.isActive)
+      .map(q => ({ qrId: q.qrId, label: q.label, imageBase64: q.imageBase64 }))
+
+    return res.status(200).json({ qrImages })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'getDepositQRImages' } })
+    return res.status(500).json({ error: 'Error al obtener los QRs de depósito.' })
+  }
+}
+
+// ─── FUNCIÓN 13: POST /api/v1/wallet/deposit/:wtxId/comprobante ───────────────
 
 /**
  * El usuario sube el comprobante de su depósito BOB pendiente.

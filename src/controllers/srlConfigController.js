@@ -5,11 +5,14 @@
  * que se muestran al usuario en las instrucciones de pago manual Bolivia.
  *
  * Endpoints (montados bajo /api/v1/admin/srl-config en adminRoutes.js):
- *   GET    /                 — Ver config completa (todos los QR, activos e inactivos)
- *   POST   /qr               — Subir nuevo QR (multipart: label + file)
- *   PATCH  /qr/:qrId         — Activar / desactivar un QR
- *   DELETE /qr/:qrId         — Eliminar un QR permanentemente
- *   PATCH  /bank-data        — Actualizar datos bancarios de AV Finance SRL
+ *   GET    /                      — Ver config completa
+ *   POST   /qr                    — Subir QR SendMoney (multipart: label + file)
+ *   PATCH  /qr/:qrId              — Activar / desactivar QR SendMoney
+ *   DELETE /qr/:qrId              — Eliminar QR SendMoney
+ *   POST   /wallet-qr             — Subir QR depósito Wallet BOB
+ *   PATCH  /wallet-qr/:qrId       — Activar / desactivar QR Wallet BOB
+ *   DELETE /wallet-qr/:qrId       — Eliminar QR Wallet BOB
+ *   PATCH  /bank-data             — Actualizar datos bancarios de AV Finance SRL
  */
 
 import SRLConfig from '../models/SRLConfig.js';
@@ -30,9 +33,10 @@ export async function getSRLConfig(req, res) {
     ).populate('qrImages.uploadedBy', 'firstName lastName email').lean();
 
     return res.status(200).json({
-      qrImages:  doc.qrImages ?? [],
-      bankData:  doc.bankData  ?? {},
-      updatedAt: doc.updatedAt,
+      qrImages:       doc.qrImages       ?? [],
+      walletQrImages: doc.walletQrImages ?? [],
+      bankData:       doc.bankData       ?? {},
+      updatedAt:      doc.updatedAt,
       total:    (doc.qrImages ?? []).length,
       active:   (doc.qrImages ?? []).filter(q => q.isActive).length,
     });
@@ -205,6 +209,117 @@ export async function deleteSRLQR(req, res) {
     console.error('[SRLConfig] Error en deleteSRLQR:', err.message);
     Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'deleteSRLQR' } });
     return res.status(500).json({ error: 'Error al eliminar el QR.' });
+  }
+}
+
+// ─── POST /api/v1/admin/srl-config/wallet-qr ─────────────────────────────────
+
+/**
+ * Sube un nuevo QR para la sección de carga de saldo BOB en la Wallet.
+ * Independiente de los QRs del flujo SendMoney.
+ */
+export async function uploadWalletSRLQR(req, res) {
+  try {
+    const { label } = req.body;
+    const file      = req.file;
+
+    if (!label?.trim()) {
+      return res.status(400).json({ error: 'Campo label requerido.' });
+    }
+    if (!file) {
+      return res.status(400).json({ error: 'Imagen QR requerida.' });
+    }
+
+    const imageBase64 = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+
+    const doc = await SRLConfig.findOneAndUpdate(
+      { key: 'srl_bolivia' },
+      {
+        $setOnInsert: { key: 'srl_bolivia' },
+        $push: {
+          walletQrImages: {
+            label:      label.trim(),
+            imageBase64,
+            isActive:   true,
+            uploadedAt: new Date(),
+            uploadedBy: req.user._id,
+          },
+        },
+      },
+      { upsert: true, new: true },
+    ).lean();
+
+    const added = doc.walletQrImages[doc.walletQrImages.length - 1];
+
+    return res.status(201).json({
+      qrId:       added.qrId,
+      label:      added.label,
+      isActive:   added.isActive,
+      uploadedAt: added.uploadedAt,
+      message:    `QR "${added.label}" subido para depósitos de Wallet BOB.`,
+    });
+
+  } catch (err) {
+    console.error('[SRLConfig] Error en uploadWalletSRLQR:', err.message);
+    Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'uploadWalletSRLQR' } });
+    return res.status(500).json({ error: 'Error al subir el QR de wallet.' });
+  }
+}
+
+// ─── PATCH /api/v1/admin/srl-config/wallet-qr/:qrId ──────────────────────────
+
+export async function toggleWalletSRLQR(req, res) {
+  try {
+    const { qrId }    = req.params;
+    const { isActive } = req.body;
+
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'Campo isActive requerido (boolean).' });
+    }
+
+    const result = await SRLConfig.findOneAndUpdate(
+      { key: 'srl_bolivia', 'walletQrImages.qrId': qrId },
+      { $set: { 'walletQrImages.$.isActive': isActive } },
+      { new: true },
+    ).lean();
+
+    if (!result) {
+      return res.status(404).json({ error: `QR wallet "${qrId}" no encontrado.` });
+    }
+
+    const updated = result.walletQrImages.find(q => q.qrId === qrId);
+
+    return res.status(200).json({
+      qrId,
+      label:   updated?.label,
+      isActive,
+      message: `QR "${updated?.label}" ${isActive ? 'activado' : 'desactivado'}.`,
+    });
+
+  } catch (err) {
+    console.error('[SRLConfig] Error en toggleWalletSRLQR:', err.message);
+    Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'toggleWalletSRLQR' } });
+    return res.status(500).json({ error: 'Error al actualizar el QR de wallet.' });
+  }
+}
+
+// ─── DELETE /api/v1/admin/srl-config/wallet-qr/:qrId ─────────────────────────
+
+export async function deleteWalletSRLQR(req, res) {
+  try {
+    const { qrId } = req.params;
+
+    await SRLConfig.findOneAndUpdate(
+      { key: 'srl_bolivia' },
+      { $pull: { walletQrImages: { qrId } } },
+    ).lean();
+
+    return res.status(200).json({ qrId, message: 'QR de wallet eliminado.' });
+
+  } catch (err) {
+    console.error('[SRLConfig] Error en deleteWalletSRLQR:', err.message);
+    Sentry.captureException(err, { tags: { controller: 'srlConfigController', action: 'deleteWalletSRLQR' } });
+    return res.status(500).json({ error: 'Error al eliminar el QR de wallet.' });
   }
 }
 

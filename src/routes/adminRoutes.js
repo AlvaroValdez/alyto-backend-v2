@@ -69,6 +69,9 @@ import {
   uploadSRLQR,
   toggleSRLQR,
   deleteSRLQR,
+  uploadWalletSRLQR,
+  toggleWalletSRLQR,
+  deleteWalletSRLQR,
   updateBankData,
 } from '../controllers/srlConfigController.js';
 import {
@@ -406,6 +409,17 @@ router.patch('/srl-config/qr/:qrId', toggleSRLQR);
  * No afecta transacciones ya creadas.
  */
 router.delete('/srl-config/qr/:qrId', deleteSRLQR);
+
+/**
+ * POST   /api/v1/admin/srl-config/wallet-qr          — Subir QR depósito Wallet BOB
+ * PATCH  /api/v1/admin/srl-config/wallet-qr/:qrId    — Activar / desactivar
+ * DELETE /api/v1/admin/srl-config/wallet-qr/:qrId    — Eliminar
+ *
+ * IMPORTANTE: la ruta POST debe ir ANTES de /wallet-qr/:qrId
+ */
+router.post('/srl-config/wallet-qr',          qrUpload.single('qr'), uploadWalletSRLQR);
+router.patch('/srl-config/wallet-qr/:qrId',   toggleWalletSRLQR);
+router.delete('/srl-config/wallet-qr/:qrId',  deleteWalletSRLQR);
 
 /**
  * PATCH /api/v1/admin/srl-config/bank-data

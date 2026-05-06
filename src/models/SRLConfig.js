@@ -72,8 +72,13 @@ const srlConfigSchema = new Schema(
       default: 'srl_bolivia',
       unique:  true,
     },
-    /** Array de imágenes QR configuradas por el admin */
+    /** QRs para el flujo SendMoney (instrucciones de pago cross-border) */
     qrImages: {
+      type:    [qrImageSchema],
+      default: [],
+    },
+    /** QRs específicos para carga de saldo BOB en la Wallet */
+    walletQrImages: {
       type:    [qrImageSchema],
       default: [],
     },
