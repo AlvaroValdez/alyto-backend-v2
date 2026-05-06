@@ -22,14 +22,26 @@ export function handleStellarError(context, error, metadata = {}) {
   const safeMetadata = sanitizeMetadata(metadata);
 
   if (error?.response?.data) {
-    // Error de Horizon con response body
-    const horizonData = error.response.data;
+    const horizonData  = error.response.data;
+    const resultCodes  = horizonData?.extras?.result_codes ?? {};
+    const txCode       = resultCodes.transaction ?? null;
+    const opCodes      = resultCodes.operations  ?? [];
+
+    // Adjuntar códigos al error para que Sentry los capture en el mensaje y extras
+    if (txCode && !error.stellarTxCode) {
+      error.stellarTxCode = txCode;
+      error.stellarOpCode = opCodes[0] ?? null;
+      error.message = `${error.message} [stellar: tx=${txCode} op=${opCodes[0] ?? 'none'}]`;
+    }
+
     console.error(`[Alyto Stellar][${context}] Horizon error`, {
-      status:    error.response?.status,
-      type:      horizonData?.type,
-      title:     horizonData?.title,
-      detail:    horizonData?.detail,
-      resultXdr: horizonData?.extras?.result_xdr ?? null,
+      httpStatus:  error.response?.status,
+      txCode,
+      opCodes,
+      type:        horizonData?.type,
+      title:       horizonData?.title,
+      detail:      horizonData?.detail,
+      resultXdr:   horizonData?.extras?.result_xdr ?? null,
       ...safeMetadata,
     });
   } else if (error instanceof Error) {

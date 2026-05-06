@@ -1002,7 +1002,11 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
     throw err;
   }
 
-  const maxRetries = 3;
+  // Stellar acepta máximo 7 decimales (1 stroop = 0.0000001 XLM/USDC)
+  const safeAmount = parseFloat(Number(amount).toFixed(7));
+  if (safeAmount <= 0) throw new Error(`[Stellar] Amount inválido tras redondeo: ${amount}`);
+
+  const maxRetries = 5;
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1017,7 +1021,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
         .addOperation(Operation.payment({
           destination: destinationAddress,
           asset:       getUSDCAsset(),
-          amount:      String(amount),
+          amount:      safeAmount.toFixed(7),
         }))
         .addMemo(Memo.text(memo))
         .setTimeout(TX_TIMEOUT_SECONDS)
@@ -1037,17 +1041,34 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
       const txCode = err.response?.data?.extras?.result_codes?.transaction;
       const opCode = err.response?.data?.extras?.result_codes?.operations?.[0];
 
-      if (['op_underfunded', 'op_no_destination', 'op_no_trust'].includes(opCode)) {
+      // Adjuntar códigos Stellar al error para que Sentry los muestre
+      if (txCode || opCode) {
+        err.stellarTxCode = txCode;
+        err.stellarOpCode = opCode;
+        err.message = `${err.message} [stellar: tx=${txCode ?? 'none'} op=${opCode ?? 'none'}]`;
+      }
+
+      // Errores permanentes — no reintentar
+      if (['op_underfunded', 'op_no_destination', 'op_no_trust', 'op_malformed'].includes(opCode)) {
         err.isPermanent = true;
         throw err;
       }
 
-      if (['tx_bad_seq', 'tx_too_late', 'tx_too_early'].includes(txCode) && attempt < maxRetries) {
-        console.warn(`[Stellar] Transient error (attempt ${attempt}): ${txCode}, retrying…`);
-        await new Promise((r) => setTimeout(r, 2000));
+      // Errores transitorios — reintentar con backoff exponencial
+      const TRANSIENT = ['tx_bad_seq', 'tx_too_late', 'tx_too_early', 'tx_insufficient_balance'];
+      if (TRANSIENT.includes(txCode) && attempt < maxRetries) {
+        const delay = Math.min(1000 * 2 ** attempt, 16000); // 2s, 4s, 8s, 16s
+        console.warn(`[Stellar] Transient error (attempt ${attempt}/${maxRetries}): ${txCode} — retry in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
         continue;
       }
 
+      // Error desconocido — loguear y lanzar
+      console.error('[Stellar] sendUSDCToHarbor failed definitively:', {
+        attempt, txCode, opCode,
+        transactionId,
+        message: err.message,
+      });
       throw err;
     }
   }

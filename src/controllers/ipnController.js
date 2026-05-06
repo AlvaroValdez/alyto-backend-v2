@@ -962,10 +962,17 @@ export async function dispatchPayout(transaction) {
       console.error('[Alyto Payout] tryOwlPayV2 falló:', {
         transactionId: transaction.alytoTransactionId,
         error:         err.message,
+        stellarTxCode: err.stellarTxCode ?? null,
+        stellarOpCode: err.stellarOpCode ?? null,
       });
       Sentry.captureException(err, {
         tags:  { component: 'dispatchPayout', provider: 'owlPay-v2' },
-        extra: { transactionId: transaction.alytoTransactionId },
+        extra: {
+          transactionId: transaction.alytoTransactionId,
+          stellarTxCode: err.stellarTxCode ?? null,
+          stellarOpCode: err.stellarOpCode ?? null,
+          isPermanent:   err.isPermanent   ?? false,
+        },
       });
 
       transaction.status        = 'failed';
