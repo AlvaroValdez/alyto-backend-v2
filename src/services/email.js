@@ -73,6 +73,20 @@ function formatDate(date) {
 }
 
 /**
+ * Convierte un dynamicFields (Mongoose Map o plain object) a plain object.
+ * Mongoose almacena Map fields como instancias nativas de Map — el acceso por
+ * punto (df.key) devuelve undefined; hay que usar Object.fromEntries primero.
+ *
+ * @param {Map|object|null} dynamicFields
+ * @returns {object}
+ */
+function getDynamicFields(dynamicFields) {
+  if (!dynamicFields) return {};
+  if (dynamicFields instanceof Map) return Object.fromEntries(dynamicFields);
+  return dynamicFields;
+}
+
+/**
  * Resuelve el nombre completo del beneficiario soportando todos los formatos:
  *   - dynamicFields (Bolivia manual / Vita)
  *   - campos nombrados del schema (formato legado)
@@ -85,7 +99,7 @@ function resolveBeneficiaryName(beneficiary) {
   if (!beneficiary) return '';
 
   // Formato Bolivia / Vita: campos en dynamicFields
-  const df = beneficiary.dynamicFields ?? {};
+  const df = getDynamicFields(beneficiary.dynamicFields);
   if (df.beneficiary_first_name || df.beneficiary_last_name) {
     return `${df.beneficiary_first_name ?? ''} ${df.beneficiary_last_name ?? ''}`.trim();
   }
@@ -295,6 +309,7 @@ export const EMAILS = {
         originAmount:        formatCurrency(transaction.originalAmount, transaction.originCurrency),
         destinationAmount:   destAmount,
         destinationCurrency: transaction.destinationCurrency,
+        destinationCountry:  transaction.destinationCountry ?? '—',
         beneficiaryName:     resolveBeneficiaryName(transaction.beneficiary),
         corridorLabel:       `${transaction.originCurrency} → ${transaction.destinationCurrency}`,
         estimatedDelivery:   '1 día hábil',
@@ -326,6 +341,7 @@ export const EMAILS = {
         originAmount:        formatCurrency(transaction.originalAmount, transaction.originCurrency),
         destinationAmount:   destAmount,
         destinationCurrency: transaction.destinationCurrency,
+        destinationCountry:  transaction.destinationCountry ?? '—',
         beneficiaryName:     resolveBeneficiaryName(transaction.beneficiary),
         corridorLabel:       `${transaction.originCurrency} → ${transaction.destinationCurrency}`,
         completedAt:         formatDate(transaction.updatedAt),
@@ -350,6 +366,8 @@ export const EMAILS = {
         userName:        user.firstName,
         transactionId:   transaction.alytoTransactionId,
         originAmount:    formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        beneficiaryName: resolveBeneficiaryName(transaction.beneficiary),
+        corridorLabel:   `${transaction.originCurrency} → ${transaction.destinationCurrency}`,
         failedAt:        formatDate(transaction.updatedAt),
         supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
         supportWhatsapp: process.env.SUPPORT_WHATSAPP ?? '+56988321490',
@@ -374,7 +392,7 @@ export const EMAILS = {
     // Datos del beneficiario — incluir en el email para que el usuario confirme
     // visualmente que está pagando el envío correcto antes de transferir.
     const ben      = transaction.beneficiary ?? {};
-    const df       = ben.dynamicFields ?? {};
+    const df       = getDynamicFields(ben.dynamicFields);
     const beneName = resolveBeneficiaryName(ben) || '—';
     const beneBank = df.beneficiary_bank ?? ben.bankName ?? ben.bankCode ?? '—';
     const beneAcctRaw = df.beneficiary_account ?? ben.accountNumber ?? ben.accountBank ?? '';
@@ -429,19 +447,29 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   adminManualPayinAlert(transaction, instructions) {
+    const ben        = transaction.beneficiary ?? {};
+    const df         = getDynamicFields(ben.dynamicFields);
+    const benName    = resolveBeneficiaryName(ben) || '—';
+    const benBank    = df.beneficiary_bank ?? ben.bankName ?? ben.bankCode ?? '—';
+    const benAcctRaw = df.beneficiary_account ?? ben.accountNumber ?? ben.accountBank ?? '';
+    const benAcct    = benAcctRaw ? `****${String(benAcctRaw).slice(-4)}` : '—';
+
     return [
       process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
       process.env.SENDGRID_TEMPLATE_ADMIN_MANUAL_PAYIN ?? process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA,
       {
-        transactionId:     transaction.alytoTransactionId,
-        originAmount:      formatCurrency(transaction.originalAmount, transaction.originCurrency),
+        transactionId:      transaction.alytoTransactionId,
+        originAmount:       formatCurrency(transaction.originalAmount, transaction.originCurrency),
         destinationCountry: transaction.destinationCountry,
-        userId:            transaction.userId?.toString(),
-        bankName:          instructions.bankName,
-        accountNumber:     instructions.accountNumber,
-        reference:         instructions.reference,
-        createdAt:         formatDate(transaction.createdAt),
-        ledgerUrl:         `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
+        userId:             transaction.userId?.toString(),
+        beneficiaryName:    benName,
+        beneficiaryBank:    benBank,
+        beneficiaryAccount: benAcct,
+        bankName:           instructions.bankName,
+        accountNumber:      instructions.accountNumber,
+        reference:          instructions.reference,
+        createdAt:          formatDate(transaction.createdAt),
+        ledgerUrl:          `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
       },
     ];
   },
@@ -458,7 +486,7 @@ export const EMAILS = {
    */
   adminBoliviaAlert(transaction) {
     const ben = transaction.beneficiary ?? {};
-    const df  = ben.dynamicFields ?? {};
+    const df  = getDynamicFields(ben.dynamicFields);
 
     // Nombre completo desde dynamicFields o campos nombrados
     const fullName = resolveBeneficiaryName(transaction.beneficiary);
@@ -554,7 +582,8 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   adminClpBobAlert(transaction, user) {
-    const ben = transaction.beneficiary?.dynamicFields ?? transaction.beneficiary ?? {};
+    const ben = transaction.beneficiary ?? {};
+    const df  = getDynamicFields(ben.dynamicFields);
     return [
       process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
       process.env.SENDGRID_TEMPLATE_ADMIN_CLP_BOB,
@@ -564,10 +593,10 @@ export const EMAILS = {
         userEmail:       user?.email ?? '',
         amount:          formatCurrency(transaction.originalAmount, 'CLP'),
         paymentRef:      transaction.paymentInstructions?.reference ?? '',
-        beneficiaryType: ben.type ?? 'bank_data',
-        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
-        bankName:        ben.bankName ?? '',
-        accountNumber:   ben.accountNumber ?? '',
+        beneficiaryType: ben.type ?? df.type ?? 'bank_data',
+        beneficiaryName: resolveBeneficiaryName(ben),
+        bankName:        df.beneficiary_bank ?? ben.bankName ?? '',
+        accountNumber:   df.beneficiary_account ?? ben.accountNumber ?? '',
         hasProof:        transaction.paymentProof?.data ? 'Si' : 'No',
         ledgerUrl:       `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${transaction.alytoTransactionId}`,
         createdAt:       formatDate(transaction.createdAt),
@@ -583,14 +612,14 @@ export const EMAILS = {
    * @returns {[string, string, object]}
    */
   clpBobPayoutCompleted(user, transaction) {
-    const ben = transaction.beneficiary?.dynamicFields ?? transaction.beneficiary ?? {};
+    const ben = transaction.beneficiary ?? {};
     return [
       user.email,
       process.env.SENDGRID_TEMPLATE_CLP_BOB_COMPLETED,
       {
         userName:        user.firstName,
         destinationBOB:  formatCurrency(transaction.destinationAmount, 'BOB'),
-        beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+        beneficiaryName: resolveBeneficiaryName(ben),
         transactionId:   transaction.alytoTransactionId,
         completedAt:     formatDate(transaction.updatedAt),
         supportEmail:    process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
