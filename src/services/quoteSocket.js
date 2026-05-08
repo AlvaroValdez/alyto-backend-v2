@@ -191,7 +191,9 @@ async function computeQuote(state) {
     ? corridor.businessAlytoCSpread
     : (corridor.alytoCSpread ?? 0);
   const alytoCSpread     = round2(amount * (spreadPct / 100));
-  const fixedFee         = corridor.fixedFee                               ?? 0;
+  const fixedFee         = (state.accountType === 'business' && corridor.businessFixedFee != null)
+    ? corridor.businessFixedFee
+    : (corridor.fixedFee ?? 0);
   const profitRetention  = round2(amount * (corridor.profitRetentionPercent / 100));
 
   // ── BRANCH 1: CLP→BOB con payout anchorBolivia — usa SpAConfig, no Vita ────
