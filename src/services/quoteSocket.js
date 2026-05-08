@@ -503,15 +503,24 @@ async function handleSubscribe(ws, msg) {
   } catch { /* no fatal — usar fallback */ }
 
   // ── 4. Buscar corredor activo ─────────────────────────────────────────────
-  const destCountry = (msg.destinationCountry ?? '').toUpperCase();
+  const destCountry    = (msg.destinationCountry ?? '').toUpperCase();
+  const corridorIdParam = msg.corridorId ?? null;
 
   let corridor = null;
   try {
-    corridor = await TransactionConfig.findOne({
-      originCountry:      originCountry,
-      destinationCountry: destCountry,
-      isActive:           true,
-    }).lean();
+    if (corridorIdParam) {
+      // Lookup directo por corridorId — soporta múltiples corredores al mismo país (ej. bo-cn vs bo-cn-usd)
+      corridor = await TransactionConfig.findOne({
+        corridorId: corridorIdParam,
+        isActive:   true,
+      }).lean();
+    } else {
+      corridor = await TransactionConfig.findOne({
+        originCountry:      originCountry,
+        destinationCountry: destCountry,
+        isActive:           true,
+      }).lean();
+    }
   } catch (err) {
     console.error('[Alyto WS] Error buscando corredor:', err.message);
   }
@@ -520,7 +529,9 @@ async function handleSubscribe(ws, msg) {
     send(ws, {
       type:    'quote_error',
       code:    'CORRIDOR_NOT_FOUND',
-      message: `Corredor no disponible para ${originCountry} → ${destCountry}.`,
+      message: corridorIdParam
+        ? `Corredor ${corridorIdParam} no disponible.`
+        : `Corredor no disponible para ${originCountry} → ${destCountry}.`,
     });
     return;
   }
