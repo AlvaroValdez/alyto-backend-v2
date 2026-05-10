@@ -2692,16 +2692,13 @@ export async function getAvailableCorridors(req, res) {
   let corridors;
   try {
     corridors = await TransactionConfig.find(corridorFilter)
-      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin maxAmountOrigin')
+      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin minAmountUSD maxAmountOrigin')
       .lean();
   } catch (err) {
     console.error('[Alyto Corridors] Error:', err.message);
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
-  // Formato plano compatible con el frontend actual (corridorsToCountries usa
-  // c.destinationCountry y c.destinationCurrency a nivel raíz).
-  // Incluimos payinMethod y payinMethodLabel como campos extra sin romper nada.
   const result = corridors.map((c) => {
     const meta = COUNTRY_META[c.destinationCountry] ?? {};
     return {
@@ -2712,7 +2709,9 @@ export async function getAvailableCorridors(req, res) {
       destinationFlag:         meta.flag ?? '',
       payinMethod:             c.payinMethod,
       payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
+      payoutMethod:            c.payoutMethod,
       minAmountOrigin:         c.minAmountOrigin ?? 0,
+      minAmountUSD:            c.minAmountUSD    ?? null,
     };
   });
 
