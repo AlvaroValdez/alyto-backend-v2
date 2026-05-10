@@ -653,14 +653,14 @@ export async function createQuote({
     method: 'POST',
     body:   JSON.stringify({
       source: {
-        type:    customer_type,
+        type:    customer_type,  // 'business' = AV Finance SRL (fuente del USDC)
         chain:   source_chain,
         country: 'US',
         asset:   'USDC',
         amount:  Number(source_amount).toFixed(2),
       },
       destination: {
-        type:    customer_type,
+        type:    'individual',   // siempre individual — Harbor off-ramp va a personas
         country: destination_country,
         asset:   destination_currency,
       },

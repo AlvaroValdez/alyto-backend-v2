@@ -787,13 +787,13 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   console.log('[OwlPay] Transfer created:', transferId, 'memo:', instructionMemo);
 
   // ── STEP F: Send USDC via Stellar ─────────────────────────────────────────
-  const usdcSendEnabled = process.env.OWLPAY_USDC_SEND_ENABLED === 'true';
+  const usdcSendEnabled = ['true', '1'].includes(process.env.OWLPAY_USDC_SEND_ENABLED ?? '');
 
   if (!usdcSendEnabled) {
     transaction.statusReason =
-      `OWLPAY_USDC_SEND_ENABLED=false — admin must send ` +
+      `OWLPAY_USDC_SEND_ENABLED=0 — admin must send ` +
       `${netAmountUSD} USDC to ${instructionAddress} ` +
-      `with memo: ${instructionMemo}`;
+      `with memo: ${instructionMemo ?? 'N/A'}`;
     await transaction.save();
 
     broadcastToAdmins('tx_manual_payout', {
@@ -821,11 +821,18 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   }
 
   // Auto-send USDC via Stellar
-  const memoForStellar = (instructionMemo ?? transaction.alytoTransactionId).slice(0, 28);
+  // Harbor provee un memo numérico único por transfer (formato: 14 dígitos en sandbox).
+  // Sin memo válido Harbor no puede asociar el USDC al transfer — es un error fatal.
+  if (!instructionMemo) {
+    throw new Error(
+      `[Harbor] No se recibió instruction_memo para transfer ${transferId}. ` +
+      `No es posible enviar USDC sin memo. Contactar OwlPay soporte.`,
+    );
+  }
   const stellarResult  = await sendUSDCToHarbor({
     destinationAddress: instructionAddress,
     amount:             netAmountUSD,
-    memo:               memoForStellar,
+    memo:               instructionMemo,
     transactionId:      transaction.alytoTransactionId,
   });
 
@@ -840,7 +847,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       hash:     stellarResult.hash,
       ledger:   stellarResult.ledger,
       amount:   netAmountUSD,
-      memo:     memoForStellar,
+      memo:     instructionMemo,
       existing: stellarResult.existing ?? false,
     },
     receivedAt: new Date(),
