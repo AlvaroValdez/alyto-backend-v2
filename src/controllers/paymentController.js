@@ -798,12 +798,12 @@ export async function initCrossBorderPayment(req, res) {
     // Construir beneficiario
     const ben = beneficiaryData ?? legacyBeneficiary ?? {};
     const beneficiaryDoc = {
-      firstName:      ben.firstName  ?? '',
-      lastName:       ben.lastName   ?? '',
-      accountType:    ben.accountType ?? '',
-      accountBank:    ben.accountNumber ?? '',
-      bankCode:       ben.bankName   ?? '',
-      dynamicFields:  ben,
+      firstName:   ben.beneficiary_first_name ?? ben.firstName  ?? '',
+      lastName:    ben.beneficiary_last_name  ?? ben.lastName   ?? '',
+      accountType: ben.accountType ?? '',
+      accountBank: ben.beneficiary_account ?? ben.accountNumber ?? '',
+      bankCode:    ben.beneficiary_bank    ?? ben.bankName      ?? '',
+      dynamicFields: ben,
     };
     // Si es QR, guardar la imagen en dynamicFields
     if (ben.type === 'qr_image' && ben.qrImageBase64) {
@@ -882,10 +882,13 @@ export async function initCrossBorderPayment(req, res) {
       if (!clpBobTemplateId) {
         console.error('[Email] ⚠️ Falta SENDGRID_TEMPLATE_CLP_BOB_INSTRUCTIONS — email de instrucciones NO enviado.');
       } else {
-        // Beneficiario Bolivia — incluir en el email para confirmación visual
-        const beneName = `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim() || '—';
-        const beneBank = ben.bankName ?? ben.bankCode ?? '—';
-        const beneAcctRaw = ben.accountNumber ?? ben.accountBank ?? '';
+        // Beneficiario Bolivia — los campos vienen en snake_case (beneficiary_first_name)
+        // cuando el frontend usa el formato dinámico de Vita. Fallback a camelCase (legado).
+        const beneName = (
+          `${ben.beneficiary_first_name ?? ben.firstName ?? ''} ${ben.beneficiary_last_name ?? ben.lastName ?? ''}`.trim()
+        ) || '—';
+        const beneBank    = ben.beneficiary_bank    ?? ben.bankName    ?? ben.bankCode ?? '—';
+        const beneAcctRaw = ben.beneficiary_account ?? ben.accountNumber ?? ben.accountBank ?? '';
         const beneAcct = beneAcctRaw ? `****${String(beneAcctRaw).slice(-4)}` : '—';
 
         console.log('[Payment] Sending CLP-BOB instructions to:', user.email, 'tx:', alytoTransactionId);
@@ -935,9 +938,9 @@ export async function initCrossBorderPayment(req, res) {
           amount:         amount.toLocaleString('es-CL'),
           paymentRef,
           beneficiaryType: ben.type ?? 'bank_data',
-          beneficiaryName: `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
-          bankName:        ben.bankName ?? '',
-          accountNumber:   ben.accountNumber ?? '',
+          beneficiaryName: `${ben.beneficiary_first_name ?? ben.firstName ?? ''} ${ben.beneficiary_last_name ?? ben.lastName ?? ''}`.trim(),
+          bankName:        ben.beneficiary_bank    ?? ben.bankName    ?? '',
+          accountNumber:   ben.beneficiary_account ?? ben.accountNumber ?? '',
           hasProof:        'No',
           ledgerUrl:       `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${alytoTransactionId}`,
         },
