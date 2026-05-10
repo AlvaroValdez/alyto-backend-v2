@@ -46,7 +46,7 @@ export function getEffectiveSpreadPct(corridor, user) {
  * @param {number}  input.amount        Origin amount in BOB (user input)
  * @param {object}  input.corridor      TransactionConfig doc or plain config
  * @param {number}  input.bobPerUsdc    BOB → USDC rate (admin-configured or env fallback)
- * @param {number}  input.vitaRate      USDC → destination currency rate (raw from Vita, no markup)
+ * @param {number}  input.providerRate   USDC → destination currency rate (raw from provider, no markup)
  * @param {string}  [input.accountType] 'business' applies businessAlytoCSpread when set
  * @returns {{
  *   originAmount:       number,
@@ -60,7 +60,7 @@ export function getEffectiveSpreadPct(corridor, user) {
  *   digitalAsset:       string
  * }}
  */
-export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate, accountType = 'personal' }) {
+export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, accountType = 'personal' }) {
   if (!amount || amount <= 0) {
     throw new Error('calculateQuote: amount must be positive');
   }
@@ -70,8 +70,8 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate, account
   if (!bobPerUsdc || bobPerUsdc <= 0) {
     throw new Error('calculateQuote: bobPerUsdc must be positive');
   }
-  if (!vitaRate || vitaRate <= 0) {
-    throw new Error('calculateQuote: vitaRate must be positive');
+  if (!providerRate || providerRate <= 0) {
+    throw new Error('calculateQuote: providerRate must be positive');
   }
 
   // Step 1 — fees in origin currency (BOB)
@@ -99,10 +99,10 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, vitaRate, account
   // Step 5 — USDC transit (audit trail; never shown to user)
   const usdcTransitAmount = round2(netBOB / bobPerUsdc);
 
-  // Step 6 — destination amount using RAW Vita rate (no markup — spec §1.2, §6.1)
+  // Step 6 — destination amount using RAW provider rate (no markup — spec §1.2, §6.1)
   const payoutFeeUSD      = corridor.payoutFeeFixed ?? 0;
-  const payoutFeeInDest   = payoutFeeUSD * vitaRate;
-  const destinationAmount = round2((usdcTransitAmount * vitaRate) - payoutFeeInDest);
+  const payoutFeeInDest   = payoutFeeUSD * providerRate;
+  const destinationAmount = round2((usdcTransitAmount * providerRate) - payoutFeeInDest);
 
   // Step 7 — effective rate for display (6 decimales para preservar rates < 1)
   const effectiveRate     = round6(destinationAmount / amount);

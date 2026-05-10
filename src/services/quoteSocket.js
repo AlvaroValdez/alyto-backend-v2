@@ -27,6 +27,7 @@ import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
 import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
 import { calculateQuote }  from './quoteCalculator.js';
+import { getHarborQuote, getCustomerUuid } from './owlPayService.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -51,6 +52,39 @@ const vitaCache = {
   fetchedAt: null,
   validUntil: null,
 };
+
+// ─── Cache de tasas Harbor para el WS ────────────────────────────────────────
+// Key: "DEST_COUNTRY|DEST_CURRENCY" — TTL: REFRESH_INTERVAL_MS (default 60s)
+const harborRateCache = new Map();
+
+async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid) {
+  const key    = `${destCountry.toUpperCase()}|${destCurrency.toUpperCase()}`;
+  const cached = harborRateCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached;
+
+  const quotes = await getHarborQuote({
+    sourceAmount:   100,
+    sourceCurrency: 'USDC',
+    sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+    destCountry,
+    destCurrency,
+    customerUuid,
+    returnAll:      true,
+  });
+
+  const quote = Array.isArray(quotes) ? quotes[0] : quotes;
+  if (!quote?.exchangeRate) {
+    throw new Error(`Harbor no devolvió exchangeRate para ${destCountry}/${destCurrency}`);
+  }
+
+  const entry = {
+    exchangeRate:  quote.exchangeRate,
+    paymentMethod: quote.paymentMethod,
+    expiresAt:     Date.now() + REFRESH_INTERVAL_MS,
+  };
+  harborRateCache.set(key, entry);
+  return entry;
+}
 
 /**
  * Indica si el cache necesita ser refrescado.
@@ -251,17 +285,82 @@ async function computeQuote(state) {
     };
   }
 
-  // ── BRANCH 2: BOB→destino — BOB→USDC→dest vía Vita ──────────────────────────
-  // Cubre: bo-co, bo-pe, bo-cl, bo-ar, bo-mx, bo-br, bo-us, bo-eu, etc.
+  // ── BRANCH 2: BOB→destino — BOB→USDC→dest ────────────────────────────────────
   if (corridor.originCurrency === 'BOB') {
-    if (isCacheStale()) await refreshVitaCache();
-
-    // Tasa BOB/USDC: prioridad corridor.manualExchangeRate → MongoDB → env
     const bobPerUsdc = corridor.manualExchangeRate > 0
       ? corridor.manualExchangeRate
       : await getBOBRate();
 
-    // Vita USD→dest (cross-rate via CLP)
+    // ── 2a. Harbor (owlPay) — tasa real desde Harbor, sin Vita ──────────────
+    if (corridor.payoutMethod === 'owlPay') {
+      const customerUuid = getCustomerUuid(corridor.legalEntity ?? 'SRL');
+      let harborRateData;
+      try {
+        harborRateData = await getHarborIndicativeRate(
+          destinationCountry,
+          corridor.destinationCurrency,
+          customerUuid,
+        );
+      } catch (err) {
+        console.warn('[Alyto WS] Harbor rate unavailable:', err.message);
+        return {
+          type:    'quote_error',
+          code:    'PROVIDER_UNAVAILABLE',
+          message: 'Servicio Harbor temporalmente no disponible.',
+        };
+      }
+
+      let quote;
+      try {
+        quote = calculateQuote({
+          amount,
+          corridor,
+          bobPerUsdc,
+          providerRate: harborRateData.exchangeRate,
+          accountType:  state.accountType,
+        });
+      } catch (err) {
+        console.warn('[Alyto WS] calculateQuote (Harbor) rejected:', err.message);
+        return null;
+      }
+
+      if (quote.destinationAmount <= 0) return null;
+
+      console.info('[Alyto WS] Quote BOB→' + destinationCountry + ' (Harbor):', {
+        amount,
+        bobPerUsdc,
+        usdcTransitAmount: quote.digitalAssetAmount,
+        harborRate:        harborRateData.exchangeRate,
+        paymentMethod:     harborRateData.paymentMethod,
+        destinationAmount: quote.destinationAmount,
+      });
+
+      return {
+        type:                'quote_update',
+        corridorId:          corridor.corridorId,
+        originAmount:        quote.originAmount,
+        originCurrency:      'BOB',
+        destinationAmount:   quote.destinationAmount,
+        destinationCurrency: corridor.destinationCurrency,
+        exchangeRate:        quote.effectiveRate,
+        conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
+        isManualCorridor:    false,
+        payinMethod:         corridor.payinMethod,
+        payoutMethod:        corridor.payoutMethod,
+        usdcTransitAmount:   quote.digitalAssetAmount,
+        bobPerUsdc,
+        fees:                quote.fees,
+        quoteExpiresAt:      new Date(Date.now() + QUOTE_VALIDITY_MS),
+        rateConfidence:      'estimated',
+        harborPaymentMethod: harborRateData.paymentMethod,
+        updatedAt:           new Date(),
+        stale:               false,
+      };
+    }
+
+    // ── 2b. Vita (vitaWallet / anchorBolivia) — tasa USD→dest vía cross-rate CLP
+    if (isCacheStale()) await refreshVitaCache();
+
     const usdPricing = extractPricingUSD(destinationCountry);
     if (!usdPricing) {
       console.warn('[Alyto WS] Sin tasa USD→' + destinationCountry + ' en Vita para BOB corredor');
@@ -270,15 +369,14 @@ async function computeQuote(state) {
 
     const { rate: usdToDestRate, validUntil } = usdPricing;
 
-    // Quote unificado — canonical formula (spec v1.0 §3.2)
     let quote;
     try {
       quote = calculateQuote({
         amount,
         corridor,
         bobPerUsdc,
-        vitaRate: usdToDestRate,
-        accountType: state.accountType,
+        providerRate: usdToDestRate,
+        accountType:  state.accountType,
       });
     } catch (err) {
       console.warn('[Alyto WS] calculateQuote rejected:', err.message);
@@ -316,8 +414,6 @@ async function computeQuote(state) {
       bobPerUsdc,
       fees:                quote.fees,
       quoteExpiresAt,
-      // Live quote por WS = rate Vita extrapolado (Harbor no se llama por
-      // latencia). El rate exacto se obtiene en GET /payments/quote.
       rateConfidence:      'estimated',
       updatedAt: new Date(),
       stale:     !vitaCache.prices,

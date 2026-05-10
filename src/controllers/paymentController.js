@@ -1569,36 +1569,144 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   const rateSource = corridor.manualExchangeRate > 0 ? 'corridor_manualRate' : 'exchangeRate_db_or_env';
   console.log('[Quote BOB] BOB_USD_RATE:', bobPerUsdc, '| source:', rateSource);
 
-  // ── 2. Obtener precios Vita (USD→dest via cross-rate CLP) ─────────────────
-  let vitaResponse;
-  try {
-    vitaResponse = await getPrices();
-  } catch (err) {
-    console.error('[Quote BOB] Vita /prices no disponible:', err.message);
-    return res.status(503).json({
-      error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
+  // ── 2 + 3. Quote por proveedor ────────────────────────────────────────────
+  // Harbor (owlPay): una sola llamada con el USDC exacto — sin Vita.
+  // Vita / anchorBolivia: flujo existente.
+
+  if (corridor.payoutMethod === 'owlPay') {
+    // Paso A: calcular USDC transit desde fees (no requiere tasa de cambio)
+    const isBiz        = req.user?.accountType === 'business';
+    const _payinFee    = amount * ((corridor.payinFeePercent ?? 0) / 100);
+    const _spread      = amount * (getEffectiveSpreadPct(corridor, req.user) / 100);
+    const _fixed       = (isBiz && corridor.businessFixedFee != null) ? corridor.businessFixedFee : (corridor.fixedFee ?? 0);
+    const _profit      = amount * ((corridor.profitRetentionPercent ?? 0) / 100);
+    const _netBOB      = amount - round2(_payinFee + _spread + _fixed + _profit);
+    const usdcTransit  = round2(_netBOB / bobPerUsdc);
+
+    if (usdcTransit <= 0) {
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
+
+    // Paso B: UNA llamada a Harbor con el monto USDC exacto
+    const customerUuid = getCustomerUuid(corridor.legalEntity ?? 'SRL');
+    let harborQuotes;
+    try {
+      harborQuotes = await getHarborQuote({
+        sourceAmount:   usdcTransit,
+        sourceCurrency: 'USDC',
+        sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+        destCountry:    corridor.destinationCountry,
+        destCurrency:   corridor.destinationCurrency,
+        customerUuid,
+        returnAll:      true,
+      });
+    } catch (err) {
+      console.error('[Quote BOB Harbor] getHarborQuote falló:', err.message);
+      return res.status(503).json({ error: 'Servicio Harbor no disponible. Intenta nuevamente.' });
+    }
+
+    const requestedMethod = req.query.method ?? null;
+    const selected = requestedMethod
+      ? (Array.isArray(harborQuotes) ? harborQuotes.find(q => q.paymentMethod === requestedMethod) ?? harborQuotes[0] : harborQuotes)
+      : (Array.isArray(harborQuotes) ? harborQuotes[0] : harborQuotes);
+
+    if (!selected?.exchangeRate) {
+      return res.status(503).json({ error: 'Harbor no devolvió tasa válida.' });
+    }
+
+    // Paso C: calculateQuote con rate real de Harbor → fee breakdown correcto
+    let quote;
+    try {
+      quote = calculateQuote({
+        amount, corridor, bobPerUsdc,
+        providerRate: selected.exchangeRate,
+        accountType:  req.user?.accountType,
+      });
+    } catch (err) {
+      console.error('[Quote BOB Harbor] calculateQuote rejected:', err.message);
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
+
+    // Harbor entrega el destinationAmount exacto — usarlo directamente
+    if (selected.destinationAmount > 0) {
+      quote.destinationAmount = selected.destinationAmount;
+      quote.effectiveRate     = round6(selected.destinationAmount / amount);
+    }
+
+    if (quote.destinationAmount <= 0) {
+      return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
+    }
+
+    const alytoProfitUSDC = round2(
+      (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
+      / bobPerUsdc,
+    );
+    const quoteExpiresAt = selected.quoteExpiresAt
+      ? new Date(Math.min(new Date(selected.quoteExpiresAt).getTime(), Date.now() + 3 * 60 * 1000))
+      : new Date(Date.now() + 3 * 60 * 1000);
+
+    console.log('[Quote BOB Harbor] rate USDC→' + dest + ':', selected.exchangeRate, '| method:', selected.paymentMethod);
+    console.log('[Quote BOB Harbor] usdcTransit:', quote.digitalAssetAmount, '| dest:', quote.destinationAmount);
+
+    return res.status(200).json({
+      corridorId:          corridor.corridorId,
+      originAmount:        quote.originAmount,
+      originCurrency:      'BOB',
+      destinationAmount:   quote.destinationAmount,
+      destinationCurrency: corridor.destinationCurrency,
+      exchangeRate:        quote.effectiveRate,
+      conversionPath:      `BOB → USDC → ${corridor.destinationCurrency}`,
+      isManualCorridor:    false,
+      stellarAsset:        'USDC',
+      usdcTransitAmount:   quote.digitalAssetAmount,
+      bobPerUsdc,
+      usdcToDestRate:      selected.exchangeRate,
+      harborPaymentMethod: selected.paymentMethod,
+      fees: { ...quote.fees, alytoProfitUSDC },
+      payinMethod:     corridor.payinMethod,
+      payoutMethod:    corridor.payoutMethod,
+      entity:          'SRL',
+      quoteExpiresAt,
+      providerQuoteId: selected.quoteId,
+      rateSource:      `harbor:${selected.paymentMethod}`,
+      rateExpiresAt:   selected.quoteExpiresAt ? new Date(selected.quoteExpiresAt) : null,
+      rateConfidence:  'exact',
     });
   }
 
-  const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
-  if (!vitaPricingUSD) {
-    console.error('[Quote BOB] No hay tasa USD→' + dest + ' en Vita para corredor:', corridor.corridorId);
-    return res.status(503).json({
-      error: `No hay tasa USD→${dest} disponible. Intenta nuevamente.`,
-    });
+  // ── Vita / anchorBolivia ──────────────────────────────────────────────────
+  let usdToDestRate, validUntil, providerMeta;
+
+  {
+    let vitaResponse;
+    try {
+      vitaResponse = await getPrices();
+    } catch (err) {
+      console.error('[Quote BOB] Vita /prices no disponible:', err.message);
+      return res.status(503).json({
+        error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
+      });
+    }
+
+    const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
+    if (!vitaPricingUSD) {
+      console.error('[Quote BOB] No hay tasa USD→' + dest + ' en Vita para corredor:', corridor.corridorId);
+      return res.status(503).json({
+        error: `No hay tasa USD→${dest} disponible. Intenta nuevamente.`,
+      });
+    }
+
+    usdToDestRate = vitaPricingUSD.rate;
+    validUntil    = vitaPricingUSD.validUntil;
+    providerMeta  = { providerQuoteId: null, rateSource: 'vita', rateExpiresAt: null, rateConfidence: 'estimated' };
   }
 
-  const { rate: usdToDestRate, validUntil } = vitaPricingUSD;
-
-  // ── 3. Quote unificado — delegate to canonical calculator (spec §3.2) ─────
   let quote;
   try {
     quote = calculateQuote({
-      amount,
-      corridor,
-      bobPerUsdc,
-      vitaRate: usdToDestRate,
-      accountType: req.user?.accountType,
+      amount, corridor, bobPerUsdc,
+      providerRate: usdToDestRate,
+      accountType:  req.user?.accountType,
     });
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
@@ -1609,20 +1717,12 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
-  // Provider-aware override: para corredores owlPay, recotizar con Harbor real.
-  // Mutates quote.destinationAmount + quote.effectiveRate cuando aplica.
-  const providerMeta = await resolveProviderQuote({
-    quote,
-    corridor,
-    requestedMethod: req.query.method ?? null,
-  });
-
   const alytoProfitUSDC = round2(
     (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
     / bobPerUsdc,
   );
 
-  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate);
+  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate, '| provider:', providerMeta.rateSource);
   console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', quote.effectiveRate);
   console.log('[Quote BOB] netBOB:', amount - quote.totalDeductedReal, '| usdcTransit:', quote.digitalAssetAmount, '| dest:', quote.destinationAmount);
 
@@ -1646,6 +1746,9 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     usdcTransitAmount:   quote.digitalAssetAmount,
     bobPerUsdc,
     usdcToDestRate:      usdToDestRate,
+    harborPaymentMethod: providerMeta.rateSource?.startsWith('harbor:')
+      ? providerMeta.rateSource.replace('harbor:', '')
+      : null,
     fees: {
       ...quote.fees,
       alytoProfitUSDC,
@@ -1957,7 +2060,7 @@ export async function getQuote(req, res) {
         amount,
         corridor,
         bobPerUsdc,
-        vitaRate: usdcToDestRate,
+        providerRate: usdcToDestRate,
         accountType: req.user?.accountType,
       });
     } catch (err) {
