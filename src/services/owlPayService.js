@@ -453,6 +453,14 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
         account_holder_name: get('account_holder_name')
                            ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
       };
+    case 'IN':
+      // Harbor India: IMPS/NEFT — requiere IFSC (no SWIFT)
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        in_account_number:   must('in_account_number'),
+        in_ifsc_code:        must('in_ifsc_code'),
+      };
     default:
       return {
         account_number:      must('account_number'),
