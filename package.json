@@ -21,7 +21,10 @@
     "test:e2e": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/e2e --runInBand --forceExit",
     "test:integration": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/integration --runInBand --forceExit",
     "test:unit": "NODE_OPTIONS=--experimental-vm-modules NODE_ENV=test jest tests/unit --runInBand",
-    "kyc:approve": "node --input-type=module --eval \"import 'dotenv/config'; import mongoose from 'mongoose'; import User from './src/models/User.js'; await mongoose.connect(process.env.MONGODB_URI); const u = await User.findOneAndUpdate({ email: process.env.TEST_USER_EMAIL }, { kycStatus: 'approved', kycApprovedAt: new Date(), kycProvider: 'dev_test' }, { new: true }); if (!u) { console.error('Usuario no encontrado:', process.env.TEST_USER_EMAIL); process.exit(1); } console.log('KYC aprobado:', u.email, '→', u.kycStatus); process.exit(0);\""
+    "kyc:approve": "node --input-type=module --eval \"import 'dotenv/config'; import mongoose from 'mongoose'; import User from './src/models/User.js'; await mongoose.connect(process.env.MONGODB_URI); const u = await User.findOneAndUpdate({ email: process.env.TEST_USER_EMAIL }, { kycStatus: 'approved', kycApprovedAt: new Date(), kycProvider: 'dev_test' }, { new: true }); if (!u) { console.error('Usuario no encontrado:', process.env.TEST_USER_EMAIL); process.exit(1); } console.log('KYC aprobado:', u.email, '→', u.kycStatus); process.exit(0);\"",
+    "fund:srl": "node scripts/fund-srl-usdc.js",
+    "fund:srl:500": "node scripts/fund-srl-usdc.js 500",
+    "fund:srl:1000": "node scripts/fund-srl-usdc.js 1000"
   },
   "keywords": [],
   "author": "AV Finance",
