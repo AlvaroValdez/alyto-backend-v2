@@ -509,8 +509,10 @@ export async function updateTransactionStatus(req, res) {
   // transferencia bancaria y cambia el status a 'payin_confirmed'.
   // En ese momento se dispara automáticamente el payout a Vita.
   if (newStatus === 'payin_confirmed') {
-    // Evitar doble dispatch: solo disparar si el status anterior era payin_pending
-    if (previousStatus !== 'payin_pending') {
+    // Disparar dispatch si el payin fue confirmado manualmente (desde payin_pending)
+    // o si el admin re-confirma para reintentar tras insufficient USDC (desde pending_funding).
+    const DISPATCH_FROM = ['payin_pending', 'pending_funding'];
+    if (!DISPATCH_FROM.includes(previousStatus)) {
       console.warn('[Admin] dispatchPayout bloqueado — status ya avanzado:', {
         transactionId: transaction.alytoTransactionId,
         previousStatus,
