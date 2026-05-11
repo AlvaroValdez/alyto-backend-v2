@@ -323,10 +323,11 @@ export function getPaymentMethods(countryIso) {
  * Países que Vita SOLO soporta vía transactions_type: "vita_sent".
  * No aparecen en la tabla withdrawal.prices.attributes.clp_sell.
  * Confirmado en diagnostic 2026-03-31: GT, SV, ES, PL.
+ * ES removido 2026-05-10 — corredor bo-es desactivado, tráfico EUR consolidado en bo-eu-srl (Harbor SEPA).
  *
  * Para estos destinos se debe llamar createVitaSentPayout() en lugar de createPayout().
  */
-export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'ES', 'PL']);
+export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
 
 /**
  * Vita no usa códigos ISO alpha-2 puro para todos los países.
@@ -343,7 +344,8 @@ export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'ES', 'PL']);
  */
 export const VITA_COUNTRY_KEY_MAP = {
   // Eurozona — withdrawal_rules usa 'eu' para todos los países SEPA/IBAN
-  ES: 'eu', PL: 'eu',
+  // ES removido — desactivado 2026-05-10, reemplazado por bo-eu-srl (Harbor SEPA)
+  PL: 'eu',
   IT: 'eu', DE: 'eu', FR: 'eu', NL: 'eu', AT: 'eu', BE: 'eu',
   PT: 'eu', IE: 'eu', GR: 'eu', FI: 'eu', LU: 'eu', SK: 'eu',
   SI: 'eu', EE: 'eu', LV: 'eu', LT: 'eu', CY: 'eu', MT: 'eu',
