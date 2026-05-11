@@ -1633,6 +1633,47 @@ export async function vitaBalance(req, res) {
   }
 }
 
+// ─── stellarBalance ───────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/stellar/balance
+ * Retorna el saldo USDC real de la wallet Stellar SRL consultando Horizon.
+ * Incluye la dirección pública y el link a Stellar Expert para el admin.
+ */
+export async function stellarBalance(req, res) {
+  try {
+    const { getStellarUSDCBalance } = await import('../services/stellarService.js');
+
+    const entity    = req.query.entity ?? 'SRL';
+    const pubKeyEnv = entity === 'LLC' ? 'STELLAR_LLC_PUBLIC_KEY' : 'STELLAR_SRL_PUBLIC_KEY';
+    const publicKey = process.env[pubKeyEnv];
+
+    if (!publicKey) {
+      return res.status(500).json({ error: `Variable de entorno ${pubKeyEnv} no configurada.` });
+    }
+
+    const usdcBalance = await getStellarUSDCBalance(publicKey);
+
+    const network   = (process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase();
+    const explorerNet = network === 'mainnet' || network === 'public' ? 'public' : 'testnet';
+    const stellarExpertUrl = `https://stellar.expert/explorer/${explorerNet}/account/${publicKey}`;
+
+    return res.json({
+      entity,
+      publicKey,
+      network:         explorerNet,
+      balance: {
+        usdc: usdcBalance,
+      },
+      stellarExpertUrl,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[stellarBalance]', err.message);
+    return res.status(500).json({ error: 'Error consultando saldo Stellar.' });
+  }
+}
+
 // ─── testPush ─────────────────────────────────────────────────────────────────
 
 export async function testPush(req, res) {

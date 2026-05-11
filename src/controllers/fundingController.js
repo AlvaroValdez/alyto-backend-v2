@@ -461,9 +461,11 @@ export async function getUSDCForecast(req, res) {
       entity,
       alertLevel,
       stellar: {
-        balance:   parseFloat(stellarBalance.toFixed(4)),
-        publicKey: stellarPubKey,
-        note:      'Balance en tiempo real vía Horizon (cache 30s)',
+        balance:          parseFloat(stellarBalance.toFixed(4)),
+        publicKey:        stellarPubKey,
+        network:          (process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase() === 'mainnet' ? 'public' : 'testnet',
+        stellarExpertUrl: `https://stellar.expert/explorer/${(process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase() === 'mainnet' ? 'public' : 'testnet'}/account/${stellarPubKey}`,
+        note:             'Balance en tiempo real vía Horizon (cache 30s)',
       },
       committed: {
         amount: parseFloat(inflight.toFixed(4)),

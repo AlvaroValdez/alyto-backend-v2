@@ -44,6 +44,7 @@ import {
   getCorridorRates,
   vitaDiagnostic,
   vitaBalance,
+  stellarBalance,
   testPush,
   getMemoryStats,
   resetUserTokenVersion,
@@ -360,6 +361,7 @@ router.get('/analytics', getGlobalAnalytics);
  */
 router.get('/vita/diagnostic', vitaDiagnostic);
 router.get('/vita/balance',    vitaBalance);
+router.get('/stellar/balance', stellarBalance);
 
 // ─── SpA Chile — Configuración payin manual CLP ─────────────────────────
 
