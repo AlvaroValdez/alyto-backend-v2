@@ -5,14 +5,16 @@
  * compras de USDC en Binance P2P, exchanges, transferencias bancarias, etc.
  *
  * Endpoints:
- *   POST /api/v1/admin/funding          — Registrar nuevo fondeo
- *   GET  /api/v1/admin/funding          — Listar fondeos con paginación y resumen
- *   GET  /api/v1/admin/funding/balance  — Balance estimado de liquidez por entidad
+ *   POST /api/v1/admin/funding           — Registrar nuevo fondeo
+ *   GET  /api/v1/admin/funding           — Listar fondeos con paginación y resumen
+ *   GET  /api/v1/admin/funding/balance   — Balance estimado de liquidez por entidad
+ *   GET  /api/v1/admin/funding/forecast  — Previsión USDC: balance Stellar vs compromisos pendientes
  */
 
-import mongoose          from 'mongoose';
-import FundingRecord     from '../models/FundingRecord.js';
-import Transaction       from '../models/Transaction.js';
+import mongoose               from 'mongoose';
+import FundingRecord          from '../models/FundingRecord.js';
+import Transaction            from '../models/Transaction.js';
+import { getStellarUSDCBalance } from '../services/stellarService.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -108,6 +110,15 @@ export async function createFunding(req, res) {
       registeredBy: req.user._id,
       status,
     });
+
+    // Cuando llega USDC confirmado, intentar liberar payouts en espera de liquidez
+    if (asset === 'USDC' && record.status === 'confirmed') {
+      setImmediate(() =>
+        retryPendingFundingTransactions(entity).catch((e) =>
+          console.error('[Funding] Auto-retry error post-fondeo:', e.message)
+        )
+      );
+    }
 
     return res.status(201).json({
       success:    true,
@@ -326,5 +337,160 @@ export async function getFundingBalance(req, res) {
   } catch (err) {
     console.error('[Funding] Error al calcular balance:', err);
     return res.status(500).json({ error: 'Error interno al calcular balance' });
+  }
+}
+
+// ─── Helpers internos ─────────────────────────────────────────────────────────
+
+/**
+ * Reintenta dispatchPayout en orden FIFO sobre todas las transacciones 'pending_funding'
+ * de una entidad. Se llama async (setImmediate) tras registrar nuevo fondeo USDC confirmado.
+ *
+ * Se detiene en la primera tx que queda en pending_funding (balance aún insuficiente).
+ */
+async function retryPendingFundingTransactions(entity) {
+  const pendingTxs = await Transaction.find(
+    { legalEntity: entity, status: 'pending_funding' },
+    null,
+    { sort: { createdAt: 1 } }
+  );
+
+  if (!pendingTxs.length) return;
+
+  console.log(`[Funding] Auto-retry: ${pendingTxs.length} tx(s) pending_funding para ${entity}`);
+
+  // Import dinámico para evitar dependencia circular en carga del módulo
+  const { dispatchPayout } = await import('./ipnController.js');
+
+  for (const tx of pendingTxs) {
+    console.log('[Funding] Auto-retry → dispatchPayout:', tx.alytoTransactionId);
+    try {
+      await dispatchPayout(tx);
+      // Si la tx sigue en pending_funding es que el saldo aún no alcanza — parar
+      if (tx.status === 'pending_funding') {
+        console.log('[Funding] Auto-retry: balance insuficiente, deteniendo cola FIFO');
+        break;
+      }
+    } catch (err) {
+      console.error('[Funding] Auto-retry error en dispatchPayout:', tx.alytoTransactionId, err.message);
+      break;
+    }
+  }
+}
+
+// ─── GET /api/v1/admin/funding/forecast ──────────────────────────────────────
+
+/**
+ * Previsión de liquidez USDC para una entidad.
+ *
+ * Combina el balance real en Stellar (Horizon) con los compromisos en vuelo
+ * y las transacciones bloqueadas por falta de fondos, devolviendo un diagnóstico
+ * accionable con nivel de alerta y monto mínimo de fondeo recomendado.
+ *
+ * Query params:
+ *   entity — 'SRL' (default) | 'LLC'
+ *
+ * alertLevel:
+ *   'ok'       — balance suficiente por encima del umbral
+ *   'warning'  — balance positivo pero bajo (< USDC_LOW_BALANCE_THRESHOLD)
+ *   'critical' — balance insuficiente para cubrir transacciones en pending_funding
+ */
+export async function getUSDCForecast(req, res) {
+  try {
+    const entity    = req.query.entity ?? 'SRL';
+    const threshold = parseFloat(process.env.USDC_LOW_BALANCE_THRESHOLD ?? '200');
+
+    if (!['LLC', 'SRL'].includes(entity)) {
+      return res.status(400).json({ error: 'entity inválido para forecast. Usar: SRL | LLC' });
+    }
+
+    const stellarPubKey = entity === 'SRL'
+      ? process.env.STELLAR_SRL_PUBLIC_KEY
+      : process.env.STELLAR_LLC_PUBLIC_KEY;
+
+    // Balance real en Stellar (cacheado 30s en stellarService)
+    const stellarBalance = await getStellarUSDCBalance(stellarPubKey);
+
+    // Consultas paralelas: in-flight + pending_funding
+    const [inflightAgg, pendingTxs] = await Promise.all([
+      Transaction.aggregate([
+        {
+          $match: {
+            legalEntity: entity,
+            status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
+          },
+        },
+        {
+          $group: {
+            _id:   null,
+            total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Transaction.find(
+        { legalEntity: entity, status: 'pending_funding' },
+        'alytoTransactionId digitalAssetAmount statusReason destinationCountry corridorId createdAt'
+      ).sort({ createdAt: 1 }).lean(),
+    ]);
+
+    const inflight      = inflightAgg[0]?.total ?? 0;
+    const inflightCount = inflightAgg[0]?.count ?? 0;
+
+    // +1 USDC por tx como reserva para fees de red Stellar (mismo que tryOwlPayV2)
+    const pendingNeeds = pendingTxs.reduce(
+      (sum, tx) => sum + (tx.digitalAssetAmount ?? 0) + 1,
+      0
+    );
+
+    const availableNow  = Math.max(0, stellarBalance - inflight);
+    const gap           = availableNow - pendingNeeds; // negativo = déficit
+    const fundingNeeded = gap < 0 ? parseFloat(Math.abs(gap).toFixed(2)) : 0;
+
+    let alertLevel = 'ok';
+    if (gap < 0)                    alertLevel = 'critical';
+    else if (availableNow < threshold) alertLevel = 'warning';
+
+    const recommendation = fundingNeeded > 0
+      ? `Fondea la wallet Stellar ${entity} con al menos ${fundingNeeded.toFixed(2)} USDC para liberar ${pendingTxs.length} pago(s) en espera.`
+      : alertLevel === 'warning'
+        ? `Saldo bajo (${availableNow.toFixed(2)} USDC). Fondea antes de que lleguen nuevas transacciones.`
+        : `Liquidez suficiente (${availableNow.toFixed(2)} USDC disponibles).`;
+
+    return res.status(200).json({
+      entity,
+      alertLevel,
+      stellar: {
+        balance:   parseFloat(stellarBalance.toFixed(4)),
+        publicKey: stellarPubKey,
+        note:      'Balance en tiempo real vía Horizon (cache 30s)',
+      },
+      committed: {
+        amount: parseFloat(inflight.toFixed(4)),
+        count:  inflightCount,
+        note:   'USDC bloqueado en payouts en vuelo (payout_pending_usdc_send / payout_in_transit / payout_sent)',
+      },
+      availableNow: parseFloat(availableNow.toFixed(4)),
+      pendingFunding: {
+        needed: parseFloat(pendingNeeds.toFixed(4)),
+        count:  pendingTxs.length,
+        transactions: pendingTxs.map((t) => ({
+          id:          t.alytoTransactionId,
+          usdcNeeded:  parseFloat(((t.digitalAssetAmount ?? 0) + 1).toFixed(4)),
+          country:     t.destinationCountry,
+          corridor:    t.corridorId,
+          reason:      t.statusReason,
+          waitingSince: t.createdAt,
+        })),
+      },
+      gap:           parseFloat(gap.toFixed(4)),
+      fundingNeeded,
+      threshold,
+      recommendation,
+      generatedAt:   new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[Funding] Error al calcular USDC forecast:', err);
+    return res.status(500).json({ error: 'Error al obtener forecast USDC' });
   }
 }

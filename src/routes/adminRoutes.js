@@ -18,6 +18,7 @@
  *   POST  /funding                            — Registra fondeo de liquidez (USDC/P2P)
  *   GET   /funding                            — Lista fondeos paginados con resumen
  *   GET   /funding/balance                    — Balance estimado de liquidez por entidad
+ *   GET   /funding/forecast                   — Previsión USDC live: Stellar vs compromisos
  */
 
 import { Router }    from 'express';
@@ -52,6 +53,7 @@ import {
   createFunding,
   listFunding,
   getFundingBalance,
+  getUSDCForecast,
 } from '../controllers/fundingController.js';
 import {
   upsertExchangeRate,
@@ -299,6 +301,15 @@ router.get('/funding', listFunding);
  * Query: entity? — filtra por LLC | SpA | SRL
  */
 router.get('/funding/balance', getFundingBalance);
+
+/**
+ * GET /api/v1/admin/funding/forecast
+ * Previsión USDC en tiempo real: balance Stellar live vs compromisos en vuelo vs
+ * transacciones bloqueadas por liquidez insuficiente.
+ * Query: entity? — 'SRL' (default) | 'LLC'
+ * Responde: { alertLevel, stellar, committed, availableNow, pendingFunding, gap, fundingNeeded, recommendation }
+ */
+router.get('/funding/forecast', getUSDCForecast);
 
 // ─── Tasas de Cambio ──────────────────────────────────────────────────────────
 
