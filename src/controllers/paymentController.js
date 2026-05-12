@@ -668,8 +668,20 @@ export async function initCrossBorderPayment(req, res) {
   if (!beneficiaryData && !legacyBeneficiary) {
     return res.status(400).json({ error: 'Se requiere beneficiaryData o beneficiary.' });
   }
-  if (owlPayMethod && !['CIPS', 'WIRE'].includes(owlPayMethod)) {
-    return res.status(400).json({ error: 'owlPayMethod debe ser "CIPS" o "WIRE".' });
+  const VALID_OWLPAY_METHODS = new Set([
+    'CIPS', 'WIRE',                 // China
+    'PIX',                          // Brasil
+    'SPEI',                         // México
+    'SEPA',                         // Europa
+    'ACH', 'ACH_PUSH', 'FEDWIRE',  // EEUU
+    'NEQUI', 'BANK_TRANSFER',       // Colombia
+    'AANI', 'FTS',                  // UAE
+    'IMPS', 'NEFT', 'RTGS',        // India
+    'CHATS', 'FPS',                 // Hong Kong
+  ]);
+  if (owlPayMethod && !VALID_OWLPAY_METHODS.has(owlPayMethod)) {
+    // Loggear pero no rechazar — Harbor seleccionará el mejor método disponible
+    console.warn('[crossborder] owlPayMethod desconocido recibido, se ignorará:', owlPayMethod);
   }
 
   // ── 2. Buscar corredor activo ─────────────────────────────────────────────

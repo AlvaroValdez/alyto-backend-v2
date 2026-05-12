@@ -608,7 +608,18 @@ const transactionSchema = new Schema(
      */
     owlPayMethod: {
       type:    String,
-      enum:    ['CIPS', 'WIRE', null],
+      enum:    [
+        'CIPS', 'WIRE',                  // China
+        'PIX',                           // Brasil
+        'SPEI',                          // México
+        'SEPA',                          // Europa (SEPA)
+        'ACH', 'ACH_PUSH', 'FEDWIRE',   // EEUU
+        'NEQUI', 'BANK_TRANSFER',        // Colombia
+        'AANI', 'FTS',                   // UAE
+        'IMPS', 'NEFT', 'RTGS',         // India
+        'CHATS', 'FPS',                  // Hong Kong
+        null,
+      ],
       default: null,
     },
     /** Expiración de la quote de OwlPay Harbor */
