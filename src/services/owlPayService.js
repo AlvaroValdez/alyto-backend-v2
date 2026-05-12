@@ -490,6 +490,43 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
         bank_name:      get('bank_name') ?? '',
       };
     }
+    case 'GB':
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_number:  must('account_number'),
+        sort_code:       must('sort_code'),
+        bank_name:       get('bank_name') ?? '',
+      };
+
+    case 'US':
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_number:  must('account_number'),
+        routing_number:  must('routing_number'),
+        account_type:    get('account_type') ?? 'checking',
+        bank_name:       get('bank_name') ?? '',
+      };
+
+    case 'AE':
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_number:  get('iban') ?? must('account_number'),
+        bank_name:       get('bank_name') ?? '',
+      };
+
+    case 'SG':
+    case 'JP':
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_number:  must('account_number'),
+        swift_code:      must('swift_code'),
+        bank_name:       must('bank_name'),
+      };
+
     default:
       return {
         account_number:      must('account_number'),

@@ -448,6 +448,22 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
       account_number:      accountNum,
     };
 
+  } else if (dest === 'BR') {
+    beneficiary_info   = { beneficiary_name: beneficiaryName };
+    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'BR');
+
+  } else if (dest === 'MX') {
+    beneficiary_info   = { beneficiary_name: beneficiaryName };
+    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'MX');
+
+  } else if (dest === 'IN') {
+    beneficiary_info   = { beneficiary_name: beneficiaryName };
+    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'IN');
+
+  } else if (['GB', 'US', 'AE', 'SG', 'JP', 'HK'].includes(dest)) {
+    beneficiary_info   = { beneficiary_name: beneficiaryName };
+    payout_instrument  = buildPayoutInstrument(rawBeneficiary, dest);
+
   } else {
     // Generic: address + SWIFT (same shape as CN but without strict required checks)
     const street = get('street', 'address', 'direccion') ?? 'N/A';
