@@ -23,46 +23,31 @@ import TransactionConfig from '../src/models/TransactionConfig.js';
 await mongoose.connect(process.env.MONGODB_URI);
 console.log('[fix-harbor-minimums] Conectado a MongoDB\n');
 
-// ── 1. Corredores SRL/BOB via Harbor — mínimo $30 USD ─────────────────────────
-const srlBobCorridors = [
-  'bo-eu-srl', 'bo-ae-srl', 'bo-cn-srl', 'bo-gb-srl',  // seedCorredoresGlobales (campo incorrecto)
-  'bo-au',                                               // seedCorredores (300 BOB estático)
-  'bo-gb',                                               // seedCorredores (2200 BOB estático)
-  'bo-za',                                               // seedCorredores (300 BOB, inactivo)
-  'bo-us-owlpay',                                        // seedCorredores (300 BOB estático)
-  'bo-eu',                                               // seedCorredores LLC/BOB (50 BOB)
-  'bo-mx-llc',                                           // seedCorredores LLC/BOB (50 BOB)
-  'bo-br-llc',                                           // seedCorredores LLC/BOB (50 BOB)
-];
-
+// ── 1. Todos los corredores SRL+LLC/BOB via Harbor — mínimo $30 USD ───────────
+// Aplica a cualquier corredor owlPay con origen BOB, sin excepción.
+// Harbor confirma $30 USD como mínimo retail para todos los corredores BOB.
 const r1 = await TransactionConfig.updateMany(
-  { corridorId: { $in: srlBobCorridors } },
+  { payoutMethod: 'owlPay', originCurrency: 'BOB' },
   { $set: { minAmountUSD: 30, minAmountOrigin: 1 } },
 );
-console.log(`[SRL/BOB Harbor]   ${r1.modifiedCount}/${r1.matchedCount} corredores actualizados → minAmountUSD: 30`);
-for (const id of srlBobCorridors) {
-  const doc = await TransactionConfig.findOne({ corridorId: id }).select('corridorId minAmountUSD minAmountOrigin isActive').lean();
-  if (doc) {
-    console.log(`  ${doc.isActive ? '🟢' : '🔴'} ${doc.corridorId.padEnd(15)} minAmountUSD=${doc.minAmountUSD}  minAmountOrigin=${doc.minAmountOrigin}`);
-  } else {
-    console.log(`  ⚠️  ${id} — no encontrado en DB`);
-  }
+console.log(`[SRL+LLC/BOB Harbor] ${r1.modifiedCount} corredores actualizados → minAmountUSD: 30`);
+const bobDocs = await TransactionConfig.find({ payoutMethod: 'owlPay', originCurrency: 'BOB' })
+  .select('corridorId minAmountUSD minAmountOrigin isActive').sort({ corridorId: 1 }).lean();
+for (const doc of bobDocs) {
+  console.log(`  ${doc.isActive ? '🟢' : '🔴'} ${doc.corridorId.padEnd(18)} minAmountUSD=${doc.minAmountUSD}  minAmountOrigin=${doc.minAmountOrigin}`);
 }
 
-// ── 2. Corredores LLC/USD via Harbor — mínimo $500 USD ────────────────────────
-// Estos ya tienen minAmountOrigin: 500 correcto; solo aseguramos minAmountUSD
-const llcUsdCorridors = ['us-au', 'us-gb', 'us-cn'];
-
+// ── 2. Todos los corredores LLC/USD via Harbor — mínimo $500 USD ──────────────
+// Harbor End User Model: $500 mínimo para todos los corredores USD institucionales.
 const r2 = await TransactionConfig.updateMany(
-  { corridorId: { $in: llcUsdCorridors } },
-  { $set: { minAmountUSD: 500 } },
+  { payoutMethod: 'owlPay', originCurrency: 'USD' },
+  { $set: { minAmountUSD: 500, minAmountOrigin: 500 } },
 );
-console.log(`\n[LLC/USD Harbor]   ${r2.modifiedCount}/${r2.matchedCount} corredores actualizados → minAmountUSD: 500`);
-for (const id of llcUsdCorridors) {
-  const doc = await TransactionConfig.findOne({ corridorId: id }).select('corridorId minAmountUSD minAmountOrigin isActive').lean();
-  if (doc) {
-    console.log(`  ${doc.isActive ? '🟢' : '🔴'} ${doc.corridorId.padEnd(15)} minAmountUSD=${doc.minAmountUSD}  minAmountOrigin=${doc.minAmountOrigin}`);
-  }
+console.log(`\n[LLC/USD Harbor]   ${r2.modifiedCount} corredores actualizados → minAmountUSD: 500`);
+const usdDocs = await TransactionConfig.find({ payoutMethod: 'owlPay', originCurrency: 'USD' })
+  .select('corridorId minAmountUSD minAmountOrigin isActive').sort({ corridorId: 1 }).lean();
+for (const doc of usdDocs) {
+  console.log(`  ${doc.isActive ? '🟢' : '🔴'} ${doc.corridorId.padEnd(15)} minAmountUSD=${doc.minAmountUSD}  minAmountOrigin=${doc.minAmountOrigin}`);
 }
 
 // ── 3. Corredores SpA/CLP via Harbor — mínimo $500 USD ────────────────────────
