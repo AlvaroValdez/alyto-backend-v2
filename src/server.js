@@ -149,10 +149,13 @@ if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
   process.exit(1);
 }
 
+const ALYTO_DOMAIN_RE = /^https:\/\/[a-z0-9-]+\.alyto\.app$/;
+
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (ALYTO_DOMAIN_RE.test(origin)) return callback(null, true);
     console.warn('[CORS] Blocked origin:', origin);
     return callback(new Error(`CORS: origen no permitido (${origin})`));
   },
