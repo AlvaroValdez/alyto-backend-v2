@@ -34,7 +34,7 @@ import {
 import { protect, requireEntity, requireKycApproved }      from '../middlewares/authMiddleware.js';
 import { checkSanctions }                                  from '../middlewares/checkSanctions.js';
 import { idempotencyCheck }                                from '../middlewares/idempotency.js';
-import { getPublicExchangeRate }                           from '../controllers/exchangeRateController.js';
+import { getPublicExchangeRate, getPublicExchangeRates }   from '../controllers/exchangeRateController.js';
 import { getSpAPayinInstructions }                         from '../controllers/spaConfigController.js';
 import { generateBusinessInvoiceForTransaction }           from '../controllers/businessInvoiceController.js';
 import { checkBusinessKYB }                                from '../middlewares/checkBusinessKYB.js';
@@ -94,10 +94,18 @@ function captureRawBody(req, res, next) {
 router.get('/quote', protect, getQuote);
 
 /**
+ * GET /api/v1/payments/exchange-rates
+ *
+ * Lista todas las tasas de cambio activas (sin auth).
+ * El frontend lo usa en Step1Amount para mostrar la tasa BOB/USDT vigente.
+ * Debe ir ANTES de /:pair para evitar colisión de rutas.
+ */
+router.get('/exchange-rates', getPublicExchangeRates);
+
+/**
  * GET /api/v1/payments/exchange-rates/:pair
  *
- * Tasa de cambio pública para un par de monedas (sin auth).
- * Permite al frontend mostrar la tasa BOB/USDT en tiempo real.
+ * Tasa de cambio pública para un par específico (sin auth).
  * Fallback a .env si el par no existe en MongoDB.
  *
  * Params: pair — "BOB-USDT" | "BOB-USD" | "CLP-USD"

@@ -40,6 +40,7 @@ import {
   getRequirementsSchema,
   createTransfer as createOwlPayTransfer,
   buildPayoutInstrument,
+  resolveHarborCountry,
 } from '../services/owlPayService.js';
 import FundingRecord from '../models/FundingRecord.js';
 import {
@@ -457,11 +458,17 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
     const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
     const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
 
+    // EU no es válido en Harbor — resolver con IBAN si disponible
+    const iban        = get('iban', 'account_number');
+    const resolvedDest = resolveHarborCountry(dest, iban);
+
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, resolvedDest);
+
     beneficiary_info = {
       beneficiary_name:    beneficiaryName,
       beneficiary_address: {
         street,
-        country: dest,
+        country: resolvedDest,
         ...(city   ? { city }                     : {}),
         ...(state  ? { state_province: state }    : {}),
         ...(postal ? { postal_code:    postal }   : {}),
@@ -469,8 +476,6 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
       ...(dob         ? { beneficiary_dob:           dob         } : {}),
       ...(idDocNumber ? { beneficiary_id_doc_number: idDocNumber } : {}),
     };
-
-    payout_instrument = buildPayoutInstrument(rawBeneficiary, dest);
   }
 
   console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, beneficiaryName, payout_instrument });
@@ -601,7 +606,7 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
 
     const quote = await createQuote({
       source_amount:              netAmountUSD,
-      destination_country:        corridor.destinationCountry,
+      destination_country:        resolveHarborCountry(corridor.destinationCountry),
       destination_currency:       corridor.destinationCurrency,
       destination_payment_method: 'bank_transfer',
       source_chain:               process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',

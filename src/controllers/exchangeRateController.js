@@ -216,6 +216,25 @@ export async function updateCLPBOBRate(req, res) {
   }
 }
 
+// ─── GET /api/v1/payments/exchange-rates ─────────────────────────────────────
+
+/**
+ * Lista todas las tasas de cambio activas (endpoint público, sin auth).
+ * El frontend lo usa en Step1Amount para mostrar la tasa BOB/USDT vigente.
+ * @returns {{ rates: Array<{ pair, rate, source, updatedAt }> }}
+ */
+export async function getPublicExchangeRates(req, res) {
+  try {
+    const rates = await ExchangeRate.find({})
+      .select('pair rate source updatedAt')
+      .sort({ pair: 1 })
+      .lean();
+    return res.json({ rates });
+  } catch (err) {
+    return res.status(500).json({ error: 'Error al obtener tasas de cambio.' });
+  }
+}
+
 // ─── GET /api/v1/payments/exchange-rates/:pair ───────────────────────────────
 
 /**

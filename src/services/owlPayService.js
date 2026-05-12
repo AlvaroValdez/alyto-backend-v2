@@ -384,6 +384,20 @@ export function getCachedRequirementsByCountry(destCountry) {
 }
 
 /**
+ * Mapea 'EU' a un país SEPA concreto para Harbor.
+ * Si se proporciona un IBAN, extrae el país de los primeros 2 chars (ISO-2).
+ * Fallback: 'DE' (proxy para quote cuando no hay IBAN todavía).
+ * Harbor no acepta 'EU' como country code — necesita un ISO-2 real.
+ */
+export function resolveHarborCountry(destCountry, ibanOrAccount) {
+  if ((destCountry ?? '').toUpperCase() !== 'EU') return destCountry;
+  if (ibanOrAccount && /^[A-Z]{2}\d/i.test(String(ibanOrAccount).trim())) {
+    return String(ibanOrAccount).trim().slice(0, 2).toUpperCase();
+  }
+  return 'DE';
+}
+
+/**
  * Construye el payout_instrument por país según la firma de Harbor.
  * Lee de beneficiary.dynamicFields (o propiedades top-level como fallback).
  */
@@ -461,6 +475,21 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
         in_account_number:   must('in_account_number'),
         in_ifsc_code:        must('in_ifsc_code'),
       };
+    case 'EU':
+    case 'DE': case 'FR': case 'ES': case 'IT': case 'NL':
+    case 'BE': case 'PT': case 'AT': case 'PL': case 'SE':
+    case 'CH': case 'NO': case 'DK': case 'FI': case 'IE': {
+      // SEPA — Harbor acepta IBAN + BIC/SWIFT
+      const iban = get('iban') ?? get('account_number');
+      const bic  = get('bic')  ?? get('swift_code');
+      return {
+        account_holder_name: get('account_holder_name')
+                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_number: iban ?? must('iban', 'IBAN'),
+        swift_code:     bic  ?? must('bic',  'BIC/SWIFT'),
+        bank_name:      get('bank_name') ?? '',
+      };
+    }
     default:
       return {
         account_number:      must('account_number'),
@@ -492,7 +521,14 @@ export async function createHarborTransfer({
   if (!beneficiary)        throw new Error('[Harbor] beneficiary requerido.');
   if (!destCountry)        throw new Error('[Harbor] destCountry requerido.');
 
-  const payoutInstrument = buildPayoutInstrument(beneficiary, destCountry);
+  // EU no es válido para Harbor — resolveHarborCountry extrae el país del IBAN si disponible
+  const df         = beneficiary?.dynamicFields instanceof Map
+                   ? Object.fromEntries(beneficiary.dynamicFields.entries())
+                   : (beneficiary?.dynamicFields ?? {});
+  const iban       = df.iban ?? df.account_number ?? beneficiary?.iban ?? beneficiary?.account_number ?? null;
+  const resolvedCountry = resolveHarborCountry(destCountry, iban);
+
+  const payoutInstrument = buildPayoutInstrument(beneficiary, resolvedCountry);
 
   const payload = {
     on_behalf_of:              customerUuid,
@@ -509,7 +545,7 @@ export async function createHarborTransfer({
         beneficiary_address: {
           street:  beneficiary.address?.street  ?? beneficiary.address     ?? 'N/A',
           city:    beneficiary.address?.city    ?? 'N/A',
-          country: (destCountry ?? '').toUpperCase(),
+          country: resolvedCountry,
         },
       },
       payout_instrument:  payoutInstrument,

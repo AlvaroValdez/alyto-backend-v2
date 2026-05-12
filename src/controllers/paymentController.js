@@ -61,6 +61,7 @@ import {
   getHarborTransferRequirements,
   getHarborMethodsWithSchemas,
   getCustomerUuid,
+  resolveHarborCountry,
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
@@ -1519,7 +1520,7 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
       sourceAmount:   quote.digitalAssetAmount,
       sourceCurrency: 'USDC',
       sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-      destCountry:    corridor.destinationCountry,
+      destCountry:    resolveHarborCountry(corridor.destinationCountry),
       destCurrency:   corridor.destinationCurrency,
       customerUuid,
       returnAll:      true,
@@ -1595,7 +1596,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
         sourceAmount:   usdcTransit,
         sourceCurrency: 'USDC',
         sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
-        destCountry:    corridor.destinationCountry,
+        destCountry:    resolveHarborCountry(corridor.destinationCountry),
         destCurrency:   corridor.destinationCurrency,
         customerUuid,
         returnAll:      true,
