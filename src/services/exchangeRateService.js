@@ -60,5 +60,27 @@ export async function resolveMinAmountOrigin(corridor) {
 
   if (corridor.originCurrency === 'USD') return corridor.minAmountUSD;
 
+  if (corridor.originCurrency === 'CLP') {
+    const clpRate = await getCLPRate();
+    return Math.ceil(corridor.minAmountUSD * clpRate);
+  }
+
   return corridor.minAmountOrigin ?? 1;
+}
+
+/**
+ * Obtiene la tasa CLP/USD (CLP por 1 USD) desde MongoDB.
+ * Busca el par 'CLP-USDT' (proxy USD dado que USDT ≈ USD).
+ *
+ * @returns {Promise<number>}
+ */
+export async function getCLPRate() {
+  try {
+    const record = await ExchangeRate.findOne({ pair: 'CLP-USDT' })
+      .sort({ updatedAt: -1 });
+    if (record) return record.rate;
+  } catch (err) {
+    console.warn('[getCLPRate] Error consultando MongoDB, usando fallback .env:', err.message);
+  }
+  return parseFloat(process.env.CLP_USD_RATE ?? '966');
 }

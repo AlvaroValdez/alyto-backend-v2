@@ -14,8 +14,12 @@ const owlPayBase = {
   fixedFee:               300,
   payoutFeeFixed:         0,
   profitRetentionPercent: 0.5,
-  minimumAmount:          500000,
-  maximumAmount:          50000000,
+  // Harbor mínimo $500 USD para SpA/CLP (End User Model)
+  // minAmountOrigin = 483 000 CLP ≈ 500 USD × 966 CLP/USD (fallback estático)
+  // resolveMinAmountOrigin() usará minAmountUSD dinámicamente en runtime
+  minAmountUSD:           500,
+  minAmountOrigin:        483000,
+  maxAmountOrigin:        null,
 }
 
 const corridors = [
@@ -58,6 +62,8 @@ const corridors = [
   },
 
   // ── SRL (BO) → Global via OwlPay ──────────────────────────────────────────
+  // Harbor mínimo $30 USD para SRL retail (confirmado para CN/NG, aplicado a todos)
+  // resolveMinAmountOrigin() convierte dinámicamente con tasa BOB/USDC live
   {
     ...owlPayBase,
     corridorId:          'bo-eu-srl',
@@ -67,7 +73,8 @@ const corridors = [
     originCurrency:      'BOB',
     destinationCurrency: 'EUR',
     payinMethod:         'manual',
-    minimumAmount:       500,
+    minAmountUSD:        30,
+    minAmountOrigin:     1,
     fixedFee:            0,
   },
   {
@@ -79,7 +86,8 @@ const corridors = [
     originCurrency:      'BOB',
     destinationCurrency: 'CNY',
     payinMethod:         'manual',
-    minimumAmount:       500,
+    minAmountUSD:        30,
+    minAmountOrigin:     1,
     fixedFee:            0,
   },
   {
@@ -91,7 +99,8 @@ const corridors = [
     originCurrency:      'BOB',
     destinationCurrency: 'AED',
     payinMethod:         'manual',
-    minimumAmount:       500,
+    minAmountUSD:        30,
+    minAmountOrigin:     1,
     fixedFee:            0,
   },
   {
@@ -103,7 +112,8 @@ const corridors = [
     originCurrency:      'BOB',
     destinationCurrency: 'GBP',
     payinMethod:         'manual',
-    minimumAmount:       500,
+    minAmountUSD:        30,
+    minAmountOrigin:     1,
     fixedFee:            0,
   },
 ]
