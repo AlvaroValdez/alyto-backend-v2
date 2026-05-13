@@ -27,7 +27,7 @@ import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
 import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
 import { calculateQuote }  from './quoteCalculator.js';
-import { getHarborQuote, getCustomerUuid } from './owlPayService.js';
+import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -294,10 +294,13 @@ async function computeQuote(state) {
     // ── 2a. Harbor (owlPay) — tasa real desde Harbor, sin Vita ──────────────
     if (corridor.payoutMethod === 'owlPay') {
       const customerUuid = getCustomerUuid(corridor.legalEntity ?? 'SRL');
+      // 'EU' no es un código ISO-2 válido para Harbor — resolveHarborCountry
+      // lo convierte a 'DE' (u otro país SEPA extraído del IBAN si disponible)
+      const harborDestCountry = resolveHarborCountry(destinationCountry);
       let harborRateData;
       try {
         harborRateData = await getHarborIndicativeRate(
-          destinationCountry,
+          harborDestCountry,
           corridor.destinationCurrency,
           customerUuid,
         );
