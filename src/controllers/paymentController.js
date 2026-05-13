@@ -2983,14 +2983,15 @@ export async function getHarborMethodsRequirements(req, res) {
   }
 
   try {
+    const resolvedDestCountry = resolveHarborCountry(destCountry);
     const methods = await getHarborMethodsWithSchemas({
-      destCountry,
+      destCountry: resolvedDestCountry,
       destCurrency,
       amountUSDC: amountUSDC ?? '100',
       customerUuid,
     });
     return res.json({
-      destCountry:  destCountry.toUpperCase(),
+      destCountry:  resolvedDestCountry.toUpperCase(),
       destCurrency: destCurrency.toUpperCase(),
       methods,
     });
