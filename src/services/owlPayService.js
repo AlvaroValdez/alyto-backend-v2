@@ -453,11 +453,13 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
       if (card) return { mx_debit_card_number: card };
       throw new Error(`[Harbor] Missing required field for MX: mx_clabe o mx_debit_card_number`);
     }
+    // CO via Harbor no está operativo — corredor CL→CO/BO→CO usa Vita Wallet.
+    // Se mantiene este case para soportar Harbor CO en el futuro si se activa.
     case 'CO':
       return {
-        co_bank_code:     must('co_bank_code'),
+        co_bank_code:      must('co_bank_code'),
         co_account_number: must('co_account_number'),
-        co_account_type:  must('co_account_type'),
+        co_account_type:   must('co_account_type'),
       };
     case 'HK':
       return {
@@ -504,13 +506,17 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
         account_type:    get('account_type') ?? 'checking',
       };
 
-    case 'AE':
+    case 'AE': {
+      // UAE — IBAN-based; bank_name solo si fue capturado (evita string vacío que
+      // algunos schemas Harbor rechazan en additionalProperties:false).
+      const bankName = get('bank_name');
       return {
         account_holder_name: get('account_holder_name')
                            ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-        account_number:  get('iban') ?? must('account_number'),
-        bank_name:       get('bank_name') ?? '',
+        account_number:      get('iban') ?? must('account_number'),
+        ...(bankName ? { bank_name: bankName } : {}),
       };
+    }
 
     case 'SG':
     case 'JP':
