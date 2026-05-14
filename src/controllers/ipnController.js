@@ -1884,9 +1884,37 @@ export async function handleOwlPayIPN(req, res) {
   }
 
   const { event, data } = req.body ?? {};
-  const isV2      = typeof event === 'string' && event.startsWith('transfer.');
-  const isV1      = typeof event === 'string' && event.startsWith('disbursement.');
-  const eventKind = isV2 ? 'v2' : isV1 ? 'v1' : 'unknown';
+  const isV2       = typeof event === 'string' && event.startsWith('transfer.');
+  const isV1       = typeof event === 'string' && event.startsWith('disbursement.');
+  const isCustomer = typeof event === 'string' && event.startsWith('customer.');
+  const eventKind  = isV2 ? 'v2' : isV1 ? 'v1' : isCustomer ? 'customer' : 'unknown';
+
+  // ── Customer events (KYC) — no asociadas a transacción específica ────────
+  // Per Harbor docs: customer.kyc_approved | customer.kyc_rejected
+  // Aplican al Customer (AV Finance LLC). Si KYC rechazado → bloqueo global.
+  if (isCustomer) {
+    const customerUuid = data?.customer_uuid ?? data?.uuid ?? data?.id;
+    console.info('[Alyto IPN/OwlPay] Customer event:', {
+      event, customerUuid, status: data?.status,
+    });
+    if (event === 'customer.kyc_rejected') {
+      console.error('[Alyto IPN/OwlPay] ⚠️ CUSTOMER KYC REJECTED', {
+        customerUuid,
+        reason: data?.failure_reason ?? data?.rejection_reason ?? 'sin detalle',
+      });
+      try {
+        await sendRawEmail(
+          process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+          `🚨 CRÍTICO — Harbor Customer KYC RECHAZADO`,
+          `<p>Harbor rechazó el KYC del Customer (AV Finance LLC).</p>` +
+          `<p>UUID: <strong>${customerUuid ?? 'desconocido'}</strong></p>` +
+          `<p>Motivo: ${data?.failure_reason ?? 'no especificado'}</p>` +
+          `<p><strong>Bloqueo total de transacciones Harbor</strong> hasta resolver con OwlPay support.</p>`,
+        );
+      } catch (e) { console.error('[OwlPay IPN] Error email admin (kyc rejected):', e.message); }
+    }
+    return res.status(200).json({ received: true, event });
+  }
 
   const transferId            = data?.id ?? data?.transfer_id ?? data?.uuid;
   const externalReference     = data?.external_reference;                        // our ALY-* ID
