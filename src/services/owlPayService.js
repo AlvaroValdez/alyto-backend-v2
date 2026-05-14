@@ -398,149 +398,191 @@ export function resolveHarborCountry(destCountry, ibanOrAccount) {
 }
 
 /**
- * Construye el payout_instrument por país según la firma de Harbor.
- * Lee de beneficiary.dynamicFields (o propiedades top-level como fallback).
+ * Construye el payout_instrument por país/método según el schema oficial Harbor.
+ *
+ * TODOS los schemas validados via GET /v2/transfers/quotes/:id/requirements
+ * (ver scripts/inspect-harbor-all-schemas.js). Todos usan
+ * additionalProperties: false — cualquier campo extra produce error 2005.
+ *
+ * @param {object}      beneficiary    - rawBeneficiary con dynamicFields
+ * @param {string}      destCountry    - ISO alpha-2 país destino
+ * @param {string|null} paymentMethod  - método Harbor (SEPA/WIRE/CIPS/CHATS/...)
  */
-export function buildPayoutInstrument(beneficiary, destCountry) {
-  const df     = beneficiary?.dynamicFields instanceof Map
-               ? Object.fromEntries(beneficiary.dynamicFields.entries())
-               : (beneficiary?.dynamicFields ?? {});
-  const get    = (key) => df[key] ?? beneficiary?.[key] ?? null;
-  const must   = (key, label) => {
+export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = null) {
+  const df = beneficiary?.dynamicFields instanceof Map
+           ? Object.fromEntries(beneficiary.dynamicFields.entries())
+           : (beneficiary?.dynamicFields ?? {});
+  const get  = (key) => df[key] ?? beneficiary?.[key] ?? null;
+  const must = (key, label) => {
     const v = get(key);
     if (!v) throw new Error(`[Harbor] Missing required field for ${destCountry}: ${label ?? key}`);
     return v;
   };
+  const fallbackHolder = `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim();
+  const holder = () => get('account_holder_name') || fallbackHolder || must('account_holder_name');
 
   const country = (destCountry ?? '').toUpperCase();
+  const method  = (paymentMethod ?? '').toUpperCase();
 
   switch (country) {
+    // ── CN: CIPS, WIRE — mismo schema ────────────────────────────────────────
+    // required: account_holder_name, bank_name, account_number, swift_code
     case 'CN': {
-      // Harbor CN uses CIPS rails — requires SWIFT fields, not UnionPay/CNAPS.
-      // Per Harbor requirements schema (confirmed 2026-04-24 via /v2/transfers/quotes/:id/requirements)
-      const nameFromParts = `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim();
-      const holderName    = get('account_holder_name') ?? (nameFromParts || null);
       return {
-        account_holder_name: holderName ?? must('account_holder_name'),
+        account_holder_name: holder(),
         bank_name:           must('bank_name'),
         account_number:      must('account_number'),
         swift_code:          must('swift_code'),
       };
     }
-    case 'NG':
-      // Harbor NG uses standard keys (not ng_ prefixed).
-      // account_number = NUBAN (10 digits). Legacy ng_account_number accepted as fallback.
+
+    // ── NG: BANK-TRANSFER ─────────────────────────────────────────────────────
+    // required: account_holder_name, bank_name, account_number
+    case 'NG': {
       return {
-        account_holder_name: get('account_holder_name') ?? (
-          `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim() || null
-        ),
-        bank_name:    must('bank_name'),
-        account_number: get('account_number') ?? must('ng_account_number'),
+        account_holder_name: holder(),
+        bank_name:           must('bank_name'),
+        account_number:      get('account_number') ?? must('ng_account_number'),
       };
+    }
+
+    // ── BR: PIX ──────────────────────────────────────────────────────────────
+    // required: br_cpf (^\d{11}$)
+    // allowed adicionales: phone_number, email, br_pix_evp
     case 'BR': {
-      const pix = get('br_pix_key');
-      if (pix) return { br_pix_key: pix };
-      return {
-        br_bank_code:       must('br_bank_code'),
-        br_agency:          must('br_agency'),
-        br_account_number:  must('br_account_number'),
-      };
+      const result = { br_cpf: must('br_cpf') };
+      const phone = get('phone_number');
+      const email = get('email');
+      const evp   = get('br_pix_evp');
+      if (phone) result.phone_number = phone;
+      if (email) result.email        = email;
+      if (evp)   result.br_pix_evp   = evp;
+      return result;
     }
+
+    // ── MX: SPEI ─────────────────────────────────────────────────────────────
+    // required: mx_clabe (^[0-9]{18}$) — UNICO campo permitido
     case 'MX': {
-      const clabe = get('mx_clabe');
-      if (clabe) return { mx_clabe: clabe };
-      const card = get('mx_debit_card_number');
-      if (card) return { mx_debit_card_number: card };
-      throw new Error(`[Harbor] Missing required field for MX: mx_clabe o mx_debit_card_number`);
+      const clabe = must('mx_clabe');
+      if (!/^[0-9]{18}$/.test(clabe)) {
+        throw new Error('[Harbor] mx_clabe debe ser exactamente 18 dígitos');
+      }
+      return { mx_clabe: clabe };
     }
-    // CO via Harbor no está operativo — corredor CL→CO/BO→CO usa Vita Wallet.
-    // Se mantiene este case para soportar Harbor CO en el futuro si se activa.
+
+    // ── CO: Harbor inactivo — CL→CO/BO→CO usa Vita ───────────────────────────
     case 'CO':
       return {
         co_bank_code:      must('co_bank_code'),
         co_account_number: must('co_account_number'),
         co_account_type:   must('co_account_type'),
       };
-    case 'HK':
-      return {
+
+    // ── HK: CHATS (+ bank_code) / WIRE ────────────────────────────────────────
+    // CHATS required: account_holder_name, bank_name, account_number, swift_code, bank_code
+    // WIRE  required: account_holder_name, bank_name, account_number, swift_code
+    case 'HK': {
+      const base = {
+        account_holder_name: holder(),
+        bank_name:           must('bank_name'),
         account_number:      must('account_number'),
         swift_code:          must('swift_code'),
-        bank_name:           must('bank_name'),
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
       };
-    case 'IN':
-      // Harbor India: IMPS/NEFT — requiere IFSC (no SWIFT)
+      if (method === 'CHATS') {
+        base.bank_code = must('bank_code'); // ^\d{3}$
+      }
+      return base;
+    }
+
+    // ── IN: IMPS ─────────────────────────────────────────────────────────────
+    // required: bank_code (IFSC ^[A-Z]{4}0[A-Z0-9]{6}$), account_number
+    // No incluye account_holder_name en payout_instrument
+    case 'IN': {
       return {
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-        in_account_number:   must('in_account_number'),
-        in_ifsc_code:        must('in_ifsc_code'),
+        bank_code:      must('bank_code'),
+        account_number: must('account_number'),
       };
+    }
+
+    // ── EU SEPA/WIRE ─────────────────────────────────────────────────────────
+    // SEPA required: account_holder_name, account_number (IBAN)
+    // WIRE required: account_holder_name, bank_name, account_number, swift_code
     case 'EU':
     case 'DE': case 'FR': case 'ES': case 'IT': case 'NL':
     case 'BE': case 'PT': case 'AT': case 'PL': case 'SE':
     case 'CH': case 'NO': case 'DK': case 'FI': case 'IE': {
-      // SEPA (default EU) — schema validado: { account_holder_name, account_number (IBAN) }
-      // additionalProperties: false → solo estos 2 campos permitidos.
-      // Para WIRE EU, buildOwlPayBeneficiary construye el instrumento con bank_name + swift_code.
-      const iban       = get('iban') ?? get('account_number');
-      const holderName = get('account_holder_name')
-                      ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim();
+      const iban = get('iban') ?? get('account_number');
+      if (method === 'WIRE') {
+        return {
+          account_holder_name: holder(),
+          bank_name:           must('bank_name'),
+          account_number:      iban ?? must('iban', 'IBAN'),
+          swift_code:          get('bic') ?? must('swift_code', 'BIC/SWIFT'),
+        };
+      }
+      // SEPA default
       return {
-        account_holder_name: holderName || must('account_holder_name'),
+        account_holder_name: holder(),
         account_number:      iban ?? must('iban', 'IBAN'),
       };
     }
+
+    // ── GB: FPS ──────────────────────────────────────────────────────────────
+    // Corredor SRL no activo en sandbox — esperando LLC.
+    // Schema asumido basado en UK Faster Payments standard.
     case 'GB':
-      // UK Faster Payments — bank identificado por sort_code, bank_name no requerido
       return {
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-        account_number:  must('account_number'),
-        sort_code:       must('sort_code'),
+        account_holder_name: holder(),
+        account_number:      must('account_number'),
+        sort_code:           must('sort_code'),
       };
 
+    // ── US: ACH_PUSH, DOMESTIC_WIRE, FEDWIRE, WIRE — todos mismo schema ──────
+    // required: account_holder_name, bank_name, account_number, routing_number (^[0-9]{9}$)
     case 'US':
-      // ACH — bank identificado por routing_number, bank_name no requerido
       return {
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-        account_number:  must('account_number'),
-        routing_number:  must('routing_number'),
-        account_type:    get('account_type') ?? 'checking',
+        account_holder_name: holder(),
+        bank_name:           must('bank_name'),
+        account_number:      must('account_number'),
+        routing_number:      must('routing_number'),
       };
 
+    // ── AE: FTS, AANI, BANK-TRANSFER — mismo schema ──────────────────────────
+    // required: account_holder_name, phone_number (^\+971[0-9]{8,9}$),
+    //           swift_code, account_number (IBAN ^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$)
+    // NOTA: NO incluye bank_name
     case 'AE': {
-      // UAE — IBAN-based; bank_name solo si fue capturado (evita string vacío que
-      // algunos schemas Harbor rechazan en additionalProperties:false).
-      const bankName = get('bank_name');
       return {
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
+        account_holder_name: holder(),
+        phone_number:        must('phone_number'),
+        swift_code:          must('swift_code'),
         account_number:      get('iban') ?? must('account_number'),
-        ...(bankName ? { bank_name: bankName } : {}),
       };
     }
 
+    // ── SG: BANK-TRANSFER ────────────────────────────────────────────────────
+    // required: account_holder_name, bank_name, account_number, swift_code
     case 'SG':
+      return {
+        account_holder_name: holder(),
+        bank_name:           must('bank_name'),
+        account_number:      must('account_number'),
+        swift_code:          must('swift_code'),
+      };
+
+    // ── JP: BANK-TRANSFER ────────────────────────────────────────────────────
+    // Corredor SRL no activo en sandbox — esperando LLC.
+    // Schema asumido similar a SG (BANK-TRANSFER estándar).
     case 'JP':
       return {
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-        account_number:  must('account_number'),
-        swift_code:      must('swift_code'),
-        bank_name:       must('bank_name'),
+        account_holder_name: holder(),
+        bank_name:           must('bank_name'),
+        account_number:      must('account_number'),
+        swift_code:          must('swift_code'),
       };
 
     default:
-      return {
-        account_number:      must('account_number'),
-        swift_code:          must('swift_code'),
-        bank_name:           must('bank_name'),
-        account_holder_name: get('account_holder_name')
-                           ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim(),
-      };
+      throw new Error(`[Harbor] País destino no soportado en buildPayoutInstrument: ${country}`);
   }
 }
 

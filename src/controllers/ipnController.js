@@ -397,103 +397,40 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
 
   let beneficiary_info, payout_instrument;
 
-  if (dest === 'CN') {
-    const street = get('street', 'address', 'direccion') ?? 'N/A';
-    const city   = get('city', 'ciudad');
-    const state  = get('state_province', 'stateProvince', 'provincia');
-    const postal = get('postal_code', 'postalCode', 'codigoPostal');
+  // ─── Helpers ────────────────────────────────────────────────────────────
+  // Todos los schemas Harbor (validados vía GET /v2/transfers/quotes/:id/requirements)
+  // usan additionalProperties:false → cualquier campo extra produce error 2005.
+  // address required mínimo: street, country (postal_code SOLO requerido para EU).
+  const iban         = get('iban', 'account_number');
+  const resolvedDest = resolveHarborCountry(dest, iban);
 
-    beneficiary_info = {
-      beneficiary_name:    beneficiaryName,
-      beneficiary_address: {
-        street,
-        country: 'CN',
-        ...(city   ? { city }                     : {}),
-        ...(state  ? { state_province: state }    : {}),
-        ...(postal ? { postal_code:    postal }   : {}),
-      },
-    };
-
-    const holderName = get('account_holder_name', 'accountHolderName') ?? beneficiaryName;
-    const bankName   = get('bank_name', 'bankName');
-    const accountNum = get('account_number', 'accountNumber');
-    const swiftCode  = get('swift_code', 'swiftCode');
-
-    if (!bankName)   throw new Error('[Harbor] Missing bank_name for CN');
-    if (!accountNum) throw new Error('[Harbor] Missing account_number for CN');
-    if (!swiftCode)  throw new Error('[Harbor] Missing swift_code for CN');
-
-    payout_instrument = {
-      account_holder_name: holderName,
-      bank_name:           bankName,
-      account_number:      accountNum,
-      swift_code:          swiftCode,
-    };
-
-  } else if (dest === 'NG') {
-    beneficiary_info = {
-      beneficiary_name: beneficiaryName,
-    };
-
-    const holderName = get('account_holder_name', 'accountHolderName') ?? beneficiaryName;
-    const bankName   = get('bank_name', 'bankName');
-    const accountNum = get('account_number', 'accountNumber');
-
-    if (!bankName)   throw new Error('[Harbor] Missing bank_name for NG');
-    if (!accountNum) throw new Error('[Harbor] Missing account_number for NG');
-
-    payout_instrument = {
-      account_holder_name: holderName,
-      bank_name:           bankName,
-      account_number:      accountNum,
-    };
-
-  } else if (dest === 'BR') {
-    beneficiary_info   = { beneficiary_name: beneficiaryName };
-    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'BR');
-
-  } else if (dest === 'MX') {
-    beneficiary_info   = { beneficiary_name: beneficiaryName };
-    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'MX');
-
-  } else if (dest === 'IN') {
-    beneficiary_info   = { beneficiary_name: beneficiaryName };
-    payout_instrument  = buildPayoutInstrument(rawBeneficiary, 'IN');
-
-  } else if (['GB', 'US', 'AE', 'SG', 'JP', 'HK'].includes(dest)) {
-    beneficiary_info   = { beneficiary_name: beneficiaryName };
-    payout_instrument  = buildPayoutInstrument(rawBeneficiary, dest);
-
-  } else if (['EU', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'PT', 'AT', 'PL', 'SE', 'CH', 'NO', 'DK', 'FI', 'IE'].includes(dest)) {
-    // EU SEPA/WIRE — Schema validado vía GET /v2/transfers/quotes/:id/requirements
-    //
-    // beneficiary_info (additionalProperties:false):
-    //   required: beneficiary_name, beneficiary_address
-    //   NO permite beneficiary_dob ni beneficiary_id_doc_number
-    //
-    // beneficiary_address:
-    //   required: street, country, postal_code
-    //   nullable: city, state_province
-    //
-    // payout_instrument SEPA: { account_holder_name, account_number (IBAN) }
-    // payout_instrument WIRE: { account_holder_name, bank_name, account_number, swift_code }
-    const iban         = get('iban', 'account_number');
-    const resolvedDest = resolveHarborCountry(dest, iban);
-
+  const buildAddress = (countryCode, { requirePostal = false } = {}) => {
     const street = get('street', 'address', 'direccion');
     const city   = get('city', 'ciudad');
     const state  = get('state_province', 'stateProvince', 'provincia');
     const postal = get('postal_code', 'postalCode', 'codigoPostal');
+    if (!street) throw new Error(`[Harbor] street requerido en beneficiary_address (${countryCode})`);
+    if (requirePostal && !postal) {
+      throw new Error(`[Harbor] postal_code requerido en beneficiary_address (${countryCode})`);
+    }
+    return {
+      street,
+      country: countryCode,
+      ...(city   ? { city }                  : {}),
+      ...(state  ? { state_province: state } : {}),
+      ...(postal ? { postal_code: postal }   : {}),
+    };
+  };
 
-    if (!iban)   throw new Error('[Harbor] IBAN (account_number) requerido para EU');
-    if (!street) throw new Error('[Harbor] street requerido en beneficiary_address (EU)');
-    if (!postal) throw new Error('[Harbor] postal_code requerido en beneficiary_address (EU)');
-
+  // ─── EU SEPA/WIRE ───────────────────────────────────────────────────────
+  // Schema verificado. SEPA: { account_holder_name, account_number(IBAN) }.
+  // WIRE: + bank_name, swift_code. beneficiary_address requires postal_code.
+  if (['EU', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'PT', 'AT', 'PL', 'SE', 'CH', 'NO', 'DK', 'FI', 'IE'].includes(dest)) {
+    if (!iban) throw new Error('[Harbor] IBAN (account_number) requerido para EU');
     const holderName = get('account_holder_name') ?? beneficiaryName;
     if (!holderName) throw new Error('[Harbor] account_holder_name requerido para EU');
 
     const isWire = (paymentMethod ?? '').toUpperCase() === 'WIRE';
-
     if (isWire) {
       const bic      = get('bic', 'swift_code');
       const bankName = get('bank_name');
@@ -506,51 +443,132 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
         swift_code:          bic,
       };
     } else {
-      // SEPA: schema acepta SOLO estos 2 campos
-      payout_instrument = {
-        account_holder_name: holderName,
-        account_number:      iban,
-      };
+      payout_instrument = { account_holder_name: holderName, account_number: iban };
     }
-
-    beneficiary_info = {
-      beneficiary_name: beneficiaryName,
-      beneficiary_address: {
-        street,
-        country:     resolvedDest,
-        postal_code: postal,
-        ...(city  ? { city }                  : {}),
-        ...(state ? { state_province: state } : {}),
-      },
-    };
-
-  } else {
-    // Generic: address + SWIFT (same shape as CN but without strict required checks)
-    const street = get('street', 'address', 'direccion') ?? 'N/A';
-    const city   = get('city', 'ciudad');
-    const state  = get('state_province', 'stateProvince', 'provincia');
-    const postal = get('postal_code', 'postalCode', 'codigoPostal');
-
-    const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
-    const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
-
-    // Resolver country code concreto si llega como alias (sin IBAN en este branch)
-    const iban        = get('iban', 'account_number');
-    const resolvedDest = resolveHarborCountry(dest, iban);
-
-    payout_instrument = buildPayoutInstrument(rawBeneficiary, resolvedDest);
-
     beneficiary_info = {
       beneficiary_name:    beneficiaryName,
-      beneficiary_address: {
-        street,
-        country: resolvedDest,
-        ...(city   ? { city }                     : {}),
-        ...(state  ? { state_province: state }    : {}),
-        ...(postal ? { postal_code:    postal }   : {}),
-      },
-      ...(dob         ? { beneficiary_dob:           dob         } : {}),
-      ...(idDocNumber ? { beneficiary_id_doc_number: idDocNumber } : {}),
+      beneficiary_address: buildAddress(resolvedDest, { requirePostal: true }),
+    };
+
+  // ─── CN (CIPS, WIRE) ────────────────────────────────────────────────────
+  // Schema verificado. payout: 4 SWIFT fields. benef: name + address.
+  // dob/id_doc allowed but NOT required → omitidos para no inflar el payload.
+  } else if (dest === 'CN') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'CN', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('CN'),
+    };
+
+  // ─── NG (BANK-TRANSFER) ─────────────────────────────────────────────────
+  // Schema verificado. payout: name, bank_name, account_number. benef: name + address.
+  } else if (dest === 'NG') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'NG', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('NG'),
+    };
+
+  // ─── BR (PIX) ───────────────────────────────────────────────────────────
+  // Schema verificado. payout: br_cpf required + optional phone/email/EVP.
+  // benef: name + address (dob/id_doc allowed but no requeridos).
+  } else if (dest === 'BR') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'BR', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('BR'),
+    };
+
+  // ─── MX (SPEI) ──────────────────────────────────────────────────────────
+  // Schema verificado. payout: mx_clabe ONLY. benef: name + address + dob + id_doc (TODOS required).
+  } else if (dest === 'MX') {
+    const dob   = get('beneficiary_dob', 'dateOfBirth', 'dob');
+    const idDoc = get('beneficiary_id_doc_number', 'documentNumber', 'document_number', 'ci');
+    if (!dob)   throw new Error('[Harbor] beneficiary_dob requerido para MX SPEI');
+    if (!idDoc) throw new Error('[Harbor] beneficiary_id_doc_number requerido para MX SPEI');
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'MX', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:          beneficiaryName,
+      beneficiary_address:       buildAddress('MX'),
+      beneficiary_dob:           dob,
+      beneficiary_id_doc_number: idDoc,
+    };
+
+  // ─── AE (FTS, AANI, BANK-TRANSFER) ──────────────────────────────────────
+  // Schema verificado. payout: name, phone_number(+971), swift_code, account_number(IBAN).
+  // benef: name + address.
+  } else if (dest === 'AE') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'AE', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('AE'),
+    };
+
+  // ─── HK (CHATS, WIRE) ───────────────────────────────────────────────────
+  // Schema verificado. CHATS añade bank_code(3 dígitos). benef: name + address.
+  } else if (dest === 'HK') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'HK', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('HK'),
+    };
+
+  // ─── IN (IMPS) ──────────────────────────────────────────────────────────
+  // Schema verificado. payout: bank_code(IFSC) + account_number ONLY.
+  // benef: name + email + address + phone + dob + id_doc (TODOS required).
+  } else if (dest === 'IN') {
+    const email = get('beneficiary_email', 'email');
+    const phone = get('beneficiary_phone_number', 'phone_number', 'phone');
+    const dob   = get('beneficiary_dob', 'dateOfBirth', 'dob');
+    const idDoc = get('beneficiary_id_doc_number', 'documentNumber', 'document_number');
+    if (!email) throw new Error('[Harbor] beneficiary_email requerido para IN IMPS');
+    if (!phone) throw new Error('[Harbor] beneficiary_phone_number requerido para IN IMPS');
+    if (!dob)   throw new Error('[Harbor] beneficiary_dob requerido para IN IMPS');
+    if (!idDoc) throw new Error('[Harbor] beneficiary_id_doc_number requerido para IN IMPS');
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'IN', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:          beneficiaryName,
+      beneficiary_email:         email,
+      beneficiary_address:       buildAddress('IN'),
+      beneficiary_phone_number:  phone,
+      beneficiary_dob:           dob,
+      beneficiary_id_doc_number: idDoc,
+    };
+
+  // ─── US (ACH_PUSH, DOMESTIC_WIRE, FEDWIRE, WIRE) ────────────────────────
+  // Schema verificado. payout: name, bank_name, account_number, routing_number.
+  // benef: name + address (ACH_PUSH solo requiere name pero incluir address es válido).
+  } else if (dest === 'US') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'US', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('US'),
+    };
+
+  // ─── SG (BANK-TRANSFER) ─────────────────────────────────────────────────
+  // Schema verificado. payout: 4 SWIFT fields. benef: name + address.
+  } else if (dest === 'SG') {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, 'SG', paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress('SG'),
+    };
+
+  // ─── JP, GB (corredores aún no activos para SRL — esperan LLC) ──────────
+  // Schemas asumidos (SRL no tiene acceso al corredor en Harbor sandbox).
+  } else if (['JP', 'GB'].includes(dest)) {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, dest, paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress(dest),
+    };
+
+  // ─── Default / país no mapeado ──────────────────────────────────────────
+  } else {
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, resolvedDest, paymentMethod);
+    beneficiary_info  = {
+      beneficiary_name:    beneficiaryName,
+      beneficiary_address: buildAddress(resolvedDest),
     };
   }
 
