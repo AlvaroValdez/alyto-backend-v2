@@ -586,8 +586,20 @@ const transactionSchema = new Schema(
         status:             { type: String, trim: true },
       }, { _id: false }),
     },
-    /** Mensaje de error si status = 'failed' */
+    /** Mensaje de error técnico — visible para admin / Sentry / Ledger */
     failureReason: {
+      type: String,
+    },
+    /** Mensaje user-friendly — visible al usuario final en su historial */
+    userFailureReason: {
+      type: String,
+    },
+    /** Acción sugerida al usuario para resolver el fallo */
+    userFailureAction: {
+      type: String,
+    },
+    /** Categoría del error (INVALID_POSTAL_CODE, INVALID_CPF, etc.) — para analytics/UI */
+    failureCategory: {
       type: String,
     },
     /** Razón del estado actual — visible en admin, no al usuario final */

@@ -49,6 +49,7 @@ import {
   getStellarUSDCBalance,
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
+import { mapHarborError } from '../utils/harborErrorMapper.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
@@ -1076,25 +1077,36 @@ export async function dispatchPayout(transaction) {
     try {
       await tryOwlPayV2(transaction, corridor, _netAmountUSD);
     } catch (err) {
+      // Mapear el error de Harbor a mensajes admin + usuario accionables
+      const mapped = mapHarborError(err);
+
       console.error('[Alyto Payout] tryOwlPayV2 falló:', {
         transactionId: transaction.alytoTransactionId,
-        error:         err.message,
+        category:      mapped.category,
+        adminMessage:  mapped.adminMessage,
+        userMessage:   mapped.userMessage,
         stellarTxCode: err.stellarTxCode ?? null,
         stellarOpCode: err.stellarOpCode ?? null,
       });
       Sentry.captureException(err, {
-        tags:  { component: 'dispatchPayout', provider: 'owlPay-v2' },
+        tags:  { component: 'dispatchPayout', provider: 'owlPay-v2', category: mapped.category },
         extra: {
           transactionId: transaction.alytoTransactionId,
           stellarTxCode: err.stellarTxCode ?? null,
           stellarOpCode: err.stellarOpCode ?? null,
           isPermanent:   err.isPermanent   ?? false,
+          harborDetails: err.details ?? err.data?.details,
         },
       });
 
-      transaction.status        = 'failed';
-      transaction.failureReason = `OwlPay Harbor v2: ${err.message}`;
-      await appendIpnLog(transaction, 'owlpay_v2_failed', 'owlPay', 'failed', { error: err.message });
+      transaction.status            = 'failed';
+      transaction.failureReason     = mapped.adminMessage;                  // técnico, ledger admin
+      transaction.userFailureReason = mapped.userMessage;                   // claro, app usuario
+      transaction.userFailureAction = mapped.userAction;                    // qué hacer
+      transaction.failureCategory   = mapped.category;                      // para analytics/UI
+      await appendIpnLog(transaction, 'owlpay_v2_failed', 'owlPay', 'failed', {
+        category: mapped.category, error: err.message, details: err.details,
+      });
 
       try {
         await notify(transaction.userId,
