@@ -52,28 +52,40 @@ function isSandbox() {
 }
 
 /**
- * Resuelve el customerUuid de Harbor para la entidad legal.
- * Exportado para que los controllers puedan resolverlo sin duplicar lógica.
+ * Resuelve el customerUuid de Harbor.
  *
- * Arquitectura MSA: AV Finance LLC firma el MSA; SRL y SpA operan como
- * Affiliates con sus propios customer UUIDs en Harbor (Schedule A).
+ * Per MSA firmado 30/03/2026 (Harbor Services Agreement v1.0): hay UN solo
+ * Customer en Harbor → **AV Finance LLC** (Delaware). SRL/SpA son entidades
+ * operativas internas (Users/Affiliates per Schedule A del MSA), NO Customers
+ * separados en Harbor. Todas las transacciones van con el mismo on_behalf_of.
  *
- * Variables de entorno:
- *   OWLPAY_CUSTOMER_UUID_SRL — Bolivia operations (activo)
- *   OWLPAY_CUSTOMER_UUID_LLC — Institutional B2B (futuro, vacío hasta crear customer LLC)
- *   OWLPAY_CUSTOMER_UUID_SPA — Chile operations (futuro)
+ * Schedule C del MSA cubre off-ramp a: EU / UAE / China / Brazil / Mexico / US.
+ * Otros corredores (NG, IN, HK, SG) habilitados via Harbor sandbox expansion.
+ * GB / JP requieren amendment al Schedule C para activarse.
  *
- * @param {'LLC'|'SpA'|'SRL'|string|null} legalEntity
- * @returns {string|null} UUID o null si no está configurado
+ * Variables de entorno (en orden de preferencia):
+ *   OWLPAY_CUSTOMER_UUID       — nombre canónico (recomendado)
+ *   OWLPAY_CUSTOMER_UUID_LLC   — alias específico (entidad signataria del MSA)
+ *   OWLPAY_CUSTOMER_UUID_SRL   — legacy (mal nombrado; contiene el UUID de LLC)
+ *
+ * @param {string|null} [legalEntity] - Solo para logging interno; no afecta UUID
+ * @returns {string|null} Harbor customer UUID, o null si no está configurado
  */
 export function getCustomerUuid(legalEntity) {
-  const entity = (legalEntity ?? 'SRL').toUpperCase();
-  const envKey = `OWLPAY_CUSTOMER_UUID_${entity}`;
-  const uuid   = process.env[envKey];
+  const uuid = process.env.OWLPAY_CUSTOMER_UUID
+            ?? process.env.OWLPAY_CUSTOMER_UUID_LLC
+            ?? process.env.OWLPAY_CUSTOMER_UUID_SRL  // legacy fallback
+            ?? null;
 
   if (!uuid) {
-    console.warn(`[OwlPay] Customer UUID no configurado: ${envKey}`);
+    console.warn('[OwlPay] Customer UUID no configurado en ninguna variable: '
+               + 'OWLPAY_CUSTOMER_UUID / OWLPAY_CUSTOMER_UUID_LLC / OWLPAY_CUSTOMER_UUID_SRL');
     return null;
+  }
+
+  if (legalEntity) {
+    // legalEntity es solo trazabilidad interna — el UUID es siempre el de LLC.
+    // (no se usa para resolver el UUID; se loguea en tryOwlPayV2 si es útil)
   }
 
   return uuid;

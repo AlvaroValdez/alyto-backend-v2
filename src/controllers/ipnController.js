@@ -654,17 +654,16 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // de margen). Para payin manual SRL el admin tarda minutos/horas → siempre
   // expira y se crea un quote nuevo. Reuso solo ocurre si la confirmación fue
   // ultra-rápida (< ~55 s desde la creación de la tx).
-  // Customer UUID dinámico por legalEntity de la transacción.
-  // MSA arquitectura: AV Finance LLC firma el MSA; SRL/SpA operan como
-  // Affiliates con sus propios customer UUIDs en Harbor (Schedule A).
-  const legalEntity        = (transaction.legalEntity ?? 'SRL').toUpperCase();
-  const customerUuidEnvKey = `OWLPAY_CUSTOMER_UUID_${legalEntity}`;
-  const customerUuid       = getCustomerUuid(transaction.legalEntity);
+  // Per MSA firmado 30/03/2026: hay UN solo Customer en Harbor (AV Finance LLC).
+  // SRL/SpA son entidades operativas internas; el on_behalf_of es siempre el
+  // UUID del LLC. legalEntity se mantiene solo para trazabilidad interna.
+  const legalEntity  = (transaction.legalEntity ?? 'SRL').toUpperCase();
+  const customerUuid = getCustomerUuid(transaction.legalEntity);
 
   if (!customerUuid) {
     const err = new Error(
-      `[OwlPay] Customer UUID no configurado para entity ${legalEntity}. ` +
-      `Variable esperada: ${customerUuidEnvKey}`,
+      '[OwlPay] Customer UUID no configurado. Variable esperada: ' +
+      'OWLPAY_CUSTOMER_UUID (o legacy OWLPAY_CUSTOMER_UUID_LLC / _SRL)',
     );
     console.error('[tryOwlPayV2]', err.message, {
       transactionId: transaction.alytoTransactionId,
@@ -674,9 +673,8 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   }
 
   console.log('[tryOwlPayV2] Customer UUID resuelto:', {
-    legalEntity,
-    customerUuidEnvKey,
-    uuid: customerUuid.slice(0, 16) + '...',
+    legalEntity,                             // entidad interna (SRL/SpA/LLC)
+    uuid: customerUuid.slice(0, 16) + '...', // siempre el UUID de LLC en Harbor
   });
 
   const hasValidProviderQuote = Boolean(
