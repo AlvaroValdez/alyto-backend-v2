@@ -465,51 +465,61 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
     payout_instrument  = buildPayoutInstrument(rawBeneficiary, dest);
 
   } else if (['EU', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'PT', 'AT', 'PL', 'SE', 'CH', 'NO', 'DK', 'FI', 'IE'].includes(dest)) {
-    // SEPA o WIRE — Harbor requiere dirección completa + campos AML para cumplimiento europeo
+    // EU SEPA/WIRE — Schema validado vía GET /v2/transfers/quotes/:id/requirements
+    //
+    // beneficiary_info (additionalProperties:false):
+    //   required: beneficiary_name, beneficiary_address
+    //   NO permite beneficiary_dob ni beneficiary_id_doc_number
+    //
+    // beneficiary_address:
+    //   required: street, country, postal_code
+    //   nullable: city, state_province
+    //
+    // payout_instrument SEPA: { account_holder_name, account_number (IBAN) }
+    // payout_instrument WIRE: { account_holder_name, bank_name, account_number, swift_code }
     const iban         = get('iban', 'account_number');
     const resolvedDest = resolveHarborCountry(dest, iban);
 
-    const street = get('street', 'address', 'direccion') ?? 'N/A';
+    const street = get('street', 'address', 'direccion');
     const city   = get('city', 'ciudad');
     const state  = get('state_province', 'stateProvince', 'provincia');
     const postal = get('postal_code', 'postalCode', 'codigoPostal');
-    const dob    = get('beneficiary_dob', 'dateOfBirth', 'dob');
-    const idDoc  = get('beneficiary_id_doc_number', 'documentNumber', 'document_number', 'ci');
 
-    if (!city)   throw new Error('[Harbor] city es requerido para transferencias EU');
-    if (!postal) throw new Error('[Harbor] postal_code es requerido para transferencias EU');
-    if (!dob)    throw new Error('[Harbor] beneficiary_dob es requerido para transferencias EU (AML)');
-    if (!idDoc)  throw new Error('[Harbor] beneficiary_id_doc_number es requerido para transferencias EU (AML)');
+    if (!iban)   throw new Error('[Harbor] IBAN (account_number) requerido para EU');
+    if (!street) throw new Error('[Harbor] street requerido en beneficiary_address (EU)');
+    if (!postal) throw new Error('[Harbor] postal_code requerido en beneficiary_address (EU)');
+
+    const holderName = get('account_holder_name') ?? beneficiaryName;
+    if (!holderName) throw new Error('[Harbor] account_holder_name requerido para EU');
 
     const isWire = (paymentMethod ?? '').toUpperCase() === 'WIRE';
 
     if (isWire) {
-      // WIRE (Transferencia Internacional): instrumento SWIFT estándar
       const bic      = get('bic', 'swift_code');
       const bankName = get('bank_name');
-      if (!iban) throw new Error('[Harbor] IBAN/account_number requerido para WIRE EU');
-      if (!bic)  throw new Error('[Harbor] BIC/SWIFT requerido para WIRE EU');
+      if (!bic)      throw new Error('[Harbor] swift_code (BIC) requerido para WIRE EU');
+      if (!bankName) throw new Error('[Harbor] bank_name requerido para WIRE EU');
       payout_instrument = {
-        account_holder_name: get('account_holder_name') ?? beneficiaryName,
+        account_holder_name: holderName,
+        bank_name:           bankName,
         account_number:      iban,
         swift_code:          bic,
-        ...(bankName ? { bank_name: bankName } : {}),
       };
     } else {
-      // SEPA (default): Harbor schema estricto — solo { iban }
-      if (!iban) throw new Error('[Harbor] IBAN requerido para SEPA (EU)');
-      payout_instrument = { iban };
+      // SEPA: schema acepta SOLO estos 2 campos
+      payout_instrument = {
+        account_holder_name: holderName,
+        account_number:      iban,
+      };
     }
 
     beneficiary_info = {
-      beneficiary_name:          beneficiaryName,
-      beneficiary_dob:           dob,
-      beneficiary_id_doc_number: idDoc,
+      beneficiary_name: beneficiaryName,
       beneficiary_address: {
         street,
-        city,
-        country: resolvedDest,
+        country:     resolvedDest,
         postal_code: postal,
+        ...(city  ? { city }                  : {}),
         ...(state ? { state_province: state } : {}),
       },
     };

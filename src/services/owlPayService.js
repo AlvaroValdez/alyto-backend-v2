@@ -481,11 +481,16 @@ export function buildPayoutInstrument(beneficiary, destCountry) {
     case 'DE': case 'FR': case 'ES': case 'IT': case 'NL':
     case 'BE': case 'PT': case 'AT': case 'PL': case 'SE':
     case 'CH': case 'NO': case 'DK': case 'FI': case 'IE': {
-      // SEPA — Harbor schema estricto: solo acepta { iban }.
-      // additionalProperties: false → cualquier campo extra produce error 2005.
-      // Para WIRE EU (método no-SEPA), buildOwlPayBeneficiary construye el instrumento inline.
-      const iban = get('iban') ?? get('account_number');
-      return { iban: iban ?? must('iban', 'IBAN') };
+      // SEPA (default EU) — schema validado: { account_holder_name, account_number (IBAN) }
+      // additionalProperties: false → solo estos 2 campos permitidos.
+      // Para WIRE EU, buildOwlPayBeneficiary construye el instrumento con bank_name + swift_code.
+      const iban       = get('iban') ?? get('account_number');
+      const holderName = get('account_holder_name')
+                      ?? `${beneficiary?.firstName ?? ''} ${beneficiary?.lastName ?? ''}`.trim();
+      return {
+        account_holder_name: holderName || must('account_holder_name'),
+        account_number:      iban ?? must('iban', 'IBAN'),
+      };
     }
     case 'GB':
       // UK Faster Payments — bank identificado por sort_code, bank_name no requerido
