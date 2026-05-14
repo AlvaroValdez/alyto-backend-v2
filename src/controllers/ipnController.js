@@ -364,7 +364,7 @@ async function convertBobToUsdc(netAmountBOB, corridor) {
  * CN: beneficiary_info includes full address + SWIFT payout_instrument.
  * NG: beneficiary_info is name-only + account_number/bank_name payout_instrument.
  */
-function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
+function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMethod) {
   if (!rawBeneficiary) throw new Error('beneficiaryDetails missing on transaction');
 
   const dest = (destCountry ?? '').toUpperCase();
@@ -465,7 +465,7 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
     payout_instrument  = buildPayoutInstrument(rawBeneficiary, dest);
 
   } else if (['EU', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'PT', 'AT', 'PL', 'SE', 'CH', 'NO', 'DK', 'FI', 'IE'].includes(dest)) {
-    // SEPA — Harbor requiere dirección completa + campos AML para cumplimiento europeo
+    // SEPA o WIRE — Harbor requiere dirección completa + campos AML para cumplimiento europeo
     const iban         = get('iban', 'account_number');
     const resolvedDest = resolveHarborCountry(dest, iban);
 
@@ -476,12 +476,30 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
     const dob    = get('beneficiary_dob', 'dateOfBirth', 'dob');
     const idDoc  = get('beneficiary_id_doc_number', 'documentNumber', 'document_number', 'ci');
 
-    if (!city)   throw new Error('[Harbor] city es requerido para transferencias SEPA (EU)');
-    if (!postal) throw new Error('[Harbor] postal_code es requerido para transferencias SEPA (EU)');
-    if (!dob)    throw new Error('[Harbor] beneficiary_dob es requerido para transferencias SEPA (EU)');
-    if (!idDoc)  throw new Error('[Harbor] beneficiary_id_doc_number es requerido para transferencias SEPA (EU)');
+    if (!city)   throw new Error('[Harbor] city es requerido para transferencias EU');
+    if (!postal) throw new Error('[Harbor] postal_code es requerido para transferencias EU');
+    if (!dob)    throw new Error('[Harbor] beneficiary_dob es requerido para transferencias EU (AML)');
+    if (!idDoc)  throw new Error('[Harbor] beneficiary_id_doc_number es requerido para transferencias EU (AML)');
 
-    payout_instrument = buildPayoutInstrument(rawBeneficiary, resolvedDest);
+    const isWire = (paymentMethod ?? '').toUpperCase() === 'WIRE';
+
+    if (isWire) {
+      // WIRE (Transferencia Internacional): instrumento SWIFT estándar
+      const bic      = get('bic', 'swift_code');
+      const bankName = get('bank_name');
+      if (!iban) throw new Error('[Harbor] IBAN/account_number requerido para WIRE EU');
+      if (!bic)  throw new Error('[Harbor] BIC/SWIFT requerido para WIRE EU');
+      payout_instrument = {
+        account_holder_name: get('account_holder_name') ?? beneficiaryName,
+        account_number:      iban,
+        swift_code:          bic,
+        ...(bankName ? { bank_name: bankName } : {}),
+      };
+    } else {
+      // SEPA (default): Harbor schema estricto — solo { iban }
+      if (!iban) throw new Error('[Harbor] IBAN requerido para SEPA (EU)');
+      payout_instrument = { iban };
+    }
 
     beneficiary_info = {
       beneficiary_name:          beneficiaryName,
@@ -708,12 +726,13 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // Schema fetching removed — form fields are defined statically in owlPayForms.js.
   // buildOwlPayBeneficiary reads from transaction.beneficiary.dynamicFields.
   const rawBeneficiary = transaction.beneficiaryDetails ?? transaction.beneficiary ?? {};
+  const selectedMethod = quoteData?.payment_method ?? transaction.owlPayMethod ?? null;
   const {
     beneficiary_info,
     payout_instrument,
     transfer_purpose: beneficiaryPurpose,
     is_self_transfer: isSelfTransfer,
-  } = buildOwlPayBeneficiary(rawBeneficiary, null, corridor.destinationCountry);
+  } = buildOwlPayBeneficiary(rawBeneficiary, null, corridor.destinationCountry, selectedMethod);
 
   // ── STEP D: Create transfer ───────────────────────────────────────────────
   const sourceAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? '';
