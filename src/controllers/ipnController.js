@@ -464,6 +464,38 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
     beneficiary_info   = { beneficiary_name: beneficiaryName };
     payout_instrument  = buildPayoutInstrument(rawBeneficiary, dest);
 
+  } else if (['EU', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'PT', 'AT', 'PL', 'SE', 'CH', 'NO', 'DK', 'FI', 'IE'].includes(dest)) {
+    // SEPA — Harbor requiere dirección completa + campos AML para cumplimiento europeo
+    const iban         = get('iban', 'account_number');
+    const resolvedDest = resolveHarborCountry(dest, iban);
+
+    const street = get('street', 'address', 'direccion') ?? 'N/A';
+    const city   = get('city', 'ciudad');
+    const state  = get('state_province', 'stateProvince', 'provincia');
+    const postal = get('postal_code', 'postalCode', 'codigoPostal');
+    const dob    = get('beneficiary_dob', 'dateOfBirth', 'dob');
+    const idDoc  = get('beneficiary_id_doc_number', 'documentNumber', 'document_number', 'ci');
+
+    if (!city)   throw new Error('[Harbor] city es requerido para transferencias SEPA (EU)');
+    if (!postal) throw new Error('[Harbor] postal_code es requerido para transferencias SEPA (EU)');
+    if (!dob)    throw new Error('[Harbor] beneficiary_dob es requerido para transferencias SEPA (EU)');
+    if (!idDoc)  throw new Error('[Harbor] beneficiary_id_doc_number es requerido para transferencias SEPA (EU)');
+
+    payout_instrument = buildPayoutInstrument(rawBeneficiary, resolvedDest);
+
+    beneficiary_info = {
+      beneficiary_name:          beneficiaryName,
+      beneficiary_dob:           dob,
+      beneficiary_id_doc_number: idDoc,
+      beneficiary_address: {
+        street,
+        city,
+        country: resolvedDest,
+        postal_code: postal,
+        ...(state ? { state_province: state } : {}),
+      },
+    };
+
   } else {
     // Generic: address + SWIFT (same shape as CN but without strict required checks)
     const street = get('street', 'address', 'direccion') ?? 'N/A';
@@ -474,7 +506,7 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry) {
     const dob         = get('dateOfBirth', 'beneficiary_dob', 'dob');
     const idDocNumber = get('documentNumber', 'beneficiary_id_doc_number', 'document_number', 'ci');
 
-    // EU no es válido en Harbor — resolver con IBAN si disponible
+    // Resolver country code concreto si llega como alias (sin IBAN en este branch)
     const iban        = get('iban', 'account_number');
     const resolvedDest = resolveHarborCountry(dest, iban);
 
