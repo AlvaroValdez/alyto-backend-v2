@@ -958,11 +958,14 @@ export function verifyWebhookSignature(rawPayloadBuffer, harborSignatureHeader) 
     return false;
   }
 
-  // Reject webhooks with timestamps older than 5 minutes (replay attack prevention)
+  // Reject webhooks con timestamp >3 min (anti-replay; estándar industria es 60-300s).
+  // Bajado de 300s a 180s tras auditoría — reduce ventana de replay sin afectar
+  // retries normales de Harbor (que reintenta en segundos, no minutos).
+  const TIMESTAMP_TOLERANCE_SEC = 180;
   const now = Math.floor(Date.now() / 1000);
   const ts  = parseInt(timestamp, 10);
-  if (isNaN(ts) || Math.abs(now - ts) > 300) {
-    console.warn('[OwlPay] Webhook timestamp out of tolerance:', timestamp, 'now:', now);
+  if (isNaN(ts) || Math.abs(now - ts) > TIMESTAMP_TOLERANCE_SEC) {
+    console.warn(`[OwlPay] Webhook timestamp out of tolerance (>${TIMESTAMP_TOLERANCE_SEC}s):`, timestamp, 'now:', now);
     return false;
   }
 

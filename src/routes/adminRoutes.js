@@ -648,6 +648,7 @@ router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
 });
 
 import { cleanupOrphanTransactions } from '../jobs/cleanupOrphanTransactions.js';
+import { reconcileHarborTransfers } from '../jobs/reconcileHarborTransfers.js';
 
 /**
  * POST /api/v1/admin/cleanup-orphans
@@ -657,6 +658,20 @@ router.post('/cleanup-orphans', async (req, res) => {
   try {
     const deleted = await cleanupOrphanTransactions();
     res.json({ deleted, runAt: new Date() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/admin/reconcile-harbor
+ * Ejecuta manualmente el job de reconciliation Harbor.
+ * Útil para forzar polling cuando un webhook se perdió y la tx quedó stuck.
+ */
+router.post('/reconcile-harbor', async (req, res) => {
+  try {
+    const stats = await reconcileHarborTransfers();
+    res.json({ stats, runAt: new Date() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

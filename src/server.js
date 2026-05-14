@@ -575,6 +575,13 @@ async function startServer() {
     setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
     console.info('[Server] Cleanup job de huérfanas programado cada 1h');
 
+    // Job de reconciliation Harbor — recupera tx en payout_sent atascadas por
+    // webhook perdido. Consulta Harbor API y actualiza status local.
+    const { reconcileHarborTransfers } = await import('./jobs/reconcileHarborTransfers.js');
+    setTimeout(reconcileHarborTransfers, 30 * 1000);                    // primera corrida 30s post-start
+    setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
+    console.info('[Server] Reconcile Harbor job programado cada 15 min');
+
     // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP
     const wss = createQuoteSocketServer(httpServer);
 

@@ -865,8 +865,9 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       reason:         'harbor_transfer_locked',
     });
 
-    // Notificar al usuario si el ajuste supera 1%
-    if (Math.abs(difference) >= 0.01 * previousAmount && previousAmount > 0) {
+    // Notificar al usuario si el ajuste supera 0.5% (alineado con banner FE
+    // de rateHistory en TransactionDetail.jsx). Cambios menores son ruido.
+    if (Math.abs(difference) >= 0.005 * previousAmount && previousAmount > 0) {
       const user = await User.findById(transaction.userId).select('email firstName').lean();
       if (user?.email) {
         // rateUpdated devuelve [email, templateId, dynamicData] si hay template,
