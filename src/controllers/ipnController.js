@@ -49,7 +49,8 @@ import {
   getStellarUSDCBalance,
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
-import { mapHarborError } from '../utils/harborErrorMapper.js';
+import { mapHarborError }     from '../utils/harborErrorMapper.js';
+import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
@@ -732,13 +733,17 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       : null;
 
     if (!quoteData) {
+      // Fallback: usa pickSupportedQuote para evitar caer en métodos broken
+      // (ej. SEPA EU) cuando preferredMethod no está disponible.
+      const fallback = pickSupportedQuote(quotesList, corridor.destinationCountry);
       if (preferredMethod) {
         console.warn(
           '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
-          preferredMethod, corridor.corridorId, quotesList[0]?.payment_method,
+          preferredMethod, corridor.corridorId,
+          fallback?.payment_method ?? quotesList[0]?.payment_method,
         );
       }
-      quoteData = quotesList[0];
+      quoteData = fallback ?? quotesList[0];
     }
     if (!quoteData) {
       throw new Error('[OwlPay] No hay quotes disponibles para este corredor');

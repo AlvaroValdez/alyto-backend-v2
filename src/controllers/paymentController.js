@@ -67,6 +67,7 @@ import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
+import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 
@@ -1538,9 +1539,9 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
       returnAll:      true,
     });
 
-    const selected = requestedMethod
-      ? harborQuotes.find(q => q.paymentMethod === requestedMethod) ?? harborQuotes[0]
-      : harborQuotes[0];
+    // Filtra a métodos soportados (ver utils/harborMethodSupport.js).
+    // Evita cotizar con SEPA si el sistema no puede ejecutar SEPA.
+    const selected = pickSupportedQuote(harborQuotes, corridor.destinationCountry, requestedMethod);
 
     if (!selected) throw new Error('Harbor devolvió 0 quotes');
 
@@ -1619,9 +1620,9 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     }
 
     const requestedMethod = req.query.method ?? null;
-    const selected = requestedMethod
-      ? (Array.isArray(harborQuotes) ? harborQuotes.find(q => q.paymentMethod === requestedMethod) ?? harborQuotes[0] : harborQuotes)
-      : (Array.isArray(harborQuotes) ? harborQuotes[0] : harborQuotes);
+    // Filtra a métodos soportados (utils/harborMethodSupport.js) — evita SEPA EU bug.
+    const quotesArr = Array.isArray(harborQuotes) ? harborQuotes : [harborQuotes];
+    const selected = pickSupportedQuote(quotesArr, corridor.destinationCountry, requestedMethod) ?? quotesArr[0];
 
     if (!selected?.exchangeRate) {
       return res.status(503).json({ error: 'Harbor no devolvió tasa válida.' });

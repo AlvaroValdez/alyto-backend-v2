@@ -28,6 +28,7 @@ import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
 import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
 import { calculateQuote }  from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
+import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -72,7 +73,11 @@ async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid) 
     returnAll:      true,
   });
 
-  const quote = Array.isArray(quotes) ? quotes[0] : quotes;
+  // Filtra a métodos que el sistema sabe ejecutar (evita mostrar SEPA rate
+  // si después forzamos WIRE, etc.) — ver utils/harborMethodSupport.js.
+  const quote = Array.isArray(quotes)
+    ? (pickSupportedQuote(quotes, destCountry) ?? quotes[0])
+    : quotes;
   if (!quote?.exchangeRate) {
     throw new Error(`Harbor no devolvió exchangeRate para ${destCountry}/${destCurrency}`);
   }
