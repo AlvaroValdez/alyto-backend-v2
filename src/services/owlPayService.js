@@ -138,17 +138,27 @@ async function owlPayRequest(endpoint, options = {}) {
     }
 
     if (!response.ok) {
+      // Harbor a veces incluye `details` (array de strings) o `errors`
+      // (objeto path→errores) con info accionable. Los incluimos en el
+      // mensaje y los logs para que la falla diga POR QUÉ rechazó.
+      const detailsArr = Array.isArray(data?.details) ? data.details : [];
+      const detailsStr = detailsArr.length > 0 ? ` — ${detailsArr.join('; ')}` : '';
+
       console.error('[Alyto OwlPay] API error:', {
         status:    response.status,
         endpoint,
         errorCode: data?.code    ?? data?.error?.code    ?? 'unknown',
         message:   data?.message ?? data?.error?.message ?? 'Sin detalle',
+        details:   detailsArr.length > 0 ? detailsArr : undefined,
+        errors:    data?.errors,
       });
+      const baseMsg = data?.message ?? data?.error?.message ?? 'Error desconocido';
       const err = new Error(
-        `[Alyto OwlPay] Error ${response.status}: ${data?.message ?? data?.error?.message ?? 'Error desconocido'}`,
+        `[Alyto OwlPay] Error ${response.status}: ${baseMsg}${detailsStr}`,
       );
       err.status      = response.status;
       err.data        = data;
+      err.details     = detailsArr;            // accesible para .failureReason
       err.isTransient = response.status >= 500;
       throw err;
     }
