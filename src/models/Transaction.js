@@ -602,6 +602,11 @@ const transactionSchema = new Schema(
     failureCategory: {
       type: String,
     },
+    /** Si el usuario puede corregir y reintentar — FE muestra botón "Reintentar" */
+    failureRetryable: {
+      type:    Boolean,
+      default: false,
+    },
     /** Razón del estado actual — visible en admin, no al usuario final */
     statusReason: {
       type:    String,

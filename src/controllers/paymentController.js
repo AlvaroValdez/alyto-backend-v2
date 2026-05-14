@@ -2460,6 +2460,13 @@ export async function getTransactionStatus(req, res) {
       diffPercent:    h.diffPercent,
       reason:         h.reason,
     })),
+    // ── Detalle de fallo user-facing (NO exponer failureReason técnico) ─────
+    failure: transaction.status === 'failed' ? {
+      reason:    transaction.userFailureReason ?? null,
+      action:    transaction.userFailureAction ?? null,
+      category:  transaction.failureCategory   ?? null,
+      retryable: transaction.failureRetryable  ?? false,
+    } : null,
   });
 }
 

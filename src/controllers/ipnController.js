@@ -1104,6 +1104,7 @@ export async function dispatchPayout(transaction) {
       transaction.userFailureReason = mapped.userMessage;                   // claro, app usuario
       transaction.userFailureAction = mapped.userAction;                    // qué hacer
       transaction.failureCategory   = mapped.category;                      // para analytics/UI
+      transaction.failureRetryable  = mapped.retryable;                     // FE muestra "Reintentar"
       await appendIpnLog(transaction, 'owlpay_v2_failed', 'owlPay', 'failed', {
         category: mapped.category, error: err.message, details: err.details,
       });
