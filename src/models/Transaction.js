@@ -177,7 +177,7 @@ const ipnLogEntrySchema = new Schema(
     /** Proveedor que envió la notificación */
     provider: {
       type: String,
-      enum: ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'anchorBolivia', 'rampNetwork', 'stellar', 'system', 'manual'],
+      enum: ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'anchorBolivia', 'rampNetwork', 'stellar', 'system', 'manual', 'reconcile'],
     },
     /** Tipo de evento tal como lo reportó el proveedor (ej. 'payment.completed') */
     eventType: { type: String, trim: true },
