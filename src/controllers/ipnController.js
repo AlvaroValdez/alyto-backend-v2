@@ -398,27 +398,39 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
   let beneficiary_info, payout_instrument;
 
   // ─── Helpers ────────────────────────────────────────────────────────────
-  // Todos los schemas Harbor (validados vía GET /v2/transfers/quotes/:id/requirements)
-  // usan additionalProperties:false → cualquier campo extra produce error 2005.
-  // address required mínimo: street, country (postal_code SOLO requerido para EU).
+  // Schemas Harbor (vía GET /v2/transfers/quotes/:id/requirements) usan
+  // additionalProperties:false → campos extra producen error 2005.
+  //
+  // ⚠️ DISCREPANCIA schema-vs-implementación verificada end-to-end
+  // (scripts/audit-harbor-end-to-end.js): el schema endpoint dice que
+  // beneficiary_address.required = ['street', 'country'], pero la
+  // implementación REAL exige también city, state_province y postal_code
+  // para todos los países (NG, BR, MX, IN, SG, AE, etc.). Por eso construimos
+  // siempre el address completo. Fallback inteligente para state_province en
+  // países sin states reales (HK, SG, NG, AE) → usar country code.
   const iban         = get('iban', 'account_number');
   const resolvedDest = resolveHarborCountry(dest, iban);
 
-  const buildAddress = (countryCode, { requirePostal = false } = {}) => {
+  const buildAddress = (countryCode) => {
     const street = get('street', 'address', 'direccion');
     const city   = get('city', 'ciudad');
     const state  = get('state_province', 'stateProvince', 'provincia');
     const postal = get('postal_code', 'postalCode', 'codigoPostal');
+
     if (!street) throw new Error(`[Harbor] street requerido en beneficiary_address (${countryCode})`);
-    if (requirePostal && !postal) {
-      throw new Error(`[Harbor] postal_code requerido en beneficiary_address (${countryCode})`);
-    }
+    if (!city)   throw new Error(`[Harbor] city requerido en beneficiary_address (${countryCode})`);
+    if (!postal) throw new Error(`[Harbor] postal_code requerido en beneficiary_address (${countryCode})`);
+
+    // state_province requerido por impl Harbor; fallback al country code
+    // para países sin estados/provincias reales (HK, SG, etc.)
+    const stateProvince = state || countryCode;
+
     return {
       street,
-      country: countryCode,
-      ...(city   ? { city }                  : {}),
-      ...(state  ? { state_province: state } : {}),
-      ...(postal ? { postal_code: postal }   : {}),
+      city,
+      state_province: stateProvince,
+      postal_code:    postal,
+      country:        countryCode,
     };
   };
 
@@ -447,7 +459,7 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
     }
     beneficiary_info = {
       beneficiary_name:    beneficiaryName,
-      beneficiary_address: buildAddress(resolvedDest, { requirePostal: true }),
+      beneficiary_address: buildAddress(resolvedDest),
     };
 
   // ─── CN (CIPS, WIRE) ────────────────────────────────────────────────────

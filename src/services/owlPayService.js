@@ -459,13 +459,30 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
     }
 
     // ── BR: PIX ──────────────────────────────────────────────────────────────
-    // required: br_cpf (^\d{11}$)
-    // allowed adicionales: phone_number, email, br_pix_evp
+    // Schema dice: required br_cpf only (^\d{11}$), oneOf phone/email/br_pix_evp.
+    // Implementación REAL verificada end-to-end (scripts/audit-harbor-end-to-end.js):
+    //   - br_cpf debe pasar validación mod-11 brasileña (no CPFs ficticios)
+    //   - DEBE incluir EXACTAMENTE UNO de: phone_number, email, br_pix_evp
+    //     (PIX key del beneficiario). Solo br_cpf falla con 2005 missing.
     case 'BR': {
-      const result = { br_cpf: must('br_cpf') };
+      const cpf   = must('br_cpf');
       const phone = get('phone_number');
       const email = get('email');
       const evp   = get('br_pix_evp');
+      const altKeys = [phone, email, evp].filter(Boolean);
+      if (altKeys.length === 0) {
+        throw new Error(
+          '[Harbor] BR PIX requiere una chave PIX adicional al CPF: ' +
+          'phone_number (+5511...), email, o br_pix_evp (UUID)'
+        );
+      }
+      if (altKeys.length > 1) {
+        throw new Error(
+          '[Harbor] BR PIX acepta solo UNA chave alternativa: ' +
+          'elegir entre phone_number, email o br_pix_evp (no múltiples)'
+        );
+      }
+      const result = { br_cpf: cpf };
       if (phone) result.phone_number = phone;
       if (email) result.email        = email;
       if (evp)   result.br_pix_evp   = evp;
