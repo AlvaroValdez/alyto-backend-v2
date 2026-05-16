@@ -559,7 +559,7 @@ const transactionSchema = new Schema(
     status: {
       type:    String,
       enum:    [
-        'pending', 'initiated', 'payin_pending', 'payin_confirmed', 'payin_completed',
+        'pending', 'initiated', 'pending_comprobante', 'payin_pending', 'payin_confirmed', 'payin_completed',
         'processing', 'in_transit', 'payout_pending', 'payout_sent',
         'payout_pending_usdc_send', 'payout_in_transit', 'pending_funding',
         'completed', 'failed', 'refunded',

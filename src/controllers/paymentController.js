@@ -1263,7 +1263,9 @@ export async function initCrossBorderPayment(req, res) {
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
       isPrioritySupport:   req.user?.accountType === 'business',
-      status:              'payin_pending',
+      // Manual payin (Bolivia SRL): comienza en 'pending_comprobante' hasta que el usuario
+      // suba el comprobante de su transferencia. uploadPaymentProof() lo mueve a 'payin_pending'.
+      status: payinProvider === 'manual' ? 'pending_comprobante' : 'payin_pending',
       alytoTransactionId,
     });
   } catch (err) {
@@ -2685,6 +2687,11 @@ export async function uploadPaymentProof(req, res) {
     size:       file.size,
     uploadedAt: new Date(),
   };
+
+  // Avanzar desde pending_comprobante → payin_pending ahora que el comprobante fue recibido
+  if (transaction.status === 'pending_comprobante') {
+    transaction.status = 'payin_pending';
+  }
 
   transaction.ipnLog.push({
     provider:   'manual',
