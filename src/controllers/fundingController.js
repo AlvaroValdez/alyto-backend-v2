@@ -251,8 +251,15 @@ export async function getFundingBalance(req, res) {
     const { entity } = req.query;
     const entities = entity ? [entity] : ['LLC', 'SpA', 'SRL'];
 
-    const [fundingAgg, payoutAgg] = await Promise.all([
-      // Total fondeado confirmado por entidad y asset
+    // Para SRL y LLC el disponible real viene de Stellar (blockchain es la verdad).
+    // SpA usa Vita/USD — sigue usando el cálculo contable de FundingRecord.
+    const STELLAR_ENTITIES = ['SRL', 'LLC'];
+    const stellarPubKeys = {
+      SRL: process.env.STELLAR_SRL_PUBLIC_KEY,
+      LLC: process.env.STELLAR_LLC_PUBLIC_KEY,
+    };
+
+    const [fundingAgg, payoutAgg, ...stellarBalances] = await Promise.all([
       FundingRecord.aggregate([
         {
           $match: {
@@ -264,25 +271,14 @@ export async function getFundingBalance(req, res) {
         {
           $group: {
             _id:           '$entity',
-            totalFundedUSDC: {
-              $sum: {
-                $cond: [{ $eq: ['$asset', 'USDC'] }, '$amount', 0],
-              },
-            },
-            totalFundedUSDT: {
-              $sum: {
-                $cond: [{ $eq: ['$asset', 'USDT'] }, '$amount', 0],
-              },
-            },
-            totalFundedUSD: {
-              $sum: '$usdEquivalent',
-            },
-            lastFunding: { $max: '$createdAt' },
+            totalFundedUSDC: { $sum: { $cond: [{ $eq: ['$asset', 'USDC'] }, '$amount', 0] } },
+            totalFundedUSDT: { $sum: { $cond: [{ $eq: ['$asset', 'USDT'] }, '$amount', 0] } },
+            totalFundedUSD:  { $sum: '$usdEquivalent' },
+            lastFunding:     { $max: '$createdAt' },
           },
         },
       ]),
 
-      // Total pagado vía transacciones completadas por entidad
       Transaction.aggregate([
         {
           $match: {
@@ -298,35 +294,52 @@ export async function getFundingBalance(req, res) {
           },
         },
       ]),
+
+      // Stellar live balance para cada entidad on-chain (en paralelo, silent si falla)
+      ...STELLAR_ENTITIES
+        .filter(e => !entity || e === entity)
+        .map(e =>
+          getStellarUSDCBalance(stellarPubKeys[e])
+            .then(bal => ({ entity: e, balance: bal }))
+            .catch(() => ({ entity: e, balance: null }))
+        ),
     ]);
 
-    // Indexar por entidad para lookup O(1)
-    const fundingByEntity  = {};
-    const payoutByEntity   = {};
+    const fundingByEntity = {};
+    const payoutByEntity  = {};
+    const stellarByEntity = {};
 
-    for (const f of fundingAgg)  fundingByEntity[f._id]  = f;
-    for (const p of payoutAgg)   payoutByEntity[p._id]   = p;
+    for (const f of fundingAgg)   fundingByEntity[f._id]  = f;
+    for (const p of payoutAgg)    payoutByEntity[p._id]   = p;
+    for (const s of stellarBalances) stellarByEntity[s.entity] = s.balance;
 
-    // Construir balance por entidad
     const balance = {};
 
     for (const ent of entities) {
-      const f = fundingByEntity[ent]  ?? {};
-      const p = payoutByEntity[ent]   ?? {};
+      const f = fundingByEntity[ent] ?? {};
+      const p = payoutByEntity[ent]  ?? {};
 
-      const totalFundedUSD  = parseFloat((f.totalFundedUSD  ?? 0).toFixed(4));
-      const totalPaidOutUSD = parseFloat((p.totalPaidOut    ?? 0).toFixed(4));
-      const available       = parseFloat((totalFundedUSD - totalPaidOutUSD).toFixed(4));
+      const totalFundedUSD  = parseFloat((f.totalFundedUSD ?? 0).toFixed(4));
+      const totalPaidOutUSD = parseFloat((p.totalPaidOut   ?? 0).toFixed(4));
+
+      // SRL/LLC: disponible = balance Stellar live (fuente de verdad blockchain).
+      // SpA: disponible = FundingRecord (no tiene wallet Stellar propia para pagos).
+      const stellarLive = stellarByEntity[ent] ?? null;
+      const available   = STELLAR_ENTITIES.includes(ent) && stellarLive !== null
+        ? parseFloat(stellarLive.toFixed(4))
+        : parseFloat((totalFundedUSD - totalPaidOutUSD).toFixed(4));
 
       balance[ent] = {
-        totalFundedUSDC: parseFloat((f.totalFundedUSDC ?? 0).toFixed(4)),
-        totalFundedUSDT: parseFloat((f.totalFundedUSDT ?? 0).toFixed(4)),
+        totalFundedUSDC:  parseFloat((f.totalFundedUSDC ?? 0).toFixed(4)),
+        totalFundedUSDT:  parseFloat((f.totalFundedUSDT ?? 0).toFixed(4)),
         totalFundedUSD,
-        totalPaidOut:    totalPaidOutUSD,
+        totalPaidOut:     totalPaidOutUSD,
         available,
+        stellarLive,
+        source:           STELLAR_ENTITIES.includes(ent) && stellarLive !== null ? 'stellar' : 'accounting',
         completedTxCount: p.txCount ?? 0,
         lastFunding:      f.lastFunding ?? null,
-        alert: available < 0 ? 'DEFICIT — fondeo insuficiente para cubrir payouts' : null,
+        alert:            available < 100 ? 'Saldo bajo — considerar fondeo' : null,
       };
     }
 
