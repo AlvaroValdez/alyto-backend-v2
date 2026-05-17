@@ -127,9 +127,25 @@ export function mapHarborError(err) {
 
   // ─── 2005 / 422 — Schema validation ──────────────────────────────────────
   if (code === 2005 || status === 422) {
+    const errors = err.data?.errors ?? {};
+
+    // on_behalf_of → UUID de customer mal configurado (no es error del beneficiario)
+    if (errors.on_behalf_of || /customer does not exist/i.test(message)) {
+      return {
+        category:     'INVALID_CUSTOMER_UUID',
+        adminMessage: `Harbor rechazó el on_behalf_of con errorCode 2005: "${message}". ` +
+                      `Verificar OWLPAY_CUSTOMER_UUID_SRL en Render. ` +
+                      `Sandbox válido: cus_QhFQdB... — cus_QzUzUt... es UUID de producción ` +
+                      `(acepta quotes pero falla /v2/transfers en sandbox).`,
+        userMessage:  'Hubo un problema interno procesando tu pago. Nuestro equipo ya fue notificado.',
+        userAction:   'Intenta de nuevo en unos minutos o contacta soporte si persiste.',
+        retryable:    false,
+      };
+    }
+
     return {
       category:     'VALIDATION_ERROR',
-      adminMessage: `Schema validation falló: ${detailsStr || message}. Errors: ${JSON.stringify(err.data?.errors ?? {})}`,
+      adminMessage: `Schema validation falló: ${detailsStr || message}. Errors: ${JSON.stringify(errors)}`,
       userMessage:  'Algunos datos del beneficiario tienen formato inválido.',
       userAction:   'Revisa los datos del beneficiario y vuelve a intentar.',
       retryable:    true,

@@ -61,7 +61,8 @@ function isSandbox() {
  *   del Customer correspondiente a la entidad que ejecuta la operación.
  *
  * Variables de entorno por entidad:
- *   OWLPAY_CUSTOMER_UUID_SRL → cus_QzUzUt... (SRL Bolivia, activo)
+ *   OWLPAY_CUSTOMER_UUID_SRL → cus_QhFQdB... (SRL Bolivia — sandbox validado e2e)
+ *                              cus_QzUzUt... es el UUID de PRODUCCIÓN, falla en sandbox transfers
  *   OWLPAY_CUSTOMER_UUID_LLC → futuro (corporate B2B desde Delaware)
  *   OWLPAY_CUSTOMER_UUID_SPA → futuro (Chile, post activación Harbor)
  *
