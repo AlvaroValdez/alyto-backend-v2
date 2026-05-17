@@ -1069,7 +1069,15 @@ export async function getCorridorAnalytics(req, res) {
  * Query params: startDate, endDate (ISO)
  */
 export async function getGlobalAnalytics(req, res) {
-  const { startDate, endDate } = req.query;
+  let { startDate, endDate, period } = req.query;
+
+  // Convertir period (7d|30d|90d) a rango de fechas si no vienen startDate/endDate
+  if (!startDate && !endDate && period) {
+    const days = { '7d': 7, '30d': 30, '90d': 90 }[period] ?? 30;
+    const from  = new Date();
+    from.setDate(from.getDate() - days);
+    startDate = from.toISOString();
+  }
 
   const dateFilter = {};
   if (startDate || endDate) {
