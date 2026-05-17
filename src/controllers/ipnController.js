@@ -781,13 +781,6 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // ── STEP D: Create transfer ───────────────────────────────────────────────
   const sourceAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? '';
 
-  console.log('[tryOwlPayV2] STEP D — enviando a Harbor:', {
-    baseUrl:      process.env.OWLPAY_BASE_URL,
-    on_behalf_of: customerUuid,
-    quote_id:     quoteId,
-    source_address: sourceAddress ? sourceAddress.slice(0, 10) + '...' : 'MISSING',
-  });
-
   const transfer = await createOwlPayTransfer({
     quote_id:                  quoteId,
     on_behalf_of:              customerUuid,
