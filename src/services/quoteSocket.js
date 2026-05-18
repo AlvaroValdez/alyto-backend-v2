@@ -36,7 +36,7 @@ import Sentry              from './sentry.js';
 const REFRESH_INTERVAL_MS          = parseInt(process.env.QUOTE_REFRESH_INTERVAL_MS    ?? '60000', 10);
 const RATE_CHANGE_THRESHOLD        = parseFloat(process.env.QUOTE_RATE_CHANGE_THRESHOLD ?? '0.005');
 const CACHE_REFRESH_BEFORE_EXPIRY  = parseInt(process.env.QUOTE_CACHE_REFRESH_BEFORE_MS ?? '120000', 10);
-const QUOTE_VALIDITY_MS            = parseInt(process.env.QUOTE_VALIDITY_MS             ?? '180000', 10); // 3 min
+const QUOTE_VALIDITY_MS            = parseInt(process.env.QUOTE_VALIDITY_MS             ?? '360000', 10); // 6 min
 const VITA_CACHE_DEFAULT_TTL_MS    = parseInt(process.env.VITA_CACHE_TTL_MS             ?? '600000', 10); // 10 min
 const MAX_CONNECTIONS_PER_USER     = 3;
 
