@@ -258,6 +258,12 @@ function resolveNetAmountForPayout(transaction) {
  * @param {object} transaction
  * @returns {{ vitaPayload: object, beneficiaryFlat: object }}
  */
+// Vita API solo acepta [a-zA-Z0-9 ] en nombres. NFD descompone caracteres
+// acentuados (á → a + combining accent), luego eliminamos esos combining marks.
+function normalizeNameForVita(str) {
+  return (str ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
   const dynamicFields = {};
   if (ben.dynamicFields instanceof Map) {
@@ -274,8 +280,8 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
 
   let vitaPayload;
   if (isDynamicFormat) {
-    const firstName = dynamicFields.beneficiary_first_name ?? '';
-    const lastName  = dynamicFields.beneficiary_last_name  ?? '';
+    const firstName = normalizeNameForVita(dynamicFields.beneficiary_first_name);
+    const lastName  = normalizeNameForVita(dynamicFields.beneficiary_last_name);
     vitaPayload = {
       country:          transaction.destinationCountry,
       currency,
@@ -283,18 +289,23 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
       order:            transaction.alytoTransactionId,
       purpose:          'ISSAVG',
       ...dynamicFields,
+      // Override normalized names after spread to strip diacritics rejected by Vita
+      beneficiary_first_name: firstName,
+      beneficiary_last_name:  lastName,
       fc_customer_type: 'natural',
       fc_legal_name:    `${firstName} ${lastName}`.trim() || 'Beneficiario Alyto',
       fc_document_type: dynamicFields.beneficiary_document_type ?? 'dni',
     };
   } else {
+    const firstName = normalizeNameForVita(ben.firstName);
+    const lastName  = normalizeNameForVita(ben.lastName);
     vitaPayload = {
       country:                     transaction.destinationCountry,
       currency,
       amount,
       order:                       transaction.alytoTransactionId,
-      beneficiary_first_name:      ben.firstName  ?? '',
-      beneficiary_last_name:       ben.lastName   ?? '',
+      beneficiary_first_name:      firstName,
+      beneficiary_last_name:       lastName,
       beneficiary_email:           ben.email      ?? '',
       beneficiary_address:         ben.address    ?? '',
       beneficiary_document_type:   ben.documentType   ?? 'dni',
@@ -304,7 +315,7 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
       ...(ben.accountBank ? { account_bank:       ben.accountBank } : {}),
       ...(ben.accountType ? { account_type_bank:  ben.accountType } : {}),
       fc_customer_type: 'natural',
-      fc_legal_name:    `${ben.firstName ?? ''} ${ben.lastName ?? ''}`.trim(),
+      fc_legal_name:    `${firstName} ${lastName}`.trim(),
       fc_document_type: ben.documentType ?? 'dni',
       ...dynamicFields,
     };
@@ -1253,7 +1264,9 @@ export async function dispatchPayout(transaction) {
 
       // ── Fallback al proveedor secundario (si configurado) ────────────
       const fallback = corridor.fallbackPayoutMethod;
-      if (fallback && fallback !== payoutMethod) {
+      // 'owlPay' (v1) está descontinuado — ignorarlo aunque esté en la config del corredor
+      const effectiveFallback = (fallback === 'owlPay') ? null : fallback;
+      if (effectiveFallback && effectiveFallback !== payoutMethod) {
         console.warn(`[Alyto Payout] Intentando fallback: ${fallback}`);
         try {
           providerResponse = await tryProvider(fallback);
