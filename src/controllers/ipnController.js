@@ -1008,15 +1008,23 @@ async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
  * @param {object} transaction — Documento Mongoose con .save() disponible
  */
 export async function dispatchPayout(transaction) {
-  // Defensa en profundidad: no procesar si ya fue despachado
-  const TERMINAL_STATUSES = ['payout_sent', 'payout_pending_usdc_send', 'completed', 'failed'];
-  if (TERMINAL_STATUSES.includes(transaction.status)) {
-    console.warn('[dispatchPayout] Bloqueado — transacción ya en status terminal:', {
+  // Atomic gate: solo un caller puede avanzar de payin_confirmed → processing.
+  // Reemplaza el check en-memoria que era vulnerable a race conditions cuando
+  // dos IPNs concurrentes llegaban al mismo tiempo.
+  const locked = await Transaction.findOneAndUpdate(
+    { _id: transaction._id, status: 'payin_confirmed' },
+    { $set: { status: 'processing' } },
+    { new: true },
+  );
+  if (!locked) {
+    console.warn('[dispatchPayout] Bloqueado — transacción no está en payin_confirmed (ya procesada o en status diferente):', {
       transactionId: transaction.alytoTransactionId,
       status: transaction.status,
     });
     return;
   }
+  // Usar el documento fresco con status actualizado
+  transaction = locked;
 
   console.log('[dispatchPayout] Iniciando para:', transaction.alytoTransactionId,
     '| status:', transaction.status,
@@ -1802,6 +1810,30 @@ export async function handleVitaIPN(req, res) {
  * Si no existe por payinReference, busca por paymentLegs.externalId (legacy).
  */
 export async function handleFintocIPN(req, res) {
+  // ── 0. Verificar firma HMAC ────────────────────────────────────────────────
+  const fintocSecret = process.env.FINTOC_WEBHOOK_SECRET;
+  if (fintocSecret) {
+    const sigHeader = req.headers['fintoc-signature'] ?? req.headers['x-fintoc-signature'];
+    if (!sigHeader) {
+      console.warn('[Alyto IPN/Fintoc] Firma ausente — rechazando solicitud.');
+      return res.status(400).json({ error: 'Missing signature' });
+    }
+    const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
+    const expected = crypto.createHmac('sha256', fintocSecret).update(rawBody).digest('hex');
+    const received = sigHeader.startsWith('sha256=') ? sigHeader.slice(7) : sigHeader;
+    try {
+      if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received))) {
+        console.warn('[Alyto IPN/Fintoc] Firma inválida — rechazando solicitud.');
+        return res.status(400).json({ error: 'Invalid signature' });
+      }
+    } catch {
+      console.warn('[Alyto IPN/Fintoc] Error comparando firma — rechazando solicitud.');
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+  } else {
+    console.warn('[Alyto IPN/Fintoc] FINTOC_WEBHOOK_SECRET no configurado — saltando verificación de firma.');
+  }
+
   const { type, data } = req.body;
 
   console.info('[Alyto IPN/Fintoc] Evento recibido.', {
@@ -1848,10 +1880,21 @@ export async function handleFintocIPN(req, res) {
     return res.status(200).json({ received: true });
   }
 
-  // ── 3. Registrar IPN en log ───────────────────────────────────────────────
+  // ── 3. Idempotency — evitar procesar el mismo evento dos veces ───────────
+  const alreadyProcessed = transaction.ipnLog?.some(
+    entry => entry.provider === 'fintoc'
+          && (entry.rawPayload?.data?.id ?? entry.rawPayload?.id) === paymentIntentId
+          && (entry.rawPayload?.type ?? entry.eventType) === type,
+  );
+  if (alreadyProcessed) {
+    console.log('[Alyto IPN/Fintoc] Evento duplicado ignorado:', type, paymentIntentId);
+    return res.status(200).json({ received: true, duplicate: true });
+  }
+
+  // ── 4. Registrar IPN en log ───────────────────────────────────────────────
   await appendIpnLog(transaction, 'fintoc_ipn_received', 'fintoc', data?.status ?? 'succeeded', req.body);
 
-  // ── 4. Procesar si el payin está pendiente ────────────────────────────────
+  // ── 5. Procesar si el payin está pendiente ────────────────────────────────
   try {
     if (transaction.status === 'payin_pending') {
       transaction.status = 'payin_confirmed';
@@ -2011,19 +2054,23 @@ export async function handleOwlPayIPN(req, res) {
     // v2: transfer.source_received — Harbor recibió el USDC en la instruction address
     // ═══════════════════════════════════════════════════════════════════════
     if (event === 'transfer.source_received') {
-      transaction.status = 'payout_sent';
-      if (transaction.harborTransfer) transaction.harborTransfer.status = status ?? 'source_received';
-      await transaction.save();
+      if (transaction.status === 'completed') {
+        console.warn('[OwlPay IPN] source_received ignorado — tx ya completada:', transaction.alytoTransactionId);
+      } else {
+        transaction.status = 'payout_sent';
+        if (transaction.harborTransfer) transaction.harborTransfer.status = status ?? 'source_received';
+        await transaction.save();
 
-      await appendIpnLog(transaction, 'harbor_source_received', 'owlPay', 'payout_sent', req.body);
+        await appendIpnLog(transaction, 'harbor_source_received', 'owlPay', 'payout_sent', req.body);
 
-      try {
-        await notify(transaction.userId, {
-          title: 'Pago en proceso',
-          body:  'Recibimos los fondos en nuestra plataforma de liquidación. El beneficiario recibirá el pago pronto.',
-          data:  { type: 'payout_sent' },
-        });
-      } catch (e) { console.error('[OwlPay IPN] Error push source_received:', e.message); }
+        try {
+          await notify(transaction.userId, {
+            title: 'Pago en proceso',
+            body:  'Recibimos los fondos en nuestra plataforma de liquidación. El beneficiario recibirá el pago pronto.',
+            data:  { type: 'payout_sent' },
+          });
+        } catch (e) { console.error('[OwlPay IPN] Error push source_received:', e.message); }
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

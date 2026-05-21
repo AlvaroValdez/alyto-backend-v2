@@ -51,6 +51,11 @@ export async function handleStripeWebhook(req, res) {
   const sig           = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+  if (!endpointSecret) {
+    console.error('[Stripe Webhook] STRIPE_WEBHOOK_SECRET no configurado — rechazando solicitud.');
+    return res.status(500).json({ error: 'Webhook secret not configured' });
+  }
+
   // ── Verificar firma ─────────────────────────────────────────────────────────
   let event;
   try {

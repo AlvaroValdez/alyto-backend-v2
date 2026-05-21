@@ -100,8 +100,8 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, acc
   const usdcTransitAmount = round2(netBOB / bobPerUsdc);
 
   // Step 6 — destination amount using RAW provider rate (no markup — spec §1.2, §6.1)
-  const payoutFeeUSD      = corridor.payoutFeeFixed ?? 0;
-  const payoutFeeInDest   = payoutFeeUSD * providerRate;
+  // payoutFeeFixed is stored in destination currency — do NOT multiply by providerRate
+  const payoutFeeInDest   = corridor.payoutFeeFixed ?? 0;
   const destinationAmount = round2((usdcTransitAmount * providerRate) - payoutFeeInDest);
 
   // Step 7 — effective rate for display (6 decimales para preservar rates < 1)

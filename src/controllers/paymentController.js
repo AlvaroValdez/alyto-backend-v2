@@ -1244,8 +1244,8 @@ export async function initCrossBorderPayment(req, res) {
         payoutFee,
         profitRetention,
         vitaRateMarkup:    0,   // spec v1.0 §3.5, §6.9 — always zero for new tx
-        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + payoutFee),
-        totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + payoutFee + profitRetention),
+        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee),
+        totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
         feeCurrency:       corridor.originCurrency ?? 'USD',
       },
 
