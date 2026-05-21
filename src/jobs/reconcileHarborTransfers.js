@@ -44,7 +44,7 @@ export async function reconcileHarborTransfers() {
   }
 
   const now = Date.now();
-  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0 };
+  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0 };
 
   // ── 1. payout_sent atascadas (webhook perdido) ──────────────────────────
   const stuckSent = await Transaction.find({
@@ -72,7 +72,22 @@ export async function reconcileHarborTransfers() {
         continue;
       }
 
-      if (!alytoStatus || alytoStatus === tx.status) {
+      if (!alytoStatus) {
+        // Harbor devolvió un status desconocido — alertar para revisión manual
+        stats.unknown++;
+        console.warn(`[Reconcile] Status Harbor desconocido: "${harborStatus}" para ${tx.alytoTransactionId} — sin mapeo Alyto`);
+        tx.ipnLog.push({
+          provider:   'reconcile',
+          eventType:  'harbor_status_unknown',
+          status:     tx.status,
+          rawPayload: { harborStatus, polledAt: new Date() },
+          receivedAt: new Date(),
+        });
+        await tx.save().catch(() => {});
+        continue;
+      }
+
+      if (alytoStatus === tx.status) {
         stats.unchanged++;
         continue;
       }
@@ -119,7 +134,7 @@ export async function reconcileHarborTransfers() {
     } catch (e) { console.error('[Reconcile] Error email admin (pending_usdc):', e.message); }
   }
 
-  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0) {
+  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0 || stats.unknown > 0) {
     console.info('[Reconcile] Stats:', stats);
   }
   return stats;

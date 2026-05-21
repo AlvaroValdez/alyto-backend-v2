@@ -115,6 +115,11 @@ const walletTransactionSchema = new mongoose.Schema({
     type:    Date,
     default: null,
   },
+  /** Fecha de expiración para operaciones pending que admin no confirmó a tiempo */
+  expiresAt: {
+    type:    Date,
+    default: null,
+  },
 }, { timestamps: true, collection: 'wallettransactions' })
 
 // ─── Índices ──────────────────────────────────────────────────────────────────

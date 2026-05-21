@@ -326,7 +326,7 @@ export async function processKyc(req, res) {
     const tosAcceptancePayload = {
       accepted:   true,
       version:    req.body.tosVersion ?? 'unknown',
-      entity:     req.body.legalEntity ?? req.user.legalEntity,
+      entity:     req.user.legalEntity,
       acceptedAt: new Date(),
       ipAddress:  req.headers['x-forwarded-for']?.split(',')[0]?.trim() ?? req.ip ?? '0.0.0.0',
       userAgent:  req.headers['user-agent'] ?? '',

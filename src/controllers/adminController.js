@@ -713,8 +713,20 @@ export async function createCorridor(req, res) {
       return res.status(409).json({ error: `Ya existe un corredor con corridorId "${corridorId}".` });
     }
 
+    const ALLOWED_FIELDS = [
+      'originCountry', 'destinationCountry', 'originCurrency', 'destinationCurrency',
+      'payinMethod', 'payoutMethod', 'stellarAsset',
+      'alytoCSpread', 'businessAlytoCSpread', 'businessFixedFee', 'fixedFee',
+      'payinFeePercent', 'fintocConfig', 'payoutFeeFixed', 'profitRetentionPercent',
+      'vitaRateMarkup', 'manualExchangeRate', 'fallbackPayoutMethod',
+      'minAmountOrigin', 'minAmountUSD', 'maxAmountOrigin',
+      'legalEntity', 'routingScenario', 'isActive', 'adminNotes',
+    ];
+    const safeBody = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => ALLOWED_FIELDS.includes(k))
+    );
     const corridor = await TransactionConfig.create({
-      ...req.body,
+      ...safeBody,
       corridorId: corridorId.toLowerCase(),
     });
 

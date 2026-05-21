@@ -254,7 +254,7 @@ export async function approveKycTest(req, res) {
  * Devuelve el estado KYC completo para diagnóstico de webhooks.
  */
 export async function getKycDebug(req, res) {
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') {
     return res.status(404).json({ error: 'Not found.' });
   }
 

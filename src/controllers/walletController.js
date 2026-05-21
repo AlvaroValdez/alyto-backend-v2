@@ -194,6 +194,7 @@ export async function initiateDeposit(req, res) {
     }
 
     // Crear WalletTransaction pendiente
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
     const wtx = await WalletTransaction.create({
       walletId:      wallet._id,
       userId:        user._id,
@@ -203,11 +204,10 @@ export async function initiateDeposit(req, res) {
       balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
       status:        'pending',
       description:   'Depósito pendiente de confirmación admin',
+      expiresAt,
     })
     // Usar wtxId como referencia para identificar la transferencia
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId })
-
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
 
     // Notificar a admins — push + in-app
     const fullName = `${user.firstName} ${user.lastName}`.trim();
@@ -431,6 +431,7 @@ export async function requestWithdrawal(req, res) {
       status:        'pending',
       description:   `Retiro a ${bankName} — ${accountHolder}`,
       metadata:      { bankName, accountNumber, accountHolder, accountType },
+      expiresAt:     new Date(Date.now() + 72 * 60 * 60 * 1000),  // 72h para retiros
     }], { session })
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
 

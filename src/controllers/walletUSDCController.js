@@ -213,20 +213,15 @@ export async function requestBOBtoUSDC(req, res) {
       return res.status(400).json({ error: `El monto mínimo de conversión es Bs. ${MIN_CONVERT}.` })
     }
 
-    // Verificar saldo BOB disponible
-    const walletBOB = await WalletBOB.findOne({ userId: user._id }).session(session)
-    if (!walletBOB) {
+    // Verificar wallet BOB activa
+    const walletBOBCheck = await WalletBOB.findOne({ userId: user._id }).session(session).lean()
+    if (!walletBOBCheck) {
       await session.abortTransaction()
       return res.status(400).json({ error: 'No tienes una wallet BOB activa. Deposita primero.' })
     }
-    if (walletBOB.status !== 'active') {
+    if (walletBOBCheck.status !== 'active') {
       await session.abortTransaction()
       return res.status(403).json({ error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
-    }
-    const balanceBOBAvailable = Math.max(0, walletBOB.balance - walletBOB.balanceReserved)
-    if (balanceBOBAvailable < amount) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `Saldo BOB insuficiente. Disponible: Bs. ${balanceBOBAvailable.toFixed(2)}.` })
     }
 
     // Obtener tasa de cambio BOB/USDC
@@ -240,12 +235,22 @@ export async function requestBOBtoUSDC(req, res) {
       return res.status(403).json({ error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
     }
 
-    // Reservar el monto BOB (no se descuenta aún — solo se reserva)
-    await WalletBOB.updateOne(
-      { _id: walletBOB._id },
+    // Reservar el monto BOB atómicamente — verifica saldo disponible en la misma operación
+    // para prevenir double-spend por requests concurrentes del mismo usuario.
+    const walletBOB = await WalletBOB.findOneAndUpdate(
+      {
+        _id:    walletBOBCheck._id,
+        status: 'active',
+        $expr:  { $gte: [{ $subtract: ['$balance', '$balanceReserved'] }, amount] },
+      },
       { $inc: { balanceReserved: amount } },
-      { session }
+      { new: true, session },
     )
+    if (!walletBOB) {
+      const available = Math.max(0, walletBOBCheck.balance - walletBOBCheck.balanceReserved)
+      await session.abortTransaction()
+      return res.status(400).json({ error: `Saldo BOB insuficiente. Disponible: Bs. ${available.toFixed(2)}.` })
+    }
 
     // Crear WalletTransaction pending
     const [wtx] = await WalletTransaction.create([{

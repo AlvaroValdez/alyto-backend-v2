@@ -35,7 +35,7 @@ const exchangeRateSchema = new Schema(
     rate: {
       type:     Number,
       required: true,
-      min:      0,
+      min:      0.0001,  // previene división por cero en cálculos de conversión
     },
 
     /**
