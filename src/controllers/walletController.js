@@ -28,6 +28,8 @@ import mongoose         from 'mongoose'
 import WalletBOB        from '../models/WalletBOB.js'
 import WalletTransaction from '../models/WalletTransaction.js'
 import User             from '../models/User.js'
+import BusinessProfile  from '../models/BusinessProfile.js'
+import ExchangeRate     from '../models/ExchangeRate.js'
 import Sentry           from '../services/sentry.js'
 import { sendEmail, EMAILS } from '../services/email.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
@@ -393,6 +395,27 @@ export async function requestWithdrawal(req, res) {
     if (balanceAvailable < amount) {
       await session.abortTransaction()
       return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
+    }
+
+    // ── Límites KYB (solo cuentas business con perfil aprobado) ──────────────
+    if (user.accountType === 'business') {
+      const bizProfile = await BusinessProfile.findOne({ userId: user._id, kybStatus: 'approved' }).lean()
+      if (bizProfile?.transactionLimits) {
+        const { maxSingleTransaction, currency: limitCurrency } = bizProfile.transactionLimits
+        let limitInBOB = maxSingleTransaction
+        if (limitCurrency !== 'BOB') {
+          // Convertir límite a BOB usando tasa configurada
+          const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } }).lean()
+          const bobRate = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE ?? '9.31')
+          limitInBOB = maxSingleTransaction * (limitCurrency === 'USD' ? bobRate : 1)
+        }
+        if (amount > limitInBOB) {
+          await session.abortTransaction()
+          return res.status(400).json({
+            error: `Monto excede el límite por transacción de tu cuenta. Máximo permitido: Bs. ${limitInBOB.toFixed(2)}.`,
+          })
+        }
+      }
     }
 
     // Reservar monto

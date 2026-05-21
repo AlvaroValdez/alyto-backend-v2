@@ -747,6 +747,11 @@ const transactionSchema = new Schema(
     clientIp: {
       type: String,
     },
+    /** Fecha de archivado lógico — ASFI exige conservar trazabilidad de todas las transacciones */
+    archivedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true, // createdAt, updatedAt automáticos

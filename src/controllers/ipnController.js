@@ -1060,6 +1060,18 @@ export async function dispatchPayout(transaction) {
       },
     });
     await transaction.save().catch(() => {});
+
+    // Alertar al admin — el payin fue confirmado pero no podemos ejecutar el payout
+    sendRawEmail(
+      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+      `⚠️ Payout bloqueado — corredor no encontrado [${transaction.alytoTransactionId}]`,
+      `<p>El payin fue confirmado pero el corredor <strong>${transaction.corridorId?.toString()}</strong> ` +
+      `no existe en TransactionConfig.</p>` +
+      `<p>Transacción: <strong>${transaction.alytoTransactionId}</strong> | ` +
+      `Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
+      `<p>Requiere intervención manual inmediata.</p>`,
+    ).catch(e => console.error('[dispatchPayout] Error email admin corridor_missing:', e.message));
+
     return;
   }
 
@@ -1629,6 +1641,15 @@ export async function handleVitaIPN(req, res) {
             transactionId: transaction.alytoTransactionId,
             error:         err.message,
           });
+          sendRawEmail(
+            process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+            `🚨 dispatchPayout falló — ${transaction.alytoTransactionId}`,
+            `<p>El payout fire-and-forget (Vita IPN) falló para la transacción ` +
+            `<strong>${transaction.alytoTransactionId}</strong>.</p>` +
+            `<p>Error: <code>${err.message}</code></p>` +
+            `<p>Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
+            `<p>Requiere revisión y payout manual.</p>`,
+          ).catch(() => {});
         });
 
       } else if (vitaStatus === 'denied') {
@@ -1911,6 +1932,15 @@ export async function handleFintocIPN(req, res) {
           transactionId: transaction.alytoTransactionId,
           error:         err.message,
         });
+        sendRawEmail(
+          process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+          `🚨 dispatchPayout falló — ${transaction.alytoTransactionId}`,
+          `<p>El payout fire-and-forget (Fintoc IPN) falló para la transacción ` +
+          `<strong>${transaction.alytoTransactionId}</strong>.</p>` +
+          `<p>Error: <code>${err.message}</code></p>` +
+          `<p>Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
+          `<p>Requiere revisión y payout manual.</p>`,
+        ).catch(() => {});
       });
 
     } else {

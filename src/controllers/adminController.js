@@ -940,6 +940,19 @@ export async function deactivateCorridor(req, res) {
       return res.status(400).json({ error: 'El corredor ya está desactivado.' });
     }
 
+    // Verificar que no haya transacciones en vuelo antes de desactivar
+    const IN_FLIGHT_STATUSES = ['payin_pending', 'payin_confirmed', 'processing', 'payout_pending', 'payout_sent', 'payout_in_transit', 'pending_funding'];
+    const inFlightCount = await Transaction.countDocuments({
+      corridorId: corridor._id,
+      status:     { $in: IN_FLIGHT_STATUSES },
+    });
+    if (inFlightCount > 0) {
+      return res.status(409).json({
+        error: `No se puede desactivar el corredor: hay ${inFlightCount} transacción(es) en proceso. Espera a que finalicen.`,
+        inFlightCount,
+      });
+    }
+
     corridor.isActive  = false;
     corridor.deletedAt = new Date();
     corridor.changeLog.push({

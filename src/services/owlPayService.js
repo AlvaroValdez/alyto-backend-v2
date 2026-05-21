@@ -952,10 +952,10 @@ export function verifyWebhookSignature(rawPayloadBuffer, harborSignatureHeader) 
     return false;
   }
 
-  // Reject webhooks con timestamp >3 min (anti-replay; estándar industria es 60-300s).
-  // Bajado de 300s a 180s tras auditoría — reduce ventana de replay sin afectar
+  // Reject webhooks con timestamp >60s (anti-replay; Stripe usa 300s, reducimos a 60s
+  // para minimizar ventana de ataque — Harbor reintenta en segundos, no minutos).
   // retries normales de Harbor (que reintenta en segundos, no minutos).
-  const TIMESTAMP_TOLERANCE_SEC = 180;
+  const TIMESTAMP_TOLERANCE_SEC = 60;
   const now = Math.floor(Date.now() / 1000);
   const ts  = parseInt(timestamp, 10);
   if (isNaN(ts) || Math.abs(now - ts) > TIMESTAMP_TOLERANCE_SEC) {
