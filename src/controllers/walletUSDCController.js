@@ -581,3 +581,30 @@ export async function getUSDCTransactions(req, res) {
     return res.status(500).json({ error: 'Error al obtener historial USDC.' })
   }
 }
+
+// ─── FUNCIÓN: GET /api/v1/wallet/usdc/rate ────────────────────────────────────
+
+/**
+ * Devuelve el tipo de cambio BOB/USDC actual sin ejecutar ninguna conversión.
+ * Usado por el frontend para mostrar el preview "100 BOB ≈ X USDC".
+ *
+ * Response: { bobPerUsdc: number, source: string, updatedAt: ISO }
+ */
+export async function getUSDCRate(req, res) {
+  try {
+    const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } })
+      .sort({ pair: 1 })
+      .lean()
+
+    const rate      = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE ?? '9.31')
+    const source    = rateDoc ? rateDoc.source ?? 'manual' : 'env_fallback'
+    const updatedAt = rateDoc?.updatedAt ?? null
+
+    return res.json({ bobPerUsdc: rate, source, updatedAt })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getUSDCRate' } })
+    console.error('[WalletUSDC] Error en getUSDCRate:', err.message)
+    return res.status(500).json({ error: 'Error al obtener el tipo de cambio.' })
+  }
+}

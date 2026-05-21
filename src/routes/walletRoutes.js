@@ -47,6 +47,7 @@ import {
   getDepositInstructions,
   requestBOBtoUSDC,
   getUSDCTransactions,
+  getUSDCRate,
 } from '../controllers/walletUSDCController.js'
 
 const router = Router()
@@ -69,6 +70,7 @@ router.get('/qr/preview',   protect, requireKycApproved, previewQR)
 // ─── USDC Wallet (Fase 35) ───────────────────────────────────────────────────
 // IMPORTANTE: /usdc/deposit-instructions debe ir ANTES de /usdc/:anything
 
+router.get('/usdc/rate',                  protect, requireKycApproved, getUSDCRate)
 router.get('/usdc/balance',               protect, requireKycApproved, getUSDCBalance)
 router.get('/usdc/deposit-instructions',  protect, requireKycApproved, getDepositInstructions)
 router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTransactions)

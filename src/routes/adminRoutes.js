@@ -66,6 +66,7 @@ import {
   listKYBApplications,
   getKYBApplication,
   reviewKYBApplication,
+  downloadKYBDocument,
 } from '../controllers/kybController.js';
 import {
   getSRLConfig,
@@ -484,6 +485,13 @@ router.get('/kyb/:businessId', getKYBApplication);
  *   transactionLimits  {object}  — { maxSingleTransaction, maxMonthlyVolume } — solo si approved
  */
 router.patch('/kyb/:businessId/review', reviewKYBApplication);
+
+/**
+ * GET /api/v1/admin/kyb/:businessId/documents/:docIdx
+ * Descarga/previsualiza un documento KYB (imagen o PDF).
+ * Query: ?inline=1 para visualización en browser.
+ */
+router.get('/kyb/:businessId/documents/:docIdx', downloadKYBDocument);
 
 // ─── Wallet BOB — Fase 25 ─────────────────────────────────────────────────────
 

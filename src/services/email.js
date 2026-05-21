@@ -255,7 +255,7 @@ export async function sendWelcomeEmail(user) {
         <h1 style="color:#FFFFFF;margin:0;font-size:24px;letter-spacing:-0.5px;">Alyto</h1>
       </div>
       <div style="background:#FFFFFF;padding:32px 24px;color:#0F1B2E;">
-        <h2 style="margin:0 0 16px;font-size:22px;">Hola ${user.firstName}, bienvenido a Alyto Wallet.</h2>
+        <h2 style="margin:0 0 16px;font-size:22px;">Hola ${user.firstName}, bienvenido a Alyto Wallet 2.0.</h2>
         <p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:#3B4A63;">
           Tu cuenta ha sido creada bajo <strong>${entityName}</strong>.
         </p>

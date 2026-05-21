@@ -20,7 +20,7 @@
 
 import Sentry         from '../services/sentry.js';
 import { sendEmail, EMAILS } from '../services/email.js';
-import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
+import { notifyAdmins, notify, NOTIFICATIONS } from '../services/notifications.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import User            from '../models/User.js';
 
@@ -475,7 +475,19 @@ export async function reviewKYBApplication(req, res) {
       empresa: profile.legalName,
     });
 
-    // ── Emails según decisión ─────────────────────────────────────────────────
+    // ── Notificación in-app + push + email al usuario según decisión ─────────
+    const kybNotifications = {
+      approved:    { title: '¡KYB Aprobado! ✓', body: 'Tu cuenta Business fue aprobada. Ya puedes operar sin restricciones.',       type: 'kyb_approved' },
+      rejected:    { title: 'KYB no aprobado',   body: 'Tu solicitud Business fue rechazada. Revisa el email para más detalles.',     type: 'kyb_rejected' },
+      more_info:   { title: 'Se requiere información', body: 'Necesitamos documentos adicionales para continuar con tu revisión.',    type: 'kyb_more_info' },
+      under_review:{ title: 'KYB en revisión 🔍', body: 'Tu solicitud Business está siendo revisada. Te notificaremos pronto.',      type: 'kyb_under_review' },
+    };
+
+    const userNotif = kybNotifications[status];
+    if (userNotif) {
+      notify(user._id, { title: userNotif.title, body: userNotif.body, data: { type: userNotif.type } }).catch(() => {});
+    }
+
     if (status === 'approved') {
       sendEmail(...EMAILS.kybApproved(user, profile)).catch(() => {});
 
@@ -497,5 +509,57 @@ export async function reviewKYBApplication(req, res) {
     console.error('[KYB Admin] Error en reviewKYBApplication:', err.message);
     Sentry.captureException(err, { tags: { controller: 'kybController', action: 'reviewKYBApplication' } });
     return res.status(500).json({ error: 'Error al procesar la revisión KYB.' });
+  }
+}
+
+// ─── Admin: GET /api/v1/admin/kyb/:businessId/documents/:docIdx ──────────────
+
+/**
+ * Descarga o previsualizan un documento KYB específico.
+ * Transmite el contenido base64 como stream con Content-Type correcto.
+ * Funciona para imágenes (JPEG, PNG, WEBP) y PDFs.
+ *
+ * Query param: ?inline=1  → visualización en browser (Content-Disposition: inline)
+ *              (omitido)   → descarga (Content-Disposition: attachment)
+ */
+export async function downloadKYBDocument(req, res) {
+  try {
+    const { businessId, docIdx } = req.params;
+    const inline = req.query.inline === '1';
+
+    const isObjectId = /^[a-f\d]{24}$/i.test(businessId);
+    const filter = isObjectId ? { _id: businessId } : { businessId };
+
+    const profile = await BusinessProfile.findOne(filter)
+      .select('+documents.data')
+      .lean();
+
+    if (!profile) {
+      return res.status(404).json({ error: 'Solicitud KYB no encontrada.' });
+    }
+
+    const idx = parseInt(docIdx, 10);
+    const doc = profile.documents?.[idx];
+
+    if (!doc || !doc.data) {
+      return res.status(404).json({ error: 'Documento no disponible.' });
+    }
+
+    const buffer   = Buffer.from(doc.data, 'base64');
+    const mimeType = doc.mimetype ?? 'application/octet-stream';
+    const filename = doc.filename ?? `documento_${idx}`;
+    const disposition = inline ? 'inline' : `attachment; filename="${filename}"`;
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', disposition);
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    return res.send(buffer);
+
+  } catch (err) {
+    console.error('[KYB Admin] Error en downloadKYBDocument:', err.message);
+    Sentry.captureException(err, { tags: { controller: 'kybController', action: 'downloadKYBDocument' } });
+    return res.status(500).json({ error: 'Error al descargar el documento.' });
   }
 }

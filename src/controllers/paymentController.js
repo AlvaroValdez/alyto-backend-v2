@@ -448,6 +448,34 @@ const FALLBACK_WITHDRAWAL_RULES = {
       { value: 'Cuenta Corriente',  label: 'Cuenta Corriente' },
     ], placeholder: '', when: null },
   ],
+  CL: [
+    { key: 'beneficiary_first_name',    label: 'Nombres',              type: 'text',   required: true,  min: 2,    max: 50,  options: [], placeholder: 'Ej. Valentina',              when: null },
+    { key: 'beneficiary_last_name',     label: 'Apellidos',            type: 'text',   required: true,  min: 2,    max: 50,  options: [], placeholder: 'Ej. Rojas Muñoz',           when: null },
+    { key: 'beneficiary_email',         label: 'Correo electrónico',   type: 'email',  required: true,  min: null, max: 80,  options: [], placeholder: 'Ej. valentina@correo.cl',   when: null },
+    { key: 'beneficiary_document_type', label: 'Tipo de documento',    type: 'select', required: true,  min: null, max: null, options: [
+      { value: 'RUT', label: 'RUT' },
+      { value: 'CE',  label: 'Cédula de extranjería' },
+    ], placeholder: '', when: null },
+    { key: 'beneficiary_document_number', label: 'RUT / Documento',   type: 'text',   required: true,  min: 7,    max: 12,  options: [], placeholder: 'Ej. 12345678-9', when: null },
+    { key: 'bank_code',                 label: 'Banco',                type: 'select', required: true,  min: null, max: null, options: [
+      { value: 'BSANTANDER',  label: 'Banco Santander' },
+      { value: 'ESTADO',      label: 'BancoEstado' },
+      { value: 'BCI',         label: 'BCI' },
+      { value: 'SCOTIABANK',  label: 'Scotiabank Chile' },
+      { value: 'ITAU',        label: 'Banco Itaú' },
+      { value: 'FALABELLA',   label: 'Banco Falabella' },
+      { value: 'BICE',        label: 'Banco BICE' },
+      { value: 'SECURITY',    label: 'Banco Security' },
+      { value: 'RIPLEY',      label: 'Banco Ripley' },
+      { value: 'CONSORCIO',   label: 'Banco Consorcio' },
+    ], placeholder: '', when: null },
+    { key: 'account_bank',              label: 'Número de cuenta',     type: 'text',   required: true,  min: 5,    max: 20,  options: [], placeholder: 'Ej. 00123456789', when: null },
+    { key: 'account_type_bank',         label: 'Tipo de cuenta',       type: 'select', required: true,  min: null, max: null, options: [
+      { value: 'Cuenta de Ahorros', label: 'Cuenta de Ahorros' },
+      { value: 'Cuenta Corriente',  label: 'Cuenta Corriente' },
+      { value: 'Cuenta Vista',      label: 'Cuenta Vista / RUT' },
+    ], placeholder: '', when: null },
+  ],
 };
 
 /** Normaliza un campo de la respuesta de Vita al formato canónico del frontend */

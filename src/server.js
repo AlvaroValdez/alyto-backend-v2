@@ -15,6 +15,7 @@ import * as Sentry from '@sentry/node';
 import 'dotenv/config';
 import { checkEnv }  from '../scripts/checkEnv.js';
 import { cleanupOrphanTransactions } from './jobs/cleanupOrphanTransactions.js';
+import { kycIncompleteMonitor }     from './jobs/kycIncompleteMonitor.js';
 import express        from 'express';
 import cors           from 'cors';
 import helmet         from 'helmet';
@@ -574,6 +575,11 @@ async function startServer() {
     cleanupOrphanTransactions();
     setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
     console.info('[Server] Cleanup job de huérfanas programado cada 1h');
+
+    // Job de monitoreo KYC incompleto — alerta admin si usuarios no finalizaron KYC en 24h
+    setTimeout(kycIncompleteMonitor, 5 * 60 * 1000);                        // primera corrida 5 min post-start
+    setInterval(kycIncompleteMonitor, 6 * 60 * 60 * 1000);                  // cada 6h
+    console.info('[Server] KYC incomplete monitor job programado cada 6h');
 
     // Job de reconciliation Harbor — recupera tx en payout_sent atascadas por
     // webhook perdido. Consulta Harbor API y actualiza status local.

@@ -21,6 +21,7 @@
 import Stripe from 'stripe';
 import User   from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
+import { notify } from '../services/notifications.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -131,6 +132,12 @@ async function _approveKyc(session) {
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
 
+  notify(user._id, {
+    title: '¡Identidad verificada! ✓',
+    body:  'Tu identidad fue verificada exitosamente. Ya puedes empezar a usar Alyto.',
+    data:  { type: 'kyc_approved' },
+  }).catch(() => {});
+
   console.info(
     `[KYC Webhook] ✅ APROBADO — userId: ${user._id} | email: ${user.email} | entity: ${user.legalEntity} | prevStatus: ${prevStatus} → approved`
   );
@@ -150,6 +157,12 @@ async function _rejectKyc(session, errorCode) {
   user.kycErrorCode  = errorCode;
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
+
+  notify(user._id, {
+    title: 'Verificación no completada',
+    body:  'Tu verificación de identidad no pudo ser aprobada. Por favor intenta nuevamente o contacta soporte.',
+    data:  { type: 'kyc_rejected', errorCode },
+  }).catch(() => {});
 
   console.info(
     `[KYC Webhook] ❌ RECHAZADO — userId: ${user._id} | email: ${user.email} | code: ${errorCode} | prevStatus: ${prevStatus} → rejected`
