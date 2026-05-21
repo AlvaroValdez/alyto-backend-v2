@@ -118,7 +118,7 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, acc
       payinFee:        round2(payinFee),
       alytoCSpread:    round2(alytoCSpread),
       fixedFee,
-      payoutFee:       payoutFeeUSD,
+      payoutFee:       payoutFeeInDest,  // en moneda destino, no en BOB
       profitRetention: round2(profitRetention),
       totalDeducted,
       totalDeductedReal,
