@@ -146,7 +146,7 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
   const tipoCambioBob     = tipoCambioManual ?? transaction.conversionRate.rate;
-  const numeroComprobante = generarNumeroCorrelativo('BOL', transaction);
+  const numeroComprobante = await generarNumeroCorrelativo('BOL');
   const ahora             = new Date();
 
   try {

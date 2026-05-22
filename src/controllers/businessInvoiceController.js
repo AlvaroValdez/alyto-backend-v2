@@ -154,7 +154,7 @@ async function generateAndStreamPDF(transaction, res) {
 
   // Generar número correlativo si no existe
   const invoiceNumber = transaction.businessInvoice?.invoiceNumber
-    ?? generarNumeroCorrelativo('SRV', transaction);
+    ?? await generarNumeroCorrelativo('SRV');
 
   // Construir DTO y generar PDF
   const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
@@ -266,7 +266,7 @@ export async function autoGenerateBusinessInvoice(transaction, userId) {
     const profile = await BusinessProfile.findById(user.businessProfileId).lean();
     if (!profile) return;
 
-    const invoiceNumber = generarNumeroCorrelativo('SRV', transaction);
+    const invoiceNumber = await generarNumeroCorrelativo('SRV');
     const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
     const { filename, verificationHash } = await generateBusinessInvoice(dto);
 
