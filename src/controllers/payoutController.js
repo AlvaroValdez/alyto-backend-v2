@@ -21,6 +21,7 @@ import User        from '../models/User.js';
 import { generateOfficialReceipt } from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
 import { autoGenerateBusinessInvoice } from './businessInvoiceController.js';
+import { uploadBuffer } from '../services/storageService.js';
 
 // ─── POST /api/v1/payouts/bolivia/manual ────────────────────────────────────
 
@@ -231,20 +232,24 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
 
-  // ── 8. Persistir referencia del comprobante en BD ─────────────────────────
-  // TODO Fase 8: subir el buffer a AWS S3 y guardar la URL real
-  // Por ahora se guarda el nombre de archivo para trazabilidad
+  // ── 8. Subir comprobante a storage (S3 / local fallback) y persistir URL ──
   try {
+    const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`
+    const { url: pdfUrl, storage } = await uploadBuffer(pdfBuffer, s3Key, {
+      contentType: 'application/pdf',
+      disposition: `attachment; filename="${filename}"`,
+    })
     await Transaction.findByIdAndUpdate(transactionId, {
-      $set: {
-        'boliviaCompliance.comprobantePdfUrl': `local://${filename}`,  // Reemplazar por S3 URL
-      },
-    });
+      $set: { 'boliviaCompliance.comprobantePdfUrl': pdfUrl },
+    })
+    console.info('[Alyto Payout Bolivia] PDF subido al storage.', {
+      numeroComprobante, storage, key: s3Key,
+    })
   } catch (err) {
-    // No crítico — el PDF ya fue generado, solo falla la URL en BD
-    console.warn('[Alyto Payout Bolivia] No se pudo persistir la URL del comprobante:', {
+    // No crítico — el PDF ya fue generado y se enviará al cliente
+    console.warn('[Alyto Payout Bolivia] No se pudo persistir URL del comprobante:', {
       transactionId, error: err.message,
-    });
+    })
   }
 
   console.info('[Alyto Payout Bolivia] Liquidación completada.', {

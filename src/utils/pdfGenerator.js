@@ -271,12 +271,24 @@ function buildPDF(data) {
     // SECCIÓN 5 — FOOTER LEGAL (Normativa IUE/IVA)
     // ═══════════════════════════════════════════════════════════════════════
 
-    // Texto legal desde variable de entorno — configurable por asesoría impositiva
-    const textoLegal = data.textoLegalFooter
-      ?? process.env.AV_FINANCE_LEGAL_FOOTER
-      ?? '[TEXTO LEGAL PENDIENTE — Completar con asesoría impositiva boliviana. '
-       + 'Espacio reservado para normativa IUE/IVA y requisitos de bancarización '
-       + 'según Ley 843 y reglamentos del SIN Bolivia.]';
+    // Texto legal configurable — env AV_FINANCE_LEGAL_FOOTER tiene máxima prioridad,
+    // seguido del campo override en el DTO, con este texto como fallback compilado.
+    const textoLegal = process.env.AV_FINANCE_LEGAL_FOOTER
+      ?? data.textoLegalFooter
+      ?? 'Este documento constituye el Comprobante Oficial de Liquidación de Activo Digital '
+       + 'emitido por AV Finance SRL (producto Alyto), con domicilio legal en Bolivia. '
+       + 'La operación registrada constituye un servicio de pago transfronterizo habilitado '
+       + 'conforme al Decreto Supremo N° 5384 que regula los Establecimientos de Tecnología '
+       + 'Financiera (ETF) y Prestadores de Servicios de Activos Virtuales (PSAV). '
+       + 'Documentación conforme a la RND N° 102400000021 del Servicio de Impuestos Nacionales '
+       + 'relativa a bancarización y respaldo de operaciones financieras. '
+       + 'Aspectos tributarios: IVA conforme Art. 4 Ley 843; IUE conforme Art. 47 Ley 843. '
+       + 'El tipo de cambio aplicado corresponde a la tasa efectiva de la operación en la fecha '
+       + 'indicada, conforme NC12 y Boletín Técnico CTNAC 2-2024 del Colegio de Auditores Bolivia. '
+       + 'Trazabilidad blockchain verificable en Stellar Network (registro público, inmutable). '
+       + 'Reclamos: presentar comprobante en soporte@alyto.app dentro de los 30 días corridos '
+       + 'posteriores a la emisión. AV Finance SRL — NIT: '
+       + (process.env.AV_FINANCE_NIT ?? '[ver admin]') + '.';
 
     doc
       .font('Helvetica-Bold')

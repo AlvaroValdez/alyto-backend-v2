@@ -19,6 +19,7 @@ import User            from '../models/User.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import { generateBusinessInvoice } from '../utils/businessInvoiceGenerator.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
+import { uploadBuffer } from '../services/storageService.js';
 
 // ── Helper: construir DTO desde transacción + perfil business ───────────────
 
@@ -160,19 +161,24 @@ async function generateAndStreamPDF(transaction, res) {
   const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
   const { buffer, filename, verificationHash } = await generateBusinessInvoice(dto);
 
-  // Persistir referencia en BD (si no existe aún)
+  // Persistir referencia en BD + subir a storage (si no existe aún)
   if (!transaction.businessInvoice?.invoiceNumber) {
     try {
+      const s3Key = `pdfs/b2b/${invoiceNumber}_${filename}`
+      const { url: pdfUrl } = await uploadBuffer(buffer, s3Key, {
+        contentType: 'application/pdf',
+        disposition: `attachment; filename="${filename}"`,
+      })
       await Transaction.findByIdAndUpdate(transaction._id, {
         $set: {
           'businessInvoice.invoiceNumber':      invoiceNumber,
           'businessInvoice.invoiceGeneratedAt':  new Date(),
-          'businessInvoice.invoicePdfUrl':       `local://${filename}`,
+          'businessInvoice.invoicePdfUrl':       pdfUrl,
           'businessInvoice.verificationHash':    verificationHash,
         },
       });
     } catch (err) {
-      // No crítico — el PDF ya fue generado
+      // No crítico — el PDF ya fue generado y se streamea al cliente
       console.warn('[B2B Invoice] No se pudo persistir referencia en BD:', err.message);
     }
   }
@@ -268,13 +274,19 @@ export async function autoGenerateBusinessInvoice(transaction, userId) {
 
     const invoiceNumber = await generarNumeroCorrelativo('SRV');
     const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
-    const { filename, verificationHash } = await generateBusinessInvoice(dto);
+    const { buffer, filename, verificationHash } = await generateBusinessInvoice(dto);
+
+    const s3Key = `pdfs/b2b/${invoiceNumber}_${filename}`
+    const { url: pdfUrl } = await uploadBuffer(buffer, s3Key, {
+      contentType: 'application/pdf',
+      disposition: `attachment; filename="${filename}"`,
+    })
 
     await Transaction.findByIdAndUpdate(transaction._id, {
       $set: {
         'businessInvoice.invoiceNumber':      invoiceNumber,
         'businessInvoice.invoiceGeneratedAt':  new Date(),
-        'businessInvoice.invoicePdfUrl':       `local://${filename}`,
+        'businessInvoice.invoicePdfUrl':       pdfUrl,
         'businessInvoice.verificationHash':    verificationHash,
       },
     });
