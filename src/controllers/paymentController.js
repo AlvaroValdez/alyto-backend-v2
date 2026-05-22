@@ -2306,7 +2306,8 @@ export async function getTransactionHistory(req, res) {
 
     const corridor = tx.corridorId ?? {};
     const splitName = [ben.firstName ?? df.beneficiary_first_name, ben.lastName ?? df.beneficiary_last_name].filter(Boolean).join(' ');
-    const resolvedFullName = ben.fullName ?? (splitName || df.beneficiary_name ?? df.account_holder_name ?? null);
+    const harborName = df.beneficiary_name ?? df.account_holder_name ?? null;
+    const resolvedFullName = ben.fullName ?? (splitName || harborName);
 
     return {
       transactionId:       tx.alytoTransactionId || String(tx._id),
