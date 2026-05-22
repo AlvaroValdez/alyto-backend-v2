@@ -1,0 +1,12 @@
+node_modules
+.env
+.env.*
+dist
+tmp
+*.log
+.git
+tests
+test-*.js
+scripts
+docs
+deploy
