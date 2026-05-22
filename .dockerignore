@@ -7,6 +7,5 @@ tmp
 .git
 tests
 test-*.js
-scripts
 docs
 deploy
