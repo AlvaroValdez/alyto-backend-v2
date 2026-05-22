@@ -104,6 +104,10 @@ function resolveBeneficiaryName(beneficiary) {
     return `${df.beneficiary_first_name ?? ''} ${df.beneficiary_last_name ?? ''}`.trim();
   }
 
+  // Formato Harbor (nombre completo en un solo campo)
+  if (df.beneficiary_name) return df.beneficiary_name;
+  if (df.account_holder_name) return df.account_holder_name;
+
   // Formato dinámico plano (llaves al nivel del objeto)
   if (beneficiary.beneficiary_first_name || beneficiary.beneficiary_last_name) {
     return `${beneficiary.beneficiary_first_name ?? ''} ${beneficiary.beneficiary_last_name ?? ''}`.trim();

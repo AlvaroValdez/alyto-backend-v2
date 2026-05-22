@@ -2066,10 +2066,10 @@ export async function handleOwlPayIPN(req, res) {
   }
 
   // ── 3. Idempotency — skip if this exact (transferId, status) was already logged ──
-  // rawPayload stored by appendIpnLog is req.body = { event, data: { transfer_id, status } }
+  // Harbor v2 usa data.id; v1 legacy usa data.transfer_id. Ambos cubiertos.
   const alreadyProcessed = transaction.ipnLog?.some(
     entry => entry.provider === 'owlPay'
-          && (entry.rawPayload?.data?.transfer_id ?? entry.rawPayload?.transfer_id) === transferId
+          && (entry.rawPayload?.data?.id ?? entry.rawPayload?.data?.transfer_id ?? entry.rawPayload?.transfer_id) === transferId
           && (entry.rawPayload?.data?.status ?? entry.rawPayload?.status) === status,
   );
   if (alreadyProcessed) {
@@ -2108,6 +2108,10 @@ export async function handleOwlPayIPN(req, res) {
     // legacy v1: disbursement.completed
     // ═══════════════════════════════════════════════════════════════════════
     else if (event === 'transfer.completed' || event === 'disbursement.completed') {
+      if (transaction.status === 'completed') {
+        console.warn('[OwlPay IPN] transfer.completed ignorado — tx ya completada:', transaction.alytoTransactionId);
+        return res.status(200).json({ received: true, duplicate: true });
+      }
       transaction.status      = 'completed';
       transaction.completedAt = new Date();
       if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';

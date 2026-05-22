@@ -664,7 +664,9 @@ router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
 });
 
 import { cleanupOrphanTransactions } from '../jobs/cleanupOrphanTransactions.js';
-import { reconcileHarborTransfers } from '../jobs/reconcileHarborTransfers.js';
+import { reconcileHarborTransfers }  from '../jobs/reconcileHarborTransfers.js';
+import { rosMonitor }                from '../jobs/rosMonitor.js';
+import ROSAlert                      from '../models/ROSAlert.js';
 
 /**
  * POST /api/v1/admin/cleanup-orphans
@@ -687,6 +689,90 @@ router.post('/cleanup-orphans', async (req, res) => {
 router.post('/reconcile-harbor', async (req, res) => {
   try {
     const stats = await reconcileHarborTransfers();
+    res.json({ stats, runAt: new Date() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROS / UIF Bolivia ────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/ros/alerts
+ * Lista alertas ROS con filtros opcionales (status, severity, userId).
+ * Paginado: ?page=1&limit=20&status=open&severity=high
+ */
+router.get('/ros/alerts', async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, severity, userId } = req.query;
+    const filter = {};
+    if (status)   filter.status   = status;
+    if (severity) filter.severity = severity;
+    if (userId)   filter.userId   = userId;
+
+    const [alerts, total] = await Promise.all([
+      ROSAlert.find(filter)
+        .sort({ severity: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(Number(limit))
+        .populate('userId', 'firstName lastName email taxId')
+        .lean(),
+      ROSAlert.countDocuments(filter),
+    ]);
+
+    res.json({ alerts, total, page: Number(page), limit: Number(limit) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/v1/admin/ros/alerts/:alertId
+ * Actualiza el status de una alerta ROS.
+ * Body: { status: 'reviewed'|'dismissed'|'reported_uif', reviewNote: '...' }
+ * reviewNote es obligatorio para 'dismissed'.
+ */
+router.patch('/ros/alerts/:alertId', async (req, res) => {
+  try {
+    const { alertId } = req.params;
+    const { status, reviewNote } = req.body;
+
+    const ALLOWED = ['reviewed', 'dismissed', 'reported_uif'];
+    if (!ALLOWED.includes(status)) {
+      return res.status(400).json({
+        error: `status debe ser uno de: ${ALLOWED.join(', ')}`,
+      });
+    }
+    if (status === 'dismissed' && !reviewNote?.trim()) {
+      return res.status(400).json({
+        error: 'reviewNote es obligatorio al desestimar una alerta ROS (trazabilidad ASFI).',
+      });
+    }
+
+    const update = {
+      status,
+      reviewedBy: req.user._id,
+      reviewedAt: new Date(),
+      ...(reviewNote ? { reviewNote } : {}),
+      ...(status === 'reported_uif' ? { reportedToUifAt: new Date() } : {}),
+    };
+
+    const alert = await ROSAlert.findOneAndUpdate({ alertId }, update, { new: true });
+    if (!alert) return res.status(404).json({ error: 'Alerta no encontrada.' });
+
+    res.json({ success: true, alert });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/admin/ros/run
+ * Fuerza un ciclo inmediato del monitor ROS (útil para testing o revisión urgente).
+ */
+router.post('/ros/run', async (req, res) => {
+  try {
+    const stats = await rosMonitor();
     res.json({ stats, runAt: new Date() });
   } catch (err) {
     res.status(500).json({ error: err.message });

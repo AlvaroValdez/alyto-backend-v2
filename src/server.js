@@ -588,6 +588,23 @@ async function startServer() {
     setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
     console.info('[Server] Reconcile Harbor job programado cada 15 min');
 
+    // Fase 36+ — Monitor heurístico ROS/UIF Bolivia (solo SRL)
+    const { rosMonitor } = await import('./jobs/rosMonitor.js');
+    setTimeout(rosMonitor, 3 * 60 * 1000);                    // primera corrida 3 min post-start
+    setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
+    console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
+
+    // Fase 36 — Monitoreo automático de depósitos USDC vía Horizon polling
+    // Solo activo si STELLAR_SRL_PUBLIC_KEY está configurado
+    if (process.env.STELLAR_SRL_PUBLIC_KEY) {
+      const { monitorUSDCDeposits } = await import('./jobs/monitorUSDCDeposits.js');
+      setTimeout(monitorUSDCDeposits, 60 * 1000);            // primera corrida 60s post-start
+      setInterval(monitorUSDCDeposits, 30 * 1000);           // cada 30s
+      console.info('[Server] USDC deposit monitor (Fase 36) programado cada 30s');
+    } else {
+      console.warn('[Server] STELLAR_SRL_PUBLIC_KEY no configurado — USDC monitor desactivado');
+    }
+
     // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP
     const wss = createQuoteSocketServer(httpServer);
 

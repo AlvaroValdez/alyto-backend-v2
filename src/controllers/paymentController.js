@@ -2298,12 +2298,15 @@ export async function getTransactionHistory(req, res) {
   // ── 3. Formatear respuesta ─────────────────────────────────────────────────
   const formatted = transactions.map((tx) => {
     const ben        = tx.beneficiary ?? {};
-    const rawAccount = ben.accountBank ?? '';
+    const df         = (ben.dynamicFields && typeof ben.dynamicFields === 'object') ? ben.dynamicFields : {};
+    const rawAccount = ben.accountBank ?? df.account_number ?? df.account_bank ?? '';
     const maskedAccount = rawAccount.length >= 4
       ? `****${rawAccount.slice(-4)}`
       : rawAccount ? '****' : null;
 
     const corridor = tx.corridorId ?? {};
+    const splitName = [ben.firstName ?? df.beneficiary_first_name, ben.lastName ?? df.beneficiary_last_name].filter(Boolean).join(' ');
+    const resolvedFullName = ben.fullName ?? (splitName || df.beneficiary_name ?? df.account_holder_name ?? null);
 
     return {
       transactionId:       tx.alytoTransactionId || String(tx._id),
@@ -2313,10 +2316,10 @@ export async function getTransactionHistory(req, res) {
       destinationAmount:   tx.destinationAmount   ?? null,
       destinationCurrency: tx.destinationCurrency ?? null,
       beneficiary: {
-        fullName:               [ben.firstName, ben.lastName].filter(Boolean).join(' ') || null,
-        beneficiary_first_name: ben.firstName ?? null,
-        beneficiary_last_name:  ben.lastName  ?? null,
-        bankName:               ben.bankCode  ?? null,
+        fullName:               resolvedFullName,
+        beneficiary_first_name: ben.firstName ?? df.beneficiary_first_name ?? null,
+        beneficiary_last_name:  ben.lastName  ?? df.beneficiary_last_name  ?? null,
+        bankName:               ben.bankCode  ?? df.bank_name ?? df.bank_code ?? null,
         accountNumber:          maskedAccount,
       },
       payinMethod:       corridor.payinMethod ?? (tx.paymentLegs?.[0]?.provider ?? null),
@@ -2403,10 +2406,14 @@ export async function getTransactionStatus(req, res) {
     ? ben.dynamicFields
     : {};
 
-  // Nombre: campo schema o dynamicFields
+  // Nombre: schema fields → dynamicFields split → Harbor whole-name formats
   const firstName = ben.firstName ?? dynFields.beneficiary_first_name ?? '';
   const lastName  = ben.lastName  ?? dynFields.beneficiary_last_name  ?? '';
-  const fullName  = `${firstName} ${lastName}`.trim();
+  const fullName  = ben.fullName
+    ?? (firstName || lastName ? `${firstName} ${lastName}`.trim() : null)
+    ?? dynFields.beneficiary_name
+    ?? dynFields.account_holder_name
+    ?? '';
 
   // Banco: bankCode schema o dynamic
   const bankName = ben.bankCode

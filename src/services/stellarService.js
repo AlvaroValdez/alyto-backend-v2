@@ -1076,33 +1076,20 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
   throw lastError;
 }
 
-// ─── Fase 35: Detección de Depósitos USDC Entrantes (Stub Manual) ─────────────
+// ─── Fase 36: Detección de Depósitos USDC Entrantes ─────────────────────────
 
 /**
- * detectIncomingUSDC — Verifica pagos USDC entrantes en la cuenta SRL compartida.
+ * detectIncomingUSDC — Ejecuta un ciclo de sondeo Horizon para USDC entrante.
  *
- * FASE 35 (manual): esta función es un stub. El flujo de acreditación en Fase 35
- * es manual: el admin detecta el depósito en Stellar Laboratory o Horizon Explorer,
- * luego lo confirma directamente desde el panel admin acreditando el saldo USDC.
+ * Delega al job monitorUSDCDeposits que maneja cursor, idempotencia y
+ * acreditación atómica. Útil para trigger manual desde admin o tests.
  *
- * FASE 36 (automático, pendiente implementación):
- *   - Abrir stream Horizon para la cuenta STELLAR_SRL_PUBLIC_KEY
- *   - Filtrar operaciones de tipo 'payment' con asset_code === 'USDC'
- *   - Leer el memo de la transacción
- *   - Buscar WalletUSDC por stellarMemo
- *   - Acreditar saldo automáticamente con sesión atómica
+ * El job corre automáticamente cada 30s desde server.js (Fase 36).
  *
- * Variables de entorno requeridas (Fase 36):
- *   STELLAR_SRL_PUBLIC_KEY — dirección pública de la cuenta SRL compartida
- *   STELLAR_HORIZON_URL    — URL del servidor Horizon
- *
- * @returns {Promise<{ detected: false, message: string }>}
+ * @returns {Promise<{ triggered: true }>}
  */
 export async function detectIncomingUSDC() {
-  // Fase 35: detección manual. No se automatiza hasta Fase 36.
-  console.info('[Stellar USDC] detectIncomingUSDC: modo manual (Fase 35). Ver Horizon Explorer para verificar depósitos.');
-  return {
-    detected: false,
-    message:  'Detección automática pendiente (Fase 36). Acreditar manualmente desde el panel admin.',
-  };
+  const { monitorUSDCDeposits } = await import('../jobs/monitorUSDCDeposits.js');
+  await monitorUSDCDeposits();
+  return { triggered: true };
 }
