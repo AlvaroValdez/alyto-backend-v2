@@ -105,6 +105,8 @@ import {
   addSanction,
   removeSanction,
   screenUserManual,
+  listFlaggedUsers,
+  clearSanctionsFlag,
 } from '../controllers/sanctionsController.js';
 import {
   adminGetBusinessInvoice,
@@ -581,12 +583,18 @@ router.get('/sanctions',               listSanctions);
 router.post('/sanctions',              addSanction);
 
 /**
- * IMPORTANTE: /sanctions/screen debe ir ANTES de /sanctions/:entryId
- * para evitar que Express interprete "screen" como un entryId.
+ * IMPORTANTE: rutas con segmento fijo deben ir ANTES de /sanctions/:entryId
+ * para evitar que Express interprete el segmento como un entryId.
  */
 
 /** POST /api/v1/admin/sanctions/screen — Verificación manual de persona/empresa */
-router.post('/sanctions/screen',       screenUserManual);
+router.post('/sanctions/screen',               screenUserManual);
+
+/** GET  /api/v1/admin/sanctions/flagged-users — Usuarios con posible hit AML (sanctionsFlag=true) */
+router.get('/sanctions/flagged-users',         listFlaggedUsers);
+
+/** POST /api/v1/admin/sanctions/flagged-users/:userId/clear — Limpiar flag tras revisión manual */
+router.post('/sanctions/flagged-users/:userId/clear', clearSanctionsFlag);
 
 /** DELETE /api/v1/admin/sanctions/:entryId — Desactivar entrada (baja lógica) */
 router.delete('/sanctions/:entryId',   removeSanction);

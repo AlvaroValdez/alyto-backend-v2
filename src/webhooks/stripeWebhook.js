@@ -18,10 +18,11 @@
  * Lookup de usuario: stripeVerificationSessionId guardado en identityController.
  */
 
-import Stripe from 'stripe';
-import User   from '../models/User.js';
+import Stripe          from 'stripe';
+import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
-import { notify } from '../services/notifications.js';
+import { notify }       from '../services/notifications.js';
+import { screenUser }   from '../services/sanctionsService.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -141,6 +142,22 @@ async function _approveKyc(session) {
     title: '¡Identidad verificada! ✓',
     body:  'Tu identidad fue verificada exitosamente. Ya puedes empezar a usar Alyto.',
     data:  { type: 'kyc_approved' },
+  }).catch(() => {});
+
+  // Screening AML (fire-and-forget) — Fase 28, exigencia ASFI
+  screenUser({
+    firstName:      user.firstName,
+    lastName:       user.lastName,
+    documentNumber: user.identityDocument?.number,
+  }).then(result => {
+    const update = { sanctionsScreenedAt: result.screenedAt, sanctionsFlag: !result.isClean };
+    if (!result.isClean) {
+      console.warn('[Sanctions KYC Webhook] ⚠️ Posible hit:', {
+        userId: user._id?.toString(),
+        hits:   result.hits.map(h => `${h.entryId} (${h.listSource})`),
+      });
+    }
+    User.findByIdAndUpdate(user._id, update).catch(() => {});
   }).catch(() => {});
 
   console.info(

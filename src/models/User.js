@@ -349,6 +349,23 @@ const userSchema = new Schema(
       type:    [String],
       default: [],
     },
+
+    // ── AML / Sanciones (Fase 28 — ASFI Bolivia) ─────────────────────────────
+    /**
+     * Indica si el último screening encontró un posible hit en listas de
+     * sanciones (OFAC, ONU, UIF Bolivia, PEPs).
+     * true = requiere revisión manual del Oficial de Cumplimiento.
+     * La transacción se bloquea vía checkSanctions middleware — este flag
+     * sirve para visibilidad en el backoffice admin.
+     */
+    sanctionsFlag: {
+      type:    Boolean,
+      default: false,
+    },
+    sanctionsScreenedAt: {
+      type:    Date,
+      default: null,
+    },
   },
   {
     timestamps: true, // createdAt, updatedAt automáticos

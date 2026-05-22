@@ -19,6 +19,7 @@ import { Router }  from 'express'
 import multer      from 'multer'
 import { protect, requireKycApproved } from '../middlewares/authMiddleware.js'
 import { idempotencyCheck } from '../middlewares/idempotency.js'
+import { checkSanctions }   from '../middlewares/checkSanctions.js'
 import {
   getWalletBalance,
   getWalletTransactions,
@@ -57,10 +58,10 @@ const router = Router()
 router.get('/balance',           protect, requireKycApproved, getWalletBalance)
 router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
 router.get('/deposit/qr-images',             protect, requireKycApproved, getDepositQRImages)
-router.post('/deposit/initiate',             protect, requireKycApproved, idempotencyCheck, initiateDeposit)
+router.post('/deposit/initiate',             protect, requireKycApproved, checkSanctions, idempotencyCheck, initiateDeposit)
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
-router.post('/send',             protect, requireKycApproved, sendP2P)
-router.post('/withdraw/request', protect, requireKycApproved, requestWithdrawal)
+router.post('/send',             protect, requireKycApproved, checkSanctions, sendP2P)
+router.post('/withdraw/request', protect, requireKycApproved, checkSanctions, requestWithdrawal)
 
 // QR Wallet (Fase 29)
 router.post('/qr/generate', protect, requireKycApproved, generateWalletQR)

@@ -74,21 +74,32 @@ export async function crearReclamo(req, res) {
     const user       = await User.findById(userId).lean()
     const plazoStr   = reclamo.plazoVence?.toLocaleDateString('es-BO', { timeZone: 'America/La_Paz' }) ?? '—'
 
-    // Confirmación al usuario
-    if (user && process.env.SENDGRID_TEMPLATE_COMPLETED) {
-      sendEmail(user.email, process.env.SENDGRID_TEMPLATE_COMPLETED, {
-        firstName: user.firstName,
-        subject:   `Reclamo recibido — ${reclamo.reclamoId}`,
-        message:   `Tu reclamo fue registrado. Número: ${reclamo.reclamoId}. Te responderemos antes del ${plazoStr} (10 días hábiles).`,
+    // Confirmación al usuario (template específico PRILI con fallback a genérico)
+    const tplReclamoRecibido = process.env.SENDGRID_TEMPLATE_RECLAMO_RECIBIDO
+                            ?? process.env.SENDGRID_TEMPLATE_COMPLETED
+    if (user && tplReclamoRecibido) {
+      sendEmail(user.email, tplReclamoRecibido, {
+        firstName:  user.firstName,
+        reclamoId:  reclamo.reclamoId,
+        tipo,
+        plazoVence: plazoStr,
+        subject:    `Reclamo recibido — ${reclamo.reclamoId}`,
+        message:    `Tu reclamo fue registrado. Número: ${reclamo.reclamoId}. Te responderemos antes del ${plazoStr} (10 días hábiles).`,
       }).catch(() => {})
     }
 
-    // Alerta al admin
+    // Alerta al admin (template específico PRILI con fallback a Bolivia genérico)
+    const tplAdminReclamo = process.env.SENDGRID_TEMPLATE_ADMIN_RECLAMO
+                         ?? process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA
     const adminEmail = process.env.ADMIN_EMAIL ?? 'admin@alyto.app'
-    if (process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA) {
-      sendEmail(adminEmail, process.env.SENDGRID_TEMPLATE_ADMIN_BOLIVIA, {
-        subject: `[PRILI] Nuevo reclamo — ${reclamo.reclamoId}`,
-        message: `Usuario: ${user?.email ?? userId}. Tipo: ${tipo}. Plazo ASFI: ${plazoStr}.`,
+    if (tplAdminReclamo) {
+      sendEmail(adminEmail, tplAdminReclamo, {
+        reclamoId:  reclamo.reclamoId,
+        userEmail:  user?.email ?? String(userId),
+        tipo,
+        plazoVence: plazoStr,
+        subject:    `[PRILI] Nuevo reclamo — ${reclamo.reclamoId}`,
+        message:    `Usuario: ${user?.email ?? userId}. Tipo: ${tipo}. Plazo ASFI: ${plazoStr}.`,
       }).catch(() => {})
     }
 
@@ -394,11 +405,16 @@ export async function adminResponderReclamo(req, res) {
     // Notificar al usuario si se resuelve o cierra con respuesta
     if (['resuelto', 'cerrado'].includes(status) && respuesta?.trim()) {
       const usuario = await User.findById(reclamo.userId).lean()
-      if (usuario && process.env.SENDGRID_TEMPLATE_COMPLETED) {
-        sendEmail(usuario.email, process.env.SENDGRID_TEMPLATE_COMPLETED, {
-          firstName: usuario.firstName,
-          subject:   `Respuesta a tu reclamo — ${reclamo.reclamoId}`,
-          message:   respuesta.trim(),
+      const tplReclamoResuelto = process.env.SENDGRID_TEMPLATE_RECLAMO_RESUELTO
+                              ?? process.env.SENDGRID_TEMPLATE_COMPLETED
+      if (usuario && tplReclamoResuelto) {
+        sendEmail(usuario.email, tplReclamoResuelto, {
+          firstName:  usuario.firstName,
+          reclamoId:  reclamo.reclamoId,
+          status,
+          respuesta:  respuesta.trim(),
+          subject:    `Respuesta a tu reclamo — ${reclamo.reclamoId}`,
+          message:    respuesta.trim(),
         }).catch(() => {})
       }
     }

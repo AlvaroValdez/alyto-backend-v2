@@ -12,6 +12,7 @@
 
 import * as Sentry   from '@sentry/node'
 import SanctionsList from '../models/SanctionsList.js'
+import User          from '../models/User.js'
 import { screenUser } from '../services/sanctionsService.js'
 
 // ─── GET /api/v1/admin/sanctions ──────────────────────────────────────────────
@@ -143,5 +144,71 @@ export async function screenUserManual(req, res) {
     Sentry.captureException(err, { tags: { controller: 'sanctionsController', fn: 'screenUserManual' } })
     console.error('[Sanctions] Error en screenUserManual:', err.message)
     return res.status(500).json({ error: 'Error en el screening.' })
+  }
+}
+
+// ─── GET /api/v1/admin/sanctions/flagged-users ────────────────────────────────
+
+/**
+ * Lista usuarios con sanctionsFlag=true (posibles hits AML pendientes de revisión).
+ * Query: page?, limit?
+ */
+export async function listFlaggedUsers(req, res) {
+  try {
+    const page  = Math.max(1, Number(req.query.page  ?? 1))
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20)))
+    const skip  = (page - 1) * limit
+
+    const [users, total] = await Promise.all([
+      User.find({ sanctionsFlag: true })
+        .select('_id firstName lastName email legalEntity kycStatus sanctionsScreenedAt createdAt')
+        .sort({ sanctionsScreenedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments({ sanctionsFlag: true }),
+    ])
+
+    return res.json({ users, total, page, limit, pages: Math.ceil(total / limit) })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'sanctionsController', fn: 'listFlaggedUsers' } })
+    console.error('[Sanctions] Error en listFlaggedUsers:', err.message)
+    return res.status(500).json({ error: 'Error al obtener usuarios flagueados.' })
+  }
+}
+
+// ─── POST /api/v1/admin/sanctions/flagged-users/:userId/clear ─────────────────
+
+/**
+ * Limpia el sanctionsFlag de un usuario tras revisión manual del Oficial de Cumplimiento.
+ * Body: { note: string } — motivo de la limpieza (obligatorio para auditoría)
+ */
+export async function clearSanctionsFlag(req, res) {
+  try {
+    const { userId } = req.params
+    const { note }   = req.body
+
+    if (!note?.trim()) {
+      return res.status(400).json({ error: 'El campo note es obligatorio para auditoría.' })
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { sanctionsFlag: false },
+      { new: true },
+    ).select('_id firstName lastName email sanctionsFlag')
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado.' })
+    }
+
+    console.info(`[Sanctions] ✅ Flag limpiado — userId: ${userId} | admin: ${req.user?.email} | note: ${note}`)
+    return res.json({ userId, sanctionsFlag: false, clearedBy: req.user?._id, note })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'sanctionsController', fn: 'clearSanctionsFlag' } })
+    console.error('[Sanctions] Error en clearSanctionsFlag:', err.message)
+    return res.status(500).json({ error: 'Error al limpiar el flag.' })
   }
 }

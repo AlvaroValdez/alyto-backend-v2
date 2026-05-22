@@ -7,9 +7,10 @@
  * Nota: La sesión biométrica delega la lógica al identityController.
  */
 
-import Stripe from 'stripe';
-import User   from '../models/User.js';
+import Stripe          from 'stripe';
+import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
+import { screenUser }   from '../services/sanctionsService.js';
 
 let _stripe = null;
 function getStripe() {
@@ -164,6 +165,8 @@ export async function getKycStatus(req, res) {
           });
           invalidateUserCache(user._id); // forzar refresco del cache del middleware
           console.info(`[KYC Status] ✅ Auto-aprobado por polling — userId: ${user._id}`);
+          // Screening AML asíncrono (fire-and-forget) — no bloquea respuesta al usuario
+          runSanctionsScreening(user._id, user.firstName, user.lastName, user.identityDocument?.number);
           return res.json({ kycStatus: 'approved', kycApprovedAt: new Date() });
         }
 
@@ -200,6 +203,35 @@ export async function getKycStatus(req, res) {
   }
 }
 
+// ─── Helper AML: screening de sanciones post-aprobación KYC ──────────────────
+
+/**
+ * Ejecuta el screening AML de forma asíncrona (fire-and-forget).
+ * Si encuentra un hit persiste el flag en User para visibilidad en el backoffice.
+ * Nunca lanza excepciones — cualquier error queda en consola/Sentry.
+ */
+function runSanctionsScreening(userId, firstName, lastName, documentNumber) {
+  screenUser({ firstName, lastName, documentNumber })
+    .then(result => {
+      if (!result.isClean) {
+        console.warn('[Sanctions KYC] ⚠️ Posible hit al aprobar KYC:', {
+          userId: userId?.toString(),
+          hits:   result.hits.map(h => `${h.entryId} (${h.listSource})`),
+        });
+        User.findByIdAndUpdate(userId, {
+          sanctionsFlag:       true,
+          sanctionsScreenedAt: result.screenedAt,
+        }).catch(() => {});
+      } else {
+        User.findByIdAndUpdate(userId, {
+          sanctionsFlag:       false,
+          sanctionsScreenedAt: result.screenedAt,
+        }).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
 // ─── approveKycTest (solo en desarrollo) ──────────────────────────────────────
 
 /**
@@ -234,6 +266,12 @@ export async function approveKycTest(req, res) {
     }
 
     console.info(`[KYC Test] ✅ KYC aprobado manualmente — userId: ${userId}`);
+
+    // Screening AML (fire-and-forget) — también en modo test para cubrir el flujo
+    const fullUser = await User.findById(userId).select('firstName lastName identityDocument').lean();
+    if (fullUser) {
+      runSanctionsScreening(userId, fullUser.firstName, fullUser.lastName, fullUser.identityDocument?.number);
+    }
 
     return res.json({
       message: 'KYC aprobado en modo test',
