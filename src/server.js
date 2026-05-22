@@ -106,9 +106,9 @@ app.use(helmet({
       ],
       frameAncestors: [
         "'self'",
-        'https://alyto-frontend-v2.onrender.com',
         'https://staging.alyto.app',
         'https://alyto.app',
+        ...(process.env.EXTRA_FRAME_ANCESTORS ? process.env.EXTRA_FRAME_ANCESTORS.split(',') : []),
       ],
       connectSrc:  [
         "'self'",
