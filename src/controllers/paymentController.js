@@ -571,12 +571,20 @@ export async function getWithdrawalRulesController(req, res) {
   }
 
   // ── 1. Resolver corredor activo para (destCountry, legalEntity) ────────────
-  const legalEntity = req.user?.legalEntity ?? null;
+  // corridorId query param permite desambiguar cuando hay múltiples corredores
+  // activos para el mismo país (ej. bo-cn CNY Harbor vs bo-cn-usd USD Vita).
+  const corridorIdParam = req.query.corridorId ?? null;
+  const legalEntity     = req.user?.legalEntity ?? null;
   let corridor = null;
   try {
-    const query = { destinationCountry: countryCode, isActive: true };
-    if (legalEntity) query.legalEntity = legalEntity;
-    corridor = await TransactionConfig.findOne(query).lean();
+    if (corridorIdParam) {
+      corridor = await TransactionConfig.findOne({ corridorId: corridorIdParam, isActive: true }).lean();
+    }
+    if (!corridor) {
+      const query = { destinationCountry: countryCode, isActive: true };
+      if (legalEntity) query.legalEntity = legalEntity;
+      corridor = await TransactionConfig.findOne(query).lean();
+    }
     if (!corridor && legalEntity) {
       corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true }).lean();
     }
@@ -585,7 +593,9 @@ export async function getWithdrawalRulesController(req, res) {
   }
 
   const payoutMethod = corridor?.payoutMethod ?? 'vitaWallet';
-  const cacheKey     = `${countryCode}:${payoutMethod}`;
+  const cacheKey     = corridorIdParam
+    ? `${corridorIdParam}:${payoutMethod}`
+    : `${countryCode}:${payoutMethod}`;
 
   // ── 2. Revisar caché ───────────────────────────────────────────────────────
   const cached = withdrawalRulesCache.get(cacheKey);
