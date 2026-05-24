@@ -321,11 +321,14 @@ export function getPaymentMethods(countryIso) {
 
 /**
  * Países que Vita SOLO soporta vía transactions_type: "vita_sent".
- * No aparecen en la tabla withdrawal.prices.attributes.clp_sell.
- * Confirmado en diagnostic 2026-03-31: GT, SV, ES, PL.
- * ES removido 2026-05-10 — corredor bo-es desactivado, tráfico EUR consolidado en bo-eu-srl (Harbor SEPA).
+ * Confirmado en diagnostic 2026-03-31 (CLP origin) y 2026-05-24 (USD origin).
  *
- * Para estos destinos se debe llamar createVitaSentPayout() en lugar de createPayout().
+ * GT, SV: NO tienen withdrawal_rules en Vita API → vita_sent obligatorio en ambos origins.
+ * PL: Para CLP origin es vita_sent. Para USD origin, PL aparece en withdrawal.usd_sell
+ *     y tiene form via clave 'eu' (IBAN/SWIFT). Pendiente migración de form frontend
+ *     antes de cambiar a withdrawal — mantenemos vita_sent por ahora.
+ *
+ * ES removido 2026-05-10 — corredor bo-es desactivado, tráfico EUR en bo-eu-srl (Harbor SEPA).
  */
 export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
 
@@ -333,18 +336,19 @@ export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
  * Vita no usa códigos ISO alpha-2 puro para todos los países.
  * Este mapa convierte ISO → clave real en la respuesta de Vita para:
  *   1. withdrawal_rules API (campos de formulario del beneficiario)
- *   2. prices.attributes (tasas de cambio), solo para corredores fuera de VITA_SENT_ONLY_COUNTRIES
+ *   2. prices.attributes (tasas de cambio)
  *
  * Notas:
- *  - Eurozona: Vita usa una sola clave 'eu' en withdrawal_rules para todos los países EUR/IBAN.
- *    En vita_sent.prices, ES/PL sí tienen claves ISO directas ('es', 'pl') — más precisas.
- *  - CA, HK: usan sufijo 'usd' en AMBAS tablas (withdrawal_rules y prices).
- *  - GT, SV: en vita_sent.prices tienen claves ISO directas ('gt', 'sv').
- *    En withdrawal_rules no tienen entrada — usar FALLBACK_WITHDRAWAL_RULES si es necesario.
+ *  - Eurozona: Vita usa clave 'eu' para todos los países SEPA/IBAN (mismo formulario).
+ *  - CA, HK: sufijo 'usd' porque Vita solo entrega USD a esos destinos.
+ *  - AU: clave 'au' — formulario BSB (routing_number), sin SWIFT.
+ *  - CN: dos rails distintos. Usar getVitaCountryKey(country, destCurrency):
+ *      'cn'    → China CNY (transferencia bancaria doméstica, select de 22 bancos chinos)
+ *      'cnusd' → China USD (SWIFT internacional, swift_bic requerido)
+ *  - GT, SV: sin withdrawal_rules en Vita → siempre vita_sent (ver VITA_SENT_ONLY_COUNTRIES).
  */
 export const VITA_COUNTRY_KEY_MAP = {
   // Eurozona — withdrawal_rules usa 'eu' para todos los países SEPA/IBAN
-  // ES removido — desactivado 2026-05-10, reemplazado por bo-eu-srl (Harbor SEPA)
   PL: 'eu',
   IT: 'eu', DE: 'eu', FR: 'eu', NL: 'eu', AT: 'eu', BE: 'eu',
   PT: 'eu', IE: 'eu', GR: 'eu', FI: 'eu', LU: 'eu', SK: 'eu',
@@ -353,20 +357,30 @@ export const VITA_COUNTRY_KEY_MAP = {
   // Triangulación USD — sufijo 'usd' en precios y reglas
   CA: 'causd',
   HK: 'hkusd',
+
+  // Australia — routing_number (BSB), sin SWIFT
+  AU: 'au',
 };
 
 /**
- * Traduce un código ISO alpha-2 a la clave real que usa Vita Wallet en su API.
+ * Traduce un código ISO alpha-2 a la clave interna que usa Vita Wallet en su API.
  * Usar en:
  *   - Lookup de withdrawal_rules (campos formulario beneficiario)
- *   - Lookup de prices.attributes (tasas, solo en withdrawal path)
+ *   - Lookup de prices.attributes (tasas)
  *
- * @param {string} countryCode — ISO 3166-1 alpha-2 (ej. 'ES', 'CA')
- * @returns {string} clave Vita (ej. 'eu', 'causd') o ISO en minúsculas si no hay mapeo
+ * @param {string} countryCode        — ISO 3166-1 alpha-2 (ej. 'CN', 'CA')
+ * @param {string} [destinationCurrency] — Moneda destino (opcional). Requerido para CN:
+ *                                         'USD' → 'cnusd' (SWIFT), otro → 'cn' (CNY doméstico)
+ * @returns {string} clave Vita (ej. 'eu', 'causd', 'cnusd') o ISO en minúsculas si no hay mapeo
  */
-export function getVitaCountryKey(countryCode) {
+export function getVitaCountryKey(countryCode, destinationCurrency = null) {
   if (!countryCode) return null;
-  const upper = countryCode.toUpperCase();
+  const upper    = countryCode.toUpperCase();
+  const destUpper = (destinationCurrency ?? '').toUpperCase();
+
+  // China tiene dos rails: CNY doméstico ('cn') y USD internacional ('cnusd')
+  if (upper === 'CN') return destUpper === 'USD' ? 'cnusd' : 'cn';
+
   return VITA_COUNTRY_KEY_MAP[upper] ?? upper.toLowerCase();
 }
 

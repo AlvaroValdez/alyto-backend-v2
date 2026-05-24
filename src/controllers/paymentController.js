@@ -607,7 +607,7 @@ export async function getWithdrawalRulesController(req, res) {
   let fields;
   try {
     const vitaResponse = await getVitaWithdrawalRules();
-    const vitaKey      = getVitaCountryKey(countryCode);
+    const vitaKey      = getVitaCountryKey(countryCode, corridor?.destinationCurrency);
     const vitaFields   = vitaResponse?.rules?.[vitaKey]?.fields ?? [];
 
     if (vitaFields.length === 0) {

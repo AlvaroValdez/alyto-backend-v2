@@ -432,6 +432,11 @@ const CORREDORES = [
     { corridorId: 'bo-pa', dest: 'PA', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },  // dolarizado
     { corridorId: 'bo-ht', dest: 'HT', destCurrency: 'HTG', spread: 3, fixed: 8, retention: 1.5 },
     { corridorId: 'bo-sv', dest: 'SV', destCurrency: 'USD', spread: 2, fixed: 3, retention: 0.8 },  // El Salvador dolarizado — vita_sent routing
+    // Australia — BSB routing_number (no SWIFT). Vita clave 'au'. Reemplaza Harbor inactivo.
+    { corridorId: 'bo-au', dest: 'AU', destCurrency: 'AUD', spread: 2, fixed: 5, retention: 1 },
+    // China USD — SWIFT internacional vía Vita clave 'cnusd'. Sin mínimo $600 de Harbor.
+    // bo-cn (CNY) permanece en Harbor. bo-cn-usd (USD) usa Vita.
+    { corridorId: 'bo-cn-usd', dest: 'CN', destCurrency: 'USD', spread: 2, fixed: 5, retention: 1 },
   ].map(({ corridorId, dest, destCurrency, spread, fixed, retention }) => ({
     corridorId,
     originCountry:          'BO',
@@ -553,7 +558,6 @@ const CORREDORES = [
   // ══════════════════════════════════════════════════════════════════════════
 
   ...[
-    { corridorId: 'bo-au', dest: 'AU', destCurrency: 'AUD' },
     { corridorId: 'bo-gb', dest: 'GB', destCurrency: 'GBP' },
     { corridorId: 'bo-cn', dest: 'CN', destCurrency: 'CNY' },
   ].map(({ corridorId, dest, destCurrency }) => ({
