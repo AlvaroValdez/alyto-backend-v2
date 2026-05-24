@@ -7,9 +7,7 @@
  * Casos cubiertos:
  *   payout_sent (>15 min sin transition)              → poll Harbor → completed | failed
  *   payout_pending_usdc_send (>2h sin USDC send)      → alert admin
- *
- * No reintenta envíos automáticamente — solo reconcilia el status local
- * con el de Harbor (single source of truth).
+ *   failed + failureRetryable=true + TRANSIENT_ERROR  → reintento automático (hasta 3x, backoff 5 min)
  *
  * Triggers:
  *   - setInterval en server.js cada 15 min
@@ -17,14 +15,21 @@
  */
 
 import Transaction         from '../models/Transaction.js';
+import TransactionConfig  from '../models/TransactionConfig.js';
 import { getTransferStatus, getCustomerUuid } from '../services/owlPayService.js';
 import { sendRawEmail }    from '../services/email.js';
+import { tryOwlPayV2 }    from '../controllers/ipnController.js';
+import { mapHarborError } from '../utils/harborErrorMapper.js';
 
 // Edad mínima antes de reconciliar — evita race condition con webhook que
 // llega normal en segundos. Si webhook no llegó en 15 min, ya hay problema.
-const PAYOUT_SENT_AGE_MS        = 15 * 60 * 1000;       // 15 min
-const PAYOUT_PENDING_USDC_AGE_MS = 2  * 60 * 60 * 1000; // 2 horas
+const PAYOUT_SENT_AGE_MS         = 15 * 60 * 1000;       // 15 min
+const PAYOUT_PENDING_USDC_AGE_MS = 2  * 60 * 60 * 1000;  // 2 horas
 const MAX_AGE_BEFORE_GIVEUP_MS   = 7  * 24 * 60 * 60 * 1000; // 7 días (auto-fail)
+
+// Parámetros de reintento automático para TRANSIENT_ERROR
+const MAX_RECONCILE_RETRIES = 3;
+const RETRY_BACKOFF_MS      = 5 * 60 * 1000; // 5 min mínimo entre reintentos
 
 // Mapeo Harbor status → Alyto status
 const HARBOR_TO_ALYTO_STATUS = {
@@ -44,7 +49,7 @@ export async function reconcileHarborTransfers() {
   }
 
   const now = Date.now();
-  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0 };
+  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0, retried: 0, retriedFailed: 0, retriedExhausted: 0 };
 
   // ── 1. payout_sent atascadas (webhook perdido) ──────────────────────────
   const stuckSent = await Transaction.find({
@@ -134,7 +139,96 @@ export async function reconcileHarborTransfers() {
     } catch (e) { console.error('[Reconcile] Error email admin (pending_usdc):', e.message); }
   }
 
-  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0 || stats.unknown > 0) {
+  // ── 3. failed + failureRetryable: true (Harbor TRANSIENT_ERROR) ─────────────
+  // Transacciones cuyo POST /v2/transfers agotó el timeout pero nunca obtuvieron
+  // un transferId — el job las reintenta automáticamente hasta MAX_RECONCILE_RETRIES.
+  const stuckFailed = await Transaction.find({
+    status:           'failed',
+    failureRetryable: true,
+    failureCategory:  'TRANSIENT_ERROR',
+    'harborTransfer.transferId': { $in: [null, undefined] },
+    reconcileRetryCount: { $lt: MAX_RECONCILE_RETRIES },
+    updatedAt: { $lt: new Date(now - RETRY_BACKOFF_MS) },
+  }).limit(10);
+
+  const exhaustedIds = [];
+
+  for (const tx of stuckFailed) {
+    const attempt = (tx.reconcileRetryCount ?? 0) + 1;
+    try {
+      const corridor = await TransactionConfig
+        .findOne({ corridorId: tx.corridorCode })
+        .lean();
+
+      if (!corridor) {
+        console.warn(`[Reconcile] Corredor "${tx.corridorCode}" no encontrado para ${tx.alytoTransactionId} — skip retry`);
+        continue;
+      }
+
+      const netAmountUSD = tx.digitalAssetAmount;
+      if (!netAmountUSD || netAmountUSD <= 0) {
+        console.warn(`[Reconcile] digitalAssetAmount inválido (${netAmountUSD}) para ${tx.alytoTransactionId} — skip retry`);
+        continue;
+      }
+
+      // Registrar el intento antes de ejecutar — evita loop en caso de crash
+      tx.reconcileRetryCount = attempt;
+      tx.ipnLog.push({
+        provider:   'reconcile',
+        eventType:  'reconcile_retry_attempt',
+        status:     tx.status,
+        rawPayload: { attempt, maxAttempts: MAX_RECONCILE_RETRIES, at: new Date() },
+        receivedAt: new Date(),
+      });
+      await tx.save();
+
+      console.info(`[Reconcile] Reintentando ${tx.alytoTransactionId} — intento ${attempt}/${MAX_RECONCILE_RETRIES}`);
+
+      await tryOwlPayV2(tx, corridor, netAmountUSD);
+
+      stats.retried++;
+      console.info(`[Reconcile] ${tx.alytoTransactionId} reintentado OK → ${tx.status}`);
+    } catch (err) {
+      stats.retriedFailed++;
+      const mapped = mapHarborError(err);
+
+      tx.status            = 'failed';
+      tx.failureReason     = mapped.adminMessage;
+      tx.failureCategory   = mapped.category;
+      tx.failureRetryable  = attempt < MAX_RECONCILE_RETRIES && mapped.retryable;
+      tx.ipnLog.push({
+        provider:   'reconcile',
+        eventType:  'reconcile_retry_failed',
+        status:     'failed',
+        rawPayload: { attempt, category: mapped.category, error: err.message },
+        receivedAt: new Date(),
+      });
+      await tx.save().catch(() => {});
+
+      if (!tx.failureRetryable) {
+        exhaustedIds.push(tx.alytoTransactionId);
+        stats.retriedExhausted++;
+      }
+
+      console.error(`[Reconcile] Reintento fallido ${tx.alytoTransactionId} (intento ${attempt}):`, err.message);
+    }
+  }
+
+  if (exhaustedIds.length > 0) {
+    console.warn(`[Reconcile] ${exhaustedIds.length} tx agotaron reintentos automáticos — requieren revisión manual`);
+    try {
+      await sendRawEmail(
+        process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+        `⚠️ ${exhaustedIds.length} tx Harbor agotaron reintentos automáticos`,
+        `<p>Las siguientes transacciones fallaron ${MAX_RECONCILE_RETRIES} reintentos automáticos ` +
+        `y requieren revisión manual en el Ledger:</p>` +
+        `<ul>${exhaustedIds.map(id => `<li>${id}</li>`).join('')}</ul>` +
+        `<p>Revisar el corredor en el admin panel y contactar a OwlPay si el problema persiste.</p>`,
+      );
+    } catch (e) { console.error('[Reconcile] Error email admin (exhausted):', e.message); }
+  }
+
+  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0 || stats.unknown > 0 || stats.retried > 0 || stats.retriedFailed > 0) {
     console.info('[Reconcile] Stats:', stats);
   }
   return stats;

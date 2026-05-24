@@ -628,7 +628,7 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
  * @param {object} corridor     — TransactionConfig lean
  * @param {number} netAmountUSD — Monto en USD/USDC a enviar (ya convertido de BOB si aplica)
  */
-async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
+export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
   // Guard idempotencia: si ya tiene transferId, no procesar de nuevo

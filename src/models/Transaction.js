@@ -607,6 +607,11 @@ const transactionSchema = new Schema(
       type:    Boolean,
       default: false,
     },
+    /** Número de reintentos automáticos ejecutados por reconcileHarborTransfers */
+    reconcileRetryCount: {
+      type:    Number,
+      default: 0,
+    },
     /** Razón del estado actual — visible en admin, no al usuario final */
     statusReason: {
       type:    String,
