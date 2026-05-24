@@ -1414,12 +1414,13 @@ export async function initCrossBorderPayment(req, res) {
  * }
  *
  * Lógica de lookup:
- * Estructura real de la respuesta de Vita /prices (solo existe clp_sell):
  *   withdrawal.prices.attributes.clp_sell[countryKey]          → tasa CLP→destino
+ *   usd.withdrawal.prices.attributes.usd_sell[countryKey]      → tasa USD→destino (39 países, directa)
  *   withdrawal.prices.attributes.fixed_cost[countryKey]        → costo fijo en moneda destino
  *   withdrawal.prices.attributes.valid_until                   → expiración ISO8601
  *
- * Para originCurrency USD/USDC: Vita NO tiene usd_sell. Se deriva via cross-rate:
+ * Para originCurrency USD/USDC: se usa prices.usd.withdrawal.usd_sell (tasa exacta de Vita).
+ *   Fall back a cross-rate CLP si la sección USD no está disponible:
  *   usd_to_dest = clp_sell[dest] / clp_sell["us"]
  *   Ejemplo: clp_sell.co=4.343071 / clp_sell.us=0.001035 ≈ 4196 COP/USD
  *
@@ -1477,27 +1478,40 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     if (raw == null) return null;
     rate = Number(raw);
   } else if (origin === 'USD' || origin === 'USDC') {
-    // Vita solo provee clp_sell. Derivamos la tasa USD via cross-rate CLP:
-    //   1 USD = (clp_sell[dest] / clp_sell["us"]) unidades de moneda destino
-    // Ejemplo BO→CO: 4.343071 / 0.001035 ≈ 4196 COP/USD
-    // Ejemplo BO→CL: 1.0      / 0.001035 ≈ 966  CLP/USD
-    // Ejemplo BO→US: 0.001035 / 0.001035 = 1.0  USD/USD ✓
+    // Preferir tasa directa desde prices.usd.withdrawal (exactamente lo que Vita aplica).
+    // Fall back a cross-rate CLP si la sección USD no está disponible en la cuenta.
+    const usdAttrs   = vitaPricesResponse?.usd?.withdrawal?.prices?.attributes;
+    const directRate = Number(usdAttrs?.usd_sell?.[countryKey] ?? NaN);
+    if (isFinite(directRate) && directRate > 0) {
+      return {
+        rate:       directRate,
+        fixedCost:  Number(usdAttrs?.fixed_cost?.[countryKey] ?? 0),
+        validUntil: usdAttrs?.valid_until ?? null,
+      };
+    }
     const clpToDest = Number(attrs.clp_sell?.[countryKey] ?? NaN);
     const clpToUsd  = Number(attrs.clp_sell?.['us']       ?? NaN);
     if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
     rate = clpToDest / clpToUsd;
   } else if (origin === 'BOB') {
     // Bolivia: Vita no tiene bob_sell. Dos pasos:
-    //   PASO 1 — tasa USD→destino via cross-rate CLP
+    //   PASO 1 — tasa USD→destino (USD directo o cross-rate CLP)
     //   PASO 2 — dividir por BOB_USD_RATE (desde MongoDB o .env)
-    const BOB_USD_RATE = await getBOBRate();
-    const clpToDest    = Number(attrs.clp_sell?.[countryKey] ?? NaN);
-    const clpToUsd     = Number(attrs.clp_sell?.['us']       ?? NaN);
-    if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
-    const usdToDestRate = clpToDest / clpToUsd;
+    const BOB_USD_RATE  = await getBOBRate();
+    const usdAttrs      = vitaPricesResponse?.usd?.withdrawal?.prices?.attributes;
+    const directUSD     = Number(usdAttrs?.usd_sell?.[countryKey] ?? NaN);
+    let usdToDestRate;
+    if (isFinite(directUSD) && directUSD > 0) {
+      usdToDestRate = directUSD;
+    } else {
+      const clpToDest = Number(attrs.clp_sell?.[countryKey] ?? NaN);
+      const clpToUsd  = Number(attrs.clp_sell?.['us']       ?? NaN);
+      if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
+      usdToDestRate = clpToDest / clpToUsd;
+    }
     rate = usdToDestRate / BOB_USD_RATE;
-    console.info('[Alyto Quote] Cotización BOB→' + destinationCountry + ' via cross-rate:', {
-      clpToDest, clpToUsd, usdToDestRate, BOB_USD_RATE, bobToDestRate: rate,
+    console.info('[Alyto Quote] Cotización BOB→' + destinationCountry + ':', {
+      usdToDestRate, BOB_USD_RATE, bobToDestRate: rate,
     });
   } else {
     return null;  // moneda origen no soportada
@@ -1515,8 +1529,8 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
 /**
  * calculateBOBQuote — Cotización para corredores manuales SRL Bolivia.
  *
- * Ruta de conversión: BOB → USDC (tasa admin o BOB_USD_RATE env) → destino (Vita cross-rate CLP).
- * Vita no tiene tasas BOB nativas. Se deriva: usd_to_dest = clp_sell[dest] / clp_sell["us"]
+ * Ruta de conversión: BOB → USDC (tasa admin o BOB_USD_RATE env) → destino (tasa USD directa Vita).
+ * Vita no tiene tasas BOB nativas. Se usa prices.usd.withdrawal con fallback a cross-rate CLP.
  *
  * @param {object} req
  * @param {object} res

@@ -24,7 +24,7 @@ import jwt                 from 'jsonwebtoken';
 import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
-import { getPrices, VITA_SENT_ONLY_COUNTRIES } from './vitaWalletService.js';
+import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey } from './vitaWalletService.js';
 import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
 import { calculateQuote }  from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
@@ -129,7 +129,7 @@ async function refreshVitaCache() {
 
 /**
  * Extrae tasa CLP→destino desde el cache de Vita.
- * Para USD/USDC origin: cross-rate via CLP.
+ * Para USD/USDC: usa prices.usd.withdrawal directo; fall back a cross-rate CLP.
  *
  * @param {string} originCurrency     'CLP' | 'USD' | 'USDC'
  * @param {string} destinationCountry ISO alpha-2 (ej. 'CO')
@@ -152,7 +152,17 @@ function extractPricing(originCurrency, destinationCountry) {
     if (raw == null) return null;
     rate = Number(raw);
   } else if (origin === 'USD' || origin === 'USDC') {
-    // Vita no tiene usd_sell — derivamos via cross-rate CLP
+    const usdKey     = getVitaCountryKey(destinationCountry, 'USD');
+    const usdAttrs   = vitaCache.prices?.usd?.withdrawal?.prices?.attributes;
+    const directRate = Number(usdAttrs?.usd_sell?.[usdKey] ?? NaN);
+    if (isFinite(directRate) && directRate > 0) {
+      return {
+        rate:       directRate,
+        fixedCost:  Number(usdAttrs?.fixed_cost?.[usdKey] ?? 0),
+        validUntil: usdAttrs?.valid_until ?? null,
+      };
+    }
+    // Fallback: cross-rate via CLP (cuenta sin sección USD activa)
     const clpToDest = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
     const clpToUsd  = Number(attrs?.clp_sell?.['us']       ?? NaN);
     if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
@@ -171,13 +181,32 @@ function extractPricing(originCurrency, destinationCountry) {
 
 /**
  * Extrae tasa USD→destino desde el cache de Vita (para corredores BOB).
- * Misma lógica que extractVitaPricing(vitaResponse, 'USD', dest) en paymentController.
+ *
+ * Prioridad:
+ *   1. prices.usd.withdrawal.prices.attributes.usd_sell[vitaKey] — tasa directa USD (39 países)
+ *   2. cross-rate CLP: clp_sell[dest] / clp_sell["us"] — fallback si sección USD ausente
  *
  * @param {string} destinationCountry ISO alpha-2 (ej. 'CO')
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 function extractPricingUSD(destinationCountry) {
-  const destUpper  = destinationCountry.toUpperCase();
+  const destUpper = destinationCountry.toUpperCase();
+  const usdKey    = getVitaCountryKey(destinationCountry, 'USD');
+
+  // Tasa directa USD: exactamente lo que Vita aplica internamente para currency='usd'
+  if (!VITA_SENT_ONLY_COUNTRIES.has(destUpper)) {
+    const usdAttrs   = vitaCache.prices?.usd?.withdrawal?.prices?.attributes;
+    const directRate = Number(usdAttrs?.usd_sell?.[usdKey] ?? NaN);
+    if (isFinite(directRate) && directRate > 0) {
+      return {
+        rate:       directRate,
+        fixedCost:  Number(usdAttrs?.fixed_cost?.[usdKey] ?? 0),
+        validUntil: usdAttrs?.valid_until ?? null,
+      };
+    }
+  }
+
+  // Fallback: cross-rate via sección CLP
   const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
     ? vitaCache.prices?.vita_sent?.prices?.attributes
     : vitaCache.prices?.withdrawal?.prices?.attributes;
@@ -185,18 +214,18 @@ function extractPricingUSD(destinationCountry) {
   if (!attrs) return null;
 
   const countryKey = destinationCountry.toLowerCase();
-
-  const clpToDest = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
-  const clpToUsd  = Number(attrs?.clp_sell?.['us']       ?? NaN);
+  const clpToDest  = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
+  const clpToUsd   = Number(attrs?.clp_sell?.['us']       ?? NaN);
   if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
 
-  const rate       = clpToDest / clpToUsd;   // unidades dest por 1 USD
+  const rate = clpToDest / clpToUsd;
   if (!isFinite(rate) || rate <= 0) return null;
 
-  const fixedCost  = Number(attrs?.fixed_cost?.[countryKey] ?? 0);
-  const validUntil = attrs?.valid_until ?? null;
-
-  return { rate, fixedCost, validUntil };
+  return {
+    rate,
+    fixedCost:  Number(attrs?.fixed_cost?.[countryKey] ?? 0),
+    validUntil: attrs?.valid_until ?? null,
+  };
 }
 
 /**
@@ -366,7 +395,7 @@ async function computeQuote(state) {
       };
     }
 
-    // ── 2b. Vita (vitaWallet / anchorBolivia) — tasa USD→dest vía cross-rate CLP
+    // ── 2b. Vita (vitaWallet / anchorBolivia) — tasa USD→dest (directa o cross-rate CLP)
     if (isCacheStale()) await refreshVitaCache();
 
     const usdPricing = extractPricingUSD(destinationCountry);
