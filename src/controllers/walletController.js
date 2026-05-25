@@ -435,7 +435,27 @@ export async function requestWithdrawal(req, res) {
     }], { session })
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
 
+    // Imagen QR bancaria opcional (adjunta por el usuario para facilitar pago admin)
+    const bankQrMeta = {}
+    if (req.file) {
+      bankQrMeta.bankQrImage = {
+        data:       req.file.buffer.toString('base64'),
+        mimetype:   req.file.mimetype,
+        filename:   req.file.originalname,
+        size:       req.file.size,
+        uploadedAt: new Date(),
+      }
+    }
+
     await session.commitTransaction()
+
+    // Guardar QR fuera de la sesión (no es monetario, fallo no es crítico)
+    if (req.file) {
+      await WalletTransaction.updateOne(
+        { _id: wtx._id },
+        { $set: { 'metadata.bankQrImage': bankQrMeta.bankQrImage } },
+      ).catch(err => console.warn('[Wallet] Error guardando QR bancario:', err.message))
+    }
 
     // Push notification al usuario
     notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
@@ -894,4 +914,138 @@ export async function uploadDepositProof(req, res) {
     ok:      true,
     message: 'Comprobante recibido. Verificaremos tu depósito en 2–4 horas hábiles.',
   })
+}
+
+// ─── FUNCIÓN 12 (ADMIN): GET /api/v1/admin/wallet/withdrawals/pending ────────
+
+export async function adminListPendingWithdrawals(req, res) {
+  try {
+    const pending = await WalletTransaction.find({ type: 'withdrawal', status: 'pending' })
+      .sort({ createdAt: -1 })
+      .populate('userId', 'firstName lastName email kycStatus legalEntity')
+      .lean()
+
+    return res.json({ withdrawals: pending, total: pending.length })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminListPendingWithdrawals' } })
+    console.error('[Wallet] Error en adminListPendingWithdrawals:', err.message)
+    return res.status(500).json({ error: 'Error al listar retiros pendientes.' })
+  }
+}
+
+// ─── FUNCIÓN 13 (ADMIN): POST /api/v1/admin/wallet/withdrawal/confirm ────────
+
+export async function adminConfirmWithdrawal(req, res) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    const admin                         = req.user
+    const { wtxId, bankReference, note } = req.body
+
+    if (!wtxId || !bankReference) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
+    }
+
+    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+    if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
+      await session.abortTransaction()
+      return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
+    }
+
+    const wallet = await WalletBOB.findById(wtx.walletId).session(session)
+    if (!wallet) {
+      await session.abortTransaction()
+      return res.status(404).json({ error: 'Wallet no encontrada.' })
+    }
+
+    const prevBalance = wallet.balance
+    const newBalance  = prevBalance - wtx.amount
+
+    // Descontar del saldo real y liberar reserva
+    await WalletBOB.updateOne(
+      { _id: wallet._id },
+      { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } },
+      { session },
+    )
+    await WalletTransaction.updateOne({ _id: wtx._id }, {
+      status:        'completed',
+      balanceBefore: prevBalance,
+      balanceAfter:  newBalance,
+      confirmedBy:   admin._id,
+      confirmedAt:   new Date(),
+      reference:     bankReference,
+      metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
+    }, { session })
+
+    await session.commitTransaction()
+
+    notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
+      title:   'Retiro procesado',
+      body:    `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
+      type:    'wallet',
+    }).catch(() => {})
+
+    return res.json({ wtxId, newBalance, confirmedAt: new Date() })
+
+  } catch (err) {
+    await session.abortTransaction()
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminConfirmWithdrawal' } })
+    console.error('[Wallet] Error en adminConfirmWithdrawal:', err.message)
+    return res.status(500).json({ error: 'Error al confirmar el retiro.' })
+  } finally {
+    session.endSession()
+  }
+}
+
+// ─── FUNCIÓN 14 (ADMIN): POST /api/v1/admin/wallet/withdrawal/reject ─────────
+
+export async function adminRejectWithdrawal(req, res) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    const { wtxId, reason } = req.body
+
+    if (!wtxId) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'wtxId es requerido.' })
+    }
+
+    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+    if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
+      await session.abortTransaction()
+      return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
+    }
+
+    // Liberar la reserva sin descontar el saldo
+    await WalletBOB.updateOne(
+      { _id: wtx.walletId },
+      { $inc: { balanceReserved: -wtx.amount } },
+      { session },
+    )
+    await WalletTransaction.updateOne({ _id: wtx._id }, {
+      status:   'failed',
+      metadata: { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
+    }, { session })
+
+    await session.commitTransaction()
+
+    notify(wtx.userId, {
+      title: 'Retiro rechazado',
+      body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} no pudo procesarse. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
+      type:  'wallet',
+    }).catch(() => {})
+
+    return res.json({ wtxId, status: 'failed' })
+
+  } catch (err) {
+    await session.abortTransaction()
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminRejectWithdrawal' } })
+    console.error('[Wallet] Error en adminRejectWithdrawal:', err.message)
+    return res.status(500).json({ error: 'Error al rechazar el retiro.' })
+  } finally {
+    session.endSession()
+  }
 }

@@ -38,6 +38,15 @@ const uploadComprobante = multer({
     cb(allowed.includes(file.mimetype) ? null : new Error('Solo JPG, PNG o PDF.'), allowed.includes(file.mimetype))
   },
 })
+
+const uploadBankQr = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp']
+    cb(allowed.includes(file.mimetype) ? null : new Error('Solo JPG, PNG o WebP para QR bancario.'), allowed.includes(file.mimetype))
+  },
+})
 import {
   generateWalletQR,
   scanAndPayQR,
@@ -61,7 +70,7 @@ router.get('/deposit/qr-images',             protect, requireKycApproved, getDep
 router.post('/deposit/initiate',             protect, requireKycApproved, checkSanctions, idempotencyCheck, initiateDeposit)
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
 router.post('/send',             protect, requireKycApproved, checkSanctions, sendP2P)
-router.post('/withdraw/request', protect, requireKycApproved, checkSanctions, requestWithdrawal)
+router.post('/withdraw/request', protect, requireKycApproved, checkSanctions, uploadBankQr.single('bankQrImage'), requestWithdrawal)
 
 // QR Wallet (Fase 29)
 router.post('/qr/generate', protect, requireKycApproved, generateWalletQR)

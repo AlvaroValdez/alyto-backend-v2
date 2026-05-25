@@ -88,6 +88,9 @@ import {
   adminConfirmDeposit,
   adminFreezeWallet,
   adminUnfreezeWallet,
+  adminListPendingWithdrawals,
+  adminConfirmWithdrawal,
+  adminRejectWithdrawal,
 } from '../controllers/walletController.js';
 import {
   adminListPendingConversions,
@@ -519,6 +522,15 @@ router.get('/wallet/deposits/pending',   adminListPendingDeposits);
  * Body: { wtxId, bankReference, note? }
  */
 router.post('/wallet/deposit/confirm',   adminConfirmDeposit);
+
+/**
+ * GET  /api/v1/admin/wallet/withdrawals/pending  — Lista retiros pendientes BOB
+ * POST /api/v1/admin/wallet/withdrawal/confirm   — Confirma retiro (transfiere)
+ * POST /api/v1/admin/wallet/withdrawal/reject    — Rechaza retiro (libera reserva)
+ */
+router.get('/wallet/withdrawals/pending',  adminListPendingWithdrawals);
+router.post('/wallet/withdrawal/confirm',  adminConfirmWithdrawal);
+router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
 
 /**
  * PATCH /api/v1/admin/wallet/:userId/freeze
