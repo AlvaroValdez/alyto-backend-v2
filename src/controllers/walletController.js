@@ -1049,3 +1049,147 @@ export async function adminRejectWithdrawal(req, res) {
     session.endSession()
   }
 }
+
+// ─── FUNCIÓN 15: GET /api/v1/wallet/balance-history ──────────────────────────
+
+/**
+ * GET /api/v1/wallet/balance-history?days=7&currency=BOB|USDC
+ * Saldo de cierre diario para los últimos N días — usado en el sparkline del card.
+ */
+export async function getBalanceHistory(req, res) {
+  try {
+    const user     = req.user
+    const days     = Math.min(30, Math.max(7, parseInt(req.query.days ?? '7', 10)))
+    const currency = req.query.currency === 'USDC' ? 'USDC' : 'BOB'
+
+    const since = new Date()
+    since.setDate(since.getDate() - (days - 1))
+    since.setHours(0, 0, 0, 0)
+
+    const [txs, txBefore] = await Promise.all([
+      WalletTransaction.find({ userId: user._id, currency, status: 'completed', createdAt: { $gte: since } })
+        .sort({ createdAt: 1 }).select('balanceAfter createdAt').lean(),
+      WalletTransaction.findOne({ userId: user._id, currency, status: 'completed', createdAt: { $lt: since } })
+        .sort({ createdAt: -1 }).select('balanceAfter').lean(),
+    ])
+
+    const buckets = {}
+    for (let i = 0; i < days; i++) {
+      const d = new Date(since)
+      d.setDate(d.getDate() + i)
+      buckets[d.toISOString().slice(0, 10)] = null
+    }
+    for (const tx of txs) {
+      const key = new Date(tx.createdAt).toISOString().slice(0, 10)
+      if (key in buckets) buckets[key] = tx.balanceAfter
+    }
+
+    let carry = txBefore?.balanceAfter ?? 0
+    const history = Object.entries(buckets).map(([date, balance]) => {
+      if (balance !== null) carry = balance
+      return { date, balance: balance !== null ? balance : carry }
+    })
+
+    return res.json({ history, currency })
+  } catch (err) {
+    console.error('[Wallet] Error en getBalanceHistory:', err.message)
+    return res.status(500).json({ error: 'Error al obtener el historial de saldo.' })
+  }
+}
+
+// ─── FUNCIÓN 16: GET /api/v1/wallet/daily-limits ─────────────────────────────
+
+/**
+ * GET /api/v1/wallet/daily-limits
+ * Uso diario de envíos y retiros BOB frente a los límites configurados.
+ */
+export async function getDailyLimits(req, res) {
+  try {
+    const user = req.user
+    const SEND_LIMIT     = parseFloat(process.env.WALLET_DAILY_SEND_LIMIT     ?? '5000')
+    const WITHDRAW_LIMIT = parseFloat(process.env.WALLET_DAILY_WITHDRAW_LIMIT ?? '10000')
+
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+
+    const [sendAgg, withdrawAgg] = await Promise.all([
+      WalletTransaction.aggregate([
+        { $match: { userId: user._id, type: 'send', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+      WalletTransaction.aggregate([
+        { $match: { userId: user._id, type: 'withdrawal', status: { $in: ['pending', 'completed'] }, currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ])
+
+    return res.json({
+      send:       { used: sendAgg[0]?.total ?? 0,     limit: SEND_LIMIT },
+      withdrawal: { used: withdrawAgg[0]?.total ?? 0, limit: WITHDRAW_LIMIT },
+    })
+  } catch (err) {
+    console.error('[Wallet] Error en getDailyLimits:', err.message)
+    return res.status(500).json({ error: 'Error al obtener los límites diarios.' })
+  }
+}
+
+// ─── FUNCIÓN 17: GET /api/v1/wallet/export ────────────────────────────────────
+
+/**
+ * GET /api/v1/wallet/export?currency=BOB|USDC&month=YYYY-MM
+ * Descarga el historial de transacciones como CSV (BOM UTF-8 para Excel/Sheets).
+ */
+export async function exportTransactions(req, res) {
+  try {
+    const user     = req.user
+    const currency = req.query.currency === 'USDC' ? 'USDC' : 'BOB'
+    const month    = req.query.month
+
+    let dateFilter = {}
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      const [y, m] = month.split('-').map(Number)
+      dateFilter = { createdAt: { $gte: new Date(y, m - 1, 1), $lt: new Date(y, m, 1) } }
+    }
+
+    const txs = await WalletTransaction.find({ userId: user._id, currency, ...dateFilter })
+      .sort({ createdAt: -1 }).limit(1000).lean()
+
+    const typeLabels = {
+      deposit:      'Depósito',
+      withdrawal:   'Retiro',
+      send:         'Envío P2P',
+      receive:      'Recibo P2P',
+      fee:          'Comisión',
+      freeze:       'Congelamiento',
+      unfreeze:     'Descongelamiento',
+      bob_to_usdc:  'Conversión BOB→USDC',
+      usdc_deposit: 'Depósito USDC',
+    }
+    const statusLabels = { pending: 'Pendiente', completed: 'Completado', failed: 'Fallido', reversed: 'Revertido' }
+
+    const rows = [
+      ['Fecha', 'Tipo', 'Moneda', 'Monto', 'Saldo Previo', 'Saldo Post', 'Estado', 'Descripción', 'Referencia'],
+      ...txs.map(tx => [
+        new Date(tx.createdAt).toLocaleString('es-BO', { timeZone: 'America/La_Paz' }),
+        typeLabels[tx.type] ?? tx.type,
+        currency,
+        tx.amount.toFixed(2),
+        tx.balanceBefore.toFixed(2),
+        tx.balanceAfter.toFixed(2),
+        statusLabels[tx.status] ?? tx.status,
+        (tx.description ?? '').replace(/[",\n]/g, ' '),
+        tx.reference ?? '',
+      ]),
+    ]
+
+    const csv = rows.map(r => r.map(v => `"${String(v)}"`).join(',')).join('\r\n')
+    const filename = `alyto_${currency.toLowerCase()}_${month ?? 'historial'}.csv`
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    return res.send('﻿' + csv)
+  } catch (err) {
+    console.error('[Wallet] Error en exportTransactions:', err.message)
+    return res.status(500).json({ error: 'Error al exportar.' })
+  }
+}

@@ -28,6 +28,9 @@ import {
   uploadDepositProof,
   sendP2P,
   requestWithdrawal,
+  getBalanceHistory,
+  getDailyLimits,
+  exportTransactions,
 } from '../controllers/walletController.js'
 
 const uploadComprobante = multer({
@@ -71,6 +74,10 @@ router.post('/deposit/initiate',             protect, requireKycApproved, checkS
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
 router.post('/send',             protect, requireKycApproved, checkSanctions, sendP2P)
 router.post('/withdraw/request', protect, requireKycApproved, checkSanctions, uploadBankQr.single('bankQrImage'), requestWithdrawal)
+
+router.get('/balance-history', protect, requireKycApproved, getBalanceHistory)
+router.get('/daily-limits',    protect, requireKycApproved, getDailyLimits)
+router.get('/export',          protect, requireKycApproved, exportTransactions)
 
 // QR Wallet (Fase 29)
 router.post('/qr/generate', protect, requireKycApproved, generateWalletQR)
