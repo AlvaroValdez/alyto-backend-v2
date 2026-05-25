@@ -24,7 +24,7 @@ import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 // ─── Mapeo de país a entidad legal ────────────────────────────────────────────
 
 // ─── Dual auth mode ──────────────────────────────────────────────────────────
-// AUTH_MODE=cookie (default, VPS prod)  → HttpOnly cookie, no token in body
+// AUTH_MODE=cookie (default, VPS prod)  → HttpOnly cookie + token in body (belt-and-suspenders)
 // AUTH_MODE=header (Render staging)     → token in JSON body, no cookie
 const AUTH_MODE     = process.env.AUTH_MODE ?? 'cookie';
 const IS_HEADER_MODE = AUTH_MODE === 'header';
@@ -222,7 +222,7 @@ export async function registerUser(req, res) {
     if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(false));
 
     return res.status(201).json({
-      ...(IS_HEADER_MODE && { token }),
+      token,
       user: {
         id:          user._id,
         email:       user.email,
@@ -350,7 +350,7 @@ export async function loginUser(req, res) {
     if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
 
     const responseBody = {
-      ...(IS_HEADER_MODE && { token }),
+      token,
       user: {
         id:          user._id,
         email:       user.email,
