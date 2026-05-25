@@ -594,6 +594,12 @@ async function startServer() {
     setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
     console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
 
+    // Job de actualización automática de tasas BOB/USDT desde Binance P2P
+    const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
+    setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
+    setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
+    console.info('[Server] Refresh exchange rates job programado cada 30 min');
+
     // Fase 36 — Monitoreo automático de depósitos USDC vía Horizon polling
     // Solo activo si STELLAR_SRL_PUBLIC_KEY está configurado
     if (process.env.STELLAR_SRL_PUBLIC_KEY) {

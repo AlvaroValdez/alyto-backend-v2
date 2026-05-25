@@ -74,28 +74,11 @@ function fireUSDCAuditTrail(wtxId) {
 
 // ─── Helper: obtener tasa BOB/USDC ────────────────────────────────────────────
 
-const RATE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 h — si es más viejo, solo se usa el env fallback
-
 async function getBOBtoUSDCRate() {
-  // Intentar leer de MongoDB (par 'BOB-USDC' o 'BOB-USDT' como proxy)
-  const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } })
-    .sort({ pair: 1 })  // BOB-USDC preferido sobre BOB-USDT
-    .lean()
-
-  if (rateDoc?.rate && rateDoc.rate > 0) {
-    const ageMs = Date.now() - new Date(rateDoc.updatedAt ?? rateDoc.createdAt).getTime()
-    if (ageMs > RATE_MAX_AGE_MS) {
-      console.warn('[walletUSDC] Tasa BOB/USDC desactualizada (>24h) — usando env fallback.', {
-        pair: rateDoc.pair, lastUpdate: rateDoc.updatedAt ?? rateDoc.createdAt,
-      })
-    } else {
-      return rateDoc.rate
-    }
-  }
-
-  // Fallback a variable de entorno
-  const envRate = parseFloat(process.env.BOB_USD_RATE ?? '9.31')
-  return isNaN(envRate) ? 9.31 : envRate
+  // Delega a getBOBRate (exchangeRateService) que maneja prioridad de pares
+  // BOB-USDC / BOB/USDC → BOB-USDT → BOB-USD → env → 9.31
+  const { getBOBRate } = await import('../services/exchangeRateService.js')
+  return getBOBRate()
 }
 
 // ─── FUNCIÓN 1: GET /api/v1/wallet/usdc/balance ───────────────────────────────
@@ -608,11 +591,14 @@ export async function getUSDCTransactions(req, res) {
  */
 export async function getUSDCRate(req, res) {
   try {
-    const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } })
-      .sort({ pair: 1 })
-      .lean()
+    const { getBOBRate } = await import('../services/exchangeRateService.js')
 
-    const rate      = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE ?? '9.31')
+    // Buscar el record para exponer source y updatedAt al frontend
+    const rateDoc = await ExchangeRate.findOne({
+      pair: { $in: ['BOB-USDC', 'BOB/USDC', 'BOB-USDT', 'BOB-USD'] },
+    }).sort({ updatedAt: -1 }).lean()
+
+    const rate      = await getBOBRate()
     const source    = rateDoc ? rateDoc.source ?? 'manual' : 'env_fallback'
     const updatedAt = rateDoc?.updatedAt ?? null
 
