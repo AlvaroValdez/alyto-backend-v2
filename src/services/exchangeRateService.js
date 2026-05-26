@@ -95,27 +95,38 @@ export async function getBOBRate() {
 /**
  * Resuelve el monto mínimo en moneda de origen para un corredor.
  *
- * Si el corredor tiene minAmountUSD:
- *   - BOB: convierte dinámicamente usando la tasa live (BOB/USDC)
- *   - USD: devuelve minAmountUSD directamente (1:1)
- * En cualquier otro caso devuelve minAmountOrigin estático.
+ * Selecciona el umbral USD según accountType:
+ *   - 'business' → minAmountUSDBusiness (si existe), si no cae a minAmountUSD
+ *   - cualquier otro → minAmountUSD
  *
- * @param {{ minAmountUSD?: number, minAmountOrigin?: number, originCurrency?: string }} corridor
+ * Luego convierte a moneda de origen:
+ *   - BOB: Math.ceil(minUSD × tasa live BOB/USDC)
+ *   - USD: minUSD directo (1:1)
+ *   - CLP: Math.ceil(minUSD × tasa live CLP/USD)
+ *   - Sin minUSD: devuelve minAmountOrigin estático
+ *
+ * @param {{ minAmountUSD?: number, minAmountUSDBusiness?: number, minAmountOrigin?: number, originCurrency?: string }} corridor
+ * @param {string} [accountType='personal']
  * @returns {Promise<number>}
  */
-export async function resolveMinAmountOrigin(corridor) {
-  if (!corridor.minAmountUSD) return corridor.minAmountOrigin ?? 1;
+export async function resolveMinAmountOrigin(corridor, accountType = 'personal') {
+  const isBusiness = accountType === 'business';
+  const minUSD = (isBusiness && corridor.minAmountUSDBusiness != null)
+    ? corridor.minAmountUSDBusiness
+    : corridor.minAmountUSD;
+
+  if (!minUSD) return corridor.minAmountOrigin ?? 1;
 
   if (corridor.originCurrency === 'BOB') {
     const rate = await getBOBRate();
-    return Math.ceil(corridor.minAmountUSD * rate);
+    return Math.ceil(minUSD * rate);
   }
 
-  if (corridor.originCurrency === 'USD') return corridor.minAmountUSD;
+  if (corridor.originCurrency === 'USD') return minUSD;
 
   if (corridor.originCurrency === 'CLP') {
     const clpRate = await getCLPRate();
-    return Math.ceil(corridor.minAmountUSD * clpRate);
+    return Math.ceil(minUSD * clpRate);
   }
 
   return corridor.minAmountOrigin ?? 1;

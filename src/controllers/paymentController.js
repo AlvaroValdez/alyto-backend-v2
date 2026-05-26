@@ -746,7 +746,7 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
-  const minAmount = await resolveMinAmountOrigin(corridor);
+  const minAmount = await resolveMinAmountOrigin(corridor, req.user?.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
       error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
@@ -1936,7 +1936,7 @@ export async function getQuote(req, res) {
   }
 
   // Validar monto mínimo del corredor
-  const minAmountOrigin = await resolveMinAmountOrigin(corridor);
+  const minAmountOrigin = await resolveMinAmountOrigin(corridor, req.user?.accountType);
   if (amount < minAmountOrigin) {
     return res.status(400).json({
       error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
@@ -2886,7 +2886,7 @@ export async function getAvailableCorridors(req, res) {
   let corridors;
   try {
     corridors = await TransactionConfig.find(corridorFilter)
-      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin minAmountUSD maxAmountOrigin')
+      .select('corridorId destinationCountry destinationCurrency payinMethod payoutMethod alytoCSpread businessAlytoCSpread fixedFee payinFeePercent fintocConfig minAmountOrigin minAmountUSD minAmountUSDBusiness maxAmountOrigin')
       .lean();
   } catch (err) {
     console.error('[Alyto Corridors] Error:', err.message);
@@ -2904,8 +2904,9 @@ export async function getAvailableCorridors(req, res) {
       payinMethod:             c.payinMethod,
       payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
       payoutMethod:            c.payoutMethod,
-      minAmountOrigin:         c.minAmountOrigin ?? 0,
-      minAmountUSD:            c.minAmountUSD    ?? null,
+      minAmountOrigin:         c.minAmountOrigin         ?? 0,
+      minAmountUSD:            c.minAmountUSD            ?? null,
+      minAmountUSDBusiness:    c.minAmountUSDBusiness    ?? null,
     };
   });
 

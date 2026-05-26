@@ -253,12 +253,20 @@ const transactionConfigSchema = new Schema(
       default: 1,
     },
     /**
-     * Mínimo en USD. Cuando está presente y originCurrency === 'BOB',
-     * el mínimo en BOB se calcula dinámicamente con la tasa live
-     * (minAmountUSD × BOB/USDC) en lugar de usar minAmountOrigin fijo.
-     * Usar para corredores OwlPay donde Harbor impone un mínimo en USD.
+     * Mínimo en USD para usuarios retail (accountType !== 'business').
+     * Cuando está presente, el mínimo en moneda local se calcula
+     * dinámicamente con la tasa live en resolveMinAmountOrigin().
      */
     minAmountUSD: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    /**
+     * Mínimo en USD para usuarios business (accountType === 'business').
+     * Si null, se usa minAmountUSD como fallback.
+     */
+    minAmountUSDBusiness: {
       type:    Number,
       min:     0,
       default: null,

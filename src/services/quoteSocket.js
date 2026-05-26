@@ -242,8 +242,8 @@ async function computeQuote(state) {
   const amount = Number(originAmount);
   const round2 = n => Math.round(n * 100) / 100;
 
-  // Validar monto mínimo del corredor
-  const minAmount = await resolveMinAmountOrigin(corridor);
+  // Validar monto mínimo del corredor (diferenciado retail/business)
+  const minAmount = await resolveMinAmountOrigin(corridor, state.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return {
       type:           'quote_error',

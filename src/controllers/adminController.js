@@ -719,7 +719,7 @@ export async function createCorridor(req, res) {
       'alytoCSpread', 'businessAlytoCSpread', 'businessFixedFee', 'fixedFee',
       'payinFeePercent', 'fintocConfig', 'payoutFeeFixed', 'profitRetentionPercent',
       'vitaRateMarkup', 'manualExchangeRate', 'fallbackPayoutMethod',
-      'minAmountOrigin', 'minAmountUSD', 'maxAmountOrigin',
+      'minAmountOrigin', 'minAmountUSD', 'minAmountUSDBusiness', 'maxAmountOrigin',
       'legalEntity', 'routingScenario', 'isActive', 'adminNotes',
     ];
     const safeBody = Object.fromEntries(
@@ -1468,6 +1468,8 @@ export async function getCorridorRates(req, res) {
       config: {
         manualExchangeRate: c.manualExchangeRate,
         minAmountOrigin:    c.minAmountOrigin,
+        minAmountUSD:       c.minAmountUSD,
+        minAmountUSDBusiness: c.minAmountUSDBusiness,
         maxAmountOrigin:    c.maxAmountOrigin,
         fintocConfig:       c.fintocConfig,
         fallbackPayoutMethod: c.fallbackPayoutMethod,
