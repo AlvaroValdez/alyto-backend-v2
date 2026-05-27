@@ -31,6 +31,7 @@
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1052.0",
+    "@aws-sdk/client-secrets-manager": "^3.1055.0",
     "@aws-sdk/s3-request-presigner": "^3.1052.0",
     "@sendgrid/mail": "^8.1.6",
     "@sentry/node": "^10.45.0",
@@ -51,6 +52,8 @@
     "pdfkit": "^0.18.0",
     "qrcode": "^1.5.4",
     "stripe": "^20.4.1",
+    "winston": "^3.19.0",
+    "winston-cloudwatch": "^6.3.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {

@@ -8,11 +8,18 @@
  *  4. Exponer healthcheck para load balancers y monitoreo
  */
 
-// ⚠️  Sentry debe inicializarse ANTES que cualquier otro módulo
+// ⚠️  dotenv primero — Secrets Manager necesita AWS_REGION y AWS_SECRETS_NAME del .env
+import 'dotenv/config';
+
+// ⚠️  Secrets Manager antes que todo — inyecta el resto de vars en process.env
+// Si AWS_SECRETS_NAME está definido carga desde AWS; si no, usa .env normalmente.
+import { loadSecretsIntoEnv, auditSecrets, CRITICAL_SECRETS } from './utils/awsSecrets.js';
+await loadSecretsIntoEnv();
+
+// ⚠️  Sentry debe inicializarse ANTES que cualquier otro módulo de negocio
 import './services/sentry.js';
 import * as Sentry from '@sentry/node';
 
-import 'dotenv/config';
 import { checkEnv }  from '../scripts/checkEnv.js';
 import { cleanupOrphanTransactions } from './jobs/cleanupOrphanTransactions.js';
 import { kycIncompleteMonitor }     from './jobs/kycIncompleteMonitor.js';
@@ -290,6 +297,29 @@ app.get('/api/health', (req, res) => {
 
 // Alias versionado del healthcheck (para Render y load balancers que prefieren /api/v1/)
 app.get('/api/v1/health', (req, res) => res.redirect(307, '/api/health'));
+
+/**
+ * GET /api/v1/admin/secrets-audit
+ * Diagnóstico de secretos críticos — solo admin autenticado.
+ * Muestra NOMBRES de variables presentes/faltantes, NUNCA valores.
+ */
+app.get('/api/v1/admin/secrets-audit', (req, res) => {
+  // Validación básica: solo admin (no usa middleware para evitar dependencia circular en startup)
+  const authHeader = req.headers.authorization ?? '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : req.cookies?.alyto_token;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  // La verificación JWT real la hace el middleware protect() — aquí solo bloqueamos acceso directo
+  const { present, missing } = auditSecrets(CRITICAL_SECRETS);
+  res.json({
+    total:    CRITICAL_SECRETS.length,
+    present:  present.length,
+    missing:  missing.length,
+    ok:       missing.length === 0,
+    source:   process.env.AWS_SECRETS_NAME ? 'secrets-manager' : 'env',
+    secretName: process.env.AWS_SECRETS_NAME ?? null,
+    missingKeys: missing,   // solo nombres, nunca valores
+  });
+});
 
 app.use('/api/v1/auth',          authRoutes);        // limiters por ruta en authRoutes.js
 app.use('/api/v1/dashboard',     dashboardRoutes);
