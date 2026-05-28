@@ -145,3 +145,26 @@ if (!IS_TEST) {
     env:        process.env.NODE_ENV ?? 'development',
   });
 }
+
+// ─── patchConsole ─────────────────────────────────────────────────────────────
+/**
+ * Redirige console.* global a través de Winston.
+ * Llamar una sola vez en server.js después de inicializar Secrets Manager.
+ * Cubre los 59 archivos existentes sin modificarlos individualmente.
+ */
+export function patchConsole() {
+  const fmt = (args) =>
+    args
+      .map(a =>
+        a instanceof Error           ? a.stack :
+        typeof a === 'object' && a !== null ? JSON.stringify(a) :
+        String(a),
+      )
+      .join(' ');
+
+  console.log   = (...args) => logger.info(fmt(args));
+  console.info  = (...args) => logger.info(fmt(args));
+  console.warn  = (...args) => logger.warn(fmt(args));
+  console.error = (...args) => logger.error(fmt(args));
+  console.debug = (...args) => logger.debug(fmt(args));
+}

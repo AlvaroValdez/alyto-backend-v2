@@ -16,6 +16,10 @@ import 'dotenv/config';
 import { loadSecretsIntoEnv, auditSecrets, CRITICAL_SECRETS } from './utils/awsSecrets.js';
 await loadSecretsIntoEnv();
 
+// ⚠️  Logger después de Secrets Manager para que CloudWatch pueda leer AWS_REGION
+import { logger, patchConsole } from './utils/logger.js';
+patchConsole();
+
 // ⚠️  Sentry debe inicializarse ANTES que cualquier otro módulo de negocio
 import './services/sentry.js';
 import * as Sentry from '@sentry/node';
