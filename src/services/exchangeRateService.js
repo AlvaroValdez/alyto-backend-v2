@@ -21,36 +21,24 @@ import { fetchBOBUSDTRate,
          getCachedBOBUSDTRate }   from './binanceP2PService.js';
 
 /**
- * Obtiene la tasa BOB/USDC (BOB por 1 USDC).
+ * Obtiene la tasa BOB/USD de mercado (BOB por 1 USD).
+ * Usada para: cotizaciones Vita, mínimos de corredor, conversiones generales.
  *
  * Prioridad:
- *  1. Override admin en MongoDB (BOB-USDC / BOB/USDC) — margen USDC específico
- *  2. Binance P2P live (cache 20 min en memoria)       — mercado real
- *  3. MongoDB BOB-USDT auto-actualizado (job 30 min)   — fallback P2P
- *  4. MongoDB BOB-USD
- *  5. env BOB_USD_RATE → 9.31
+ *  1. Binance P2P live (cache 20 min en memoria)       — mercado real
+ *  2. MongoDB BOB-USDT auto-actualizado (job 30 min)   — fallback P2P
+ *  3. MongoDB BOB-USD
+ *  4. env BOB_USD_RATE → 9.31
  *
- * @returns {Promise<number>} Tasa BOB por 1 USDC
+ * NOTA: El override BOB-USDC del admin es específico para el corredor USDC
+ * (margen de cambio manual). NO aplica aquí para no contaminar cotizaciones
+ * Vita ni mínimos de corredor con una tasa posiblemente desactualizada.
+ * Usar getBOBUSDCRate() para operaciones del corredor USDC.
+ *
+ * @returns {Promise<number>} Tasa BOB por 1 USD
  */
 export async function getBOBRate() {
-  // ── 1. Check admin override USDC en MongoDB ──────────────────────────────
-  try {
-    const usdcRecords = await ExchangeRate.find({
-      pair: { $in: ['BOB-USDC', 'BOB/USDC'] },
-    }).sort({ updatedAt: -1 }).lean();
-
-    const override = usdcRecords.find(r => r?.rate > 0);
-    if (override) {
-      console.log('[getBOBRate] Override admin MongoDB:', override.rate,
-        '| par:', override.pair,
-        '| actualizado:', override.updatedAt.toISOString());
-      return override.rate;
-    }
-  } catch (err) {
-    console.warn('[getBOBRate] Error consultando MongoDB (override):', err.message);
-  }
-
-  // ── 2. Binance P2P live ───────────────────────────────────────────────────
+  // ── 1. Binance P2P live ───────────────────────────────────────────────────
   try {
     const liveRate = await fetchBOBUSDTRate();
     console.log('[getBOBRate] Tasa live Binance P2P:', liveRate);
@@ -86,10 +74,28 @@ export async function getBOBRate() {
     console.warn('[getBOBRate] Error consultando MongoDB (fallback):', err.message);
   }
 
-  // ── 5. env → 9.31 ────────────────────────────────────────────────────────
+  // ── 4. env → 9.31 ────────────────────────────────────────────────────────
   const envRate = parseFloat(process.env.BOB_USD_RATE ?? '9.31');
   console.log('[getBOBRate] Tasa desde .env:', envRate);
   return envRate;
+}
+
+/**
+ * Obtiene la tasa BOB/USDC configurada por el admin para el corredor USDC.
+ * Incluye el margen manual definido en MongoDB (BOB-USDC / BOB/USDC).
+ * Solo usar para operaciones del corredor WalletUSDC — NO para Vita ni mínimos.
+ *
+ * @returns {Promise<number>} Tasa BOB por 1 USDC (con margen admin)
+ */
+export async function getBOBUSDCRate() {
+  try {
+    const records = await ExchangeRate.find({
+      pair: { $in: ['BOB-USDC', 'BOB/USDC'] },
+    }).sort({ updatedAt: -1 }).lean();
+    const override = records.find(r => r?.rate > 0);
+    if (override) return override.rate;
+  } catch (_) {}
+  return getBOBRate();
 }
 
 /**
@@ -100,7 +106,7 @@ export async function getBOBRate() {
  *   - cualquier otro → minAmountUSD
  *
  * Luego convierte a moneda de origen:
- *   - BOB: Math.ceil(minUSD × tasa live BOB/USDC)
+ *   - BOB: Math.ceil(minUSD × tasa live BOB/USD Binance P2P)
  *   - USD: minUSD directo (1:1)
  *   - CLP: Math.ceil(minUSD × tasa live CLP/USD)
  *   - Sin minUSD: devuelve minAmountOrigin estático

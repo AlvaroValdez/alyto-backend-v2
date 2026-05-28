@@ -75,10 +75,10 @@ function fireUSDCAuditTrail(wtxId) {
 // ─── Helper: obtener tasa BOB/USDC ────────────────────────────────────────────
 
 async function getBOBtoUSDCRate() {
-  // Delega a getBOBRate (exchangeRateService) que maneja prioridad de pares
-  // BOB-USDC / BOB/USDC → BOB-USDT → BOB-USD → env → 9.31
-  const { getBOBRate } = await import('../services/exchangeRateService.js')
-  return getBOBRate()
+  // Usa getBOBUSDCRate: incluye el override admin BOB-USDC (margen manual)
+  // solo para este corredor. getBOBRate (Vita/quotes) no incluye ese override.
+  const { getBOBUSDCRate } = await import('../services/exchangeRateService.js')
+  return getBOBUSDCRate()
 }
 
 // ─── FUNCIÓN 1: GET /api/v1/wallet/usdc/balance ───────────────────────────────
@@ -591,14 +591,14 @@ export async function getUSDCTransactions(req, res) {
  */
 export async function getUSDCRate(req, res) {
   try {
-    const { getBOBRate } = await import('../services/exchangeRateService.js')
+    const { getBOBUSDCRate } = await import('../services/exchangeRateService.js')
 
     // Buscar el record para exponer source y updatedAt al frontend
     const rateDoc = await ExchangeRate.findOne({
       pair: { $in: ['BOB-USDC', 'BOB/USDC', 'BOB-USDT', 'BOB-USD'] },
     }).sort({ updatedAt: -1 }).lean()
 
-    const rate      = await getBOBRate()
+    const rate      = await getBOBUSDCRate()
     const source    = rateDoc ? rateDoc.source ?? 'manual' : 'env_fallback'
     const updatedAt = rateDoc?.updatedAt ?? null
 
