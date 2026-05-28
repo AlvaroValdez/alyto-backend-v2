@@ -12,6 +12,7 @@
  *   S3_SECRET_ACCESS_KEY — credencial secreta
  *   S3_ENDPOINT          — opcional: endpoint S3-compatible (R2, MinIO)
  *   S3_PDF_BASE_URL      — opcional: CDN base URL para URLs públicas
+ *   S3_OBJECT_LOCK_ENABLED — 'true' activa Object Lock COMPLIANCE en pdfs/* (ASFI 5 años)
  *
  * Funciones exportadas:
  *   uploadBuffer(buffer, key, opts?)  → { url, key, storage }
@@ -80,6 +81,20 @@ export async function uploadBuffer(buffer, key, opts = {}) {
   return _saveLocal(buffer, key)
 }
 
+// Retención ASFI Bolivia: 5 años = 1825 días
+const ASFI_RETENTION_DAYS = 1825
+
+function _objectLockParams(key) {
+  if (process.env.S3_OBJECT_LOCK_ENABLED !== 'true') return {}
+  if (!key.startsWith('pdfs/')) return {}
+  const retainUntil = new Date()
+  retainUntil.setDate(retainUntil.getDate() + ASFI_RETENTION_DAYS)
+  return {
+    ObjectLockMode:            'COMPLIANCE',
+    ObjectLockRetainUntilDate: retainUntil,
+  }
+}
+
 async function _uploadToS3(buffer, key, contentType, disposition) {
   const bucket = process.env.S3_BUCKET
 
@@ -94,6 +109,7 @@ async function _uploadToS3(buffer, key, contentType, disposition) {
       'uploaded-by': 'alyto-backend',
       'uploaded-at': new Date().toISOString(),
     },
+    ..._objectLockParams(key),
   })
 
   await getS3Client().send(cmd)
