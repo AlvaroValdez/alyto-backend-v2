@@ -27,6 +27,8 @@ import { checkAdmin } from '../middlewares/checkAdmin.js';
 import { idempotencyCheck } from '../middlewares/idempotency.js';
 import {
   getAllUsers,
+  getUser,
+  updateUser,
   getGlobalLedger,
   listTransactions,
   getLedgerCounts,
@@ -140,6 +142,19 @@ const qrUpload = multer({
  * Lista todos los usuarios del sistema ordenados por fecha de creación.
  */
 router.get('/users', getAllUsers);
+
+/**
+ * GET /api/v1/admin/users/:userId
+ * Detalle completo de un usuario para el modal de edición.
+ */
+router.get('/users/:userId', getUser);
+
+/**
+ * PATCH /api/v1/admin/users/:userId
+ * Edita campos permitidos: accountType, legalEntity, kycStatus, role, isActive, sanctionsFlag.
+ * Si isActive pasa a false, invalida tokens activos del usuario.
+ */
+router.patch('/users/:userId', updateUser);
 
 /**
  * PATCH /api/v1/admin/users/:userId/reset-token-version

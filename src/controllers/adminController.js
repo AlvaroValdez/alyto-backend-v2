@@ -55,7 +55,7 @@ function normalizeAsset(raw) {
 export async function getAllUsers(req, res) {
   try {
     const users = await User.find({})
-      .select('firstName lastName email legalEntity kycStatus role isActive residenceCountry createdAt lastLoginAt')
+      .select('firstName lastName email legalEntity kycStatus kybStatus accountType role isActive sanctionsFlag residenceCountry createdAt lastLoginAt')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -67,6 +67,67 @@ export async function getAllUsers(req, res) {
   } catch (err) {
     console.error('[Admin] Error en getAllUsers:', err.message);
     return res.status(500).json({ error: 'Error al obtener usuarios.' });
+  }
+}
+
+// ─── getUser ──────────────────────────────────────────────────────────────────
+
+export async function getUser(req, res) {
+  try {
+    const user = await User.findById(req.params.userId)
+      .select('firstName lastName email legalEntity kycStatus kybStatus accountType role isActive sanctionsFlag residenceCountry createdAt lastLoginAt')
+      .lean();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    return res.json({ user });
+  } catch (err) {
+    console.error('[Admin] getUser error:', err.message);
+    return res.status(500).json({ error: 'Error interno.' });
+  }
+}
+
+// ─── updateUser ───────────────────────────────────────────────────────────────
+
+const USER_ALLOWED_FIELDS = new Set([
+  'accountType', 'legalEntity', 'kycStatus', 'role', 'isActive', 'sanctionsFlag',
+]);
+
+export async function updateUser(req, res) {
+  const { userId } = req.params;
+
+  const updates = {};
+  for (const [k, v] of Object.entries(req.body)) {
+    if (USER_ALLOWED_FIELDS.has(k)) updates[k] = v;
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'No hay campos válidos para actualizar.' });
+  }
+
+  try {
+    const setOp = { ...updates, updatedAt: new Date() };
+    const incOp = {};
+    if (updates.isActive === false || updates.isActive === 'false') {
+      incOp.tokenVersion = 1;
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: setOp, ...(Object.keys(incOp).length ? { $inc: incOp } : {}) },
+      { new: true, runValidators: true },
+    ).select('firstName lastName email legalEntity kycStatus kybStatus accountType role isActive sanctionsFlag updatedAt').lean();
+
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+    if (updates.isActive === false || updates.isActive === 'false') {
+      const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
+      invalidateUserCache(String(userId));
+    }
+
+    console.info('[Admin] Usuario actualizado:', { userId, fields: Object.keys(updates), adminId: req.user._id });
+    return res.json({ user });
+  } catch (err) {
+    if (err.name === 'ValidationError') return res.status(400).json({ error: err.message });
+    console.error('[Admin] updateUser error:', err.message);
+    return res.status(500).json({ error: 'Error interno.' });
   }
 }
 
