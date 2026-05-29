@@ -276,7 +276,7 @@ function buildPDF(data) {
     const textoLegal = process.env.AV_FINANCE_LEGAL_FOOTER
       ?? data.textoLegalFooter
       ?? 'Este documento constituye el Comprobante Oficial de Liquidación de Activo Digital '
-       + 'emitido por AV Finance SRL (producto Alyto), con domicilio legal en Bolivia. '
+       + 'emitido por AV Finance SRL (producto Alyto), con domicilio legal en Av. Ramiro Castillo N° 13, La Paz, Bolivia. '
        + 'La operación registrada constituye un servicio de pago transfronterizo habilitado '
        + 'conforme al Decreto Supremo N° 5384 que regula los Establecimientos de Tecnología '
        + 'Financiera (ETF) y Prestadores de Servicios de Activos Virtuales (PSAV). '
