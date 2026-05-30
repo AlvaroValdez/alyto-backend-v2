@@ -729,10 +729,12 @@ export const EMAILS = {
         businessId:            profile.businessId,
         legalName:             profile.legalName ?? profile.tradeName,
         maxSingleTransaction:  formatCurrency(
-          profile.transactionLimits?.maxSingleTransaction ?? 50_000, 'USD',
+          profile.transactionLimits?.maxSingleTransaction ?? 50_000,
+          profile.transactionLimits?.currency ?? 'USD',
         ),
         maxMonthlyVolume:      formatCurrency(
-          profile.transactionLimits?.maxMonthlyVolume ?? 80_000, 'USD',
+          profile.transactionLimits?.maxMonthlyVolume ?? 80_000,
+          profile.transactionLimits?.currency ?? 'USD',
         ),
         kybNote:     profile.kybNote ?? null,
         approvedAt:  formatDate(profile.kybReviewedAt ?? new Date()),

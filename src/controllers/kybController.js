@@ -68,15 +68,21 @@ export async function applyKYB(req, res) {
       });
     }
 
-    // ── Verificar que no existe solicitud previa ───────────────────────────────
+    // ── Verificar solicitud previa ─────────────────────────────────────────────
+    // Bloquea si ya existe una postulación activa. EXCEPCIÓN: si fue rechazada,
+    // se permite volver a postular (se elimina la rechazada para crear una nueva).
     const existing = await BusinessProfile.findOne({ userId: user._id });
     if (existing) {
-      return res.status(409).json({
-        error:      'Solicitud KYB ya existe.',
-        businessId: existing.businessId,
-        kybStatus:  existing.kybStatus,
-        message:    'Ya tienes una solicitud KYB registrada. Consulta su estado en GET /api/v1/kyb/status.',
-      });
+      if (existing.kybStatus === 'rejected') {
+        await BusinessProfile.deleteOne({ _id: existing._id });
+      } else {
+        return res.status(409).json({
+          error:      'Solicitud KYB ya existe.',
+          businessId: existing.businessId,
+          kybStatus:  existing.kybStatus,
+          message:    'Ya tienes una solicitud KYB en curso. Consulta su estado en tu perfil.',
+        });
+      }
     }
 
     // ── Parsear businessData ──────────────────────────────────────────────────
@@ -87,6 +93,20 @@ export async function applyKYB(req, res) {
       return res.status(400).json({
         error:   'businessData inválido.',
         message: 'El campo businessData debe ser un JSON válido.',
+      });
+    }
+
+    // ── Validar campos obligatorios (expediente ASFI completo) ─────────────────
+    const requiredFields = { legalName: 'Razón social', taxId: 'NIT/Tax ID', countryOfIncorporation: 'País de constitución' };
+    const missing = Object.entries(requiredFields)
+      .filter(([k]) => !businessData[k] || String(businessData[k]).trim() === '')
+      .map(([, label]) => label);
+    if ((req.files ?? []).length === 0) missing.push('Al menos un documento');
+    if (missing.length > 0) {
+      return res.status(400).json({
+        error:   'Datos de empresa incompletos.',
+        message: `Faltan campos obligatorios: ${missing.join(', ')}.`,
+        missing,
       });
     }
 
@@ -191,16 +211,23 @@ export async function getKYBStatus(req, res) {
   try {
     const user = req.user;
 
+    // Respuesta base con TODAS las claves — forma consistente en los 3 casos
+    // (sin perfil / perfil borrado / perfil existe) para que el FE nunca reciba undefined.
+    const emptyResponse = {
+      kybStatus:          user.kybStatus ?? 'not_started',
+      businessId:         null,
+      submittedAt:        null,
+      reviewedAt:         null,
+      kybNote:            null,
+      kybRejectionReason: null,
+      missingDocuments:   [],
+      transactionLimits:  null,
+      business:           null,
+      documents:          [],
+    };
+
     if (!user.businessProfileId) {
-      return res.status(200).json({
-        kybStatus:        user.kybStatus ?? 'not_started',
-        businessId:       null,
-        submittedAt:      null,
-        reviewedAt:       null,
-        kybNote:          null,
-        kybRejectionReason: null,
-        missingDocuments: [],
-      });
+      return res.status(200).json(emptyResponse);
     }
 
     const profile = await BusinessProfile.findById(user.businessProfileId)
@@ -208,18 +235,43 @@ export async function getKYBStatus(req, res) {
       .lean();
 
     if (!profile) {
-      return res.status(200).json({ kybStatus: 'not_started' });
+      // Perfil referenciado pero inexistente — devolver forma completa, not_started.
+      return res.status(200).json({ ...emptyResponse, kybStatus: 'not_started' });
     }
 
     return res.status(200).json({
       kybStatus:          profile.kybStatus,
       businessId:         profile.businessId,
       submittedAt:        profile.createdAt,
-      reviewedAt:         profile.kybReviewedAt,
-      kybNote:            profile.kybNote,
-      kybRejectionReason: profile.kybRejectionReason,
-      missingDocuments:   [],  // el admin los especifica en kybNote o por email
-      transactionLimits:  profile.kybStatus === 'approved' ? profile.transactionLimits : null,
+      reviewedAt:         profile.kybReviewedAt ?? null,
+      kybNote:            profile.kybNote ?? null,
+      kybRejectionReason: profile.kybRejectionReason ?? null,
+      missingDocuments:   profile.missingDocuments ?? [],
+      // Límites: devolver siempre que existan (el FE muestra los reales, no defaults).
+      transactionLimits:  profile.transactionLimits ?? null,
+      // Datos de la empresa para renderizar el expediente de la postulación.
+      business: {
+        legalName:              profile.legalName ?? null,
+        tradeName:              profile.tradeName ?? null,
+        taxId:                  profile.taxId ?? null,
+        businessType:           profile.businessType ?? null,
+        industry:               profile.industry ?? null,
+        countryOfIncorporation: profile.countryOfIncorporation ?? null,
+        country:                profile.country ?? null,
+        estimatedMonthlyVolume: profile.estimatedMonthlyVolume ?? null,
+        legalRepresentative:    profile.legalRepresentative ?? null,
+        website:                profile.website ?? null,
+        phone:                  profile.phone ?? null,
+        address:                profile.address ?? null,
+        city:                   profile.city ?? null,
+      },
+      // Metadata de documentos (sin el base64) para mostrar el expediente subido.
+      documents: (profile.documents ?? []).map((d) => ({
+        type:       d.type,
+        filename:   d.filename,
+        mimetype:   d.mimetype,
+        uploadedAt: d.uploadedAt,
+      })),
     });
 
   } catch (err) {
