@@ -349,7 +349,7 @@ export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
  */
 export const VITA_COUNTRY_KEY_MAP = {
   // Eurozona — withdrawal_rules usa 'eu' para todos los países SEPA/IBAN
-  PL: 'eu',
+  ES: 'eu', PL: 'eu',
   IT: 'eu', DE: 'eu', FR: 'eu', NL: 'eu', AT: 'eu', BE: 'eu',
   PT: 'eu', IE: 'eu', GR: 'eu', FI: 'eu', LU: 'eu', SK: 'eu',
   SI: 'eu', EE: 'eu', LV: 'eu', LT: 'eu', CY: 'eu', MT: 'eu',
