@@ -74,20 +74,23 @@ import { broadcastToAdmins } from '../routes/adminSSE.js';
 // ─── Router EU por monto (Harbor vs Vita) ─────────────────────────────────────
 /**
  * Destinos EU/SEPA cubiertos por DOS proveedores en paralelo:
- *   - Vita Wallet (corredor con destinationCountry específico, ej. bo-es): SIN mínimo,
- *     única vía viable para montos pequeños.
  *   - OwlPay Harbor (corredor con destinationCountry='EU', ej. bo-eu-srl): mejor FX y
- *     más rápido (SEPA, 0-1 día), pero con mínimo (≈600 USD).
+ *     más rápido (SEPA, 0-1 día). Harbor SOLO procesa montos en [30, 9998] USD
+ *     (límites reales de la API, confirmados 2026-05-30).
+ *   - Vita Wallet (corredor destinationCountry específico, ej. bo-es): cubre los
+ *     montos FUERA del rango Harbor (< $30 o > $9998).
  *
- * El router elige automáticamente por monto: ≥ umbral → Harbor; si no → Vita.
+ * El router elige por monto: dentro del rango Harbor → Harbor (mejor FX); fuera → Vita.
  * Solo aplica cuando NO se pasó corridorId explícito y existen AMBOS corredores.
- * Documentado en docs/PLAN_EJECUCION_ECP.md y CLAUDE.md.
+ * Documentado en docs/PLAN_EJECUCION_ECP.md y CLAUDE.md §12.
  */
 const EU_SEPA_DESTINATIONS = new Set([
   'ES', 'EU', 'DE', 'FR', 'IT', 'NL', 'PT', 'IE', 'AT', 'BE',
   'GR', 'FI', 'LU', 'SK', 'SI', 'EE', 'LV', 'LT', 'CY', 'MT', 'PL',
 ]);
-const EU_HARBOR_THRESHOLD_USD = Number(process.env.EU_HARBOR_THRESHOLD_USD ?? 600);
+// Límites reales de Harbor confirmados contra la API: source.amount ∈ [30, 9998] USD.
+const HARBOR_MIN_USD = Number(process.env.HARBOR_MIN_USD ?? 30);
+const HARBOR_MAX_USD = Number(process.env.HARBOR_MAX_USD ?? 9998);
 
 /**
  * Resuelve el corredor EU óptimo por monto. Retorna null si no aplica
@@ -107,15 +110,17 @@ async function resolveEuCorridorByAmount(origin, dest, amountOrigin, accountType
   const vita   = candidates.find(c => c.payoutMethod === 'vitaWallet');
   if (!harbor || !vita) return null;   // sin ambos, no hay decisión por monto
 
-  const amountUSD = await convertOriginToUSD(amountOrigin, harbor.originCurrency);
-  const chosen    = amountUSD >= EU_HARBOR_THRESHOLD_USD ? harbor : vita;
+  const amountUSD     = await convertOriginToUSD(amountOrigin, harbor.originCurrency);
+  const harborMinUSD  = harbor.minAmountUSD ?? HARBOR_MIN_USD;
+  const inHarborRange = amountUSD >= harborMinUSD && amountUSD <= HARBOR_MAX_USD;
+  const chosen        = inHarborRange ? harbor : vita;   // Harbor mejor FX en rango; Vita fuera
 
   console.info('[Alyto Router/EU] Selección por monto', {
     dest,
-    amountUSD:  Math.round(amountUSD),
-    thresholdUSD: EU_HARBOR_THRESHOLD_USD,
-    chosen:     chosen.corridorId,
-    payout:     chosen.payoutMethod,
+    amountUSD:   Math.round(amountUSD),
+    harborRange: `${harborMinUSD}-${HARBOR_MAX_USD}`,
+    chosen:      chosen.corridorId,
+    payout:      chosen.payoutMethod,
   });
   return chosen;
 }
