@@ -1556,6 +1556,16 @@ export async function dispatchPayout(transaction) {
  * }
  */
 export async function handleVitaIPN(req, res) {
+  // ── 0. Ping de validación de webhook ──────────────────────────────────────
+  // Al registrar la URL, Vita hace un POST SIN firma para validar que existe.
+  // Un evento real siempre trae { status, order }. Si faltan ambos, es un ping
+  // de validación → responder 200 para que Vita active la URL. No procesa nada,
+  // por lo que un body vacío de un tercero es inofensivo (sin order = sin acción).
+  if (!req.body || (req.body.order === undefined && req.body.status === undefined)) {
+    console.info('[Vita IPN] Ping de validación de webhook — 200 OK');
+    return res.status(200).json({ ok: true, message: 'Vita IPN endpoint activo' });
+  }
+
   // ── 1. Validar firma HMAC-SHA256 ──────────────────────────────────────────
   if (!verifyVitaSignature(req.body, req.headers)) {
     console.warn('[Vita IPN] Invalid signature - requestId:', req.headers['x-request-id'] ?? 'unknown');
