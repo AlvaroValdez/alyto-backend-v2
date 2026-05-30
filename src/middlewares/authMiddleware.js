@@ -62,11 +62,15 @@ export const clearUserCache = () => {
  *  4. Rechaza si el usuario fue eliminado o desactivado tras emitir el token
  */
 export async function protect(req, res, next) {
-  // 1) Cookie HttpOnly (modo principal); 2) Authorization: Bearer (fallback para API/mobile)
-  const token = req.cookies?.alyto_token
-    ?? (req.headers.authorization?.startsWith('Bearer ')
-        ? req.headers.authorization.split(' ')[1]
-        : null);
+  // 1) Authorization: Bearer (origen-específico vía localStorage — NO se filtra entre
+  //    entornos); 2) Cookie HttpOnly alyto_token (fallback). Bearer-first es crítico:
+  //    la cookie usa domain=.alyto.app y se comparte entre prod (alyto.app) y staging
+  //    (staging.alyto.app); si se leyera primero, una cookie de otro entorno pisaría
+  //    el Bearer correcto → "usuario no encontrado". Consistente con server.js:313.
+  const bearer = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.split(' ')[1]
+    : null;
+  const token = bearer ?? req.cookies?.alyto_token;
 
   if (!token) {
     console.log('[Protect] REJECT: no token extracted | path:', req.path);
