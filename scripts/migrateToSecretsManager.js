@@ -5,26 +5,25 @@
  * Lee process.env (ya cargado desde .env) y crea/actualiza un único secret
  * JSON en AWS Secrets Manager con todas las variables críticas de Alyto.
  *
- * USO (ejecutar en VPS con acceso a AWS configurado):
- *   node scripts/migrateToSecretsManager.js
- *   node scripts/migrateToSecretsManager.js --dry-run   (solo muestra qué haría)
- *   node scripts/migrateToSecretsManager.js --update     (fuerza actualización si ya existe)
+ * USO (ejecutar en VPS — Node 22, no requiere paquetes externos):
+ *   node --env-file=.env scripts/migrateToSecretsManager.js
+ *   node --env-file=.env scripts/migrateToSecretsManager.js --dry-run
+ *   node --env-file=.env scripts/migrateToSecretsManager.js --update
  *
  * PREREQUISITOS:
- *   1. AWS CLI configurado (aws configure) con permisos secretsmanager:CreateSecret
- *      y secretsmanager:PutSecretValue
- *   2. Variables en process.env (cargar .env antes con: source .env o dotenv)
- *   3. AWS_REGION definido en env (default: us-east-1)
- *   4. AWS_SECRETS_NAME definido en env (default: alyto/production)
+ *   1. Agregar al .env del VPS antes de correr:
+ *      AWS_ACCESS_KEY_ID=<key IAM user con permisos secretsmanager>
+ *      AWS_SECRET_ACCESS_KEY=<secret>
+ *      AWS_REGION=us-east-1
+ *      AWS_SECRETS_NAME=alyto/production
+ *   2. El .env debe tener TODAS las variables de producción cargadas
  *
  * SEGURIDAD:
  *   - NUNCA commitear este script con valores hardcodeados
  *   - El script no imprime valores, solo nombres y estadísticas
- *   - Después de migrar exitosamente, las vars del .env del VPS deben mantenerse
- *     solo AWS_REGION y AWS_SECRETS_NAME (el resto viene de Secrets Manager)
+ *   - Después de migrar exitosamente, el .env del VPS puede reducirse a:
+ *     NODE_ENV, PORT, AWS_REGION, AWS_SECRETS_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
  */
-
-import 'dotenv/config';
 import {
   SecretsManagerClient,
   CreateSecretCommand,
