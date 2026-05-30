@@ -69,6 +69,20 @@ function captureRawBody(req, res, next) {
 // ─── Rutas ────────────────────────────────────────────────────────────────────
 
 /**
+ * GET /api/v1/ipn/:provider — Ping de validación de webhook.
+ *
+ * Varios proveedores (Vita, Fintoc, Harbor) validan la URL del webhook con una
+ * petición GET antes de activarla. Sin esto devuelven "URL no activa" (404).
+ * Responde 200 OK SIN procesar nada — los IPN reales siguen siendo POST firmados.
+ */
+const webhookPingOk = (provider) => (req, res) =>
+  res.status(200).json({ ok: true, provider, message: 'IPN endpoint activo — usar POST para eventos' });
+
+router.get('/vita',   webhookPingOk('vita'));
+router.get('/fintoc', webhookPingOk('fintoc'));
+router.get('/owlpay', webhookPingOk('owlpay'));
+
+/**
  * POST /api/v1/ipn/vita
  *
  * IPN de Vita Wallet — notificación de cambio de estado en transacciones.
