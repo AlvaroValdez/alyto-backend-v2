@@ -38,21 +38,17 @@ export async function createKycSession(req, res) {
     // NO usar APP_URL — esa variable puede apuntar al backend (ngrok tunnel en dev).
     const returnUrl = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/kyc/return`;
 
-    // allowed_countries solo funciona en producción con aprobación Stripe.
-    // En sandbox Stripe lo rechaza con parameter_unknown.
-    const isLive = process.env.STRIPE_SECRET_KEY?.startsWith('sk_live');
+    // NOTA: Stripe Identity NO soporta `allowed_countries` vía API (rechaza con
+    // parameter_unknown "Did you mean allowed_types?"). La restricción por país/
+    // entidad se hace en código (gating por legalEntity), no en este parámetro.
     const documentOptions = {
       require_live_capture:    true,
       require_matching_selfie: true,
       allowed_types: ['driving_license', 'id_card', 'passport'],
-      ...(isLive && {
-        allowed_countries: ['BO', 'CL', 'US', 'AR', 'CO', 'PE', 'MX', 'BR',
-                            'EC', 'VE', 'UY', 'PY', 'CA', 'GB', 'DE', 'FR',
-                            'ES', 'IT', 'AU', 'CN', 'AE'],
-      }),
     };
 
-    const flowId = isLive ? process.env.STRIPE_IDENTITY_FLOW_ID : null
+    // Sesión con type+options inline (patrón estándar Stripe, igual que identityController).
+    // NO usar verification_flow junto con type/options — son mutuamente excluyentes.
     const sessionParams = {
       type: 'document',
       options: { document: documentOptions },
@@ -62,10 +58,6 @@ export async function createKycSession(req, res) {
         legalEntity: user.legalEntity,
         email:       user.email,
       },
-    }
-    // Usar el flujo configurado en el dashboard si está disponible
-    if (flowId) {
-      sessionParams.verification_flow = flowId
     }
     const session = await getStripe().identity.verificationSessions.create(sessionParams);
 
