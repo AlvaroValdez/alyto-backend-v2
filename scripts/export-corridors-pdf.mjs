@@ -25,9 +25,15 @@ const PROVIDER_LABEL = {
   manual:        'Manual',
 };
 
+// Filtro opcional por país (origen o destino): node ... export-corridors-pdf.mjs BO
+const countryArg = (process.argv[2] ?? '').toUpperCase().trim();
+const query = countryArg
+  ? { $or: [{ originCountry: countryArg }, { destinationCountry: countryArg }] }
+  : {};
+
 await mongoose.connect(MONGODB_URI);
 const col = mongoose.connection.collection('transaction_configs');
-const docs = await col.find({}).toArray();
+const docs = await col.find(query).toArray();
 
 // Agrupar por payoutMethod
 const groups = {};
@@ -40,13 +46,14 @@ for (const k of Object.keys(groups)) {
 }
 
 // ── PDF ──
-const out = 'corredores-router-alyto.pdf';
+const out = countryArg ? `corredores-${countryArg.toLowerCase()}-alyto.pdf` : 'corredores-router-alyto.pdf';
 const doc = new PDFDocument({ size: 'A4', margin: 40 });
 doc.pipe(createWriteStream(out));
 
 const NAVY = '#1D3461', GRAY = '#64748B', GREEN = '#16A34A', RED = '#DC2626';
 
-doc.font('Helvetica-Bold').fontSize(18).fillColor(NAVY).text('Alyto — Corredores por Proveedor');
+doc.font('Helvetica-Bold').fontSize(18).fillColor(NAVY)
+   .text(countryArg ? `Alyto — Corredores ${countryArg} (Anchor)` : 'Alyto — Corredores por Proveedor');
 doc.font('Helvetica').fontSize(9).fillColor(GRAY)
    .text(`Fuente: TransactionConfig (DB: ${dbName}) · Total: ${docs.length} corredores · Generado por export-corridors-pdf`);
 doc.moveDown(0.5);
