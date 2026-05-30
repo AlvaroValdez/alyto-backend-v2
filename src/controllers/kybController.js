@@ -366,7 +366,7 @@ export async function uploadKYBDocuments(req, res) {
  * Query params:
  *   status                  — pending | under_review | approved | rejected | more_info
  *   country                 — ISO 3166-1 alpha-2 (countryOfIncorporation)
- *   estimatedMonthlyVolume  — under_5k | 5k_20k | 20k_60k | over_60k
+ *   estimatedMonthlyVolume  — 0-10k | 10k-50k | 50k-100k | 100k-500k | 500k+ (USD)
  *   page                    — default 1
  *   limit                   — default 20, máx 100
  */
