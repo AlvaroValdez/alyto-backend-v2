@@ -65,11 +65,60 @@ import {
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
-import { getBOBRate, resolveMinAmountOrigin } from '../services/exchangeRateService.js';
+import { getBOBRate, resolveMinAmountOrigin, convertOriginToUSD } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
+
+// ─── Router EU por monto (Harbor vs Vita) ─────────────────────────────────────
+/**
+ * Destinos EU/SEPA cubiertos por DOS proveedores en paralelo:
+ *   - Vita Wallet (corredor con destinationCountry específico, ej. bo-es): SIN mínimo,
+ *     única vía viable para montos pequeños.
+ *   - OwlPay Harbor (corredor con destinationCountry='EU', ej. bo-eu-srl): mejor FX y
+ *     más rápido (SEPA, 0-1 día), pero con mínimo (≈600 USD).
+ *
+ * El router elige automáticamente por monto: ≥ umbral → Harbor; si no → Vita.
+ * Solo aplica cuando NO se pasó corridorId explícito y existen AMBOS corredores.
+ * Documentado en docs/PLAN_EJECUCION_ECP.md y CLAUDE.md.
+ */
+const EU_SEPA_DESTINATIONS = new Set([
+  'ES', 'EU', 'DE', 'FR', 'IT', 'NL', 'PT', 'IE', 'AT', 'BE',
+  'GR', 'FI', 'LU', 'SK', 'SI', 'EE', 'LV', 'LT', 'CY', 'MT', 'PL',
+]);
+const EU_HARBOR_THRESHOLD_USD = Number(process.env.EU_HARBOR_THRESHOLD_USD ?? 600);
+
+/**
+ * Resuelve el corredor EU óptimo por monto. Retorna null si no aplica
+ * (destino no-EU, falta uno de los dos proveedores, o monto no convertible).
+ */
+async function resolveEuCorridorByAmount(origin, dest, amountOrigin, accountType) {
+  if (!EU_SEPA_DESTINATIONS.has(dest)) return null;
+
+  const candidates = await TransactionConfig.find({
+    originCountry:       origin,
+    destinationCountry:  { $in: [dest, 'EU'] },
+    destinationCurrency: 'EUR',
+    isActive:            true,
+  }).lean();
+
+  const harbor = candidates.find(c => c.payoutMethod === 'owlPay');
+  const vita   = candidates.find(c => c.payoutMethod === 'vitaWallet');
+  if (!harbor || !vita) return null;   // sin ambos, no hay decisión por monto
+
+  const amountUSD = await convertOriginToUSD(amountOrigin, harbor.originCurrency);
+  const chosen    = amountUSD >= EU_HARBOR_THRESHOLD_USD ? harbor : vita;
+
+  console.info('[Alyto Router/EU] Selección por monto', {
+    dest,
+    amountUSD:  Math.round(amountUSD),
+    thresholdUSD: EU_HARBOR_THRESHOLD_USD,
+    chosen:     chosen.corridorId,
+    payout:     chosen.payoutMethod,
+  });
+  return chosen;
+}
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -1905,11 +1954,16 @@ export async function getQuote(req, res) {
     } else {
       const origin = originCountry.toUpperCase();
       const dest   = destinationCountry.toUpperCase();
-      corridor = await TransactionConfig.findOne({
-        originCountry:      origin,
-        destinationCountry: dest,
-        isActive:           true,
-      }).lean();
+      // Router EU por monto: si destino es EU/SEPA y existen corredores Vita+Harbor,
+      // elegir proveedor según monto (≥ umbral USD → Harbor; si no → Vita).
+      corridor = await resolveEuCorridorByAmount(origin, dest, amount, req.user?.accountType);
+      if (!corridor) {
+        corridor = await TransactionConfig.findOne({
+          originCountry:      origin,
+          destinationCountry: dest,
+          isActive:           true,
+        }).lean();
+      }
     }
   } catch (err) {
     console.error('[Alyto Quote] Error buscando corredor en BD:', {

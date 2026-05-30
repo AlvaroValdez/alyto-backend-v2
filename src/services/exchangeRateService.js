@@ -139,6 +139,23 @@ export async function resolveMinAmountOrigin(corridor, accountType = 'personal')
 }
 
 /**
+ * Convierte un monto en moneda origen a su equivalente aproximado en USD.
+ * Usa las tasas live (BOB/USD, CLP/USD). USD se devuelve tal cual.
+ * Útil para decisiones de enrutamiento por monto (ej. umbral Harbor EU).
+ *
+ * @param {number} amountOrigin   - Monto en moneda origen
+ * @param {string} originCurrency - ISO 4217 (BOB | CLP | USD)
+ * @returns {Promise<number>} Monto aproximado en USD
+ */
+export async function convertOriginToUSD(amountOrigin, originCurrency) {
+  const amt = Number(amountOrigin) || 0;
+  if (originCurrency === 'USD') return amt;
+  if (originCurrency === 'BOB') { const r = await getBOBRate(); return r > 0 ? amt / r : 0; }
+  if (originCurrency === 'CLP') { const r = await getCLPRate(); return r > 0 ? amt / r : 0; }
+  return amt; // fallback conservador: tratar como USD
+}
+
+/**
  * Obtiene la tasa CLP/USD (CLP por 1 USD) desde MongoDB.
  * Busca el par 'CLP-USDT' (proxy USD dado que USDT ≈ USD).
  *
