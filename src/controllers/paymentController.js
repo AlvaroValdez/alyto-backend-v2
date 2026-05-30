@@ -70,7 +70,7 @@ import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
-import { resolveEuCorridorByAmount } from '../routing/euAmountRouter.js';
+import { resolveEuCorridorByAmount, isEuSepaDestination } from '../routing/euAmountRouter.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -2914,7 +2914,12 @@ export async function getAvailableCorridors(req, res) {
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
-  const result = corridors.map((c) => {
+  // Agrupar por (destinationCountry + destinationCurrency). Cuando un destino EU/SEPA
+  // tiene MÚLTIPLES proveedores (Harbor + Vita, ej. bo-eu-srl + bo-es), se colapsa en
+  // UNA sola entrada "auto-ruteada": el backend elige proveedor por monto y el frontend
+  // NO envía corridorId. Casos como bo-cn (CNY) vs bo-cn-usd (USD) NO se colapsan
+  // (distinta moneda → entradas separadas).
+  const mapCorridor = (c, extra = {}) => {
     const meta = COUNTRY_META[c.destinationCountry] ?? {};
     return {
       corridorId:              c.corridorId,
@@ -2928,8 +2933,46 @@ export async function getAvailableCorridors(req, res) {
       minAmountOrigin:         c.minAmountOrigin         ?? 0,
       minAmountUSD:            c.minAmountUSD            ?? null,
       minAmountUSDBusiness:    c.minAmountUSDBusiness    ?? null,
+      autoRouted:              false,
+      ...extra,
     };
-  });
+  };
+
+  const groups = new Map();
+  for (const c of corridors) {
+    const key = `${c.destinationCountry}|${c.destinationCurrency}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+
+  const result = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      result.push(mapCorridor(group[0]));
+      continue;
+    }
+    // Múltiples corredores mismo país+moneda.
+    if (isEuSepaDestination(group[0].destinationCountry)) {
+      // Auto-ruteado: una sola entrada, mínimo = el más bajo del grupo (piso real),
+      // sin corridorId (el quote lo resuelve por monto). payoutMethod='auto'.
+      const minRetail = Math.min(...group.map(c => c.minAmountUSD         ?? Infinity));
+      const minBiz    = Math.min(...group.map(c => c.minAmountUSDBusiness ?? Infinity));
+      const minOrigin = Math.min(...group.map(c => c.minAmountOrigin      ?? Infinity));
+      result.push(mapCorridor(group[0], {
+        corridorId:           null,                 // auto-ruteado: frontend NO envía corridorId
+        payoutMethod:         'auto',
+        minAmountUSD:         Number.isFinite(minRetail) ? minRetail : null,
+        minAmountUSDBusiness: Number.isFinite(minBiz)    ? minBiz    : null,
+        minAmountOrigin:      Number.isFinite(minOrigin) ? minOrigin : 0,
+        autoRouted:           true,
+        providers:            group.map(c => c.payoutMethod),
+      }));
+    } else {
+      // Multi-proveedor sin auto-router → no colapsar (mantener explícitos para no
+      // romper la resolución por corridorId). Defensivo: hoy no ocurre fuera de EU.
+      for (const c of group) result.push(mapCorridor(c));
+    }
+  }
 
   return res.json({
     originCurrency: userOriginCurrency,
