@@ -505,6 +505,23 @@ export async function updateTransactionStatus(req, res) {
 
   const previousStatus = transaction.status;
 
+  // ── Guard anti-doble-payout: confirmar payin SOLO desde estados pre-payout ──
+  // Sin esto, un admin podría regrabar a 'payin_confirmed' una tx ya liquidada
+  // (payout_sent/completed) y disparar un SEGUNDO envío de USDC real.
+  if (newStatus === 'payin_confirmed') {
+    const ALLOWED_FROM = ['payin_pending', 'pending_funding', 'payin_confirmed'];
+    if (!ALLOWED_FROM.includes(previousStatus)) {
+      console.warn('[Admin updateTransactionStatus] REJECT confirmación inválida:', {
+        transactionId, previousStatus, newStatus,
+      });
+      return res.status(409).json({
+        error: `No se puede confirmar payin de una transacción en estado '${previousStatus}'. ` +
+               `Ya pasó la etapa de payout — confirmar de nuevo causaría un doble envío.`,
+        previousStatus,
+      });
+    }
+  }
+
   // ── 3. Actualizar status y registrar en ipnLog ────────────────────────────
   transaction.status = newStatus;
 

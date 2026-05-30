@@ -34,6 +34,7 @@ import {
   Keypair,
   Memo,
   Asset,
+  StrKey,
 } from '@stellar/stellar-sdk';
 
 import {
@@ -100,15 +101,21 @@ function _getSRLPublicKey() {
  * Throws with a clear message if the env var is not set — required for sendUSDCToHarbor.
  */
 function getUSDCAsset() {
-  const code   = process.env.STELLAR_USDC_CODE   ?? 'USDC';
-  const issuer = process.env.STELLAR_USDC_ISSUER;
-  if (!issuer) {
+  // Fuente de verdad: ASSETS.USDC derivado de STELLAR_NETWORK (config/stellar.js) —
+  // garantiza el issuer correcto por red (Circle mainnet vs testnet). NUNCA depender
+  // solo de la env, que podría quedar con el issuer de la red equivocada.
+  const configIssuer = ASSETS.USDC.getIssuer();
+  const envIssuer    = process.env.STELLAR_USDC_ISSUER;
+  // Guard fail-fast: si la env está seteada y NO coincide con el issuer de la red,
+  // abortar — enviar USDC de otro issuer al destino equivocado = pérdida de fondos.
+  if (envIssuer && envIssuer !== configIssuer) {
     throw new Error(
-      '[Stellar] STELLAR_USDC_ISSUER not set. ' +
-      'For testnet use: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5',
+      `[Stellar] STELLAR_USDC_ISSUER (${envIssuer}) no coincide con el issuer de la red ` +
+      `actual (${configIssuer}, network=${NETWORK_INFO.name}). Abortando para no enviar ` +
+      `USDC del issuer equivocado.`,
     );
   }
-  return new Asset(code, issuer);
+  return ASSETS.USDC;
 }
 
 /**
@@ -900,8 +907,10 @@ export async function getStellarUSDCBalance(publicKey) {
 
   const account = await horizonServer.loadAccount(key);
 
-  const usdcCode   = process.env.STELLAR_USDC_CODE   ?? 'USDC';
-  const usdcIssuer = process.env.STELLAR_USDC_ISSUER ?? null;
+  // Issuer derivado de la red (config) — el MISMO que se usa al enviar (getUSDCAsset).
+  // Nunca contar "cualquier issuer": en mainnet podrían coexistir USDC de otro issuer.
+  const usdcCode   = ASSETS.USDC.getCode();
+  const usdcIssuer = ASSETS.USDC.getIssuer();
 
   console.log('[Stellar] Balances on account:', account.balances.map((b) => ({
     code:    b.asset_code,
@@ -909,9 +918,9 @@ export async function getStellarUSDCBalance(publicKey) {
     balance: b.balance,
   })));
 
-  const usdcEntry = usdcIssuer
-    ? account.balances.find((b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer)
-    : account.balances.find((b) => b.asset_code === usdcCode);
+  const usdcEntry = account.balances.find(
+    (b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer,
+  );
 
   const balance = usdcEntry ? parseFloat(usdcEntry.balance) : 0;
 
@@ -974,6 +983,15 @@ async function _findTransactionByMemo(sourcePublicKey, memo, lookbackCount = 200
  */
 export async function sendUSDCToHarbor({ destinationAddress, amount, memo, transactionId }) {
   if (!destinationAddress) throw new Error('[Stellar] destinationAddress required');
+  // Guard: la dirección destino DEBE ser una public key Stellar válida (ed25519).
+  // Enviar a una dirección malformada/de otra red = pérdida de USDC real.
+  if (!StrKey.isValidEd25519PublicKey(destinationAddress)) {
+    const err = new Error(
+      `[Stellar] destinationAddress inválida (no es public key ed25519): ${destinationAddress}`,
+    );
+    err.isPermanent = true;
+    throw err;
+  }
   if (!amount || amount <= 0) throw new Error('[Stellar] amount must be positive');
   if (!memo) throw new Error('[Stellar] memo required');
   if (memo.length > 28) {

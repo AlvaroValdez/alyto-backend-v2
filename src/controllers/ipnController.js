@@ -43,6 +43,7 @@ import {
   resolveHarborCountry,
 } from '../services/owlPayService.js';
 import FundingRecord from '../models/FundingRecord.js';
+import { HARBOR_MIN_USD, HARBOR_MAX_USD } from '../routing/euAmountRouter.js';
 import {
   registerAuditTrail,
   sendUSDCToHarbor,
@@ -54,6 +55,9 @@ import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
+import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
+import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
+import { uploadBuffer }              from '../services/storageService.js';
 import { getBOBRate }        from '../services/exchangeRateService.js';
 import { recordSent }       from './contactsController.js';
 
@@ -628,6 +632,64 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
  * @param {object} corridor     — TransactionConfig lean
  * @param {number} netAmountUSD — Monto en USD/USDC a enviar (ya convertido de BOB si aplica)
  */
+/**
+ * Genera el Comprobante Oficial de Transacción (Bolivia SRL) para un payout Harbor
+ * completado y lo sube a storage. FIRE-AND-FORGET: nunca lanza ni bloquea el flujo.
+ * Solo aplica a legalEntity SRL (exigencia ASFI: comprobante por transacción).
+ */
+async function generateSrlComprobante(transaction) {
+  try {
+    if (transaction.legalEntity !== 'SRL') return;
+    if (transaction.boliviaCompliance?.comprobanteUrl) return; // ya generado (idempotente)
+
+    const user = await User.findById(transaction.userId).lean();
+    if (!user) return;
+
+    const numeroComprobante = await generarNumeroCorrelativo('BOL');
+    const digital   = transaction.digitalAssetAmount ?? 0;
+    const tipoCambio = digital > 0
+      ? Number((transaction.originalAmount / digital).toFixed(6))
+      : (transaction.conversionRate?.rate ?? 0);
+    const comisionServicio = transaction.feeBreakdown?.alytoFee
+      ?? transaction.feeBreakdown?.totalDeducted ?? 0;
+
+    const dto = {
+      numeroComprobante,
+      nombreCliente:      user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
+      nitOci:             user.taxId ?? user.identityDocument?.number ?? 'NO REGISTRADO',
+      tipoDocumento:      user.taxId ? 'NIT' : 'CI',
+      codigoClienteAlyto: user._id.toString(),
+      fechaHora:          (transaction.createdAt ?? new Date()).toISOString(),
+      tipoOperacion:      'Liquidación de Activo Digital',
+      txid:               transaction.stellarTxId ?? 'PENDIENTE',
+      montoFiatRecibido:  transaction.originalAmount,
+      tipoDeCambio:       tipoCambio,
+      montoActivoEntregado: digital,
+      comisionServicio,
+      totalLiquidado:     transaction.originalAmount - comisionServicio,
+    };
+
+    const { buffer, filename } = await generateOfficialReceipt(dto);
+    const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`;
+    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+
+    await Transaction.findByIdAndUpdate(transaction._id, {
+      $set: {
+        'boliviaCompliance.comprobanteUrl':        url,
+        'boliviaCompliance.numeroComprobante':     numeroComprobante,
+        'boliviaCompliance.comprobanteGeneratedAt': new Date(),
+      },
+    });
+    console.info('[Comprobante SRL] Generado (Harbor payout):', {
+      transactionId: transaction.alytoTransactionId, numeroComprobante,
+    });
+  } catch (err) {
+    console.error('[Comprobante SRL] Error generando comprobante (no bloquea):', {
+      transactionId: transaction?.alytoTransactionId, error: err.message,
+    });
+  }
+}
+
 export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
@@ -640,8 +702,29 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     return;
   }
 
-  // ── STEP A: Pre-check liquidez USDC en wallet Stellar SRL ────────────────
-  const usdcBalance = await getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY);
+  // ── STEP 0: Validar que el NETO USDC esté en el rango que Harbor acepta ───
+  // Harbor rechaza source.amount fuera de [30, 9998] USD. Validar ANTES de crear
+  // el quote/transfer evita recibir el payin BOB y luego no poder liquidar.
+  if (netAmountUSD < HARBOR_MIN_USD || netAmountUSD > HARBOR_MAX_USD) {
+    const reason = `Neto USDC ${netAmountUSD.toFixed(2)} fuera del rango Harbor [${HARBOR_MIN_USD}, ${HARBOR_MAX_USD}]`;
+    console.error('[tryOwlPayV2] Monto fuera de rango Harbor:', {
+      transactionId: transaction.alytoTransactionId, netAmountUSD, HARBOR_MIN_USD, HARBOR_MAX_USD,
+    });
+    transaction.status       = 'failed';
+    transaction.statusReason = reason;
+    await transaction.save();
+    broadcastToAdmins('tx_failed', { transactionId: transaction.alytoTransactionId, reason });
+    return { provider: 'owlpay', status: 'failed', reason };
+  }
+
+  // ── STEP A: Pre-check liquidez USDC SRL (disponible = fondeado − comprometido) ──
+  // Usar getAvailableUSDC (descuenta USDC ya comprometido por tx en vuelo) y el balance
+  // on-chain real; el disponible efectivo es el mínimo de ambos.
+  const [availableAccounting, onChainBalance] = await Promise.all([
+    FundingRecord.getAvailableUSDC(entity),
+    getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
+  ]);
+  const usdcBalance = Math.min(availableAccounting, onChainBalance);
   const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
 
   if (usdcBalance < needed) {
@@ -2161,6 +2244,10 @@ export async function handleOwlPayIPN(req, res) {
       } catch (stellarErr) {
         console.error('[OwlPay IPN] Error Stellar audit:', stellarErr.message);
       }
+
+      // Comprobante Oficial SRL (fire-and-forget — exigencia ASFI). Tras el audit
+      // trail para incluir el TXID mainnet real. No bloquea ni revierte la tx.
+      await generateSrlComprobante(transaction);
 
       try {
         await notify(transaction.userId, NOTIFICATIONS.paymentCompleted(

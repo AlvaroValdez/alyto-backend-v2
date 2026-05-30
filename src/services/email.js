@@ -839,7 +839,7 @@ export const EMAILS = {
           <p style="margin-top:0;">Harbor ha emitido una instruction_address para esta transferencia. Alyto debe enviar USDC antes del vencimiento para evitar la expiración del transfer.</p>
           <table style="width:100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
             <tr><td style="padding:8px 0; color:#8A96B8;">Transaction ID</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px;">${transaction.alytoTransactionId}</code></td></tr>
-            <tr><td style="padding:8px 0; color:#8A96B8;">Monto a enviar</td><td style="padding:8px 0;"><strong>${Number(transfer?.sourceAmount ?? 0).toFixed(6)} USDC</strong></td></tr>
+            <tr><td style="padding:8px 0; color:#8A96B8;">Monto a enviar</td><td style="padding:8px 0;"><strong>${Number(transfer?.usdcAmountRequired ?? transfer?.sourceAmount ?? 0).toFixed(6)} USDC</strong></td></tr>
             <tr><td style="padding:8px 0; color:#8A96B8;">Dirección destino</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px; word-break:break-all;">${transfer?.instructionAddress ?? '—'}</code></td></tr>
             <tr><td style="padding:8px 0; color:#8A96B8;">Memo</td><td style="padding:8px 0;"><code style="background:#1E293B; padding:2px 6px; border-radius:4px;">${transfer?.instructionMemo ?? 'none required'}</code></td></tr>
             <tr><td style="padding:8px 0; color:#8A96B8;">Chain</td><td style="padding:8px 0;">${transfer?.instructionChain ?? '—'}</td></tr>

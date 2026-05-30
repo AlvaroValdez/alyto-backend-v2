@@ -572,13 +572,20 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
 
     // ── US: ACH_PUSH, DOMESTIC_WIRE, FEDWIRE, WIRE — todos mismo schema ──────
     // required: account_holder_name, bank_name, account_number, routing_number (^[0-9]{9}$)
-    case 'US':
+    case 'US': {
+      const routing = must('routing_number');
+      // Validar formato ABA routing (9 dígitos) ANTES de enviar — un routing mal
+      // formado haría que Harbor reciba el USDC pero no pueda dispersar (fondos atascados).
+      if (!/^[0-9]{9}$/.test(String(routing).trim())) {
+        throw new Error(`[Harbor] routing_number US inválido (debe ser 9 dígitos): ${routing}`);
+      }
       return {
         account_holder_name: holder(),
         bank_name:           must('bank_name'),
         account_number:      must('account_number'),
-        routing_number:      must('routing_number'),
+        routing_number:      String(routing).trim(),
       };
+    }
 
     // ── AE: FTS, AANI, BANK-TRANSFER — mismo schema ──────────────────────────
     // required: account_holder_name, phone_number (^\+971[0-9]{8,9}$),
