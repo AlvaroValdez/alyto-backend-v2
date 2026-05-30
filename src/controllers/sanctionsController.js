@@ -196,7 +196,7 @@ export async function clearSanctionsFlag(req, res) {
     const user = await User.findByIdAndUpdate(
       userId,
       { sanctionsFlag: false },
-      { new: true },
+      { returnDocument: 'after' },
     ).select('_id firstName lastName email sanctionsFlag')
 
     if (!user) {

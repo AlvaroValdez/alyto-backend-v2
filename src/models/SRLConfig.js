@@ -108,7 +108,7 @@ srlConfigSchema.statics.getActive = async function () {
   const doc = await this.findOneAndUpdate(
     { key: 'srl_bolivia' },
     { $setOnInsert: { key: 'srl_bolivia' } },
-    { upsert: true, new: true },
+    { upsert: true, returnDocument: 'after' },
   ).lean();
 
   return {

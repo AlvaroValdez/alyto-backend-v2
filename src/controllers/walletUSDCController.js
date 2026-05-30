@@ -227,7 +227,7 @@ export async function requestBOBtoUSDC(req, res) {
         $expr:  { $gte: [{ $subtract: ['$balance', '$balanceReserved'] }, amount] },
       },
       { $inc: { balanceReserved: amount } },
-      { new: true, session },
+      { returnDocument: 'after', session },
     )
     if (!walletBOB) {
       const available = Math.max(0, walletBOBCheck.balance - walletBOBCheck.balanceReserved)

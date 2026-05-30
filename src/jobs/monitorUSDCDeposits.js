@@ -158,7 +158,7 @@ async function _processPayment(record, srlPublicKey, stats) {
       const updated = await WalletUSDC.findOneAndUpdate(
         { _id: wallet._id, status: 'active' },
         { $inc: { balance: amount } },
-        { new: true, session },
+        { returnDocument: 'after', session },
       )
       if (!updated) throw new Error(`WalletUSDC ${wallet._id} no encontrada o inactiva`)
 

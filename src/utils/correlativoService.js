@@ -29,7 +29,7 @@ export async function generarNumeroCorrelativo(prefix) {
   const doc = await Counter.findOneAndUpdate(
     { _id: key },
     { $inc: { seq: 1 } },
-    { upsert: true, new: true },
+    { upsert: true, returnDocument: 'after' },
   )
 
   const seq = String(doc.seq).padStart(6, '0')  // ej: '000042'

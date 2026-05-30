@@ -258,7 +258,7 @@ export async function approveKycTest(req, res) {
     const user = await User.findByIdAndUpdate(
       userId,
       { kycStatus: 'approved', kycApprovedAt: new Date(), kycProvider: 'dev_test' },
-      { new: true },
+      { returnDocument: 'after' },
     ).select('email kycStatus kycApprovedAt legalEntity');
 
     if (!user) {

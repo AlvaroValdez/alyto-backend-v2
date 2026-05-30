@@ -32,7 +32,7 @@ systemConfigSchema.statics.setValue = async function (key, value) {
   await this.findOneAndUpdate(
     { _id: key },
     { value },
-    { upsert: true, new: true },
+    { upsert: true, returnDocument: 'after' },
   )
 }
 

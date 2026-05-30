@@ -784,7 +784,7 @@ router.patch('/ros/alerts/:alertId', async (req, res) => {
       ...(status === 'reported_uif' ? { reportedToUifAt: new Date() } : {}),
     };
 
-    const alert = await ROSAlert.findOneAndUpdate({ alertId }, update, { new: true });
+    const alert = await ROSAlert.findOneAndUpdate({ alertId }, update, { returnDocument: 'after' });
     if (!alert) return res.status(404).json({ error: 'Alerta no encontrada.' });
 
     res.json({ success: true, alert });

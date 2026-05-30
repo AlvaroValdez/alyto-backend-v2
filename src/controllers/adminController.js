@@ -112,7 +112,7 @@ export async function updateUser(req, res) {
     const user = await User.findByIdAndUpdate(
       userId,
       { $set: setOp, ...(Object.keys(incOp).length ? { $inc: incOp } : {}) },
-      { new: true, runValidators: true },
+      { returnDocument: 'after', runValidators: true },
     ).select('firstName lastName email legalEntity kycStatus kybStatus accountType role isActive sanctionsFlag updatedAt').lean();
 
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
@@ -1825,7 +1825,7 @@ export async function resetUserTokenVersion(req, res) {
   const user = await User.findByIdAndUpdate(
     userId,
     { $set: { tokenVersion: 0 } },
-    { new: true },
+    { returnDocument: 'after' },
   ).select('_id email tokenVersion').lean();
 
   if (!user) {

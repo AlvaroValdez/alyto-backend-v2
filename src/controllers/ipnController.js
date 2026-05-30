@@ -1014,7 +1014,7 @@ export async function dispatchPayout(transaction) {
   const locked = await Transaction.findOneAndUpdate(
     { _id: transaction._id, status: 'payin_confirmed' },
     { $set: { status: 'processing' } },
-    { new: true },
+    { returnDocument: 'after' },
   );
   if (!locked) {
     console.warn('[dispatchPayout] Bloqueado — transacción no está en payin_confirmed (ya procesada o en status diferente):', {

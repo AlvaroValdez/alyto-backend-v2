@@ -29,7 +29,7 @@ export async function getSRLConfig(req, res) {
     const doc = await SRLConfig.findOneAndUpdate(
       { key: 'srl_bolivia' },
       { $setOnInsert: { key: 'srl_bolivia' } },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: 'after' },
     ).populate('qrImages.uploadedBy', 'firstName lastName email').lean();
 
     return res.status(200).json({
@@ -96,7 +96,7 @@ export async function uploadSRLQR(req, res) {
           },
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: 'after' },
     ).lean();
 
     const added = doc.qrImages[doc.qrImages.length - 1];
@@ -148,7 +148,7 @@ export async function toggleSRLQR(req, res) {
     const result = await SRLConfig.findOneAndUpdate(
       { key: 'srl_bolivia', 'qrImages.qrId': qrId },
       { $set: { 'qrImages.$.isActive': isActive } },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean();
 
     if (!result) {
@@ -191,7 +191,7 @@ export async function deleteSRLQR(req, res) {
     const result = await SRLConfig.findOneAndUpdate(
       { key: 'srl_bolivia' },
       { $pull: { qrImages: { qrId } } },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean();
 
     if (!result) {
@@ -246,7 +246,7 @@ export async function uploadWalletSRLQR(req, res) {
           },
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: 'after' },
     ).lean();
 
     const added = doc.walletQrImages[doc.walletQrImages.length - 1];
@@ -280,7 +280,7 @@ export async function toggleWalletSRLQR(req, res) {
     const result = await SRLConfig.findOneAndUpdate(
       { key: 'srl_bolivia', 'walletQrImages.qrId': qrId },
       { $set: { 'walletQrImages.$.isActive': isActive } },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean();
 
     if (!result) {
@@ -350,7 +350,7 @@ export async function updateBankData(req, res) {
           'bankData.accountType':   accountType.trim(),
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: 'after' },
     ).lean();
 
     console.info('[SRLConfig] Datos bancarios actualizados.', { adminId: req.user._id });

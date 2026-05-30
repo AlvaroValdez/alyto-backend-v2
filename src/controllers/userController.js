@@ -126,7 +126,7 @@ export async function updateProfile(req, res) {
     const updated = await User.findByIdAndUpdate(
       req.user._id,
       { $set },
-      { new: true, runValidators: true },
+      { returnDocument: 'after', runValidators: true },
     ).lean();
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
@@ -266,7 +266,7 @@ export async function uploadAvatar(req, res) {
     const updated = await User.findByIdAndUpdate(
       req.user._id,
       { $set: { avatarUrl: dataUrl } },
-      { new: true },
+      { returnDocument: 'after' },
     ).lean();
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
@@ -346,7 +346,7 @@ export async function processKyc(req, res) {
           kycDocuments: { $each: kycDocumentsPayload },
         },
       },
-      { new: true, select: '-password -__v' },
+      { returnDocument: 'after', select: '-password -__v' },
     );
 
     if (!updatedUser) {

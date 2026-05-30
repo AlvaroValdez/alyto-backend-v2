@@ -49,7 +49,7 @@ export async function upsertExchangeRate(req, res) {
           updatedBy: req.user._id,
         },
       },
-      { upsert: true, new: true, runValidators: true },
+      { upsert: true, returnDocument: 'after', runValidators: true },
     );
 
     const isNew = previousRate === null;
@@ -171,7 +171,7 @@ export async function updateCLPBOBRate(req, res) {
             updatedBy: adminId,
           },
         },
-        { upsert: true, new: true, runValidators: true },
+        { upsert: true, returnDocument: 'after', runValidators: true },
       );
     };
 
