@@ -65,7 +65,7 @@ import {
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
-import { getBOBRate, resolveMinAmountOrigin } from '../services/exchangeRateService.js';
+import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
@@ -1646,15 +1646,12 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   const round2      = n => Math.round(n * 100) / 100;
   const userId      = req.user?._id?.toString();
 
-  // ── 1. Tasa BOB/USDC ───────────────────────────────────────────────────────
-  // Prioridad: manualExchangeRate del corredor → MongoDB (ExchangeRate) → .env
-  const BOB_USD_RATE = await getBOBRate();
-  const bobPerUsdc   = (corridor.manualExchangeRate > 0)
-    ? corridor.manualExchangeRate
-    : BOB_USD_RATE;
-
-  const rateSource = corridor.manualExchangeRate > 0 ? 'corridor_manualRate' : 'exchangeRate_db_or_env';
-  console.log('[Quote BOB] BOB_USD_RATE:', bobPerUsdc, '| source:', rateSource);
+  // ── 1. Tasa BOB/USDC (con colchón cambiario si aplica) ──────────────────────
+  // Fuente única: resolveQuoteRate. manualExchangeRate del admin gana sin colchón;
+  // si no, tasa de mercado × (1 + fxBufferPct) para proteger el margen ante el
+  // gap quote→fondeo manual (ver services/exchangeRateService.js).
+  const { bobPerUsdc, marketRate, bufferPct, source: rateSource } = await resolveQuoteRate(corridor);
+  console.log('[Quote BOB] bobPerUsdc:', bobPerUsdc, '| market:', marketRate, '| buffer%:', bufferPct, '| source:', rateSource);
 
   // ── 2 + 3. Quote por proveedor ────────────────────────────────────────────
   // Harbor (owlPay): una sola llamada con el USDC exacto — sin Vita.
@@ -2127,11 +2124,9 @@ export async function getQuote(req, res) {
   //
   // Sin tasa configurada (manualExchangeRate === 0): la cotización no puede procesarse.
   if (corridor.payinMethod === 'manual') {
-    // bobPerUsdc: admin-configured rate or DB/env fallback.
-    const BOB_USD_RATE = await getBOBRate();
-    const bobPerUsdc   = (corridor.manualExchangeRate && corridor.manualExchangeRate > 0)
-      ? corridor.manualExchangeRate
-      : BOB_USD_RATE;
+    // bobPerUsdc: tasa admin sin colchón, o mercado × (1 + colchón) — fuente única.
+    const { bobPerUsdc, marketRate, bufferPct, source: rateSource } = await resolveQuoteRate(corridor);
+    console.log('[Alyto Quote] bobPerUsdc:', bobPerUsdc, '| market:', marketRate, '| buffer%:', bufferPct, '| source:', rateSource);
 
     const vitaPricingUSD = await extractVitaPricing(vitaResponse, 'USD', dest);
     if (!vitaPricingUSD) {

@@ -20,6 +20,21 @@ import ExchangeRate               from '../models/ExchangeRate.js';
 import { fetchBOBUSDTRate,
          getCachedBOBUSDTRate }   from './binanceP2PService.js';
 
+// ── Colchón cambiario (FX buffer) ────────────────────────────────────────────
+// El payin SRL es manual: el usuario transfiere BOB y el admin confirma horas
+// después; recién entonces compramos USDC al precio de ese momento. Entre la
+// cotización (T0) y el fondeo (T+) el BOB puede depreciarse, dejando el monto
+// neto por debajo del costo real del USDC. Para no entregar transacciones por
+// debajo de costo, la tasa de cotización incorpora un colchón configurable
+// sobre la tasa de mercado (más BOB por USDC = colchón a favor de Alyto).
+//
+//   FX_BUFFER_PCT          colchón % por defecto (corridor.fxBufferPct lo anula)
+//   FX_REQUOTE_THRESHOLD_PCT  umbral de drift que dispara el guard en dispatch
+const FX_BUFFER_PCT_DEFAULT      = parseFloat(process.env.FX_BUFFER_PCT ?? '2');
+const FX_REQUOTE_THRESHOLD_PCT   = parseFloat(process.env.FX_REQUOTE_THRESHOLD_PCT ?? '3');
+
+const round6 = n => Math.round(n * 1e6) / 1e6;
+
 /**
  * Obtiene la tasa BOB/USD de mercado (BOB por 1 USD).
  * Usada para: cotizaciones Vita, mínimos de corredor, conversiones generales.
@@ -96,6 +111,80 @@ export async function getBOBUSDCRate() {
     if (override) return override.rate;
   } catch (_) {}
   return getBOBRate();
+}
+
+/**
+ * Resuelve la tasa BOB/USDC para COTIZAR al usuario (corredores SRL Bolivia).
+ *
+ * Fuente única para los 4 sitios de quote (REST calculateBOBQuote, REST getQuote
+ * manual, WS quoteSocket, y el recalc de dispatchPayout). Reemplaza el patrón
+ * duplicado `manualExchangeRate > 0 ? manualExchangeRate : getBOBRate()`.
+ *
+ * Reglas:
+ *   - manualExchangeRate del admin GANA y NO recibe colchón (ya es una tasa
+ *     deliberada fijada por el admin, presumiblemente con su propio margen).
+ *   - Si no hay tasa manual → tasa de mercado (Binance P2P) × (1 + colchón%).
+ *     El colchón es corridor.fxBufferPct si está definido, si no FX_BUFFER_PCT.
+ *
+ * @param {{ manualExchangeRate?: number, fxBufferPct?: number }} corridor
+ * @returns {Promise<{ bobPerUsdc: number, marketRate: number, bufferPct: number, source: string }>}
+ */
+export async function resolveQuoteRate(corridor) {
+  if (corridor?.manualExchangeRate > 0) {
+    return {
+      bobPerUsdc: corridor.manualExchangeRate,
+      marketRate: corridor.manualExchangeRate,
+      bufferPct:  0,
+      source:     'corridor_manualRate',
+    };
+  }
+
+  const marketRate = await getBOBRate();
+  const bufferPct  = (corridor?.fxBufferPct != null) ? corridor.fxBufferPct : FX_BUFFER_PCT_DEFAULT;
+  const bobPerUsdc = round6(marketRate * (1 + bufferPct / 100));
+
+  return {
+    bobPerUsdc,
+    marketRate,
+    bufferPct,
+    source: bufferPct > 0 ? 'binance_p2p+buffer' : 'binance_p2p',
+  };
+}
+
+/**
+ * Guard de drift cambiario para dispatchPayout (corredores SRL con tasa live).
+ *
+ * Compara la tasa de mercado ACTUAL (momento del fondeo) contra la tasa que se
+ * congeló al cotizar (ya incluye el colchón). Si el mercado superó la tasa
+ * congelada por más de FX_REQUOTE_THRESHOLD_PCT, el colchón no alcanza y NO se
+ * debe fondear a ciegas → el caller debe pausar y avisar al admin.
+ *
+ * Fail-open: si no se puede leer el mercado o no hay tasa congelada, devuelve
+ * drifted=false (coherente con el pre-check de liquidez, que también es optimista).
+ *
+ * @param {{ lockedBobPerUsdc: number, manualRateActive?: boolean }} input
+ * @returns {Promise<{ drifted: boolean, marketNow?: number, lockedBobPerUsdc?: number, driftPct?: number, thresholdPct: number, reason?: string }>}
+ */
+export async function checkFxDrift({ lockedBobPerUsdc, manualRateActive = false }) {
+  // Tasa fija del admin: sin exposición live → nunca dispara.
+  if (manualRateActive) {
+    return { drifted: false, thresholdPct: FX_REQUOTE_THRESHOLD_PCT, reason: 'manual_rate' };
+  }
+  if (!lockedBobPerUsdc || lockedBobPerUsdc <= 0) {
+    return { drifted: false, thresholdPct: FX_REQUOTE_THRESHOLD_PCT, reason: 'no_locked_rate' };
+  }
+
+  const marketNow = await getBOBRate().catch(() => null);
+  if (marketNow == null || marketNow <= 0) {
+    // No bloquear el flujo si no podemos leer el mercado.
+    return { drifted: false, thresholdPct: FX_REQUOTE_THRESHOLD_PCT, reason: 'market_unavailable' };
+  }
+
+  const ceiling  = lockedBobPerUsdc * (1 + FX_REQUOTE_THRESHOLD_PCT / 100);
+  const drifted  = marketNow > ceiling;
+  const driftPct = round6(((marketNow - lockedBobPerUsdc) / lockedBobPerUsdc) * 100);
+
+  return { drifted, marketNow, lockedBobPerUsdc, driftPct, thresholdPct: FX_REQUOTE_THRESHOLD_PCT };
 }
 
 /**

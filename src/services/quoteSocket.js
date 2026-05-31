@@ -25,7 +25,7 @@ import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey } from './vitaWalletService.js';
-import { getBOBRate, resolveMinAmountOrigin } from './exchangeRateService.js';
+import { resolveMinAmountOrigin, resolveQuoteRate } from './exchangeRateService.js';
 import { resolveEuCorridorByAmount } from '../routing/euAmountRouter.js';
 import { calculateQuote }  from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
@@ -322,9 +322,8 @@ async function computeQuote(state) {
 
   // ── BRANCH 2: BOB→destino — BOB→USDC→dest ────────────────────────────────────
   if (corridor.originCurrency === 'BOB') {
-    const bobPerUsdc = corridor.manualExchangeRate > 0
-      ? corridor.manualExchangeRate
-      : await getBOBRate();
+    // Tasa con colchón cambiario (fuente única) — ver exchangeRateService.js
+    const { bobPerUsdc } = await resolveQuoteRate(corridor);
 
     // ── 2a. Harbor (owlPay) — tasa real desde Harbor, sin Vita ──────────────
     if (corridor.payoutMethod === 'owlPay') {

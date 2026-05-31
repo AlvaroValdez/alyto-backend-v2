@@ -230,6 +230,20 @@ const transactionConfigSchema = new Schema(
     },
 
     /**
+     * Colchón cambiario (%) aplicado sobre la tasa de mercado (Binance P2P) al
+     * cotizar BOB→USDC. Protege el margen ante la depreciación del BOB entre la
+     * cotización y el fondeo manual (que ocurre horas después). Solo aplica
+     * cuando manualExchangeRate === 0 (tasa live). Ej. 2 = +2% de colchón.
+     * null = usar el default global FX_BUFFER_PCT (env).
+     * Ver resolveQuoteRate() en services/exchangeRateService.js.
+     */
+    fxBufferPct: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+
+    /**
      * Proveedor de payout secundario (fallback) si el primario falla.
      * El sistema intenta el payoutMethod principal primero;
      * si lanza excepción, reintenta con este fallback antes de marcar como 'failed'.

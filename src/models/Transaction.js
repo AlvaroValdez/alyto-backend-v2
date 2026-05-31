@@ -562,6 +562,7 @@ const transactionSchema = new Schema(
         'pending', 'initiated', 'pending_comprobante', 'payin_pending', 'payin_confirmed', 'payin_completed',
         'processing', 'in_transit', 'payout_pending', 'payout_sent',
         'payout_pending_usdc_send', 'payout_in_transit', 'pending_funding',
+        'pending_fx_review',
         'completed', 'failed', 'refunded',
       ],
       default: 'pending',
