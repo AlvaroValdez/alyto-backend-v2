@@ -266,6 +266,9 @@ export async function adminGetBusinessInvoice(req, res) {
  */
 export async function autoGenerateBusinessInvoice(transaction, userId) {
   try {
+    // Idempotencia: si ya tiene factura, no regenerar (evita correlativos duplicados).
+    if (transaction.businessInvoice?.invoiceNumber) return;
+
     const user = await User.findById(userId).lean();
     if (!user?.businessProfileId) return;
 

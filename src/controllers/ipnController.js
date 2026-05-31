@@ -690,6 +690,37 @@ async function generateSrlComprobante(transaction) {
   }
 }
 
+/**
+ * Genera el documento de compliance correcto al COMPLETAR una liquidación SRL:
+ *   - cuenta business (accountType business + businessProfileId) → Factura B2B
+ *     (autoGenerateBusinessInvoice — persiste verificationHash para el QR)
+ *   - retail → Comprobante Oficial de Transacción (generateSrlComprobante)
+ *
+ * Fire-and-forget — nunca bloquea ni lanza. Debe llamarse en TODAS las rutas
+ * de completado (Vita sandbox, Vita IPN real, Harbor IPN).
+ *
+ * @param {object} transaction — Documento Transaction (mongoose, no lean)
+ */
+async function generateComprobanteOnCompletion(transaction) {
+  try {
+    if (transaction.legalEntity !== 'SRL') return;
+    const user = await User.findById(transaction.userId).lean();
+    if (!user) return;
+
+    if (user.accountType === 'business' && user.businessProfileId) {
+      // Import dinámico para evitar dependencia circular con businessInvoiceController.
+      const { autoGenerateBusinessInvoice } = await import('./businessInvoiceController.js');
+      await autoGenerateBusinessInvoice(transaction, user._id);
+    } else {
+      await generateSrlComprobante(transaction);
+    }
+  } catch (err) {
+    console.error('[Comprobante] Error en generateComprobanteOnCompletion (no bloquea):', {
+      transactionId: transaction?.alytoTransactionId, error: err.message,
+    });
+  }
+}
+
 export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
@@ -1526,6 +1557,9 @@ export async function dispatchPayout(transaction) {
             console.error('[Stellar] Error (sandbox step 2):', stellarErr.message);
           }
 
+          // Comprobante/factura (B2B si business, retail si no) — fire-and-forget
+          generateComprobanteOnCompletion(tx).catch(() => {});
+
           // Push: transferencia completada
           try {
             await notify(
@@ -1886,6 +1920,9 @@ export async function handleVitaIPN(req, res) {
             console.error('[Alyto IPN/Vita] Error guardando stellarTxId:', err.message),
           );
         }
+
+        // Comprobante/factura (B2B si business, retail si no) — fire-and-forget
+        generateComprobanteOnCompletion(transaction).catch(() => {});
 
         // Notificación push: transferencia completada
         try {
@@ -2308,9 +2345,9 @@ export async function handleOwlPayIPN(req, res) {
         console.error('[OwlPay IPN] Error Stellar audit:', stellarErr.message);
       }
 
-      // Comprobante Oficial SRL (fire-and-forget — exigencia ASFI). Tras el audit
-      // trail para incluir el TXID mainnet real. No bloquea ni revierte la tx.
-      await generateSrlComprobante(transaction);
+      // Comprobante/factura (B2B si business, retail si no) — fire-and-forget,
+      // exigencia ASFI. Tras el audit trail para incluir el TXID real.
+      await generateComprobanteOnCompletion(transaction);
 
       try {
         await notify(transaction.userId, NOTIFICATIONS.paymentCompleted(
