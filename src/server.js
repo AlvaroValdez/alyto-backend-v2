@@ -87,6 +87,10 @@ if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !p
 
 const app = express();
 
+// AWS-3C — X-Ray: openSegment debe ser el PRIMER middleware (no-op si XRAY_ENABLED!=true)
+const { xrayOpenSegment, xrayCloseSegment } = await import('./utils/xray.js');
+app.use(xrayOpenSegment('alyto-backend'));
+
 // Trust proxy — necesario para que express-rate-limit y otros middlewares
 // lean la IP real del cliente cuando el servidor corre detrás de un proxy
 // (Render, Nginx, AWS ALB). En desarrollo local no hay proxy, el valor '1'
