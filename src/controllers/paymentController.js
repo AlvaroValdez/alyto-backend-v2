@@ -2537,6 +2537,11 @@ export async function getTransactionStatus(req, res) {
     estimatedDelivery: transaction.corridorId?.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
     createdAt:         transaction.createdAt,
     updatedAt:         transaction.updatedAt,
+    // Trazabilidad blockchain — el FE muestra "Verificado en blockchain" si hay
+    // stellarTxId. La red es autoritativa del backend (prod=public/mainnet,
+    // staging=testnet) para que el link a Stellar Expert no dependa de VITE.
+    stellarTxId:       transaction.stellarTxId ?? null,
+    stellarNetwork:    process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet',
     // Confianza en la tasa y historial de ajustes (MSA Section 4.2 — UI Liability)
     rateConfidence:    transaction.rateConfidence ?? null,
     rateHistory:       (transaction.rateHistory ?? []).map(h => ({
