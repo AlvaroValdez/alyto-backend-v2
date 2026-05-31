@@ -645,6 +645,11 @@ async function startServer() {
       console.warn('[Server] STELLAR_SRL_PUBLIC_KEY no configurado — USDC monitor desactivado');
     }
 
+    // AWS-2B — Consumer SQS de webhooks IPN (no-op si SQS_ENABLED!=true)
+    const { startIpnConsumerJob } = await import('./jobs/ipnQueueConsumer.js');
+    startIpnConsumerJob();
+    console.info('[Server] IPN SQS consumer (AWS-2B) inicializado');
+
     // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP
     const wss = createQuoteSocketServer(httpServer);
 

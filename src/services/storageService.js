@@ -29,6 +29,23 @@ import * as Sentry from '@sentry/node'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// ─── AWS-1D: aviso de Object Lock incompatible con R2 ──────────────────────────
+// Object Lock (inmutabilidad ASFI 5 años) SOLO funciona en un bucket AWS S3
+// nativo creado con Object Lock. Cloudflare R2 NO lo soporta: si se activa
+// contra R2, el PutObject con ObjectLockMode se ignora silenciosamente y la
+// retención NO se aplica (falso cumplimiento). Provisionar bucket S3 con
+// scripts/aws/setup-object-lock-bucket.sh.
+if (
+  process.env.S3_OBJECT_LOCK_ENABLED === 'true' &&
+  /r2\.cloudflarestorage\.com/i.test(process.env.S3_ENDPOINT ?? '')
+) {
+  console.warn(
+    '[Storage] ⚠️  S3_OBJECT_LOCK_ENABLED=true pero S3_ENDPOINT apunta a Cloudflare R2, ' +
+    'que NO soporta Object Lock. La retención ASFI (5 años) NO se está aplicando. ' +
+    'Usar un bucket AWS S3 nativo (scripts/aws/setup-object-lock-bucket.sh).'
+  )
+}
+
 // ─── Cliente S3 (lazy init) ───────────────────────────────────────────────────
 
 let _s3 = null

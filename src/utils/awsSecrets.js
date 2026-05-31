@@ -29,9 +29,22 @@ let _client = null;
 
 function getClient() {
   if (!_client) {
+    // Sin credentials explícitas → cadena de credenciales por defecto del SDK
+    // (IAM Role del cómputo en prod — AWS-1C — o AWS_ACCESS_KEY_ID/SECRET del env).
     _client = new SecretsManagerClient({ region: AWS_REGION });
   }
   return _client;
+}
+
+/**
+ * AWS-1C — modo de credenciales efectivo de los clientes AWS.
+ *   'static-keys'   → AWS_ACCESS_KEY_ID/SECRET presentes en el entorno (pendiente migrar)
+ *   'default-chain' → cadena por defecto del SDK (IAM Role del cómputo — objetivo 1C)
+ */
+export function credentialMode() {
+  return process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+    ? 'static-keys'
+    : 'default-chain';
 }
 
 // ─── Carga principal ──────────────────────────────────────────────────────────
@@ -51,6 +64,7 @@ export async function loadSecretsIntoEnv() {
   }
 
   console.info(`[AWS Secrets] Cargando secretos desde: ${AWS_SECRETS_NAME} (region: ${AWS_REGION})`);
+  console.info(`[AWS Secrets] Modo de credenciales AWS: ${credentialMode()}`);
 
   try {
     const command = new GetSecretValueCommand({ SecretId: AWS_SECRETS_NAME });
