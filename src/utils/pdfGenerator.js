@@ -23,7 +23,7 @@
 import PDFDocument from 'pdfkit';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
-  resolveLogoPath, formatBOB, formatUSDC, cleanEnvValue,
+  resolveLogoPath, formatBOB, formatUSDC, cleanEnvValue, stellarExplorerTxUrl,
   drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
 } from './pdfHelpers.js';
 
@@ -208,10 +208,10 @@ function buildPDF(data) {
       .fontSize(8)
       .fillColor(COLOR_ACCENT)
       .text(
-        `Verificable en: https://stellar.expert/explorer/public/tx/${data.txid}`,
+        `Verificable en: ${stellarExplorerTxUrl(data.txid)}`,
         marginL,
         doc.y,
-        { link: `https://stellar.expert/explorer/public/tx/${data.txid}`, underline: true },
+        { link: stellarExplorerTxUrl(data.txid), underline: true },
       );
 
     doc.moveDown(0.8);

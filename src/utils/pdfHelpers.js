@@ -77,6 +77,15 @@ export function formatUSDC(amount) {
   return `${Number(amount).toFixed(7)} USDC`;
 }
 
+/**
+ * URL de Stellar Expert para un TXID, según la red del entorno.
+ * Prod (VPS) = mainnet → 'public'; staging = testnet.
+ */
+export function stellarExplorerTxUrl(txid) {
+  const net = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+  return `https://stellar.expert/explorer/${net}/tx/${txid}`;
+}
+
 // ── Helpers de dibujo PDF ────────────────────────────────────────────────────
 
 /**

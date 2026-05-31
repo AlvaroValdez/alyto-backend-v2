@@ -27,7 +27,7 @@ import QRCode      from 'qrcode';
 import crypto      from 'crypto';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
-  formatBOB, formatUSDC, cleanEnvValue,
+  formatBOB, formatUSDC, cleanEnvValue, stellarExplorerTxUrl,
   drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
 } from './pdfHelpers.js';
 
@@ -165,8 +165,8 @@ function buildBusinessPDF(data) {
     const hasStellarTx = data.txid && !data.txid.startsWith('N/A') && data.txid !== 'PENDIENTE';
     if (hasStellarTx) {
       doc.font('Helvetica').fontSize(7).fillColor(COLOR_ACCENT)
-        .text(`Verificar: https://stellar.expert/explorer/public/tx/${data.txid}`, marginL, doc.y,
-          { link: `https://stellar.expert/explorer/public/tx/${data.txid}`, underline: true });
+        .text(`Verificar: ${stellarExplorerTxUrl(data.txid)}`, marginL, doc.y,
+          { link: stellarExplorerTxUrl(data.txid), underline: true });
       doc.moveDown(0.2);
     }
 
