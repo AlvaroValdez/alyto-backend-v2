@@ -161,8 +161,21 @@ async function generateAndStreamPDF(transaction, res) {
   const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
   const { buffer, filename, verificationHash } = await generateBusinessInvoice(dto);
 
-  // Persistir referencia en BD + subir a storage (si no existe aún)
+  // Persistir referencia en BD (si no existe aún). El hash se guarda PRIMERO e
+  // independiente del upload a R2 — el QR de verificación solo necesita el hash.
   if (!transaction.businessInvoice?.invoiceNumber) {
+    try {
+      await Transaction.findByIdAndUpdate(transaction._id, {
+        $set: {
+          'businessInvoice.invoiceNumber':      invoiceNumber,
+          'businessInvoice.invoiceGeneratedAt':  new Date(),
+          'businessInvoice.verificationHash':    verificationHash,
+        },
+      });
+    } catch (err) {
+      console.warn('[B2B Invoice] No se pudo persistir hash en BD:', err.message);
+    }
+    // Upload a storage best-effort (no bloquea el stream del PDF al cliente).
     try {
       const s3Key = `pdfs/b2b/${invoiceNumber}_${filename}`
       const { url: pdfUrl } = await uploadBuffer(buffer, s3Key, {
@@ -170,16 +183,10 @@ async function generateAndStreamPDF(transaction, res) {
         disposition: `attachment; filename="${filename}"`,
       })
       await Transaction.findByIdAndUpdate(transaction._id, {
-        $set: {
-          'businessInvoice.invoiceNumber':      invoiceNumber,
-          'businessInvoice.invoiceGeneratedAt':  new Date(),
-          'businessInvoice.invoicePdfUrl':       pdfUrl,
-          'businessInvoice.verificationHash':    verificationHash,
-        },
+        $set: { 'businessInvoice.invoicePdfUrl': pdfUrl },
       });
     } catch (err) {
-      // No crítico — el PDF ya fue generado y se streamea al cliente
-      console.warn('[B2B Invoice] No se pudo persistir referencia en BD:', err.message);
+      console.warn('[B2B Invoice] Upload PDF a storage falló (no crítico):', err.message);
     }
   }
 
@@ -279,20 +286,30 @@ export async function autoGenerateBusinessInvoice(transaction, userId) {
     const dto = buildInvoiceDTO(transaction, profile, invoiceNumber);
     const { buffer, filename, verificationHash } = await generateBusinessInvoice(dto);
 
-    const s3Key = `pdfs/b2b/${invoiceNumber}_${filename}`
-    const { url: pdfUrl } = await uploadBuffer(buffer, s3Key, {
-      contentType: 'application/pdf',
-      disposition: `attachment; filename="${filename}"`,
-    })
-
+    // Persistir hash + número PRIMERO — el QR de verificación solo necesita el
+    // verificationHash en la BD; NO debe depender del upload a R2 (que puede
+    // fallar). El PDF es regenerable on-demand con el mismo invoiceNumber.
     await Transaction.findByIdAndUpdate(transaction._id, {
       $set: {
         'businessInvoice.invoiceNumber':      invoiceNumber,
         'businessInvoice.invoiceGeneratedAt':  new Date(),
-        'businessInvoice.invoicePdfUrl':       pdfUrl,
         'businessInvoice.verificationHash':    verificationHash,
       },
     });
+
+    // Subir PDF a storage (best-effort) — si falla, el hash ya quedó persistido.
+    try {
+      const s3Key = `pdfs/b2b/${invoiceNumber}_${filename}`;
+      const { url: pdfUrl } = await uploadBuffer(buffer, s3Key, {
+        contentType: 'application/pdf',
+        disposition: `attachment; filename="${filename}"`,
+      });
+      await Transaction.findByIdAndUpdate(transaction._id, {
+        $set: { 'businessInvoice.invoicePdfUrl': pdfUrl },
+      });
+    } catch (upErr) {
+      console.warn('[B2B Invoice] Upload PDF a storage falló (hash ya persistido, PDF regenerable on-demand):', upErr.message);
+    }
 
     console.info('[B2B Invoice] Factura auto-generada:', {
       transactionId:  transaction.alytoTransactionId,
