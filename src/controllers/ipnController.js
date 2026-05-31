@@ -22,6 +22,7 @@
  */
 
 import crypto            from 'crypto';
+import { enqueueIpnEvent, isSqsEnabled } from '../utils/sqsBuffer.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import User              from '../models/User.js';
@@ -58,7 +59,7 @@ import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
 import { uploadBuffer }              from '../services/storageService.js';
-import { getBOBRate }        from '../services/exchangeRateService.js';
+import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
 import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -355,13 +356,10 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
  * @throws {Error} si manualExchangeRate no está configurada (= 0)
  */
 async function convertBobToUsdc(netAmountBOB, corridor) {
-  // Prioridad: manualExchangeRate del corredor → MongoDB (ExchangeRate) → .env
-  let bobPerUsdc = corridor.manualExchangeRate;
-
-  if (!bobPerUsdc || bobPerUsdc <= 0) {
-    bobPerUsdc = await getBOBRate();
-    console.log('[convertBobToUsdc] manualExchangeRate no configurada en corredor — usando getBOBRate():', bobPerUsdc);
-  }
+  // Fuente única (resolveQuoteRate): tasa admin sin colchón, o mercado + colchón.
+  // Solo se llega aquí en el fallback de recalc (tx sin digitalAssetAmount). Debe
+  // usar la MISMA tasa con colchón que la cotización para no entregar bajo costo.
+  const { bobPerUsdc } = await resolveQuoteRate(corridor);
 
   const usdcAmount = Math.round((netAmountBOB / bobPerUsdc) * 100) / 100; // 2 decimales — igual que en la cotización (round2)
   return { usdcAmount, bobPerUsdc };
@@ -1214,14 +1212,42 @@ export async function dispatchPayout(transaction) {
       let usdcAmount, bobPerUsdc;
       if (transaction.digitalAssetAmount > 0) {
         usdcAmount = transaction.digitalAssetAmount;
-        bobPerUsdc = corridor.manualExchangeRate > 0
-          ? corridor.manualExchangeRate
-          : await getBOBRate();
+        // Tasa con colchón (fuente única) para el registro de auditoría.
+        bobPerUsdc = (await resolveQuoteRate(corridor)).bobPerUsdc;
       } else {
         const convResult = await convertBobToUsdc(_netAmountNative, corridor);
         usdcAmount = convResult.usdcAmount;
         bobPerUsdc = convResult.bobPerUsdc;
       }
+
+      // ── Guard de drift cambiario (Harbor — incluye EEUU/USD) ─────────────────
+      // El payin SRL es manual y se confirma horas después de cotizar. Si el BOB
+      // se depreció más allá del colchón ya incluido en la tasa congelada, NO
+      // fondeamos a ciegas (entregaríamos por debajo de costo): pausamos en
+      // 'pending_fx_review' y avisamos al admin. Fail-open si no hay tasa/mercado.
+      const lockedBobPerUsdc = usdcAmount > 0
+        ? Math.round((_netAmountNative / usdcAmount) * 1e6) / 1e6
+        : bobPerUsdc;
+      const drift = await checkFxDrift({
+        lockedBobPerUsdc,
+        manualRateActive: corridor.manualExchangeRate > 0,
+      });
+      if (drift.drifted) {
+        transaction.status        = 'pending_fx_review';
+        transaction.statusReason  = 'fx_drift_guard';
+        transaction.failureReason =
+          `Drift cambiario ${drift.driftPct}% supera umbral ${drift.thresholdPct}% ` +
+          `(congelada ${drift.lockedBobPerUsdc} → mercado ${drift.marketNow} BOB/USDC)`;
+        await transaction.save().catch(() => {});
+        console.warn('[dispatchPayout] FX guard activado (owlPay) — payout pausado:', {
+          transactionId: transaction.alytoTransactionId, ...drift,
+        });
+        import('../services/email.js')
+          .then(m => m.notifyAdminFxGuard(transaction, drift))
+          .catch(() => {});
+        return;
+      }
+
       transaction.conversionRate       = { fromCurrency: 'BOB', toCurrency: 'USDC', rate: bobPerUsdc, convertedAmount: usdcAmount };
       transaction.digitalAsset         = 'USDC';
       transaction.digitalAssetAmount   = usdcAmount;
@@ -1299,9 +1325,8 @@ export async function dispatchPayout(transaction) {
       let usdcAmount, bobPerUsdc;
       if (transaction.digitalAssetAmount > 0) {
         usdcAmount  = transaction.digitalAssetAmount;
-        bobPerUsdc  = corridor.manualExchangeRate > 0
-          ? corridor.manualExchangeRate
-          : await getBOBRate();
+        // Tasa con colchón (fuente única) para el registro de auditoría.
+        bobPerUsdc  = (await resolveQuoteRate(corridor)).bobPerUsdc;
         console.log('[dispatchPayout] Usando usdcTransitAmount de la cotización:', {
           netBOB: netAmountNative, bobPerUsdc, usdcAmount,
         });
@@ -1313,6 +1338,36 @@ export async function dispatchPayout(transaction) {
         console.log('[dispatchPayout] Conversión BOB→USDC recalculada:', {
           netBOB: netAmountNative, bobPerUsdc, usdcAmount,
         });
+      }
+
+      // ── Guard de drift cambiario ────────────────────────────────────────────
+      // El payin SRL es manual y se confirma horas después de cotizar. Si el BOB
+      // se depreció más allá del colchón ya incluido en la tasa congelada, NO
+      // fondeamos a ciegas (entregaríamos por debajo de costo): pausamos en
+      // 'pending_fx_review' y avisamos al admin para decidir (re-cotizar o ejecutar).
+      // Fail-open: si no hay tasa congelada o no se lee el mercado, no bloquea.
+      const lockedBobPerUsdc = usdcAmount > 0
+        ? Math.round((netAmountNative / usdcAmount) * 1e6) / 1e6
+        : bobPerUsdc;
+      const drift = await checkFxDrift({
+        lockedBobPerUsdc,
+        manualRateActive: corridor.manualExchangeRate > 0,
+      });
+      if (drift.drifted) {
+        transaction.status        = 'pending_fx_review';
+        transaction.statusReason  = 'fx_drift_guard';
+        transaction.failureReason =
+          `Drift cambiario ${drift.driftPct}% supera umbral ${drift.thresholdPct}% ` +
+          `(congelada ${drift.lockedBobPerUsdc} → mercado ${drift.marketNow} BOB/USDC)`;
+        await transaction.save().catch(() => {});
+        console.warn('[dispatchPayout] FX guard activado — payout pausado:', {
+          transactionId: transaction.alytoTransactionId, ...drift,
+        });
+        // Fire-and-forget (no bloquea el flujo) — patrón email del módulo.
+        import('../services/email.js')
+          .then(m => m.notifyAdminFxGuard(transaction, drift))
+          .catch(() => {});
+        return;
       }
 
       // Registrar conversión + activo Stellar en la transacción
@@ -1757,6 +1812,18 @@ export async function handleVitaIPN(req, res) {
     return res.status(401).json({ error: 'Firma inválida.' });
   }
 
+  // ── AWS-2B: buffer SQS. Si está activo, encolar el evento ya verificado y
+  //    delegar al consumer. fromSqsConsumer evita re-encolar cuando el propio
+  //    consumer reejecuta este handler. Si el encolado falla → procesar síncrono.
+  if (isSqsEnabled() && !req.fromSqsConsumer) {
+    const queued = await enqueueIpnEvent('vita', {
+      body:    req.body,
+      headers: req.headers,
+      rawBody: req.rawBody ? Buffer.from(req.rawBody).toString('base64') : null,
+    });
+    if (queued) return res.status(200).json({ received: true, queued: true });
+  }
+
   const { status: vitaStatus, order: vitaOrder, wallet } = req.body;
 
   console.info('[Alyto IPN/Vita] IPN recibido.', {
@@ -2048,6 +2115,16 @@ export async function handleFintocIPN(req, res) {
     console.warn('[Alyto IPN/Fintoc] FINTOC_WEBHOOK_SECRET no configurado — saltando verificación de firma.');
   }
 
+  // ── AWS-2B: buffer SQS (ver handleVitaIPN). ──────────────────────────────
+  if (isSqsEnabled() && !req.fromSqsConsumer) {
+    const queued = await enqueueIpnEvent('fintoc', {
+      body:    req.body,
+      headers: req.headers,
+      rawBody: req.rawBody ? Buffer.from(req.rawBody).toString('base64') : null,
+    });
+    if (queued) return res.status(200).json({ received: true, queued: true });
+  }
+
   const { type, data } = req.body;
 
   console.info('[Alyto IPN/Fintoc] Evento recibido.', {
@@ -2179,6 +2256,16 @@ export async function handleOwlPayIPN(req, res) {
   if (!verifyWebhookSignature(rawBody, harborSignature)) {
     console.warn('[OwlPay IPN] Invalid harbor-signature from IP:', req.ip);
     return res.status(401).json({ error: 'Firma inválida.' });
+  }
+
+  // ── AWS-2B: buffer SQS (ver handleVitaIPN). ──────────────────────────────
+  if (isSqsEnabled() && !req.fromSqsConsumer) {
+    const queued = await enqueueIpnEvent('owlpay', {
+      body:    req.body,
+      headers: req.headers,
+      rawBody: req.rawBody ? Buffer.from(req.rawBody).toString('base64') : null,
+    });
+    if (queued) return res.status(200).json({ received: true, queued: true });
   }
 
   const { event, data } = req.body ?? {};
