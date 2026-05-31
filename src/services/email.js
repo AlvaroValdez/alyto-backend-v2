@@ -225,6 +225,40 @@ export async function sendRawEmail(to, subject, html) {
 }
 
 /**
+ * Alerta admin: el guard de drift cambiario pausó un payout porque la tasa de
+ * mercado actual superó la tasa congelada al cotizar por encima del umbral.
+ * La tx queda en 'pending_fx_review' para decisión manual (re-cotizar o ejecutar).
+ *
+ * Fire-and-forget desde dispatchPayout — nunca bloquea el flujo de payout.
+ *
+ * @param {object} transaction
+ * @param {{ marketNow?: number, lockedBobPerUsdc?: number, driftPct?: number, thresholdPct?: number }} drift
+ */
+export async function notifyAdminFxGuard(transaction, { marketNow, lockedBobPerUsdc, driftPct, thresholdPct } = {}) {
+  const adminEmail = process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app';
+  const txId       = transaction.alytoTransactionId ?? transaction._id;
+  const subject    = `⚠️ Drift cambiario — payout pausado ${txId}`;
+  const ledgerUrl  = `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/admin/ledger?tx=${txId}`;
+
+  const html =
+    `<p>El guard de drift cambiario <strong>pausó</strong> un payout.</p>` +
+    `<ul>` +
+    `<li>Transacción: <strong>${txId}</strong></li>` +
+    `<li>Corredor: ${transaction.corridorCode ?? '—'}</li>` +
+    `<li>Tasa congelada al cotizar (BOB/USDC): <strong>${lockedBobPerUsdc ?? '—'}</strong></li>` +
+    `<li>Tasa de mercado ahora (BOB/USDC): <strong>${marketNow ?? '—'}</strong></li>` +
+    `<li>Drift: <strong>${driftPct ?? '—'}%</strong> (umbral: ${thresholdPct ?? '—'}%)</li>` +
+    `<li>USDC requerido: ${transaction.digitalAssetAmount ?? '—'}</li>` +
+    `</ul>` +
+    `<p>El colchón no cubre el movimiento del BOB. La transacción quedó en ` +
+    `<code>pending_fx_review</code>. Acción: re-cotizar con el usuario o ejecutar ` +
+    `el payout manualmente desde el panel admin si se decide absorber la diferencia.</p>` +
+    `<p><a href="${ledgerUrl}">Ver en el Ledger</a></p>`;
+
+  return sendRawEmail(adminEmail, subject, html);
+}
+
+/**
  * Envía el email de bienvenida. Usa SendGrid Dynamic Template si
  * SENDGRID_TEMPLATE_WELCOME está configurado; si no, envía HTML inline
  * (idéntico tono y estructura que otros emails transaccionales).
