@@ -43,6 +43,11 @@ const notificationSchema = new mongoose.Schema(
         'conversion_rejected',
         'qr_payment',
         'kyc',
+        // KYB (cuenta Business) — transiciones de estado notificadas al usuario
+        'kyb_approved',
+        'kyb_rejected',
+        'kyb_more_info',
+        'kyb_under_review',
         'system',
         'general',
         'transfer_initiated',

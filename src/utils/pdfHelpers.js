@@ -19,6 +19,24 @@ export const COLOR_ACCENT   = '#F5A623';
 export const COLOR_GRAY     = '#666666';
 export const COLOR_LIGHT_BG = '#F5F7FA';
 
+// ── Saneamiento de valores de entorno ────────────────────────────────────────
+
+/**
+ * Devuelve el valor de entorno limpio, o `null` si está vacío o es un
+ * placeholder sin completar (ej. "<COMPLETAR: …>", "[NIT pendiente]").
+ * Evita que textos placeholder se impriman literalmente en el PDF.
+ * @param {string|undefined} val
+ * @returns {string|null}
+ */
+export function cleanEnvValue(val) {
+  if (!val || typeof val !== 'string') return null;
+  const t = val.trim();
+  if (!t) return null;
+  if (/^[<[]/.test(t)) return null;                       // empieza con < o [
+  if (/COMPLETAR|PENDIENTE|TODO|PLACEHOLDER/i.test(t)) return null;
+  return t;
+}
+
 // ── Logo ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -61,6 +79,23 @@ export function formatUSDC(amount) {
 
 // ── Helpers de dibujo PDF ────────────────────────────────────────────────────
 
+/**
+ * Determina si un color de fondo (hex) es claro, para elegir texto oscuro/claro.
+ * Usa luminancia relativa percibida (ITU-R BT.601).
+ * @param {string} hex - color #RRGGBB
+ * @returns {boolean} true si el fondo es claro (→ usar texto oscuro)
+ */
+function isLightBackground(hex) {
+  if (!hex || typeof hex !== 'string') return true;
+  const c = hex.replace('#', '');
+  if (c.length < 6) return true;
+  const r = parseInt(c.slice(0, 2), 16);
+  const g = parseInt(c.slice(2, 4), 16);
+  const b = parseInt(c.slice(4, 6), 16);
+  // Luminancia 0–255; umbral 150 separa fondos claros de oscuros.
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+}
+
 /** Dibuja una línea separadora horizontal a lo ancho de la página. */
 export function drawSeparator(doc, color = '#CCCCCC') {
   doc
@@ -99,18 +134,23 @@ export function drawTableRow(doc, concepto, valor, {
     doc.rect(x, y, totalW, rowHeight).fill(bgColor);
   }
 
+  // El color del texto depende de la LUMINANCIA del fondo, no de si hay fondo.
+  // Antes: bgColor ? blanco : oscuro → las filas con fondo claro (#F9FAFB)
+  // quedaban con texto blanco INVISIBLE. Ahora: fondo claro → texto oscuro.
+  const textColor = (!bgColor || isLightBackground(bgColor)) ? '#222222' : '#FFFFFF';
+
   const font = bold ? 'Helvetica-Bold' : 'Helvetica';
 
   doc
     .font(font)
     .fontSize(9)
-    .fillColor(bgColor ? '#FFFFFF' : '#222222')
+    .fillColor(textColor)
     .text(concepto, x + 4, y + 4, { width: colWidth, lineBreak: false });
 
   doc
     .font('Helvetica')
     .fontSize(9)
-    .fillColor(bgColor ? '#FFFFFF' : '#222222')
+    .fillColor(textColor)
     .text(valor, x + colWidth + 4, y + 4, {
       width:     totalW - colWidth - 8,
       align:     'right',
@@ -159,8 +199,8 @@ export function drawInstitutionalHeader(doc, titulo, numeroCorrelativo) {
   }
 
   // Razón social + NIT en una línea
-  const nit       = process.env.AV_FINANCE_NIT    ?? '[NIT pendiente]';
-  const direccion = process.env.AV_FINANCE_ADDRESS ?? '';
+  const nit       = cleanEnvValue(process.env.AV_FINANCE_NIT)     ?? 'En trámite ante el SIN';
+  const direccion = cleanEnvValue(process.env.AV_FINANCE_ADDRESS) ?? '';
 
   doc
     .font('Helvetica-Bold')

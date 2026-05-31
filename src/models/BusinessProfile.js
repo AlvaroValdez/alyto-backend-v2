@@ -123,7 +123,11 @@ const businessProfileSchema = new Schema(
       enum: [
         'SRL',   // Sociedad de Responsabilidad Limitada
         'SA',    // Sociedad Anónima
+        'SAM',   // Sociedad Anónima Mixta
         'SpA',   // Sociedad por Acciones
+        'UNIP',  // Empresa Unipersonal
+        'COOP',  // Cooperativa
+        'ASC',   // Asociación Civil / Fundación
         'LLC',   // Limited Liability Company
         'LLP',   // Limited Liability Partnership
         'IND',   // Empresa Individual

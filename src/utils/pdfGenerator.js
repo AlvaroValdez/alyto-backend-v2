@@ -23,7 +23,7 @@
 import PDFDocument from 'pdfkit';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
-  resolveLogoPath, formatBOB, formatUSDC,
+  resolveLogoPath, formatBOB, formatUSDC, cleanEnvValue,
   drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
 } from './pdfHelpers.js';
 
@@ -87,7 +87,7 @@ function buildPDF(data) {
 
     drawInstitutionalHeader(doc, 'Comprobante Oficial de Transacción', data.numeroComprobante);
 
-    const nit = process.env.AV_FINANCE_NIT ?? '[NIT pendiente]';
+    const nit = cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'En trámite ante el SIN';
 
     // ═══════════════════════════════════════════════════════════════════════
     // SECCIÓN 2 — DATOS DEL CLIENTE (KYC)
@@ -273,8 +273,8 @@ function buildPDF(data) {
 
     // Texto legal configurable — env AV_FINANCE_LEGAL_FOOTER tiene máxima prioridad,
     // seguido del campo override en el DTO, con este texto como fallback compilado.
-    const textoLegal = process.env.AV_FINANCE_LEGAL_FOOTER
-      ?? data.textoLegalFooter
+    const textoLegal = cleanEnvValue(process.env.AV_FINANCE_LEGAL_FOOTER)
+      ?? cleanEnvValue(data.textoLegalFooter)
       ?? 'Este documento constituye el Comprobante Oficial de Liquidación de Activo Digital '
        + 'emitido por AV Finance SRL (producto Alyto), con domicilio legal en Av. Ramiro Castillo N° 13, La Paz, Bolivia. '
        + 'La operación registrada constituye un servicio de pago transfronterizo habilitado '
@@ -288,7 +288,7 @@ function buildPDF(data) {
        + 'Trazabilidad blockchain verificable en Stellar Network (registro público, inmutable). '
        + 'Reclamos: presentar comprobante en soporte@alyto.app dentro de los 30 días corridos '
        + 'posteriores a la emisión. AV Finance SRL — NIT: '
-       + (process.env.AV_FINANCE_NIT ?? '[ver admin]') + '.';
+       + (cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'en trámite ante el SIN') + '.';
 
     doc
       .font('Helvetica-Bold')

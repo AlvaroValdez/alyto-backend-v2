@@ -27,7 +27,7 @@ import QRCode      from 'qrcode';
 import crypto      from 'crypto';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
-  formatBOB, formatUSDC,
+  formatBOB, formatUSDC, cleanEnvValue,
   drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
 } from './pdfHelpers.js';
 
@@ -87,7 +87,7 @@ const DEFAULT_LEGAL_FOOTER =
   + 'El tipo de cambio utilizado corresponde a la tasa efectiva pagada en la fecha de la operación, '
   + 'conforme NC12 y Boletín Técnico CTNAC 2-2024. '
   + 'Trazabilidad blockchain verificable en Stellar Network (red pública, inmutable, descentralizada). '
-  + 'AV Finance SRL — NIT: ' + (process.env.AV_FINANCE_NIT ?? '[pendiente]') + '.';
+  + 'AV Finance SRL — NIT: ' + (cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'en trámite ante el SIN') + '.';
 
 // ── Constructor del PDF ──────────────────────────────────────────────────────
 
@@ -230,8 +230,8 @@ function buildBusinessPDF(data) {
     drawSeparator(doc);
 
     // ── SECCIÓN 7 — NOTA LEGAL + QR (lado a lado) ────────────────────────
-    const textoLegal = data.textoLegalFooter
-      ?? process.env.AV_FINANCE_B2B_LEGAL_FOOTER
+    const textoLegal = cleanEnvValue(data.textoLegalFooter)
+      ?? cleanEnvValue(process.env.AV_FINANCE_B2B_LEGAL_FOOTER)
       ?? DEFAULT_LEGAL_FOOTER;
 
     const qrSize     = 60;
@@ -260,7 +260,7 @@ function buildBusinessPDF(data) {
     doc.moveDown(0.3);
 
     // Pie de firma institucional
-    const nit = process.env.AV_FINANCE_NIT ?? '[NIT pendiente]';
+    const nit = cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'En trámite ante el SIN';
     doc.font('Helvetica').fontSize(7).fillColor(COLOR_GRAY)
       .text(
         `Comprobante N° ${data.invoiceNumber}  ·  Emitido: ${new Date(data.fechaHora).toLocaleDateString('es-BO')}  ·  AV Finance SRL  ·  NIT: ${nit}`,
