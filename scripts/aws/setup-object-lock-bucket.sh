@@ -10,7 +10,8 @@
 #
 # Requisitos: AWS CLI v2 autenticado con permisos de administración S3
 #   (s3:CreateBucket, s3:PutBucketVersioning, s3:PutObjectLockConfiguration,
-#    s3:PutBucketPolicy). El usuario runtime `alyto-secrets-writer` NO los tiene.
+#    s3:PutBucketPolicy, s3:PutBucketEncryption, s3:GetBucketObjectLockConfiguration).
+#   El usuario runtime `alyto-secrets-writer` NO los tiene → usar credenciales admin.
 #
 # Uso:
 #   BUCKET=alyto-pdfs-compliance REGION=us-east-1 DAYS=1825 \
@@ -22,11 +23,26 @@ BUCKET="${BUCKET:-alyto-pdfs-compliance}"
 REGION="${REGION:-us-east-1}"
 DAYS="${DAYS:-1825}"
 
-echo "==> Creando bucket S3 nativo con Object Lock"
-echo "    Bucket: ${BUCKET}"
-echo "    Region: ${REGION}"
-echo "    Retención COMPLIANCE: ${DAYS} días (~$((DAYS / 365)) años)"
+command -v aws >/dev/null 2>&1 || { echo "❌ AWS CLI v2 no instalado."; exit 1; }
+aws sts get-caller-identity >/dev/null 2>&1 || { echo "❌ Sin credenciales AWS válidas (aws configure / env)."; exit 1; }
+
+echo "==> Identidad AWS:"
+aws sts get-caller-identity --output text --query '[Account,Arn]'
+echo "==> Bucket: ${BUCKET} | Region: ${REGION} | Retención COMPLIANCE: ${DAYS} días (~$((DAYS / 365)) años)"
 echo
+
+# Idempotencia: si el bucket ya existe, NO se puede activar Object Lock retroactivamente.
+if aws s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+  echo "⚠️  El bucket '${BUCKET}' YA existe."
+  if aws s3api get-object-lock-configuration --bucket "${BUCKET}" >/dev/null 2>&1; then
+    echo "✅ Ya tiene Object Lock configurado. Mostrando config y saliendo (idempotente):"
+    aws s3api get-object-lock-configuration --bucket "${BUCKET}"
+    exit 0
+  fi
+  echo "❌ El bucket existe SIN Object Lock. No se puede activar retroactivamente."
+  echo "   Crear un bucket NUEVO con otro nombre (BUCKET=...) y migrar objetos."
+  exit 1
+fi
 
 # 1) Crear bucket con Object Lock habilitado (también habilita versioning).
 #    us-east-1 NO admite LocationConstraint; el resto sí.
@@ -42,13 +58,12 @@ else
     --object-lock-enabled-for-bucket
 fi
 
-# 2) Asegurar versioning (requerido por Object Lock; create-bucket ya lo activa,
-#    pero lo dejamos explícito e idempotente).
+# 2) Asegurar versioning (requerido por Object Lock; idempotente).
 aws s3api put-bucket-versioning \
   --bucket "${BUCKET}" \
   --versioning-configuration "Status=Enabled"
 
-# 3) Configuración de retención por defecto COMPLIANCE.
+# 3) Retención por defecto COMPLIANCE.
 #    El código (storageService.js) además fija ObjectLockRetainUntilDate por objeto,
 #    pero el default protege ante objetos subidos por otras vías.
 aws s3api put-object-lock-configuration \
@@ -66,6 +81,17 @@ aws s3api put-bucket-encryption \
   --bucket "${BUCKET}" \
   --server-side-encryption-configuration \
   '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+# 6) Verificación post-creación — falla ruidosamente si Object Lock no quedó activo.
+echo
+echo "==> Verificando Object Lock..."
+LOCK_MODE="$(aws s3api get-object-lock-configuration --bucket "${BUCKET}" \
+  --query 'ObjectLockConfiguration.Rule.DefaultRetention.Mode' --output text 2>/dev/null || echo NONE)"
+if [ "${LOCK_MODE}" != "COMPLIANCE" ]; then
+  echo "❌ Verificación FALLÓ: Object Lock no quedó en COMPLIANCE (got: ${LOCK_MODE})."
+  exit 1
+fi
+echo "✅ Object Lock COMPLIANCE confirmado (${DAYS} días)."
 
 echo
 echo "==> ✅ Bucket listo. Configurar en Secrets Manager (alyto/production) / .env:"
