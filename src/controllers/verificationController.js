@@ -70,8 +70,10 @@ function page({ statusCode, icon, iconColor, title, subtitle, rows = [], stellar
       </div>`)
     .join('');
 
+  // Red de Stellar según entorno: prod (VPS) = mainnet → 'public'; staging = testnet.
+  const stellarNet = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
   const stellarBtn = stellarTxId ? `
-    <a class="stellar-link" href="https://stellar.expert/explorer/public/tx/${esc(stellarTxId)}" target="_blank" rel="noopener noreferrer">
+    <a class="stellar-link" href="https://stellar.expert/explorer/${stellarNet}/tx/${esc(stellarTxId)}" target="_blank" rel="noopener noreferrer">
       Ver trazabilidad en Stellar ↗
     </a>` : '';
 
