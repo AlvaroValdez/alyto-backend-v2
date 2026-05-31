@@ -409,6 +409,10 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
 
+// AWS-3C — X-Ray: closeSegment va DESPUÉS de las rutas, ANTES de los error handlers
+// (no-op si XRAY_ENABLED!=true)
+app.use(xrayCloseSegment());
+
 // Sentry: captura errores de rutas Express antes del handler genérico
 // Debe estar DESPUÉS de todas las rutas y ANTES del error handler propio
 Sentry.setupExpressErrorHandler(app);
