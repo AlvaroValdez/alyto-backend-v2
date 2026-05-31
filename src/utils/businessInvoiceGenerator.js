@@ -327,8 +327,12 @@ export async function generateBusinessInvoice(data) {
       data.invoiceNumber, data.txid, data.fechaHora,
     );
 
-    // Generar QR con URL de verificación
-    const verifyBaseUrl = process.env.ALYTO_VERIFY_BASE_URL ?? 'https://alyto.app/verify';
+    // Generar QR con URL de verificación.
+    // Debe apuntar al BACKEND que sirve GET /api/v1/verify/:hash (no al frontend).
+    // Setear ALYTO_VERIFY_BASE_URL por entorno:
+    //   staging → https://alyto-backend-v2.onrender.com/api/v1/verify
+    //   prod    → dominio del backend de producción + /api/v1/verify
+    const verifyBaseUrl = (process.env.ALYTO_VERIFY_BASE_URL || 'https://alyto-backend-v2.onrender.com/api/v1/verify').replace(/\/+$/, '');
     const verificationUrl = `${verifyBaseUrl}/${verificationHash}`;
 
     let qrDataUrl = null;
