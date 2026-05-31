@@ -1,0 +1,37 @@
+name: keep-alive staging
+
+# Mantiene despierto el backend de staging en Render (plan con spin-down por
+# inactividad). Sin esto, el primer login tras ~15 min de inactividad dispara
+# un cold start de ~1-2 min. Cron cada 5 min para cubrir el jitter de GitHub
+# Actions (los schedules pueden retrasarse varios minutos).
+#
+# Solución de fondo (producción): plan de Render sin spin-down. Este workflow
+# es el alivio inmediato para staging mientras tanto.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}   # permite dispararlo manualmente desde la pestaña Actions
+
+# Si una corrida tarda, no encolar otra encima.
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping health endpoint
+        run: |
+          URL="https://alyto-backend-v2.onrender.com/api/v1/health"
+          # -m 120: dar tiempo a que el server despierte si estaba dormido.
+          # --retry para tolerar el primer intento que cae mientras arranca.
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 120 --retry 2 --retry-delay 30 "$URL")
+          echo "health → HTTP $code"
+          # No fallar el job por un cold start puntual; el objetivo es generar
+          # tráfico, no monitorear uptime. Solo registrar.
+          if [ "$code" != "200" ]; then
+            echo "::warning::health devolvió $code (posible cold start en curso)"
+          fi
