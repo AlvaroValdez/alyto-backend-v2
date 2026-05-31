@@ -1109,6 +1109,12 @@ export async function dispatchPayout(transaction) {
   // Usar el documento fresco con status actualizado
   transaction = locked;
 
+  // ── Resiliencia: el gate ya movió payin_confirmed → processing. Cualquier
+  // excepción no controlada en el cuerpo NO debe dejar la tx atascada en
+  // 'processing' (el job reconcile solo cubre Harbor payout_sent). Se captura,
+  // se marca 'failed' (retryable) con la causa persistida en failureReason +
+  // ipnLog, y se notifica al usuario/admin. Ver dispatchPayout catch al final.
+  try {
   console.log('[dispatchPayout] Iniciando para:', transaction.alytoTransactionId,
     '| status:', transaction.status,
     '| NODE_ENV:', process.env.NODE_ENV);
@@ -1613,6 +1619,63 @@ export async function dispatchPayout(transaction) {
     payoutMethod,
     note: 'Implementación pendiente Fase 18B.',
   });
+
+  } catch (dispatchErr) {
+    // ── Red de seguridad: excepción no controlada en el cuerpo de dispatchPayout.
+    // Evita que la tx quede atascada en 'processing' sin causa ni recuperación.
+    console.error('[dispatchPayout] ❌ Excepción no controlada — marcando failed:', {
+      transactionId: transaction?.alytoTransactionId,
+      error:         dispatchErr.message,
+      stack:         dispatchErr.stack?.split('\n').slice(0, 4).join(' | '),
+    });
+    Sentry.captureException(dispatchErr, {
+      tags:  { component: 'dispatchPayout', stage: 'unhandled' },
+      extra: { transactionId: transaction?.alytoTransactionId },
+    });
+    try {
+      // Recargar fresco — solo recuperar si nadie le puso ya un estado terminal.
+      const fresh = await Transaction.findById(transaction._id);
+      if (fresh && fresh.status === 'processing') {
+        fresh.status            = 'failed';
+        fresh.failureReason     = `dispatchPayout: ${dispatchErr.message}`;
+        fresh.userFailureReason = 'No pudimos completar el envío. Nuestro equipo fue notificado y lo revisará.';
+        fresh.failureRetryable  = true;
+        fresh.ipnLog.push({
+          provider:   'system',
+          eventType:  'payout_dispatch_exception',
+          status:     'failed',
+          rawPayload: {
+            error: dispatchErr.message,
+            stack: dispatchErr.stack?.split('\n').slice(0, 4).join(' | '),
+          },
+          receivedAt: new Date(),
+        });
+        await fresh.save();
+
+        // Notificar usuario (push/in-app) — fire-and-forget
+        notify(fresh.userId,
+          NOTIFICATIONS.paymentFailed(fresh.originalAmount, fresh.originCurrency),
+        ).catch(() => {});
+
+        // Alertar admin por email
+        try {
+          const adminEmail = process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL;
+          if (adminEmail) {
+            await sendRawEmail(
+              adminEmail,
+              `⚠️ dispatchPayout falló [${fresh.alytoTransactionId}]`,
+              `<p>Excepción no controlada al ejecutar el payout.</p>`
+              + `<p>Tx: <strong>${fresh.alytoTransactionId}</strong> · ${fresh.originalAmount} ${fresh.originCurrency} → ${fresh.destinationCountry}</p>`
+              + `<p>Error: <code>${dispatchErr.message}</code></p>`
+              + `<p>Marcada como <strong>failed</strong> (retryable). Revisar en el Ledger.</p>`,
+            );
+          }
+        } catch (e) { console.error('[dispatchPayout] Error email admin (exception):', e.message); }
+      }
+    } catch (recoverErr) {
+      console.error('[dispatchPayout] Error en recuperación tras excepción:', recoverErr.message);
+    }
+  }
 }
 
 // ─── POST /api/v1/ipn/vita ────────────────────────────────────────────────────
