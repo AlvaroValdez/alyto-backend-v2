@@ -11,8 +11,10 @@
 //   - JOBS_EXTERNAL_SCHEDULER=true → server.js NO arranca los setInterval de los jobs
 //     migrables (los dispara EventBridge). Default false = comportamiento histórico.
 //
-// monitorUSDCDeposits (cada 30s) y el consumer SQS NO están aquí: son sub-minuto /
-// long-poll, no encajan en cron de EventBridge — siguen siempre in-process.
+// NO están aquí (siguen siempre in-process, por diseño):
+//   - monitorUSDCDeposits (cada 30s) — sub-minuto, no encaja en cron de EventBridge
+//   - monitorChannelXLM (cada 1h) — monitoreo de infraestructura core (saldo XLM del canal)
+//   - el consumer SQS — long-poll continuo
 
 import { logger } from '../utils/logger.js';
 
@@ -26,8 +28,9 @@ const JOBS = {
     import('./reconcileHarborTransfers.js').then((m) => m.reconcileHarborTransfers),
   'reconcile-stellar': () =>
     import('./reconcileStellarTransits.js').then((m) => m.reconcileStellarTransits),
-  'monitor-channel-xlm': () =>
-    import('./monitorChannelXLM.js').then((m) => m.monitorChannelXLM),
+  // monitorChannelXLM NO se registra aquí a propósito: corre SIEMPRE in-process
+  // (monitoreo de infraestructura core, fuera del gate JOBS_EXTERNAL_SCHEDULER).
+  // Registrarlo permitiría dispararlo por Lambda → doble ejecución. Ver server.js.
   'ros-monitor': () =>
     import('./rosMonitor.js').then((m) => m.rosMonitor),
   'refresh-rates': () =>
