@@ -64,6 +64,7 @@ import {
   resolveHarborCountry,
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
+import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
@@ -2794,6 +2795,26 @@ export async function uploadPaymentProof(req, res) {
   } catch (err) {
     console.error('[Comprobante] Error guardando en BD:', err.message);
     return res.status(500).json({ error: 'Error guardando el comprobante.' });
+  }
+
+  // AWS-4 — Parser IA del comprobante (fire-and-forget, no bloquea la respuesta).
+  // Pre-rellena datos para el admin; no autoritativo. No-op si BEDROCK_ENABLED!=true.
+  if (isBedrockEnabled()) {
+    parseComprobante(file.buffer.toString('base64'), file.mimetype)
+      .then(async (parsed) => {
+        if (!parsed) return;
+        await Transaction.updateOne(
+          { _id: transaction._id },
+          { $set: { comprobanteParsedData: { ...parsed, parsedAt: new Date(), model: 'bedrock' } } },
+        );
+        broadcastToAdmins('tx_comprobante_parsed', {
+          transactionId: transaction.alytoTransactionId,
+          amount:        parsed.amount,
+          reference:     parsed.reference,
+          confidence:    parsed.confidence,
+        });
+      })
+      .catch(() => {});
   }
 
   // Broadcast SSE: nueva tx accionable (tab "Accionables" del admin Ledger)

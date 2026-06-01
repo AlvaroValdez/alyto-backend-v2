@@ -516,6 +516,24 @@ const transactionSchema = new Schema(
         uploadedAt: { type: Date, default: Date.now },
       }, { _id: false }),
     },
+    /**
+     * AWS-4 — Datos extraídos del comprobante por IA (Bedrock/Claude). SUGERENCIA
+     * para pre-rellenar la confirmación del admin; NO autoritativo. Solo visible
+     * en el panel admin. Poblado fire-and-forget tras subir el comprobante.
+     */
+    comprobanteParsedData: {
+      type: new Schema({
+        amount:     { type: Number },
+        currency:   { type: String },
+        reference:  { type: String, trim: true },
+        bank:       { type: String, trim: true },
+        date:       { type: String, trim: true },
+        senderName: { type: String, trim: true },
+        confidence: { type: Number },       // 0..1
+        parsedAt:   { type: Date },
+        model:      { type: String },       // 'bedrock' (proveedor)
+      }, { _id: false }),
+    },
     /** Ledger de Stellar en que se confirmó la transacción */
     stellarLedger: {
       type: Number,
