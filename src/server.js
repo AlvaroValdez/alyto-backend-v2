@@ -43,6 +43,7 @@ import identityRoutes      from './routes/identityRoutes.js';
 import adminRoutes         from './routes/adminRoutes.js';
 import regionalRoutes      from './routes/regionalRoutes.js';
 import ipnRoutes           from './routes/ipn.js';
+import internalJobsRoutes  from './routes/internalJobsRoutes.js';
 import dashboardRoutes     from './routes/dashboardRoutes.js';
 import kycRoutes           from './routes/kycRoutes.js';
 import kybRoutes           from './routes/kybRoutes.js';
@@ -339,6 +340,7 @@ app.use('/api/v1/identity',      identityRoutes);
 app.use('/api/v1/admin',         adminRoutes);
 app.use('/api/v1/regional',      regionalRoutes);
 app.use('/api/v1/ipn',           ipnRoutes);
+app.use('/api/v1/internal',      internalJobsRoutes);    // AWS-2A — disparo de jobs (token interno)
 app.use('/api/v1/kyc',           kycRoutes);
 app.use('/api/v1/kyb',           kybRoutes);
 app.use('/api/v1/wallet',        walletRoutes);         // Fase 25 — Wallet BOB (SRL Bolivia)
@@ -613,34 +615,45 @@ async function startServer() {
         process.env.DISABLE_TOKEN_VERSION_CHECK === 'true');
     });
 
-    // Job de limpieza de transacciones huérfanas (payin_pending expiradas sin comprobante)
-    cleanupOrphanTransactions();
-    setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
-    console.info('[Server] Cleanup job de huérfanas programado cada 1h');
+    // AWS-2A — Si un scheduler externo (EventBridge→Lambda) dispara los jobs vía
+    // POST /api/v1/internal/jobs/:name, NO arrancar los setInterval in-process para
+    // evitar doble ejecución. JOBS_EXTERNAL_SCHEDULER!=true → comportamiento histórico.
+    const { isExternalScheduler } = await import('./jobs/jobRegistry.js');
+    const externalScheduler = isExternalScheduler();
+    if (externalScheduler) {
+      console.info('[Server] JOBS_EXTERNAL_SCHEDULER=true — jobs cron los dispara EventBridge→Lambda (setInterval in-process desactivado)');
+    }
 
-    // Job de monitoreo KYC incompleto — alerta admin si usuarios no finalizaron KYC en 24h
-    setTimeout(kycIncompleteMonitor, 5 * 60 * 1000);                        // primera corrida 5 min post-start
-    setInterval(kycIncompleteMonitor, 6 * 60 * 60 * 1000);                  // cada 6h
-    console.info('[Server] KYC incomplete monitor job programado cada 6h');
+    if (!externalScheduler) {
+      // Job de limpieza de transacciones huérfanas (payin_pending expiradas sin comprobante)
+      cleanupOrphanTransactions();
+      setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
+      console.info('[Server] Cleanup job de huérfanas programado cada 1h');
 
-    // Job de reconciliation Harbor — recupera tx en payout_sent atascadas por
-    // webhook perdido. Consulta Harbor API y actualiza status local.
-    const { reconcileHarborTransfers } = await import('./jobs/reconcileHarborTransfers.js');
-    setTimeout(reconcileHarborTransfers, 30 * 1000);                    // primera corrida 30s post-start
-    setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
-    console.info('[Server] Reconcile Harbor job programado cada 15 min');
+      // Job de monitoreo KYC incompleto — alerta admin si usuarios no finalizaron KYC en 24h
+      setTimeout(kycIncompleteMonitor, 5 * 60 * 1000);                        // primera corrida 5 min post-start
+      setInterval(kycIncompleteMonitor, 6 * 60 * 60 * 1000);                  // cada 6h
+      console.info('[Server] KYC incomplete monitor job programado cada 6h');
 
-    // Fase 36+ — Monitor heurístico ROS/UIF Bolivia (solo SRL)
-    const { rosMonitor } = await import('./jobs/rosMonitor.js');
-    setTimeout(rosMonitor, 3 * 60 * 1000);                    // primera corrida 3 min post-start
-    setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
-    console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
+      // Job de reconciliation Harbor — recupera tx en payout_sent atascadas por
+      // webhook perdido. Consulta Harbor API y actualiza status local.
+      const { reconcileHarborTransfers } = await import('./jobs/reconcileHarborTransfers.js');
+      setTimeout(reconcileHarborTransfers, 30 * 1000);                    // primera corrida 30s post-start
+      setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
+      console.info('[Server] Reconcile Harbor job programado cada 15 min');
 
-    // Job de actualización automática de tasas BOB/USDT desde Binance P2P
-    const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
-    setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
-    setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
-    console.info('[Server] Refresh exchange rates job programado cada 30 min');
+      // Fase 36+ — Monitor heurístico ROS/UIF Bolivia (solo SRL)
+      const { rosMonitor } = await import('./jobs/rosMonitor.js');
+      setTimeout(rosMonitor, 3 * 60 * 1000);                    // primera corrida 3 min post-start
+      setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
+      console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
+
+      // Job de actualización automática de tasas BOB/USDT desde Binance P2P
+      const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
+      setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
+      setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
+      console.info('[Server] Refresh exchange rates job programado cada 30 min');
+    }
 
     // Fase 36 — Monitoreo automático de depósitos USDC vía Horizon polling
     // Solo activo si STELLAR_SRL_PUBLIC_KEY está configurado
