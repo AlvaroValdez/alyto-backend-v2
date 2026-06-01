@@ -68,7 +68,7 @@ import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.j
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
-import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { resolveEuCorridorByAmount, isEuSepaDestination } from '../routing/euAmountRouter.js';
@@ -620,12 +620,26 @@ export async function getWithdrawalRulesController(req, res) {
     return res.status(200).json(cached.payload);
   }
 
-  // ── 3a. Harbor (OwlPay) — form config estático en el frontend ───────────────
-  // Los campos que se muestran al usuario están definidos en owlPayForms.js
-  // (frontend). El backend NO necesita consultar Harbor para renderizar el form.
+  // ── 3a. Harbor (OwlPay) — campos definidos por HARBOR_FORM_FIELDS ───────────
+  // La fuente de verdad es harborMethodSupport.HARBOR_FORM_FIELDS, derivada de
+  // buildPayoutInstrument(). Cubre todos los países Harbor activos (bo-us, bo-eu,
+  // bo-gb, bo-br, bo-mx, bo-cn, bo-hk, bo-in, bo-ae, bo-sg, bo-jp, bo-ng).
   // Harbor solo se llama en tryOwlPayV2() cuando se ejecuta el payout real.
   if (payoutMethod === 'owlPay') {
-    const payload = { destCountry: countryCode, payoutMethod: 'owlPay', fields: [] };
+    // EU: el corredor bo-eu-srl tiene destinationCountry='EU'. Países individuales
+    // de la eurozona (DE, FR, IT…) usan los mismos campos WIRE.
+    const euCountries = new Set(['DE','FR','IT','NL','BE','PT','AT','PL','SE','CH','NO','DK','FI','IE']);
+    const harborKey = euCountries.has(countryCode) ? 'EU' : countryCode;
+    const harborFields = HARBOR_FORM_FIELDS[harborKey] ?? null;
+
+    if (!harborFields) {
+      console.warn(`[WithdrawalRules] No hay HARBOR_FORM_FIELDS para país: ${countryCode} (clave: ${harborKey})`);
+      return res.status(404).json({
+        error: `No hay definición de formulario Harbor para ${countryCode}. Contactar soporte.`,
+      });
+    }
+
+    const payload = { destCountry: countryCode, payoutMethod: 'owlPay', fields: harborFields };
     withdrawalRulesCache.set(cacheKey, { payload, cachedAt: Date.now() });
     return res.status(200).json(payload);
   }

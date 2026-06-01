@@ -76,3 +76,129 @@ export function pickSupportedQuote(quotes, destCountry, requestedMethod = null) 
 }
 
 export { SUPPORTED_METHODS_BY_COUNTRY };
+
+/**
+ * HARBOR_FORM_FIELDS — campos del formulario de beneficiario por país Harbor.
+ *
+ * Fuente de verdad para getWithdrawalRulesController y el frontend.
+ * Derivado de buildPayoutInstrument() + esquemas Harbor verificados en prod.
+ *
+ * Formato de cada field:
+ *   key         — clave que buildPayoutInstrument espera en beneficiary.dynamicFields
+ *   label       — etiqueta en español para el frontend
+ *   type        — 'text' | 'select' | 'email' | 'tel'
+ *   required    — boolean
+ *   placeholder — ejemplo visible en el input
+ *   hint        — texto de ayuda bajo el campo
+ *   min/max     — longitud mínima/máxima (para validación frontend)
+ *   pattern     — regex string para validación frontend (sin delimitadores)
+ *   options     — [{ value, label }] para type='select'
+ */
+export const HARBOR_FORM_FIELDS = {
+
+  // ── US: ACH_PUSH / DOMESTIC_WIRE / FEDWIRE / WIRE — mismo schema ─────────
+  US: [
+    { key: 'account_holder_name', label: 'Nombre completo del titular', type: 'text',  required: true,  placeholder: 'John Doe' },
+    { key: 'bank_name',           label: 'Nombre del banco',            type: 'text',  required: true,  placeholder: 'Bank of America' },
+    { key: 'account_number',      label: 'Número de cuenta',            type: 'text',  required: true,  placeholder: '123456789012' },
+    { key: 'routing_number',      label: 'Routing Number (ABA)',        type: 'text',  required: true,  placeholder: '021000021',
+      hint: '9 dígitos — identifica al banco en EEUU', min: 9, max: 9, pattern: '^[0-9]{9}$' },
+  ],
+
+  // ── EU / Eurozona: WIRE (SEPA deshabilitado por bug Harbor) ───────────────
+  EU: [
+    { key: 'account_holder_name', label: 'Nombre del titular',         type: 'text', required: true, placeholder: 'Hans Müller' },
+    { key: 'bank_name',           label: 'Nombre del banco',           type: 'text', required: true, placeholder: 'Deutsche Bank' },
+    { key: 'iban',                label: 'IBAN',                       type: 'text', required: true, placeholder: 'DE89370400440532013000',
+      hint: 'Número IBAN internacional del beneficiario', min: 15, max: 34 },
+    { key: 'swift_code',          label: 'Código BIC / SWIFT',         type: 'text', required: true, placeholder: 'DEUTDEDB',
+      hint: '8 u 11 caracteres alfanuméricos', min: 8, max: 11 },
+  ],
+
+  // ── GB: FPS (Faster Payments) ─────────────────────────────────────────────
+  GB: [
+    { key: 'account_holder_name', label: 'Nombre del titular',   type: 'text', required: true, placeholder: 'James Smith' },
+    { key: 'account_number',      label: 'Número de cuenta',     type: 'text', required: true, placeholder: '12345678', min: 8, max: 8 },
+    { key: 'sort_code',           label: 'Sort Code',            type: 'text', required: true, placeholder: '12-34-56',
+      hint: '6 dígitos del banco UK (formato: 12-34-56)', min: 6, max: 8 },
+  ],
+
+  // ── BR: PIX ───────────────────────────────────────────────────────────────
+  // br_cpf + exactamente UNO de: phone_number | email | br_pix_evp
+  BR: [
+    { key: 'br_cpf',       label: 'CPF del beneficiario', type: 'text', required: true,  placeholder: '12345678901',
+      hint: '11 dígitos numéricos sin puntos ni guiones', min: 11, max: 11, pattern: '^[0-9]{11}$' },
+    { key: 'phone_number', label: 'Celular (chave PIX)',  type: 'tel',  required: false, placeholder: '+5511987654321',
+      hint: 'Chave PIX: número de celular con código de país (+55...)' },
+    { key: 'email',        label: 'Email (chave PIX)',    type: 'email',required: false, placeholder: 'beneficiario@email.com',
+      hint: 'Chave PIX: correo electrónico del beneficiario' },
+    { key: 'br_pix_evp',  label: 'Chave aleatória (EVP)',type: 'text', required: false, placeholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+      hint: 'Chave PIX aleatória en formato UUID' },
+  ],
+
+  // ── MX: SPEI ──────────────────────────────────────────────────────────────
+  MX: [
+    { key: 'mx_clabe', label: 'CLABE Interbancaria', type: 'text', required: true, placeholder: '012345678901234567',
+      hint: '18 dígitos — estándar SPEI México', min: 18, max: 18, pattern: '^[0-9]{18}$' },
+  ],
+
+  // ── CN: CIPS / WIRE ───────────────────────────────────────────────────────
+  CN: [
+    { key: 'account_holder_name', label: 'Nombre del titular',   type: 'text', required: true, placeholder: 'Zhang Wei' },
+    { key: 'bank_name',           label: 'Nombre del banco',     type: 'text', required: true, placeholder: 'Bank of China' },
+    { key: 'account_number',      label: 'Número de cuenta',     type: 'text', required: true, placeholder: '6222021234567890123' },
+    { key: 'swift_code',          label: 'Código SWIFT',         type: 'text', required: true, placeholder: 'BKCHCNBJ',
+      hint: '8 u 11 caracteres', min: 8, max: 11 },
+  ],
+
+  // ── HK: CHATS / WIRE ──────────────────────────────────────────────────────
+  // bank_code: requerido para CHATS, opcional para WIRE
+  HK: [
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true,  placeholder: 'Chan Tai Man' },
+    { key: 'bank_name',           label: 'Nombre del banco',   type: 'text', required: true,  placeholder: 'HSBC Hong Kong' },
+    { key: 'account_number',      label: 'Número de cuenta',   type: 'text', required: true,  placeholder: '123456789012' },
+    { key: 'swift_code',          label: 'Código SWIFT',       type: 'text', required: true,  placeholder: 'HSBCHKHH', min: 8, max: 11 },
+    { key: 'bank_code',           label: 'Código bancario HK', type: 'text', required: false, placeholder: '004',
+      hint: '3 dígitos — requerido para transferencias CHATS' },
+  ],
+
+  // ── IN: IMPS ──────────────────────────────────────────────────────────────
+  IN: [
+    { key: 'bank_code',      label: 'Código IFSC', type: 'text', required: true, placeholder: 'SBIN0001234',
+      hint: '11 caracteres alfanuméricos (ej: SBIN0001234)', min: 11, max: 11, pattern: '^[A-Z]{4}0[A-Z0-9]{6}$' },
+    { key: 'account_number', label: 'Número de cuenta bancaria', type: 'text', required: true, placeholder: '12345678901' },
+  ],
+
+  // ── AE: FTS / AANI / BANK-TRANSFER ───────────────────────────────────────
+  AE: [
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'Mohammed Al Rashid' },
+    { key: 'phone_number',        label: 'Teléfono UAE',       type: 'tel',  required: true, placeholder: '+971501234567',
+      hint: 'Número local UAE: +971 seguido de 8-9 dígitos', pattern: '^\\+971[0-9]{8,9}$' },
+    { key: 'swift_code',          label: 'Código SWIFT',       type: 'text', required: true, placeholder: 'EBILAEAD', min: 8, max: 11 },
+    { key: 'account_number',      label: 'IBAN UAE',           type: 'text', required: true, placeholder: 'AE070331234567890123456',
+      hint: 'IBAN formato: AE + 2 dígitos + 19 caracteres', min: 23, max: 23 },
+  ],
+
+  // ── SG: BANK-TRANSFER ─────────────────────────────────────────────────────
+  SG: [
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'Lee Kuan' },
+    { key: 'bank_name',           label: 'Nombre del banco',   type: 'text', required: true, placeholder: 'DBS Bank' },
+    { key: 'account_number',      label: 'Número de cuenta',   type: 'text', required: true, placeholder: '1234567890' },
+    { key: 'swift_code',          label: 'Código SWIFT',       type: 'text', required: true, placeholder: 'DBSSSGSG', min: 8, max: 11 },
+  ],
+
+  // ── JP: BANK-TRANSFER / WIRE ──────────────────────────────────────────────
+  JP: [
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'Yamamoto Taro' },
+    { key: 'bank_name',           label: 'Nombre del banco',   type: 'text', required: true, placeholder: 'Mitsubishi UFJ Bank' },
+    { key: 'account_number',      label: 'Número de cuenta',   type: 'text', required: true, placeholder: '1234567' },
+    { key: 'swift_code',          label: 'Código SWIFT',       type: 'text', required: true, placeholder: 'BOTKJPJT', min: 8, max: 11 },
+  ],
+
+  // ── NG: BANK-TRANSFER ─────────────────────────────────────────────────────
+  NG: [
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'Emeka Okafor' },
+    { key: 'bank_name',           label: 'Nombre del banco',   type: 'text', required: true, placeholder: 'Zenith Bank' },
+    { key: 'account_number',      label: 'Número de cuenta',   type: 'text', required: true, placeholder: '1234567890', min: 10, max: 10 },
+  ],
+};

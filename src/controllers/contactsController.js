@@ -36,12 +36,30 @@ export async function createContact(req, res) {
     }
 
     // Evitar duplicados por número de cuenta
-    if (beneficiaryData.beneficiary_account_number) {
+    // Vita usa beneficiary_account_number; Harbor/OwlPay usa account_number.
+    const dedupeAccountNumber =
+      beneficiaryData.beneficiary_account_number ??
+      beneficiaryData.account_number             ??
+      beneficiaryData.mx_clabe                   ??   // MX SPEI
+      beneficiaryData.iban                       ??   // EU SEPA/WIRE
+      null;
+
+    if (dedupeAccountNumber) {
+      const orClauses = [];
+      if (beneficiaryData.beneficiary_account_number)
+        orClauses.push({ 'beneficiaryData.beneficiary_account_number': dedupeAccountNumber });
+      if (beneficiaryData.account_number)
+        orClauses.push({ 'beneficiaryData.account_number': dedupeAccountNumber });
+      if (beneficiaryData.mx_clabe)
+        orClauses.push({ 'beneficiaryData.mx_clabe': dedupeAccountNumber });
+      if (beneficiaryData.iban)
+        orClauses.push({ 'beneficiaryData.iban': dedupeAccountNumber });
+
       const existing = await Contact.findOne({
         userId: req.user._id,
         destinationCountry,
         formType,
-        'beneficiaryData.beneficiary_account_number': beneficiaryData.beneficiary_account_number,
+        $or: orClauses,
       })
       if (existing) {
         return res.status(409).json({
