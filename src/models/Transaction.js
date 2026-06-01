@@ -631,6 +631,11 @@ const transactionSchema = new Schema(
       type:    Number,
       default: 0,
     },
+    /** Número de reintentos de executeWeb3Transit ejecutados por reconcileStellarTransits */
+    stellarRetryCount: {
+      type:    Number,
+      default: 0,
+    },
     /** Razón del estado actual — visible en admin, no al usuario final */
     statusReason: {
       type:    String,

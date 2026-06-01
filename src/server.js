@@ -606,6 +606,28 @@ async function startServer() {
       } else {
         console.log('[Stellar] ✅ SRL keypair configured');
       }
+
+      // Gate OWLPAY_USDC_SEND_ENABLED — visible en cada arranque para evitar
+      // sorpresas en producción. Si está OFF y hay tx payout_pending_usdc_send,
+      // correr scripts/resume-usdc-send.mjs --execute tras activar.
+      const usdcSendEnabled = ['true', '1'].includes(process.env.OWLPAY_USDC_SEND_ENABLED ?? '');
+      if (usdcSendEnabled) {
+        console.log('[OwlPay] ✅ OWLPAY_USDC_SEND_ENABLED=1 — envío USDC a Harbor AUTOMÁTICO');
+      } else {
+        console.warn('[OwlPay] ⚠️ OWLPAY_USDC_SEND_ENABLED=0 — envío USDC a Harbor MANUAL. ' +
+          'Las tx Harbor quedarán en payout_pending_usdc_send hasta que admin envíe manualmente. ' +
+          'Activar con OWLPAY_USDC_SEND_ENABLED=1 y correr scripts/resume-usdc-send.mjs --execute.');
+      }
+
+      // Gate STELLAR_CHANNEL_SECRET — requerido para Fee Bump transactions
+      const hasChannelSecret = !!(process.env.STELLAR_CHANNEL_SECRET ?? process.env.STELLAR_MASTER_SECRET);
+      if (!hasChannelSecret) {
+        console.warn('[Stellar] ⚠️ STELLAR_CHANNEL_SECRET no configurado — ' +
+          'buildFeeBumpTransaction fallará. Las trustlines y executeWeb3Transit no funcionarán.');
+      } else {
+        console.log('[Stellar] ✅ Channel account (Fee Bump) configurada');
+      }
+
       console.log('[Env] NODE_ENV:', process.env.NODE_ENV);
       console.log('[Env] DISABLE_TOKEN_VERSION_CHECK:',
         process.env.DISABLE_TOKEN_VERSION_CHECK,
@@ -642,6 +664,13 @@ async function startServer() {
       setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
       console.info('[Server] Reconcile Harbor job programado cada 15 min');
 
+      // Job de reconciliation Stellar — retry payin_completed sin tránsito +
+      // alertas in_transit >2h + auto-fail >7 días
+      const { reconcileStellarTransits } = await import('./jobs/reconcileStellarTransits.js');
+      setTimeout(reconcileStellarTransits, 2 * 60 * 1000);               // primera corrida 2 min post-start
+      setInterval(reconcileStellarTransits, 15 * 60 * 1000);             // cada 15 min
+      console.info('[Server] Reconcile Stellar transits job programado cada 15 min');
+
       // Fase 36+ — Monitor heurístico ROS/UIF Bolivia (solo SRL)
       const { rosMonitor } = await import('./jobs/rosMonitor.js');
       setTimeout(rosMonitor, 3 * 60 * 1000);                    // primera corrida 3 min post-start
@@ -653,6 +682,23 @@ async function startServer() {
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
       setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
       console.info('[Server] Refresh exchange rates job programado cada 30 min');
+    }
+
+    // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO
+    // Alerta al admin si el saldo XLM cae bajo el umbral. Corre siempre in-process
+    // (no migra a EventBridge) porque detectar falta de XLM es infraestructura core.
+    const hasStellarChannelForMonitor = !!(
+      process.env.STELLAR_MASTER_PUBLIC     ??
+      process.env.STELLAR_CHANNEL_SECRET    ??
+      process.env.STELLAR_MASTER_SECRET
+    );
+    if (hasStellarChannelForMonitor) {
+      const { monitorChannelXLM } = await import('./jobs/monitorChannelXLM.js');
+      setTimeout(monitorChannelXLM, 90 * 1000);           // primera corrida 90s post-start
+      setInterval(monitorChannelXLM, 60 * 60 * 1000);     // cada 1h
+      console.info('[Server] XLM channel monitor programado cada 1h');
+    } else {
+      console.warn('[Server] STELLAR_MASTER_PUBLIC/STELLAR_CHANNEL_SECRET no configurados — XLM monitor desactivado');
     }
 
     // Fase 36 — Monitoreo automático de depósitos USDC vía Horizon polling

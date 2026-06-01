@@ -1094,6 +1094,32 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
   throw lastError;
 }
 
+// ─── 11. XLM Balance — monitoreo de channel account y cuentas corporativas ───
+
+/**
+ * getXLMBalance(publicKey)
+ *
+ * Retorna el saldo nativo (XLM) de una cuenta Stellar.
+ * El saldo nativo siempre existe (toda cuenta Stellar tiene XLM).
+ * Usado por monitorChannelXLM para alertar cuando el channel account
+ * se queda sin XLM para pagar Fee Bump transactions.
+ *
+ * @param {string} publicKey  - Public key de la cuenta a consultar
+ * @returns {Promise<number>}  Saldo XLM (puede ser 0 si la cuenta no existe)
+ */
+export async function getXLMBalance(publicKey) {
+  try {
+    const account = await horizonServer.loadAccount(publicKey);
+    const nativeEntry = account.balances.find((b) => b.asset_type === 'native');
+    return nativeEntry ? parseFloat(nativeEntry.balance) : 0;
+  } catch (err) {
+    // account_not_found = cuenta no existe en Stellar (fondeo pendiente)
+    if (err.response?.status === 404) return 0;
+    console.error('[Stellar] Error consultando balance XLM:', { publicKey, error: err.message });
+    return 0;
+  }
+}
+
 // ─── Fase 36: Detección de Depósitos USDC Entrantes ─────────────────────────
 
 /**
