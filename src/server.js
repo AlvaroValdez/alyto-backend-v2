@@ -58,10 +58,7 @@ import { createQuoteSocketServer }  from './services/quoteSocket.js';
 import User        from './models/User.js';
 import Transaction from './models/Transaction.js';
 import stellarRoutes       from './routes/stellarRoutes.js';          // SEP-10/12/24/31
-import path from 'path';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+import { renderStellarToml } from './controllers/stellarTomlController.js'; // SEP-1
 
 // ─── Configuración ───────────────────────────────────────────────────────────
 
@@ -171,13 +168,15 @@ if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
   process.exit(1);
 }
 
-const ALYTO_DOMAIN_RE = /^https:\/\/[a-z0-9-]+\.alyto\.app$/;
-
 app.use(cors({
   origin(origin, callback) {
+    // Requests sin Origin (curl, health checks, server-to-server, apps nativas): permitidos.
     if (!origin) return callback(null, true);
+    // Allowlist 100% EXPLÍCITA por entorno vía ALLOWED_ORIGINS. Sin comodines ni
+    // regex que crucen la frontera prod/staging: cada entorno declara exactamente
+    // sus propios orígenes legítimos. Producción NUNCA debe incluir orígenes de
+    // staging (Render, *.onrender.com, staging.alyto.app) ni viceversa.
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    if (ALYTO_DOMAIN_RE.test(origin)) return callback(null, true);
     console.warn('[CORS] Blocked origin:', origin);
     return callback(new Error(`CORS: origen no permitido (${origin})`));
   },
@@ -355,13 +354,9 @@ app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificacio
 app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
 app.use('/api/v1/stellar',       stellarRoutes);        // SEP-10/12/24/31 — Stellar Ecosystem Proposals
 
-// stellar.toml — SEP-1 (debe estar en /.well-known/stellar.toml del dominio raíz)
-app.use('/.well-known', express.static(path.join(__dirname, '..', 'public', '.well-known'), {
-  setHeaders: (res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  },
-}));
+// stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
+// prod/staging). Single source of truth — sin archivos estáticos que se desincronicen.
+app.get('/.well-known/stellar.toml', renderStellarToml);
 
 // ─── Rutas de Desarrollo (opt-in explícito vía ALYTO_ENABLE_DEV_ROUTES=1) ────
 // SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.

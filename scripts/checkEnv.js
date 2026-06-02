@@ -69,8 +69,9 @@ const OPTIONAL = [
   { name: 'VITA_SECRET_PROD',                desc: 'Vita — HMAC secret producción' },
   { name: 'VITA_BUSINESS_WALLET_UUID_PROD',  desc: 'Vita — UUID master wallet producción' },
   { name: 'VITA_NOTIFY_URL_PROD',            desc: 'Vita — IPN URL producción' },
-  // SEP-10/12/24/31
-  { name: 'HOME_DOMAIN',                     desc: 'SEP-10 — dominio raíz del anchor (default: alyto.app)' },
+  // SEP-1/10/12/24/31
+  { name: 'HOME_DOMAIN',                     desc: 'SEP-1/10 — dominio raíz del anchor por entorno (prod: alyto.app | staging: staging.alyto.app)' },
+  { name: 'STELLAR_ANCHOR_BASE_URL',         desc: 'SEP-1 — base URL pública del backend en el toml (prod: https://api.alyto.app | staging: https://api-staging.alyto.app)' },
   { name: 'USER_KEYPAIR_KMS_KEY_ID',         desc: 'Custody — ARN o alias de la KMS key para cifrar secretkeys de usuarios (modelo custodial activo)' },
 ];
 
