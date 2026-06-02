@@ -69,6 +69,9 @@ const OPTIONAL = [
   { name: 'VITA_SECRET_PROD',                desc: 'Vita — HMAC secret producción' },
   { name: 'VITA_BUSINESS_WALLET_UUID_PROD',  desc: 'Vita — UUID master wallet producción' },
   { name: 'VITA_NOTIFY_URL_PROD',            desc: 'Vita — IPN URL producción' },
+  // SEP-10/12/24/31
+  { name: 'HOME_DOMAIN',                     desc: 'SEP-10 — dominio raíz del anchor (default: alyto.app)' },
+  { name: 'USER_KEYPAIR_KMS_KEY_ID',         desc: 'Custody — ARN o alias de la KMS key para cifrar secretkeys de usuarios (modelo custodial activo)' },
 ];
 
 // ─── Función de verificación ──────────────────────────────────────────────────

@@ -230,7 +230,7 @@ const boliviaComplianceSchema = new Schema(
 // ─── Sub-esquema: Factura B2B (Comprobante Oficial de Servicio) ──────────────
 // Aplica cuando accountType = 'business' y KYB aprobado.
 // Cumple: RND 102400000021 (bancarización), RM 055/2025 (documentación),
-//         NC12 (fuente tipo de cambio), DS 5384 (trazabilidad blockchain).
+//         NC12 (fuente tipo de cambio), DS 5384 (07/05/2025 — trazabilidad blockchain ETF/PSAV).
 
 const bancarizacionSchema = new Schema(
   {
@@ -581,7 +581,9 @@ const transactionSchema = new Schema(
         'processing', 'in_transit', 'payout_pending', 'payout_sent',
         'payout_pending_usdc_send', 'payout_in_transit', 'pending_funding',
         'pending_fx_review',
-        'completed', 'failed', 'refunded',
+        'completed', 'failed', 'refunded', 'cancelled',
+        // SEP-24 / SEP-31
+        'sep24_deposit_pending', 'sep24_withdraw_pending', 'sep31_waiting',
       ],
       default: 'pending',
       index:   true,
@@ -778,6 +780,55 @@ const transactionSchema = new Schema(
     },
     /** Fecha de archivado lógico — ASFI exige conservar trazabilidad de todas las transacciones */
     archivedAt: {
+      type: Date,
+      default: null,
+    },
+
+    // ── SEP-24 / SEP-31 ───────────────────────────────────────────────────────
+    /** Tipo de transacción SEP-24: 'deposit' | 'withdraw' */
+    sep24Type: {
+      type: String,
+      enum: ['deposit', 'withdraw', null],
+      default: null,
+    },
+    /** Campos adicionales SEP-31 recibidos del sending anchor */
+    sep31Fields: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    /** sender_id SEP-31 (ID del cliente KYC del sending anchor) */
+    senderId: {
+      type: String,
+      default: null,
+    },
+    /** receiver_id SEP-31 (ID del beneficiario KYC) */
+    receiverId: {
+      type: String,
+      default: null,
+    },
+    /** Dirección Stellar a la que el usuario/anchor debe enviar USDC */
+    instructionAddress: {
+      type: String,
+      default: null,
+    },
+    /** Memo de la transacción Stellar (igual al transactionId) */
+    instructionMemo: {
+      type: String,
+      default: null,
+    },
+    /** Mensaje de estado visible al usuario (SEP-24/31) */
+    statusMessage: {
+      type: String,
+      default: null,
+    },
+    /** ID de transacción externo del proveedor SEP (para reconciliación) */
+    externalTransactionId: {
+      type:   String,
+      sparse: true,
+      default: null,
+    },
+    /** Expiración de la instrucción de pago SEP (distinta de paymentInstructionsExpiresAt) */
+    expiresAt: {
       type: Date,
       default: null,
     },

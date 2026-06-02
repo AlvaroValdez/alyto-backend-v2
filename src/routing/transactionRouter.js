@@ -84,7 +84,7 @@ export function resolveRoute({ originCountry, destinationCountry, clientType }) 
 
   // ── Escenario C: Corredor Local Bolivia ──────────────────────────────────
   // Condición: país de destino = Bolivia
-  // Entidad operadora: AV Finance SRL (licencia ETF/PSAV en trámite)
+  // Entidad operadora: AV Finance SRL — ETF/PSAV (ECP Entorno Controlado de Pruebas ASFI)
   // Flujo: Stellar Network → Anchor Manual Bolivia → PDF Comprobante Oficial
   // IMPORTANTE: Activa Compliance_Bolivia_Alyto automáticamente
   if (destinationCountry === 'BO') {

@@ -6,7 +6,7 @@
  *
  * Cumplimiento normativo:
  *   - RND 102400000021 — Bancarización (sección 6)
- *   - DS 5384          — Trazabilidad blockchain PSAV (sección 4)
+ *   - DS 5384 (07/05/2025) — Trazabilidad blockchain PSAV — ETF/Proveedor de Servicios de Activos Virtuales (sección 4)
  *   - RM 055/2025      — Documentación operaciones activos virtuales (sección 3)
  *   - NC12 + CTNAC 2-2024 — Fuente de tipo de cambio efectivo (sección 5)
  *   - Ley 843          — IVA/IUE (sección 7)
@@ -80,7 +80,7 @@ const DEFAULT_LEGAL_FOOTER =
   'Este documento constituye el Comprobante Oficial de Servicio emitido por AV Finance SRL '
   + '(producto Alyto) conforme a la normativa boliviana vigente. '
   + 'Los activos virtuales operados constituyen un mecanismo alternativo de pago conforme al '
-  + 'Decreto Supremo N° 5384 (Creación de ETF/PSAV) y la Resolución Ministerial N° 055/2025 (MEFP). '
+  + 'Decreto Supremo N° 5384 de 7 de mayo de 2025 (Empresas de Tecnología Financiera — PSAV) y la Resolución Ministerial N° 055/2025 (MEFP). '
   + 'La documentación de esta transacción cumple con las obligaciones establecidas en la '
   + 'RND N° 102400000021 (Bancarización) del Servicio de Impuestos Nacionales. '
   + 'Aspectos tributarios aplicables: IVA (Art. 4, Ley 843), IUE (Art. 47, Ley 843). '

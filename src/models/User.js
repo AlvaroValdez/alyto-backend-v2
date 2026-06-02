@@ -62,17 +62,26 @@ const addressSchema = new Schema(
   { _id: false },
 );
 
-// ─── Sub-esquema: Cuenta Stellar ─────────────────────────────────────────────
+// ─── Sub-esquema: Cuenta Stellar (modelo custodial) ──────────────────────────
+// Alyto custodia los Activos Virtuales de los usuarios (PSAV — DS 5384, Cap. XI,
+// Art. 4° literal l inciso 4). El keypair se genera en `custodyService.js` al
+// aprobar el KYC. La secretKey se cifra en AWS KMS y se guarda como ciphertext;
+// NUNCA se almacena en texto plano en MongoDB ni se loguea.
 
 const stellarAccountSchema = new Schema(
   {
-    /** Stellar public key del usuario (G...) — segura para almacenar y loguear */
+    /** Stellar public key del usuario (G...) — asignada al provisionar custodia */
     publicKey: {
       type:   String,
       trim:   true,
       match:  /^G[A-Z2-7]{55}$/,
     },
-    /** Indica si la cuenta fue creada y fondeada por Alyto */
+    /** Ciphertext KMS de la secretKey (base64). NUNCA en texto plano. */
+    secretKeyCiphertext: {
+      type:   String,
+      select: false,   // no incluir en queries por defecto
+    },
+    /** Indica si la cuenta fue creada y fondeada por Alyto (modelo custodial) */
     createdByAlyto: { type: Boolean, default: false },
     /** Assets con trustline activa en esta cuenta */
     activeTrustlines: {

@@ -23,6 +23,7 @@ import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { notify }       from '../services/notifications.js';
 import { screenUser }   from '../services/sanctionsService.js';
+import { provisionUserKeypair } from '../services/custodyService.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -159,6 +160,18 @@ async function _approveKyc(session) {
     }
     User.findByIdAndUpdate(user._id, update).catch(() => {});
   }).catch(() => {});
+
+  // Provisión de keypair Stellar custodial (fire-and-forget) — modelo custodial activo.
+  // PSAV permite custodia (DS 5384, Cap. XI, Art. 4° literal l inciso 4). La secretKey
+  // se cifra en AWS KMS (USER_KEYPAIR_KMS_KEY_ID); nunca se almacena en MongoDB ni logs.
+  // Es fire-and-forget: si KMS falla, el KYC NO se bloquea (se reintenta vía custody/provision).
+  provisionUserKeypair(user._id)
+    .then(({ publicKey }) => {
+      console.info(`[KYC Webhook] 🔑 Keypair custodial provisionado — userId: ${user._id} | publicKey: ${publicKey}`);
+    })
+    .catch(err => {
+      console.error(`[KYC Webhook] ⚠️ Provisión de keypair falló — userId: ${user._id} | err: ${err.message}`);
+    });
 
   console.info(
     `[KYC Webhook] ✅ APROBADO — userId: ${user._id} | email: ${user.email} | entity: ${user.legalEntity} | prevStatus: ${prevStatus} → approved`

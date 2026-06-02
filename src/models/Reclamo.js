@@ -1,7 +1,7 @@
 /**
  * Reclamo.js — Punto de Reclamo de Primera Instancia (PRILI)
  *
- * Exigencia ASFI para licencia ETF/PSAV de AV Finance SRL (Decreto 5384).
+ * Exigencia ASFI para ETF/PSAV de AV Finance SRL (DS N° 5384 de 07/05/2025).
  * Aplica a todos los usuarios de la plataforma — no exclusivo de SRL.
  *
  * Plazos regulatorios:

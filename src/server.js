@@ -57,6 +57,11 @@ import { handleStripeWebhook }     from './webhooks/stripeWebhook.js';
 import { createQuoteSocketServer }  from './services/quoteSocket.js';
 import User        from './models/User.js';
 import Transaction from './models/Transaction.js';
+import stellarRoutes       from './routes/stellarRoutes.js';          // SEP-10/12/24/31
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 // ─── Configuración ───────────────────────────────────────────────────────────
 
@@ -348,6 +353,15 @@ app.use('/api/v1/reclamos',      reclamosRoutes);       // Fase 27 — PRILI Rec
 app.use('/api/v1/contacts',      contactsRoutes);       // Fase 33 — Agenda de Contactos
 app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificaciones
 app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
+app.use('/api/v1/stellar',       stellarRoutes);        // SEP-10/12/24/31 — Stellar Ecosystem Proposals
+
+// stellar.toml — SEP-1 (debe estar en /.well-known/stellar.toml del dominio raíz)
+app.use('/.well-known', express.static(path.join(__dirname, '..', 'public', '.well-known'), {
+  setHeaders: (res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  },
+}));
 
 // ─── Rutas de Desarrollo (opt-in explícito vía ALYTO_ENABLE_DEV_ROUTES=1) ────
 // SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.

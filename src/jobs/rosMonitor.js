@@ -18,7 +18,7 @@
  *   - setInterval en server.js cada 6h
  *   - POST /api/v1/admin/ros/run (manual desde admin)
  *
- * Compliance: ASFI RD 044/2021, DS N° 5384, Ley N° 170 UIF Bolivia.
+ * Compliance: ASFI RD 044/2021, DS N° 5384 (07/05/2025), Ley N° 170 UIF Bolivia.
  */
 
 import * as Sentry   from '@sentry/node'
