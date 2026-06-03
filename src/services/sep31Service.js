@@ -168,24 +168,27 @@ export async function createTransaction({ body, user }) {
   const instructionAddress = process.env.STELLAR_SRL_PUBLIC_KEY;
   const instructionMemo    = transactionId;
 
-  // Crear Transaction en MongoDB
+  if (!user._id) {
+    throw Object.assign(new Error('SEP-31 requiere una cuenta Alyto vinculada (sending anchor sin userId)'), { status: 400 });
+  }
+
+  // Crear Transaction en MongoDB (campos conformes al schema Transaction)
   const tx = await Transaction.create({
-    transactionId,
-    userId:              user._id ?? user.stellarAccount,
+    alytoTransactionId:  transactionId,
+    userId:              user._id,
     legalEntity,
-    corridorId,
+    operationType:       'crossBorderPayment',
+    routingScenario:     prefix,                  // C=SRL, B=SpA, A=LLC
+    corridorCode:        corridorId,
     status:              'sep31_waiting',
-    payinMethod:         'stellar_usdc',
-    payoutMethod:        corridor.payoutMethod,
     originCountry:       corridor.originCountry,
     destinationCountry:  corridor.destinationCountry,
+    originalAmount:      usdAmount,
     originCurrency:      'USD',
+    destinationAmount:   quote.destinationAmount,
     destinationCurrency: corridor.destinationCurrency,
-    amountIn:            usdAmount,
-    amountOut:           quote.amountOut,
-    fxRate:              quote.fxRate,
-    digitalAssetAmount:  usdAmount,
     digitalAsset:        'USDC',
+    digitalAssetAmount:  usdAmount,
     sep31Fields:         fields,
     senderId:            sender_id,
     receiverId:          receiver_id,
@@ -207,12 +210,10 @@ export async function createTransaction({ body, user }) {
     stellar_memo_type:    'text',
     stellar_memo:         instructionMemo,
     expires_at:           tx.expiresAt.toISOString(),
-    quote_id:             quote.quoteId,
-    fee_total:            quote.totalFee?.toString() ?? '0',
-    fee_percent:          quote.feePercent?.toString() ?? '0',
+    fee_total:            quote.totalDeducted?.toString() ?? '0',
     amount_in:            amount,
     amount_in_asset:      `stellar:USDC:${ASSETS.USDC.getIssuer()}`,
-    amount_out:           quote.amountOut?.toString(),
+    amount_out:           quote.destinationAmount?.toString(),
     amount_out_asset:     corridor.destinationCurrency,
   };
 }
@@ -223,9 +224,7 @@ export async function createTransaction({ body, user }) {
  * Retorna el estado de una transacción SEP-31 en formato estándar.
  */
 export async function getTransaction({ transactionId }) {
-  const tx = await Transaction.findOne({
-    $or: [{ transactionId }, { _id: transactionId }],
-  }).lean();
+  const tx = await Transaction.findOne({ alytoTransactionId: transactionId }).lean();
 
   if (!tx) {
     throw Object.assign(new Error('Transaction not found'), { status: 404 });
@@ -243,7 +242,7 @@ export async function getTransaction({ transactionId }) {
  * Principalmente para recibir info cuando el USDC ha sido enviado.
  */
 export async function patchTransaction({ transactionId, body }) {
-  const tx = await Transaction.findOne({ transactionId });
+  const tx = await Transaction.findOne({ alytoTransactionId: transactionId });
   if (!tx) throw Object.assign(new Error('Transaction not found'), { status: 404 });
 
   if (body.status) {
@@ -274,12 +273,12 @@ const STATUS_MAP = {
 
 function buildSep31TransactionObject(tx) {
   return {
-    id:                  tx.transactionId,
+    id:                  tx.alytoTransactionId,
     status:              STATUS_MAP[tx.status] ?? 'pending_sender',
     status_eta:          null,
-    amount_in:           tx.amountIn?.toString(),
+    amount_in:           tx.originalAmount?.toString(),
     amount_in_asset:     'USDC',
-    amount_out:          tx.amountOut?.toString(),
+    amount_out:          tx.destinationAmount?.toString(),
     amount_out_asset:    tx.destinationCurrency,
     amount_fee:          tx.fees?.totalDeducted?.toString() ?? '0',
     amount_fee_asset:    tx.originCurrency ?? 'USD',

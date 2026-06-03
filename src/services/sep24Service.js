@@ -101,23 +101,28 @@ export async function initiateDeposit({ body, user }) {
 
   const transactionId = `ALY-D-${Date.now()}-${randomId()}`;
   const userId        = user._id ?? null;
+  if (!userId) {
+    throw Object.assign(new Error('SEP-24 deposit requiere una cuenta Alyto vinculada'), { status: 400 });
+  }
+  const amt = amount ? parseFloat(amount) : 0;
 
   // Dirección a la que el usuario debe enviar el USDC
   const depositAddress = process.env.STELLAR_SRL_PUBLIC_KEY;
   const depositMemo    = transactionId;
 
-  // Crear registro de transacción en MongoDB
+  // Crear registro de transacción en MongoDB (campos conformes al schema Transaction)
   const tx = await Transaction.create({
-    transactionId,
+    alytoTransactionId:  transactionId,
     userId,
     legalEntity:         'SRL',
+    operationType:       'payin',          // depósito = entrada de fondos
+    routingScenario:     'C',
     status:              'sep24_deposit_pending',
-    payinMethod:         'stellar_usdc',
-    payoutMethod:        'wallet_usdc',
-    originCurrency:      'USDC',
-    destinationCurrency: 'USDC',
-    amountIn:            amount ? parseFloat(amount) : null,
+    originalAmount:      amt,
+    originCurrency:      'USD',            // valor fiat del USDC (ISO 3 chars)
+    destinationCurrency: 'USD',
     digitalAsset:        'USDC',
+    digitalAssetAmount:  amt,
     sep24Type:           'deposit',
     instructionAddress:  depositAddress,
     instructionMemo:     depositMemo,
@@ -168,26 +173,31 @@ export async function initiateWithdraw({ body, user }) {
 
   const transactionId = `ALY-W-${Date.now()}-${randomId()}`;
   const userId        = user._id ?? null;
+  if (!userId) {
+    throw Object.assign(new Error('SEP-24 withdraw requiere una cuenta Alyto vinculada'), { status: 400 });
+  }
+  const amt = amount ? parseFloat(amount) : 0;
 
   // La cuenta Stellar SRL recibe el USDC del usuario
   const withdrawAddress = process.env.STELLAR_SRL_PUBLIC_KEY;
   const withdrawMemo    = transactionId;
 
   const tx = await Transaction.create({
-    transactionId,
+    alytoTransactionId:  transactionId,
     userId,
     legalEntity:         'SRL',
+    operationType:       'payout',         // retiro = salida de fondos
+    routingScenario:     'C',
     status:              'sep24_withdraw_pending',
-    payinMethod:         'stellar_usdc',
-    payoutMethod:        'bank_transfer',
-    originCurrency:      'USDC',
-    destinationCurrency: 'BOB',
-    amountIn:            amount ? parseFloat(amount) : null,
+    originalAmount:      amt,
+    originCurrency:      'USD',            // origen: USDC (valor fiat USD)
+    destinationCurrency: 'BOB',           // destino: banco local boliviano
     digitalAsset:        'USDC',
+    digitalAssetAmount:  amt,
     sep24Type:           'withdraw',
     beneficiary: {
-      bankAccount:  dest,
-      bankCode:     dest_extra,
+      accountBank: dest,
+      bankCode:    dest_extra,
     },
     instructionAddress:  withdrawAddress,
     instructionMemo:     withdrawMemo,
@@ -225,11 +235,8 @@ export async function listTransactions({ user, query }) {
   } = query;
 
   const filter = {
-    $or: [
-      { userId: user._id },
-      { 'sep10.stellarAccount': user.stellarAccount },
-    ],
-    sep24Type: { $exists: true },
+    userId:    user._id,
+    sep24Type: { $exists: true, $ne: null },
   };
 
   if (kind) {
@@ -239,7 +246,7 @@ export async function listTransactions({ user, query }) {
     filter.createdAt = { $gte: new Date(no_older_than) };
   }
   if (paging_id) {
-    filter.transactionId = { $lt: paging_id };
+    filter.alytoTransactionId = { $lt: paging_id };
   }
 
   const txs = await Transaction.find(filter)
@@ -261,8 +268,8 @@ export async function getTransaction({ query }) {
   const { id, stellar_transaction_id, external_transaction_id } = query;
 
   const filter = {};
-  if (id)                       filter.transactionId    = id;
-  else if (stellar_transaction_id) filter.stellarTxId   = stellar_transaction_id;
+  if (id)                          filter.alytoTransactionId    = id;
+  else if (stellar_transaction_id) filter.stellarTxId           = stellar_transaction_id;
   else if (external_transaction_id) filter.externalTransactionId = external_transaction_id;
   else throw Object.assign(new Error('id, stellar_transaction_id or external_transaction_id required'), { status: 400 });
 
@@ -303,14 +310,14 @@ const SEP24_STATUS_MAP = {
 
 function buildSep24TransactionObject(tx) {
   return {
-    id:                          tx.transactionId,
+    id:                          tx.alytoTransactionId,
     kind:                        tx.sep24Type ?? 'deposit',
     status:                      SEP24_STATUS_MAP[tx.status] ?? 'pending_anchor',
     status_eta:                  null,
-    more_info_url:               `${FRONTEND_URL}/transactions/${tx.transactionId}`,
-    amount_in:                   tx.amountIn?.toString() ?? null,
+    more_info_url:               `${FRONTEND_URL}/transactions/${tx.alytoTransactionId}`,
+    amount_in:                   tx.originalAmount?.toString() ?? null,
     amount_in_asset:             'stellar:USDC:' + ASSETS.USDC.getIssuer(),
-    amount_out:                  tx.amountOut?.toString() ?? null,
+    amount_out:                  tx.destinationAmount?.toString() ?? null,
     amount_out_asset:            tx.destinationCurrency,
     amount_fee:                  tx.fees?.totalDeducted?.toString() ?? '0',
     amount_fee_asset:            'USD',
