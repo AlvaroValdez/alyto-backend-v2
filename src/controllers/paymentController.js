@@ -738,20 +738,25 @@ export async function initCrossBorderPayment(req, res) {
   if (!beneficiaryData && !legacyBeneficiary) {
     return res.status(400).json({ error: 'Se requiere beneficiaryData o beneficiary.' });
   }
+  // Debe estar alineado con harborMethodSupport.js (single source of truth de métodos Harbor).
   const VALID_OWLPAY_METHODS = new Set([
-    'CIPS', 'WIRE',                 // China
-    'PIX',                          // Brasil
-    'SPEI',                         // México
-    'SEPA',                         // Europa
-    'ACH', 'ACH_PUSH', 'FEDWIRE',  // EEUU
-    'NEQUI', 'BANK_TRANSFER',       // Colombia
-    'AANI', 'FTS',                  // UAE
-    'IMPS', 'NEFT', 'RTGS',        // India
-    'CHATS', 'FPS',                 // Hong Kong
+    'CIPS', 'WIRE',                              // China / multi
+    'PIX',                                       // Brasil
+    'SPEI',                                      // México
+    'SEPA',                                      // Europa
+    'ACH', 'ACH_PUSH', 'FEDWIRE', 'DOMESTIC_WIRE', // EEUU
+    'NEQUI', 'BANK_TRANSFER', 'BANK-TRANSFER',   // Colombia / UAE
+    'AANI', 'FTS',                               // UAE
+    'IMPS', 'NEFT', 'RTGS',                      // India
+    'CHATS', 'FPS',                              // Hong Kong / GB
   ]);
+  // Normalizar: si el método no es válido, descartarlo (null) — el create NO debe
+  // recibir un valor fuera del enum (rompía Transaction.create → 500). Harbor elige
+  // el mejor método disponible cuando no se pasa uno.
+  let normalizedOwlPayMethod = owlPayMethod;
   if (owlPayMethod && !VALID_OWLPAY_METHODS.has(owlPayMethod)) {
-    // Loggear pero no rechazar — Harbor seleccionará el mejor método disponible
-    console.warn('[crossborder] owlPayMethod desconocido recibido, se ignorará:', owlPayMethod);
+    console.warn('[crossborder] owlPayMethod desconocido recibido, se descarta:', owlPayMethod);
+    normalizedOwlPayMethod = null;
   }
 
   // ── 2. Buscar corredor activo ─────────────────────────────────────────────
@@ -1300,7 +1305,7 @@ export async function initCrossBorderPayment(req, res) {
         ? { transferPurpose: String((beneficiaryData ?? legacyBeneficiary).transfer_purpose) }
         : {}),
 
-      ...(owlPayMethod ? { owlPayMethod } : {}),
+      ...(normalizedOwlPayMethod ? { owlPayMethod: normalizedOwlPayMethod } : {}),
 
       // Provider quote metadata del GET /quote previo (solo para auditoría).
       // owlPay: forzar 'estimated' — el rate real se fija en tryOwlPayV2 al despachar.
@@ -1343,6 +1348,12 @@ export async function initCrossBorderPayment(req, res) {
   } catch (err) {
     console.error('[Alyto CrossBorder] Error persistiendo transacción en BD:', {
       corridorId, error: err.message,
+    });
+    // No continuar con transaction=undefined (causaba un 500 confuso aguas abajo
+    // al acceder a transaction.originCurrency). Devolver el motivo real de inmediato.
+    return res.status(500).json({
+      error:  'No se pudo crear la transacción.',
+      detail: err.message,
     });
   }
 

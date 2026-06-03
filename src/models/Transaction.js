@@ -656,16 +656,17 @@ const transactionSchema = new Schema(
      */
     owlPayMethod: {
       type:    String,
+      // Alineado con harborMethodSupport.js (single source of truth).
       enum:    [
-        'CIPS', 'WIRE',                  // China
-        'PIX',                           // Brasil
-        'SPEI',                          // México
-        'SEPA',                          // Europa (SEPA)
-        'ACH', 'ACH_PUSH', 'FEDWIRE',   // EEUU
-        'NEQUI', 'BANK_TRANSFER',        // Colombia
-        'AANI', 'FTS',                   // UAE
-        'IMPS', 'NEFT', 'RTGS',         // India
-        'CHATS', 'FPS',                  // Hong Kong
+        'CIPS', 'WIRE',                              // China / multi
+        'PIX',                                       // Brasil
+        'SPEI',                                      // México
+        'SEPA',                                      // Europa (SEPA)
+        'ACH', 'ACH_PUSH', 'FEDWIRE', 'DOMESTIC_WIRE', // EEUU
+        'NEQUI', 'BANK_TRANSFER', 'BANK-TRANSFER',   // Colombia / UAE
+        'AANI', 'FTS',                               // UAE
+        'IMPS', 'NEFT', 'RTGS',                      // India
+        'CHATS', 'FPS',                              // Hong Kong / GB
         null,
       ],
       default: null,
