@@ -142,11 +142,33 @@ const fundingRecordSchema = new Schema(
 
     /**
      * Admin que registró este fondeo (ref a User con role: 'admin').
+     * Opcional: la reconciliación automática de tesorería (H3) no tiene un admin
+     * registrante; usa el createdBy del intent si existe, o null si es unmatched.
      */
     registeredBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      default: null,
+    },
+
+    /** Marca que este fondeo fue reconciliado automáticamente desde Stellar (H3). */
+    reconciledFromStellar: {
+      type: Boolean,
+      default: false,
+    },
+
+    /** Correlativo del FundingIntent asociado (si la reconciliación lo matcheó). */
+    intentId: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    /** Operación Horizon que originó el fondeo — clave de idempotencia de la reconciliación. */
+    horizonOperationId: {
+      type: String,
+      default: null,
+      trim: true,
     },
 
     /**
@@ -170,6 +192,7 @@ const fundingRecordSchema = new Schema(
 // Índices para consultas del balance por entidad
 fundingRecordSchema.index({ entity: 1, asset: 1, status: 1 });
 fundingRecordSchema.index({ createdAt: -1 });
+fundingRecordSchema.index({ horizonOperationId: 1 }, { sparse: true });
 
 /**
  * Devuelve el USDC disponible para payouts de una entidad legal:
