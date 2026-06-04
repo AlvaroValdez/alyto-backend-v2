@@ -36,6 +36,7 @@ const DEFAULT_TTL = {
  */
 export async function generateQR({
   type,
+  asset = 'BOB',
   creatorUserId,
   creatorName,
   amount,
@@ -45,8 +46,11 @@ export async function generateQR({
   if (!['charge', 'p2p', 'deposit'].includes(type)) {
     throw new Error('Tipo de QR inválido. Usa: charge, p2p o deposit.');
   }
+  if (!['BOB', 'USDC'].includes(asset)) {
+    throw new Error('Asset de QR inválido. Usa: BOB o USDC.');
+  }
   if ((type === 'charge' || type === 'p2p') && (!amount || Number(amount) < 1)) {
-    throw new Error('Los tipos charge y p2p requieren amount >= 1 BOB.');
+    throw new Error(`Los tipos charge y p2p requieren amount >= 1 ${asset}.`);
   }
 
   const ttl  = expiresInSecs != null ? Number(expiresInSecs) : DEFAULT_TTL[type];
@@ -57,6 +61,7 @@ export async function generateQR({
     v:           1,
     qrId,
     type,
+    asset,
     creatorUserId,
     creatorName,
     amount:      amount != null ? Number(amount) : null,

@@ -14,8 +14,10 @@ import User              from '../models/User.js';
 import WalletBOB         from '../models/WalletBOB.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import { generateQR, verifyQR }        from '../services/qrWalletService.js';
-import { notify }                      from '../services/notifications.js';
+import { notify, NOTIFICATIONS }       from '../services/notifications.js';
 import { getOrCreateWallet, fireAuditTrail } from './walletController.js';
+import { executeUsdcP2pTransfer, fireUSDCAuditTrail } from './walletUSDCController.js';
+import WalletUSDC        from '../models/WalletUSDC.js';
 import Sentry            from '../services/sentry.js';
 
 // ── POST /api/v1/wallet/qr/generate ──────────────────────────────────────────
@@ -27,6 +29,7 @@ import Sentry            from '../services/sentry.js';
 export async function generateWalletQR(req, res) {
   try {
     const { type, amount, description, expiresInSecs } = req.body;
+    const asset = req.body.asset ?? 'BOB';
     const user = req.user;
 
     if (user.legalEntity !== 'SRL') {
@@ -36,16 +39,18 @@ export async function generateWalletQR(req, res) {
       return res.status(403).json({ error: 'KYC requerido para usar QR Wallet.' });
     }
 
-    // Para charge/p2p verificar que la wallet existe y está activa
+    // Para charge/p2p verificar que la wallet del asset correcto existe y está activa
     if (type === 'charge' || type === 'p2p') {
-      const wallet = await WalletBOB.findOne({ userId: user._id }).lean();
+      const Model  = asset === 'USDC' ? WalletUSDC : WalletBOB;
+      const wallet = await Model.findOne({ userId: user._id }).lean();
       if (!wallet || wallet.status !== 'active') {
-        return res.status(403).json({ error: 'Tu wallet no está activa.' });
+        return res.status(403).json({ error: `Tu wallet ${asset} no está activa.` });
       }
     }
 
     const result = await generateQR({
       type,
+      asset,
       creatorUserId: user._id.toString(),
       creatorName:   `${user.firstName} ${user.lastName}`.trim(),
       amount:        amount != null ? Number(amount) : undefined,
@@ -57,6 +62,7 @@ export async function generateWalletQR(req, res) {
       qrId:      result.qrId,
       qrBase64:  result.qrBase64,
       type,
+      asset,
       amount:    amount != null ? Number(amount) : null,
       expiresAt: result.expiresAt,
     });
@@ -107,6 +113,48 @@ export async function scanAndPayQR(req, res) {
     if (payload.creatorUserId === payer._id.toString()) {
       await session.abortTransaction();
       return res.status(400).json({ error: 'No puedes pagarte a ti mismo.' });
+    }
+
+    // 2-bis. Rama USDC — delega en la transferencia ledger-only compartida (P1)
+    const asset = payload.asset ?? 'BOB';
+    if (asset === 'USDC') {
+      const finalAmount = payload.type === 'deposit' ? Number(overrideAmount) : Number(payload.amount);
+      if (!Number.isFinite(finalAmount) || finalAmount < 1) {
+        await session.abortTransaction();
+        return res.status(400).json({ error: 'Monto inválido. Mínimo 1 USDC.' });
+      }
+      const recipient = await User.findById(payload.creatorUserId)
+        .select('_id firstName lastName alytoAlias legalEntity accountType').lean();
+      if (!recipient || recipient.legalEntity !== 'SRL') {
+        await session.abortTransaction();
+        return res.status(404).json({ error: 'Destinatario no encontrado.' });
+      }
+      try {
+        const result = await executeUsdcP2pTransfer(session, {
+          sender:      payer,
+          recipient,
+          amount:      finalAmount,
+          description: payload.description ? `QR: ${payload.description}` : 'Pago QR USDC',
+          source:      'qr',
+        });
+        await session.commitTransaction();
+        fireUSDCAuditTrail(result.wtxSend.wtxId);
+        notify(recipient._id, NOTIFICATIONS.usdcReceived(finalAmount, result.senderName)).catch(() => {});
+        return res.json({
+          success:      true,
+          wtxId:        result.wtxSend.wtxId,
+          amount:       finalAmount,
+          asset:        'USDC',
+          recipient:    result.recipientName,
+          qrType:       payload.type,
+          balanceAfter: result.prevOrigen - result.total,
+        });
+      } catch (err) {
+        await session.abortTransaction();
+        if (err.httpStatus) return res.status(err.httpStatus).json({ error: err.message });
+        Sentry.captureException(err, { tags: { controller: 'qrWalletController', fn: 'scanAndPayQR', asset: 'USDC' } });
+        return res.status(500).json({ error: 'Error al procesar el pago QR USDC.' });
+      }
     }
 
     // 3. Determinar monto final
@@ -250,6 +298,7 @@ export async function previewQR(req, res) {
       valid:       true,
       qrId:        payload.qrId,
       type:        payload.type,
+      asset:       payload.asset ?? 'BOB',
       creatorName: payload.creatorName,
       amount:      payload.amount,
       description: payload.description,
