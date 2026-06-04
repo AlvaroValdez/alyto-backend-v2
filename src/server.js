@@ -717,6 +717,12 @@ async function startServer() {
       setTimeout(monitorUSDCDeposits, 60 * 1000);            // primera corrida 60s post-start
       setInterval(monitorUSDCDeposits, 30 * 1000);           // cada 30s
       console.info('[Server] USDC deposit monitor (Fase 36) programado cada 30s');
+
+      // H3 (Camino A) — Reconciliación de fondeo de tesorería vía Horizon polling
+      const { reconcileTreasuryFunding } = await import('./jobs/reconcileTreasuryFunding.js');
+      setTimeout(reconcileTreasuryFunding, 90 * 1000);       // primera corrida 90s post-start
+      setInterval(reconcileTreasuryFunding, 2 * 60 * 1000);  // cada 2 min
+      console.info('[Server] Treasury funding reconcile (H3) programado cada 2 min');
     } else {
       console.warn('[Server] STELLAR_SRL_PUBLIC_KEY no configurado — USDC monitor desactivado');
     }
