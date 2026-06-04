@@ -602,7 +602,10 @@ export async function getUSDCRate(req, res) {
     const source    = rateDoc ? rateDoc.source ?? 'manual' : 'env_fallback'
     const updatedAt = rateDoc?.updatedAt ?? null
 
-    return res.json({ bobPerUsdc: rate, source, updatedAt })
+    // `rate` es alias de `bobPerUsdc` por compatibilidad con clientes que leen
+    // cualquiera de las dos claves (evita "Cargando tasa..." si el frontend
+    // desplegado aún espera `rate`).
+    return res.json({ bobPerUsdc: rate, rate, source, updatedAt })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getUSDCRate' } })
