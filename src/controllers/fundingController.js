@@ -13,8 +13,19 @@
 
 import mongoose               from 'mongoose';
 import FundingRecord          from '../models/FundingRecord.js';
+import FundingIntent          from '../models/FundingIntent.js';
 import Transaction            from '../models/Transaction.js';
 import { getStellarUSDCBalance } from '../services/stellarService.js';
+import { generateStellarPayQR }  from '../services/qrService.js';
+import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
+import { ASSETS }             from '../config/stellar.js';
+
+// Dirección de tesorería por entidad (wallet Stellar corporativa).
+const TREASURY_ADDRESS = {
+  LLC: () => process.env.STELLAR_LLC_PUBLIC_KEY,
+  SpA: () => process.env.STELLAR_SPA_PUBLIC_KEY,
+  SRL: () => process.env.STELLAR_SRL_PUBLIC_KEY,
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -361,7 +372,7 @@ export async function getFundingBalance(req, res) {
  *
  * Se detiene en la primera tx que queda en pending_funding (balance aún insuficiente).
  */
-async function retryPendingFundingTransactions(entity) {
+export async function retryPendingFundingTransactions(entity) {
   const pendingTxs = await Transaction.find(
     { legalEntity: entity, status: 'pending_funding' },
     null,
@@ -507,5 +518,136 @@ export async function getUSDCForecast(req, res) {
   } catch (err) {
     console.error('[Funding] Error al calcular USDC forecast:', err);
     return res.status(500).json({ error: 'Error al obtener forecast USDC' });
+  }
+}
+
+// ─── POST /api/v1/admin/funding/intents ──────────────────────────────────────
+
+/**
+ * Crea una intención de fondeo de tesorería (Camino A, H3).
+ *
+ * Genera un correlativo atómico (FND-YYYYMM-N) que se usa como memo al retirar
+ * USDC desde el exchange hacia la wallet de tesorería. Devuelve un QR SEP-7 con
+ * la dirección + memo para minimizar el error de transcripción. El job
+ * `reconcileTreasuryFunding` matchea el inflow on-chain con este intent.
+ *
+ * Body:
+ *   entity         {String}  'LLC'|'SpA'|'SRL' (default 'SRL')
+ *   expectedAmount {Number}  (opcional) USDC esperado
+ *   sourceCurrency {String}  (opcional) ej 'BOB'
+ *   sourceAmount   {Number}  (opcional) fiat pagado
+ *   binanceOrderId {String}  (opcional)
+ *   note           {String}  (opcional)
+ */
+export async function createFundingIntent(req, res) {
+  try {
+    const { entity = 'SRL', expectedAmount, sourceCurrency, sourceAmount, binanceOrderId, note } = req.body;
+
+    if (!['LLC', 'SpA', 'SRL'].includes(entity)) {
+      return res.status(400).json({ error: 'entity inválido. Usar: LLC | SpA | SRL' });
+    }
+    const treasuryAddress = TREASURY_ADDRESS[entity]?.();
+    if (!treasuryAddress) {
+      return res.status(500).json({ error: `Wallet de tesorería no configurada para ${entity}` });
+    }
+
+    const intentId = await generarNumeroCorrelativo('FND');
+
+    const intent = await FundingIntent.create({
+      intentId,
+      entity,
+      asset:           'USDC',
+      treasuryAddress,
+      memo:            intentId,
+      expectedAmount:  expectedAmount ?? null,
+      sourceCurrency:  sourceCurrency ?? null,
+      sourceAmount:    sourceAmount ?? null,
+      binanceOrderId:  binanceOrderId ?? null,
+      note:            note ?? null,
+      status:          'open',
+      createdBy:       req.user._id,
+    });
+
+    const assetIssuer = ASSETS.USDC.issuer;
+    const { uri, qrBase64 } = await generateStellarPayQR({
+      destination: treasuryAddress,
+      assetCode:   'USDC',
+      assetIssuer,
+      memo:        intentId,
+    });
+
+    return res.status(201).json({
+      intentId:        intent.intentId,
+      entity,
+      asset:           'USDC',
+      treasuryAddress,
+      assetIssuer,
+      memo:            intentId,
+      expectedAmount:  intent.expectedAmount,
+      status:          intent.status,
+      sep7Uri:         uri,
+      qr:              qrBase64,
+      note: 'Retira el USDC a esta dirección usando el memo. El monto se reconcilia on-chain; ' +
+            'no es necesario que el QR lleve el monto (el exchange no lo respeta).',
+    });
+  } catch (err) {
+    console.error('[Funding] Error al crear intent de fondeo:', err);
+    return res.status(500).json({ error: 'Error interno al crear intent de fondeo' });
+  }
+}
+
+// ─── GET /api/v1/admin/funding/intents ───────────────────────────────────────
+
+/**
+ * Lista intents de fondeo con paginación y filtros (status, entity).
+ */
+export async function listFundingIntents(req, res) {
+  try {
+    const { entity, status, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (entity) filter.entity = entity;
+    if (status) filter.status = status;
+
+    const pageNum  = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+
+    const [intents, total] = await Promise.all([
+      FundingIntent.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .populate('createdBy', 'name email'),
+      FundingIntent.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      intents,
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (err) {
+    console.error('[Funding] Error al listar intents:', err);
+    return res.status(500).json({ error: 'Error interno al listar intents' });
+  }
+}
+
+// ─── PATCH /api/v1/admin/funding/intents/:intentId/cancel ────────────────────
+
+/**
+ * Cancela un intent abierto (no reconciliado aún).
+ */
+export async function cancelFundingIntent(req, res) {
+  try {
+    const { intentId } = req.params;
+    const intent = await FundingIntent.findOne({ intentId });
+    if (!intent) return res.status(404).json({ error: 'Intent no encontrado' });
+    if (intent.status !== 'open') {
+      return res.status(400).json({ error: `No se puede cancelar un intent en estado '${intent.status}'` });
+    }
+    intent.status = 'cancelled';
+    await intent.save();
+    return res.status(200).json({ intentId, status: intent.status });
+  } catch (err) {
+    console.error('[Funding] Error al cancelar intent:', err);
+    return res.status(500).json({ error: 'Error interno al cancelar intent' });
   }
 }

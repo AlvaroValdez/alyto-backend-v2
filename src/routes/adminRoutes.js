@@ -57,6 +57,9 @@ import {
   listFunding,
   getFundingBalance,
   getUSDCForecast,
+  createFundingIntent,
+  listFundingIntents,
+  cancelFundingIntent,
 } from '../controllers/fundingController.js';
 import {
   upsertExchangeRate,
@@ -332,6 +335,16 @@ router.get('/funding/balance', getFundingBalance);
  * Responde: { alertLevel, stellar, committed, availableNow, pendingFunding, gap, fundingNeeded, recommendation }
  */
 router.get('/funding/forecast', getUSDCForecast);
+
+/**
+ * Fondeo de tesorería — Intents (Camino A, H3).
+ * POST   /api/v1/admin/funding/intents               — crea intent + QR SEP-7
+ * GET    /api/v1/admin/funding/intents               — lista intents
+ * PATCH  /api/v1/admin/funding/intents/:intentId/cancel — cancela intent abierto
+ */
+router.post('/funding/intents', createFundingIntent);
+router.get('/funding/intents', listFundingIntents);
+router.patch('/funding/intents/:intentId/cancel', cancelFundingIntent);
 
 // ─── Tasas de Cambio ──────────────────────────────────────────────────────────
 
