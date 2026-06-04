@@ -124,6 +124,18 @@ const userSchema = new Schema(
       type:    String,
       default: null,
     },
+    /** Alias público Alyto para transferencias P2P (ej. "juan"). Único, minúsculas. */
+    alytoAlias: {
+      type:      String,
+      default:   null,
+      lowercase: true,
+      trim:      true,
+    },
+    /** Última modificación del alias (para cooldown de cambios). */
+    aliasUpdatedAt: {
+      type:    Date,
+      default: null,
+    },
 
     // ── Campo CRÍTICO: Jurisdicción Multi-Entidad ────────────────────────────
     /**
@@ -389,6 +401,12 @@ userSchema.index({ kycStatus: 1 });
 userSchema.index({ kybStatus: 1 });
 userSchema.index({ accountType: 1 });
 userSchema.index({ 'stellarAccount.publicKey': 1 }, { sparse: true });
+// Único PARCIAL solo sobre strings: permite múltiples null (usuarios sin alias)
+// y mantiene unicidad de los alias asignados (case-insensitive vía lowercase).
+userSchema.index(
+  { alytoAlias: 1 },
+  { unique: true, partialFilterExpression: { alytoAlias: { $type: 'string' } } },
+);
 
 // ─── Virtual: nombre completo ─────────────────────────────────────────────────
 

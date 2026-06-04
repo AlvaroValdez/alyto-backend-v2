@@ -61,7 +61,14 @@ import {
   requestBOBtoUSDC,
   getUSDCTransactions,
   getUSDCRate,
+  getUSDCTransferQuote,
+  sendUSDC,
 } from '../controllers/walletUSDCController.js'
+import {
+  checkAliasAvailable,
+  getMyAlias,
+  setAlias,
+} from '../controllers/aliasController.js'
 
 const router = Router()
 
@@ -91,6 +98,13 @@ router.get('/usdc/rate',                  protect, requireKycApproved, getUSDCRa
 router.get('/usdc/balance',               protect, requireKycApproved, getUSDCBalance)
 router.get('/usdc/deposit-instructions',  protect, requireKycApproved, getDepositInstructions)
 router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTransactions)
+router.get('/usdc/transfer-quote',        protect, requireKycApproved, getUSDCTransferQuote)
+router.post('/usdc/send',                 protect, requireKycApproved, checkSanctions, idempotencyCheck, sendUSDC)
 router.post('/usdc/convert-bob',          protect, requireKycApproved, idempotencyCheck, requestBOBtoUSDC)
+
+// ─── Alias Alyto (@usuario) — P2P USDC P1 ────────────────────────────────────
+router.get('/alias/available', protect, checkAliasAvailable)
+router.get('/alias/me',        protect, getMyAlias)
+router.put('/alias',           protect, setAlias)
 
 export default router
