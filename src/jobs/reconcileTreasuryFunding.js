@@ -53,7 +53,17 @@ export async function reconcileTreasuryFunding() {
   const cursorKey = `stellar:treasury:cursor:${treasury}`
 
   try {
-    const cursor = await SystemConfig.getValue(cursorKey, 'now')
+    // Anclaje del cursor en el primer arranque: si no hay cursor persistido, anclar
+    // al último paging_token ACTUAL y guardarlo (no procesa historia). Evita el bug
+    // del default 'now', que se re-evaluaba cada ciclo y podía saltarse un fondeo
+    // llegado entre ciclos. A partir del ancla, todo inflow nuevo se procesa.
+    let cursor = await SystemConfig.getValue(cursorKey, null)
+    if (cursor === null) {
+      const latest = await horizonServer.payments().forAccount(treasury).order('desc').limit(1).call()
+      cursor = latest.records?.[0]?.paging_token ?? '0'
+      await SystemConfig.setValue(cursorKey, cursor)
+      console.info('[Treasury Reconcile] Cursor anclado en primer arranque:', cursor)
+    }
 
     const response = await horizonServer
       .payments()
