@@ -2556,6 +2556,16 @@ export async function getTransactionStatus(req, res) {
     concept,
     payinMethod:       transaction.corridorId?.payinMethod ?? null,
     estimatedDelivery: transaction.corridorId?.payinMethod === 'manual' ? 'pocas horas' : '1-2 días hábiles',
+    // ── SEP-24 / SEP-31 — depósito/retiro de activo digital (NO cross-border) ──
+    // El FE usa estos campos para distinguir un depósito (USD→USDC a la propia
+    // wallet) de un envío a beneficiario, y renderizar el comprobante correcto.
+    operationType:      transaction.operationType    ?? null,
+    sep24Type:          transaction.sep24Type         ?? null,
+    digitalAsset:       transaction.digitalAsset       ?? null,
+    digitalAssetAmount: transaction.digitalAssetAmount ?? null,
+    instructionAddress: transaction.instructionAddress ?? null,
+    instructionMemo:    transaction.instructionMemo    ?? null,
+    expiresAt:          transaction.expiresAt          ?? null,
     createdAt:         transaction.createdAt,
     updatedAt:         transaction.updatedAt,
     // Trazabilidad blockchain — el FE muestra "Verificado en blockchain" si hay
