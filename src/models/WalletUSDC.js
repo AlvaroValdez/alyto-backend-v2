@@ -121,6 +121,15 @@ walletUSDCSchema.virtual('balanceAvailable').get(function () {
 
 walletUSDCSchema.index({ status: 1 })
 walletUSDCSchema.index({ legalEntity: 1 })
-walletUSDCSchema.index({ stellarMemo: 1 }, { unique: true, sparse: true })
+// Camino A: stellarMemo dejó de ser el identificador (los depósitos van a la
+// dirección custodial). Las wallets nuevas tienen stellarMemo:null y `sparse` NO
+// excluye los null explícitos → un índice unique+sparse rompe con E11000 al segundo
+// null. Índice único PARCIAL solo sobre strings: permite múltiples null y mantiene
+// la unicidad de los memos legacy durante la transición (H2 los busca por memo).
+walletUSDCSchema.index(
+  { stellarMemo: 1 },
+  { unique: true, partialFilterExpression: { stellarMemo: { $type: 'string' } } },
+)
+walletUSDCSchema.index({ stellarAddress: 1 })
 
 export default mongoose.model('WalletUSDC', walletUSDCSchema)
