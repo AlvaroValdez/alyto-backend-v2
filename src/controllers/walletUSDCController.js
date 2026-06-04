@@ -20,21 +20,14 @@
  */
 
 import mongoose          from 'mongoose'
-import crypto            from 'crypto'
 import WalletUSDC        from '../models/WalletUSDC.js'
 import WalletBOB         from '../models/WalletBOB.js'
 import WalletTransaction from '../models/WalletTransaction.js'
+import User              from '../models/User.js'
 import ExchangeRate      from '../models/ExchangeRate.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
-
-// ─── Helper: generar memo único ───────────────────────────────────────────────
-
-function generateStellarMemo() {
-  const rand = crypto.randomBytes(4).toString('hex').toUpperCase()
-  return `ALYTO-${rand}`
-}
 
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
 
@@ -42,18 +35,48 @@ async function getOrCreateWalletUSDC(userId, session) {
   const opts = session ? { session } : {}
   let wallet = await WalletUSDC.findOne({ userId }, null, opts)
   if (!wallet) {
-    // Asignar la dirección Stellar compartida SRL y generar memo único
-    const stellarAddress = process.env.STELLAR_SRL_PUBLIC_KEY ?? null
-    const stellarMemo    = generateStellarMemo()
+    // Camino A: la dirección de depósito es la cuenta custodial del PROPIO usuario
+    // (Fase 38), NO la wallet de tesorería SRL compartida. Sin memo. Si el usuario
+    // ya tiene keypair custodial se usa de inmediato; si no, se provisiona en el
+    // flujo de instrucciones de depósito (ver getDepositInstructions).
+    // ⚠️ No se provisiona aquí: esta función puede ejecutarse dentro de una sesión
+    //    transaccional (convert-bob) y la provisión hace llamadas a Horizon.
+    const owner            = await User.findById(userId, 'stellarAccount.publicKey', opts).lean()
+    const custodialAddress = owner?.stellarAccount?.publicKey ?? null
 
     wallet = await WalletUSDC.create([{
       userId,
-      stellarAddress,
-      stellarMemo,
+      stellarAddress: custodialAddress,
+      stellarMemo:    null,
     }], opts)
     wallet = wallet[0]
   }
   return wallet
+}
+
+// ─── Helper: garantizar dirección de depósito custodial (Camino A) ───────────
+
+/**
+ * Devuelve la dirección Stellar custodial del usuario donde recibir USDC,
+ * provisionando el keypair (Fase 38) si aún no existe. Fuera de toda sesión
+ * transaccional — provisionUserKeypair hace llamadas a Horizon (fund + trustline).
+ * @returns {Promise<{publicKey: string, usdcTrustline: boolean}>}
+ */
+async function ensureCustodialDepositAddress(userId) {
+  let owner     = await User.findById(userId, 'stellarAccount.publicKey stellarAccount.activeTrustlines').lean()
+  let publicKey = owner?.stellarAccount?.publicKey ?? null
+
+  if (!publicKey) {
+    const { provisionUserKeypair } = await import('../services/custodyService.js')
+    const result = await provisionUserKeypair(userId)
+    publicKey = result.publicKey
+    owner = await User.findById(userId, 'stellarAccount.activeTrustlines').lean()
+  }
+
+  const usdcTrustline = Array.isArray(owner?.stellarAccount?.activeTrustlines)
+    && owner.stellarAccount.activeTrustlines.includes('USDC')
+
+  return { publicKey, usdcTrustline }
 }
 
 // ─── Helper: fire-and-forget audit trail USDC ────────────────────────────────
@@ -121,8 +144,11 @@ export async function getUSDCBalance(req, res) {
  * Retorna las instrucciones para depositar USDC directamente vía Stellar.
  * No requiere monto — el usuario puede depositar cualquier cantidad.
  *
- * ⚠️ El usuario DEBE incluir el stellarMemo exacto para que el depósito
- * sea identificado y acreditado correctamente.
+ * Camino A: la dirección de depósito es la cuenta custodial del PROPIO usuario
+ * (Fase 38). No se requiere memo — cada usuario tiene su dirección exclusiva, así
+ * la wallet de tesorería SRL deja de recibir depósitos de usuarios. El keypair se
+ * provisiona on-demand si aún no existe. La dirección almacenada se sincroniza
+ * (lazy-migración de wallets legacy con memo sobre la dirección compartida).
  */
 export async function getDepositInstructions(req, res) {
   try {
@@ -133,20 +159,35 @@ export async function getDepositInstructions(req, res) {
 
     const wallet = await getOrCreateWalletUSDC(user._id)
 
-    const USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+    // Dirección de depósito = cuenta custodial propia (provisiona si falta)
+    const { publicKey: custodialAddress, usdcTrustline } = await ensureCustodialDepositAddress(user._id)
+
+    // Sincronizar la dirección almacenada si cambió (lazy-migración legacy → custodial)
+    if (custodialAddress && (wallet.stellarAddress !== custodialAddress || wallet.stellarMemo)) {
+      await WalletUSDC.updateOne(
+        { _id: wallet._id },
+        { stellarAddress: custodialAddress, stellarMemo: null },
+      )
+    }
+
+    const USDC_ISSUER = process.env.STELLAR_USDC_ISSUER
+      ?? 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
 
     return res.json({
-      network:          process.env.STELLAR_NETWORK ?? 'testnet',
-      stellarAddress:   wallet.stellarAddress,
-      stellarMemo:      wallet.stellarMemo,
-      memoType:         'text',
-      asset:            'USDC',
-      assetIssuer:      USDC_ISSUER,
-      warning:          'IMPORTANTE: Debes incluir el memo exacto al realizar la transferencia. Sin memo el depósito no podrá ser acreditado.',
-      instructions:     [
-        `1. Envía USDC a la dirección: ${wallet.stellarAddress}`,
-        `2. Incluye el memo (texto): ${wallet.stellarMemo}`,
-        '3. El equipo Alyto verificará y acreditará tu saldo en 1-2 horas hábiles.',
+      network:        process.env.STELLAR_NETWORK ?? 'testnet',
+      stellarAddress: custodialAddress,
+      stellarMemo:    null,            // Camino A: sin memo — dirección exclusiva por usuario
+      memoRequired:   false,
+      asset:          'USDC',
+      assetIssuer:    USDC_ISSUER,
+      ready:          usdcTrustline,   // si false, la trustline USDC aún se está estableciendo
+      warning:        usdcTrustline
+        ? 'Envía USDC (red Stellar) únicamente a tu dirección. No necesitas memo.'
+        : 'Tu cuenta Stellar se está preparando para recibir USDC (estableciendo trustline). Reintenta en unos minutos antes de depositar.',
+      instructions:   [
+        `1. Envía USDC (red Stellar) a tu dirección: ${custodialAddress}`,
+        '2. No se requiere memo — la dirección es exclusivamente tuya.',
+        '3. El depósito se acreditará automáticamente al confirmarse en la red Stellar.',
       ],
     })
 
