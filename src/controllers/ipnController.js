@@ -746,14 +746,26 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     return { provider: 'owlpay', status: 'failed', reason };
   }
 
-  // ── STEP A: Pre-check liquidez USDC SRL (disponible = fondeado − comprometido) ──
-  // Usar getAvailableUSDC (descuenta USDC ya comprometido por tx en vuelo) y el balance
-  // on-chain real; el disponible efectivo es el mínimo de ambos.
-  const [availableAccounting, onChainBalance] = await Promise.all([
-    FundingRecord.getAvailableUSDC(entity),
+  // ── STEP A: Pre-check liquidez USDC (on-chain manda) ────────────────────────
+  // Fuente de verdad = saldo on-chain real en Stellar menos los payouts en vuelo
+  // (USDC ya comprometido). El saldo on-chain ES el colateral real; el FundingRecord
+  // es un libro de trazabilidad de origen, NO una tranca de pago. Esta fórmula es
+  // idéntica a la del panel de previsión (getUSDCForecast → availableNow), de modo
+  // que lo que el admin ve disponible es exactamente lo que el motor autoriza.
+  const [onChainBalance, inflightAgg] = await Promise.all([
     getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
+    Transaction.aggregate([
+      {
+        $match: {
+          legalEntity: entity,
+          status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
+        },
+      },
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
+    ]),
   ]);
-  const usdcBalance = Math.min(availableAccounting, onChainBalance);
+  const inflight    = inflightAgg[0]?.total ?? 0;
+  const usdcBalance = Math.max(0, onChainBalance - inflight);
   const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
 
   if (usdcBalance < needed) {
