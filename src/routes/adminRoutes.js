@@ -62,6 +62,11 @@ import {
   cancelFundingIntent,
 } from '../controllers/fundingController.js';
 import {
+  getWalletFeeConfig,
+  updateWalletFeeConfig,
+  getWalletFeeRevenue,
+} from '../controllers/walletFeeController.js';
+import {
   upsertExchangeRate,
   listExchangeRates,
   getCLPBOBRate,
@@ -345,6 +350,16 @@ router.get('/funding/forecast', getUSDCForecast);
 router.post('/funding/intents', createFundingIntent);
 router.get('/funding/intents', listFundingIntents);
 router.patch('/funding/intents/:intentId/cancel', cancelFundingIntent);
+
+/**
+ * Comisiones de wallet (P3 USDC P2P).
+ * GET  /api/v1/admin/wallet-fees          — config actual
+ * PUT  /api/v1/admin/wallet-fees          — actualizar comisiones
+ * GET  /api/v1/admin/wallet-fees/revenue  — revenue acumulada + verificación
+ */
+router.get('/wallet-fees/revenue', getWalletFeeRevenue);
+router.get('/wallet-fees', getWalletFeeConfig);
+router.put('/wallet-fees', updateWalletFeeConfig);
 
 // ─── Tasas de Cambio ──────────────────────────────────────────────────────────
 

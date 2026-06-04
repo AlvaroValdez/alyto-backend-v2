@@ -23,16 +23,29 @@ import mongoose          from 'mongoose'
 import WalletUSDC        from '../models/WalletUSDC.js'
 import WalletBOB         from '../models/WalletBOB.js'
 import WalletTransaction from '../models/WalletTransaction.js'
+import WalletFeeConfig   from '../models/WalletFeeConfig.js'
 import User              from '../models/User.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 import { normalizeAlias } from './aliasController.js'
 
-// Comisión P2P USDC — Camino USDC P2P. P1 arranca en 0; P3 la hace configurable.
-// Mantener la firma para que el desglose pre-confirm exista desde el día 1.
-function calcUsdcP2pFee(/* amount, accountType */) {
-  return 0
+// Comisión P2P USDC — configurable desde WalletFeeConfig (P3). Arranca en 0
+// (config deshabilitada) para efecto red; se activa el cobro desde admin.
+async function calcUsdcP2pFee(amount, accountType) {
+  const cfg = await WalletFeeConfig.getSingleton()
+  if (!cfg.usdcP2pEnabled) return 0
+  if (cfg.usdcP2pFreeBelow > 0 && amount < cfg.usdcP2pFreeBelow) return 0
+
+  const isBiz = accountType === 'business'
+  const pct   = isBiz ? cfg.businessUsdcP2pFeePercent : cfg.usdcP2pFeePercent
+  const fixed = isBiz ? cfg.businessUsdcP2pFeeFixed   : cfg.usdcP2pFeeFixed
+
+  let fee = amount * (pct / 100) + fixed
+  if (cfg.usdcP2pFeeMin > 0)                          fee = Math.max(fee, cfg.usdcP2pFeeMin)
+  if (cfg.usdcP2pFeeMax != null && cfg.usdcP2pFeeMax > 0) fee = Math.min(fee, cfg.usdcP2pFeeMax)
+  fee = Math.min(fee, amount)            // sanidad: nunca cobrar más que el monto
+  return Math.round(fee * 1e6) / 1e6     // redondeo a 6 decimales
 }
 
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
@@ -696,7 +709,7 @@ export async function getUSDCTransferQuote(req, res) {
     }
 
     const validAmount = Number.isFinite(amount) && amount > 0
-    const fee   = validAmount ? calcUsdcP2pFee(amount, user.accountType) : 0
+    const fee   = validAmount ? await calcUsdcP2pFee(amount, user.accountType) : 0
     const total = validAmount ? amount + fee : 0
 
     return res.json({
@@ -729,7 +742,7 @@ export async function getUSDCTransferQuote(req, res) {
 export async function executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source }) {
   const biz = (status, message) => Object.assign(new Error(message), { httpStatus: status })
 
-  const fee   = calcUsdcP2pFee(amount, sender.accountType)
+  const fee   = await calcUsdcP2pFee(amount, sender.accountType)
   const total = amount + fee
 
   // Secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
@@ -785,6 +798,29 @@ export async function executeUsdcP2pTransfer(session, { sender, recipient, amoun
       metadata:           { source: source ?? 'alias', senderAlias: sender.alytoAlias ?? null },
     },
   ], { session, ordered: true })
+
+  // Comisión → ledger de revenue interno (solo si fee > 0). El USDC de la comisión
+  // queda en el pool custodial; revenueAccruedUsdc registra el saldo de Alyto.
+  if (fee > 0) {
+    const cfg       = await WalletFeeConfig.getSingleton(session)
+    const revBefore = cfg.revenueAccruedUsdc ?? 0
+    await WalletFeeConfig.updateOne({ _id: 'singleton' }, { $inc: { revenueAccruedUsdc: fee } }, { session })
+    await WalletTransaction.create([{
+      walletId:           walletOrigen._id,
+      walletModel:        'WalletUSDC',
+      userId:             sender._id,
+      type:               'fee',
+      currency:           'USDC',
+      amount:             fee,
+      balanceBefore:      revBefore,
+      balanceAfter:       revBefore + fee,
+      status:             'completed',
+      description:        'Comisión transferencia USDC P2P',
+      counterpartyUserId: recipient._id,
+      confirmedAt:        new Date(),
+      metadata:           { kind: 'p2p_revenue', source: source ?? 'alias' },
+    }], { session, ordered: true })
+  }
 
   return { wtxSend, wtxReceive, fee, total, prevOrigen, senderName, recipientName }
 }
