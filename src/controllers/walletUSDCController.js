@@ -28,6 +28,13 @@ import ExchangeRate      from '../models/ExchangeRate.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
+import { normalizeAlias } from './aliasController.js'
+
+// Comisión P2P USDC — Camino USDC P2P. P1 arranca en 0; P3 la hace configurable.
+// Mantener la firma para que el desglose pre-confirm exista desde el día 1.
+function calcUsdcP2pFee(/* amount, accountType */) {
+  return 0
+}
 
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
 
@@ -652,5 +659,191 @@ export async function getUSDCRate(req, res) {
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getUSDCRate' } })
     console.error('[WalletUSDC] Error en getUSDCRate:', err.message)
     return res.status(500).json({ error: 'Error al obtener el tipo de cambio.' })
+  }
+}
+
+// ─── Helper: resolver destinatario por alias ─────────────────────────────────
+
+async function resolveRecipientByAlias(rawAlias) {
+  const alias = normalizeAlias(rawAlias)
+  if (!alias) return { error: 'Falta el alias del destinatario.' }
+  const recipient = await User.findOne({ alytoAlias: alias })
+    .select('_id firstName lastName legalEntity alytoAlias').lean()
+  if (!recipient) return { error: 'No existe un usuario Alyto con ese alias.' }
+  if (recipient.legalEntity !== 'SRL') return { error: 'Solo podés enviar a otros usuarios Bolivia (SRL).' }
+  return { recipient }
+}
+
+// ─── GET /api/v1/wallet/usdc/transfer-quote ──────────────────────────────────
+
+/**
+ * Previsualiza una transferencia USDC P2P: resuelve el destinatario por alias y
+ * devuelve el desglose (monto, comisión, total). La comisión hoy es 0 (P1).
+ * Query: alias, amount
+ */
+export async function getUSDCTransferQuote(req, res) {
+  try {
+    const user = req.user
+    if (user.legalEntity !== 'SRL') {
+      return res.status(403).json({ error: 'Exclusivo para usuarios Bolivia (SRL).' })
+    }
+    const amount = Number(req.query.amount)
+    const { recipient, error } = await resolveRecipientByAlias(req.query.alias)
+    if (error) return res.status(404).json({ error })
+    if (String(recipient._id) === String(user._id)) {
+      return res.status(400).json({ error: 'No podés enviarte USDC a vos mismo.' })
+    }
+
+    const validAmount = Number.isFinite(amount) && amount > 0
+    const fee   = validAmount ? calcUsdcP2pFee(amount, user.accountType) : 0
+    const total = validAmount ? amount + fee : 0
+
+    return res.json({
+      recipient: {
+        alias: recipient.alytoAlias,
+        name:  `${recipient.firstName ?? ''} ${recipient.lastName ?? ''}`.trim(),
+      },
+      currency: 'USDC',
+      amount:   validAmount ? amount : null,
+      fee,
+      total,
+    })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getUSDCTransferQuote' } })
+    console.error('[WalletUSDC] Error en getUSDCTransferQuote:', err.message)
+    return res.status(500).json({ error: 'Error al previsualizar la transferencia.' })
+  }
+}
+
+// ─── POST /api/v1/wallet/usdc/send ───────────────────────────────────────────
+
+/**
+ * Transferencia USDC P2P entre wallets Alyto (ledger-only + audit trail).
+ * Body: { recipientAlias, amount, description? }
+ * Modelo custodial: ambas wallets son de Alyto → se reasigna saldo en el libro
+ * (sesión atómica), sin movimiento on-chain. Preserva la colateralización.
+ * Comisión: 0 en P1 (estructura lista para P3).
+ */
+export async function sendUSDC(req, res) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+
+  try {
+    const sender = req.user
+    const { recipientAlias, amount: rawAmount, description } = req.body
+    const amount = Number(rawAmount)
+
+    if (sender.legalEntity !== 'SRL') {
+      await session.abortTransaction()
+      return res.status(403).json({ error: 'La wallet USDC es exclusiva para usuarios Bolivia (SRL).' })
+    }
+    if (!recipientAlias || !Number.isFinite(amount) || amount <= 0) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'recipientAlias y amount (> 0) son requeridos.' })
+    }
+    if (amount < 1) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'El monto mínimo de envío es 1 USDC.' })
+    }
+
+    const { recipient, error } = await resolveRecipientByAlias(recipientAlias)
+    if (error) {
+      await session.abortTransaction()
+      return res.status(404).json({ error })
+    }
+    if (String(recipient._id) === String(sender._id)) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'No podés enviarte USDC a vos mismo.' })
+    }
+
+    const fee   = calcUsdcP2pFee(amount, sender.accountType)
+    const total = amount + fee
+
+    // Secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
+    const walletOrigen  = await getOrCreateWalletUSDC(sender._id, session)
+    const walletDestino = await getOrCreateWalletUSDC(recipient._id, session)
+
+    if (walletOrigen.status !== 'active') {
+      await session.abortTransaction()
+      return res.status(403).json({ error: 'Tu wallet USDC no está activa.' })
+    }
+    if (walletDestino.status !== 'active') {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'La wallet USDC del destinatario no está activa.' })
+    }
+
+    const balanceAvailable = Math.max(0, walletOrigen.balance - walletOrigen.balanceReserved)
+    if (balanceAvailable < total) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: `Saldo USDC insuficiente. Disponible: ${balanceAvailable.toFixed(2)} USDC (necesitás ${total.toFixed(2)}).` })
+    }
+
+    const prevOrigen  = walletOrigen.balance
+    const prevDestino = walletDestino.balance
+
+    await WalletUSDC.updateOne({ _id: walletOrigen._id },  { $inc: { balance: -total }  }, { session })
+    await WalletUSDC.updateOne({ _id: walletDestino._id }, { $inc: { balance:  amount } }, { session })
+
+    const recipientName = `${recipient.firstName ?? ''} ${recipient.lastName ?? ''}`.trim()
+    const senderName    = `${sender.firstName ?? ''} ${sender.lastName ?? ''}`.trim()
+
+    const [wtxSend, wtxReceive] = await WalletTransaction.create([
+      {
+        walletId:           walletOrigen._id,
+        walletModel:        'WalletUSDC',
+        userId:             sender._id,
+        type:               'send',
+        currency:           'USDC',
+        amount,
+        balanceBefore:      prevOrigen,
+        balanceAfter:       prevOrigen - total,
+        status:             'completed',
+        description:        description ?? `Envío USDC a @${recipient.alytoAlias}`,
+        counterpartyUserId: recipient._id,
+        confirmedAt:        new Date(),
+        metadata:           { recipientAlias: recipient.alytoAlias, fee },
+      },
+      {
+        walletId:           walletDestino._id,
+        walletModel:        'WalletUSDC',
+        userId:             recipient._id,
+        type:               'receive',
+        currency:           'USDC',
+        amount,
+        balanceBefore:      prevDestino,
+        balanceAfter:       prevDestino + amount,
+        status:             'completed',
+        description:        `USDC recibido de ${senderName}`,
+        counterpartyUserId: sender._id,
+        confirmedAt:        new Date(),
+        metadata:           { senderAlias: sender.alytoAlias ?? null },
+      },
+    ], { session, ordered: true })
+
+    await session.commitTransaction()
+
+    // Audit trail Stellar — fire and forget (memo, no envío on-chain)
+    fireUSDCAuditTrail(wtxSend.wtxId)
+
+    // Notificaciones — fire and forget
+    notify(recipient._id, NOTIFICATIONS.usdcReceived(amount, senderName)).catch(() => {})
+    notifyAdmins(NOTIFICATIONS.adminUsdcP2pTransfer(amount, senderName, recipientName)).catch(() => {})
+
+    return res.json({
+      wtxId:        wtxSend.wtxId,
+      amount,
+      fee,
+      total,
+      recipient:    { alias: recipient.alytoAlias, name: recipientName },
+      balanceAfter: prevOrigen - total,
+    })
+
+  } catch (err) {
+    await session.abortTransaction()
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'sendUSDC' } })
+    console.error('[WalletUSDC] Error en sendUSDC:', err.message)
+    return res.status(500).json({ error: 'Error al procesar la transferencia USDC.' })
+  } finally {
+    session.endSession()
   }
 }

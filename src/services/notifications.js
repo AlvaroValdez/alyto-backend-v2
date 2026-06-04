@@ -352,6 +352,22 @@ export const NOTIFICATIONS = {
     };
   },
 
+  usdcReceived(amount, senderName) {
+    return {
+      title: '💵 USDC recibido',
+      body:  `${senderName} te envió ${Number(amount).toFixed(2)} USDC.`,
+      data:  { type: 'usdc_p2p_received' },
+    };
+  },
+
+  adminUsdcP2pTransfer(amount, senderName, receiverName) {
+    return {
+      title: 'Transferencia USDC P2P',
+      body:  `${senderName} → ${receiverName}: ${Number(amount).toFixed(2)} USDC.`,
+      data:  { type: 'admin_usdc_p2p_transfer' },
+    };
+  },
+
   // ── Conversión BOB → USDC ─────────────────────────────────────────────────
 
   conversionConfirmed(bobAmount, usdcAmount) {
