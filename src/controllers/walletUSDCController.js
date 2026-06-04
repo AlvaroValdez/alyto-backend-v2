@@ -24,7 +24,6 @@ import WalletUSDC        from '../models/WalletUSDC.js'
 import WalletBOB         from '../models/WalletBOB.js'
 import WalletTransaction from '../models/WalletTransaction.js'
 import User              from '../models/User.js'
-import ExchangeRate      from '../models/ExchangeRate.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
@@ -105,8 +104,9 @@ export function fireUSDCAuditTrail(wtxId) {
 // ─── Helper: obtener tasa BOB/USDC ────────────────────────────────────────────
 
 async function getBOBtoUSDCRate() {
-  // Usa getBOBUSDCRate: incluye el override admin BOB-USDC (margen manual)
-  // solo para este corredor. getBOBRate (Vita/quotes) no incluye ese override.
+  // Tasa del corredor USDC: derivada de mercado × (1 + spread%) para no quedar
+  // bajo costo de fondeo. El override admin BOB-USDC solo sube el piso (ver
+  // getBOBUSDCRate). getBOBRate (Vita/quotes) no aplica este spread.
   const { getBOBUSDCRate } = await import('../services/exchangeRateService.js')
   return getBOBUSDCRate()
 }
@@ -639,21 +639,22 @@ export async function getUSDCTransactions(req, res) {
  */
 export async function getUSDCRate(req, res) {
   try {
-    const { getBOBUSDCRate } = await import('../services/exchangeRateService.js')
+    const { getBOBUSDCRateDetailed } = await import('../services/exchangeRateService.js')
 
-    // Buscar el record para exponer source y updatedAt al frontend
-    const rateDoc = await ExchangeRate.findOne({
-      pair: { $in: ['BOB-USDC', 'BOB/USDC', 'BOB-USDT', 'BOB-USD'] },
-    }).sort({ updatedAt: -1 }).lean()
-
-    const rate      = await getBOBUSDCRate()
-    const source    = rateDoc ? rateDoc.source ?? 'manual' : 'env_fallback'
-    const updatedAt = rateDoc?.updatedAt ?? null
+    // Tasa derivada de mercado × (1 + spread%); el override admin solo sube el piso.
+    const detail = await getBOBUSDCRateDetailed()
 
     // `rate` es alias de `bobPerUsdc` por compatibilidad con clientes que leen
     // cualquiera de las dos claves (evita "Cargando tasa..." si el frontend
     // desplegado aún espera `rate`).
-    return res.json({ bobPerUsdc: rate, rate, source, updatedAt })
+    return res.json({
+      bobPerUsdc: detail.bobPerUsdc,
+      rate:       detail.bobPerUsdc,
+      source:     detail.source,
+      marketRate: detail.marketRate,
+      spreadPct:  detail.spreadPct,
+      updatedAt:  new Date().toISOString(),
+    })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getUSDCRate' } })

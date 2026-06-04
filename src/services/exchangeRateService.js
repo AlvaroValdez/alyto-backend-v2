@@ -32,6 +32,11 @@ import { fetchBOBUSDTRate,
 //   FX_REQUOTE_THRESHOLD_PCT  umbral de drift que dispara el guard en dispatch
 const FX_BUFFER_PCT_DEFAULT      = parseFloat(process.env.FX_BUFFER_PCT ?? '2');
 const FX_REQUOTE_THRESHOLD_PCT   = parseFloat(process.env.FX_REQUOTE_THRESHOLD_PCT ?? '3');
+// Spread del corredor USDC (wallet): la tasa de conversión BOB→USDC se DERIVA de
+// la tasa de mercado × (1 + spread%) para que nunca quede por debajo del costo de
+// fondeo. Por defecto reusa FX_BUFFER_PCT. El override admin BOB-USDC solo puede
+// SUBIR la tasa por encima de este piso, nunca bajarla bajo costo.
+const USDC_CONVERT_SPREAD_PCT    = parseFloat(process.env.USDC_CONVERT_SPREAD_PCT ?? process.env.FX_BUFFER_PCT ?? '2');
 
 const round6 = n => Math.round(n * 1e6) / 1e6;
 
@@ -96,21 +101,51 @@ export async function getBOBRate() {
 }
 
 /**
- * Obtiene la tasa BOB/USDC configurada por el admin para el corredor USDC.
- * Incluye el margen manual definido en MongoDB (BOB-USDC / BOB/USDC).
+ * Tasa BOB/USDC para el corredor WalletUSDC (conversión BOB→USDC del usuario).
  * Solo usar para operaciones del corredor WalletUSDC — NO para Vita ni mínimos.
  *
- * @returns {Promise<number>} Tasa BOB por 1 USDC (con margen admin)
+ * La tasa se DERIVA de la tasa de mercado (Binance P2P BOB/USDT) × (1 + spread%)
+ * para que nunca quede por debajo del costo de fondeo (más BOB por USDC = margen
+ * a favor de Alyto). El override admin BOB-USDC actúa solo como PISO SUPERIOR:
+ * si el admin lo fija por encima de la tasa derivada, gana (más margen); si lo
+ * fija por debajo del costo, se ignora y se usa la derivada (protección de margen).
+ *
+ * @returns {Promise<number>} Tasa BOB por 1 USDC (≥ mercado × (1 + spread%))
  */
 export async function getBOBUSDCRate() {
+  return (await getBOBUSDCRateDetailed()).bobPerUsdc;
+}
+
+/**
+ * Igual que getBOBUSDCRate pero devuelve el desglose para exponer en la UI.
+ * @returns {Promise<{ bobPerUsdc, marketRate, spreadPct, derivedRate, override, source }>}
+ */
+export async function getBOBUSDCRateDetailed() {
+  const marketRate  = await getBOBRate();
+  const spreadPct   = USDC_CONVERT_SPREAD_PCT;
+  const derivedRate = round6(marketRate * (1 + spreadPct / 100));
+
+  let override = null;
   try {
     const records = await ExchangeRate.find({
       pair: { $in: ['BOB-USDC', 'BOB/USDC'] },
     }).sort({ updatedAt: -1 }).lean();
-    const override = records.find(r => r?.rate > 0);
-    if (override) return override.rate;
-  } catch (_) {}
-  return getBOBRate();
+    const rec = records.find(r => r?.rate > 0);
+    if (rec) override = rec.rate;
+  } catch (_) { /* sin override → solo derivada */ }
+
+  // El override solo puede SUBIR la tasa por encima del piso derivado.
+  const useOverride = override != null && override > derivedRate;
+  const bobPerUsdc  = useOverride ? override : derivedRate;
+
+  return {
+    bobPerUsdc,
+    marketRate,
+    spreadPct,
+    derivedRate,
+    override,
+    source: useOverride ? 'admin_override' : 'binance_p2p+spread',
+  };
 }
 
 /**
