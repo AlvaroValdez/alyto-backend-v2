@@ -721,6 +721,7 @@ router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
 import { cleanupOrphanTransactions } from '../jobs/cleanupOrphanTransactions.js';
 import { reconcileHarborTransfers }  from '../jobs/reconcileHarborTransfers.js';
 import { rosMonitor }                from '../jobs/rosMonitor.js';
+import { rosMonitorWallet }          from '../jobs/rosMonitorWallet.js';
 import ROSAlert                      from '../models/ROSAlert.js';
 
 /**
@@ -759,11 +760,12 @@ router.post('/reconcile-harbor', async (req, res) => {
  */
 router.get('/ros/alerts', async (req, res) => {
   try {
-    const { page = 1, limit = 20, status, severity, userId } = req.query;
+    const { page = 1, limit = 20, status, severity, userId, source } = req.query;
     const filter = {};
     if (status)   filter.status   = status;
     if (severity) filter.severity = severity;
     if (userId)   filter.userId   = userId;
+    if (source)   filter.source   = source;
 
     const [alerts, total] = await Promise.all([
       ROSAlert.find(filter)
@@ -827,8 +829,8 @@ router.patch('/ros/alerts/:alertId', async (req, res) => {
  */
 router.post('/ros/run', async (req, res) => {
   try {
-    const stats = await rosMonitor();
-    res.json({ stats, runAt: new Date() });
+    const [crossborder, wallet] = await Promise.all([rosMonitor(), rosMonitorWallet()]);
+    res.json({ stats: { crossborder, wallet }, runAt: new Date() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

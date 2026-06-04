@@ -33,6 +33,8 @@ const JOBS = {
   // Registrarlo permitiría dispararlo por Lambda → doble ejecución. Ver server.js.
   'ros-monitor': () =>
     import('./rosMonitor.js').then((m) => m.rosMonitor),
+  'ros-monitor-wallet': () =>
+    import('./rosMonitorWallet.js').then((m) => m.rosMonitorWallet),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
 };

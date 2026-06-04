@@ -52,10 +52,21 @@ const rosAlertSchema = new mongoose.Schema({
     default: 'medium',
   },
 
-  /** IDs de transacciones que evidencian el patrón */
+  /**
+   * Origen de la alerta:
+   *   crossborder — transacciones cross-border (Transaction) — rosMonitor
+   *   wallet      — transferencias de wallet P2P (WalletTransaction) — rosMonitorWallet
+   */
+  source: {
+    type:    String,
+    enum:    ['crossborder', 'wallet'],
+    default: 'crossborder',
+    index:   true,
+  },
+
+  /** IDs de transacciones que evidencian el patrón (Transaction o WalletTransaction según source) */
   transactionIds: [{
     type: mongoose.Schema.Types.ObjectId,
-    ref:  'Transaction',
   }],
 
   /** Datos numéricos de evidencia (montos, conteos, etc.) */

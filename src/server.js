@@ -686,6 +686,12 @@ async function startServer() {
       setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
       console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
 
+      // P4 — Monitor ROS/UIF sobre transferencias de wallet (P2P BOB+USDC)
+      const { rosMonitorWallet } = await import('./jobs/rosMonitorWallet.js');
+      setTimeout(rosMonitorWallet, 4 * 60 * 1000);              // primera corrida 4 min post-start
+      setInterval(rosMonitorWallet, 6 * 60 * 60 * 1000);        // cada 6h
+      console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
