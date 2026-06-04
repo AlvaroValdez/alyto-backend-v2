@@ -32,8 +32,7 @@ import { normalizeAlias } from './aliasController.js'
 
 // Comisión P2P USDC — configurable desde WalletFeeConfig (P3). Arranca en 0
 // (config deshabilitada) para efecto red; se activa el cobro desde admin.
-async function calcUsdcP2pFee(amount, accountType) {
-  const cfg = await WalletFeeConfig.getSingleton()
+function feeFromConfig(cfg, amount, accountType) {
   if (!cfg.usdcP2pEnabled) return 0
   if (cfg.usdcP2pFreeBelow > 0 && amount < cfg.usdcP2pFreeBelow) return 0
 
@@ -42,10 +41,15 @@ async function calcUsdcP2pFee(amount, accountType) {
   const fixed = isBiz ? cfg.businessUsdcP2pFeeFixed   : cfg.usdcP2pFeeFixed
 
   let fee = amount * (pct / 100) + fixed
-  if (cfg.usdcP2pFeeMin > 0)                          fee = Math.max(fee, cfg.usdcP2pFeeMin)
+  if (cfg.usdcP2pFeeMin > 0)                              fee = Math.max(fee, cfg.usdcP2pFeeMin)
   if (cfg.usdcP2pFeeMax != null && cfg.usdcP2pFeeMax > 0) fee = Math.min(fee, cfg.usdcP2pFeeMax)
   fee = Math.min(fee, amount)            // sanidad: nunca cobrar más que el monto
   return Math.round(fee * 1e6) / 1e6     // redondeo a 6 decimales
+}
+
+async function calcUsdcP2pFee(amount, accountType) {
+  const cfg = await WalletFeeConfig.getSingleton()
+  return feeFromConfig(cfg, amount, accountType)
 }
 
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
@@ -742,7 +746,29 @@ export async function getUSDCTransferQuote(req, res) {
 export async function executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source }) {
   const biz = (status, message) => Object.assign(new Error(message), { httpStatus: status })
 
-  const fee   = await calcUsdcP2pFee(amount, sender.accountType)
+  const cfg   = await WalletFeeConfig.getSingleton(session)
+  const isBiz = sender.accountType === 'business'
+
+  // ── Límites (P4) ─────────────────────────────────────────────────────────────
+  const minTx    = cfg.usdcP2pMinPerTx ?? 1
+  const maxTx    = isBiz ? cfg.businessUsdcP2pMaxPerTx : cfg.usdcP2pMaxPerTx
+  const maxDaily = isBiz ? cfg.businessUsdcP2pMaxDaily : cfg.usdcP2pMaxDaily
+
+  if (amount < minTx)            throw biz(400, `El monto mínimo de envío es ${minTx} USDC.`)
+  if (maxTx > 0 && amount > maxTx) throw biz(400, `El máximo por transferencia es ${maxTx} USDC.`)
+  if (maxDaily > 0) {
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const agg = await WalletTransaction.aggregate([
+      { $match: { userId: sender._id, type: 'send', currency: 'USDC', status: 'completed', createdAt: { $gte: since24h } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]).session(session)
+    const sent24h = agg[0]?.total ?? 0
+    if (sent24h + amount > maxDaily) {
+      throw biz(400, `Superás tu límite diario de ${maxDaily} USDC (enviado hoy: ${sent24h.toFixed(2)}).`)
+    }
+  }
+
+  const fee   = feeFromConfig(cfg, amount, sender.accountType)
   const total = amount + fee
 
   // Secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
@@ -802,7 +828,6 @@ export async function executeUsdcP2pTransfer(session, { sender, recipient, amoun
   // Comisión → ledger de revenue interno (solo si fee > 0). El USDC de la comisión
   // queda en el pool custodial; revenueAccruedUsdc registra el saldo de Alyto.
   if (fee > 0) {
-    const cfg       = await WalletFeeConfig.getSingleton(session)
     const revBefore = cfg.revenueAccruedUsdc ?? 0
     await WalletFeeConfig.updateOne({ _id: 'singleton' }, { $inc: { revenueAccruedUsdc: fee } }, { session })
     await WalletTransaction.create([{
@@ -848,10 +873,7 @@ export async function sendUSDC(req, res) {
       await session.abortTransaction()
       return res.status(400).json({ error: 'recipientAlias y amount (> 0) son requeridos.' })
     }
-    if (amount < 1) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El monto mínimo de envío es 1 USDC.' })
-    }
+    // Límites (mín/máx por-tx, diario) se enforce en executeUsdcP2pTransfer (config).
 
     const { recipient, error } = await resolveRecipientByAlias(recipientAlias)
     if (error) {

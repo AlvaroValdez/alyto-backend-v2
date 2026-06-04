@@ -21,6 +21,11 @@ const EDITABLE = [
   'usdcP2pFreeBelow',
   'businessUsdcP2pFeePercent',
   'businessUsdcP2pFeeFixed',
+  'usdcP2pMinPerTx',
+  'usdcP2pMaxPerTx',
+  'usdcP2pMaxDaily',
+  'businessUsdcP2pMaxPerTx',
+  'businessUsdcP2pMaxDaily',
 ]
 
 // ─── GET /api/v1/admin/wallet-fees ───────────────────────────────────────────

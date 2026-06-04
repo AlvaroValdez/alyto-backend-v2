@@ -31,6 +31,18 @@ const walletFeeConfigSchema = new mongoose.Schema({
   businessUsdcP2pFeePercent:{ type: Number, default: 0, min: 0 },
   businessUsdcP2pFeeFixed:  { type: Number, default: 0, min: 0 },
 
+  // ── Límites USDC P2P (0 = sin límite, salvo el mínimo) ───────────────────────
+  /** Mínimo por envío en USDC. */
+  usdcP2pMinPerTx:          { type: Number, default: 1,     min: 0 },
+  /** Máximo por transacción (retail). 0 = sin límite. */
+  usdcP2pMaxPerTx:          { type: Number, default: 1000,  min: 0 },
+  /** Máximo acumulado diario (retail). 0 = sin límite. */
+  usdcP2pMaxDaily:          { type: Number, default: 2000,  min: 0 },
+  /** Máximo por transacción (business). */
+  businessUsdcP2pMaxPerTx:  { type: Number, default: 5000,  min: 0 },
+  /** Máximo acumulado diario (business). */
+  businessUsdcP2pMaxDaily:  { type: Number, default: 10000, min: 0 },
+
   // ── Revenue acumulada (ledger interno) ───────────────────────────────────────
   /** USDC total acumulado por comisiones P2P (cuenta de revenue interna). */
   revenueAccruedUsdc:       { type: Number, default: 0, min: 0 },

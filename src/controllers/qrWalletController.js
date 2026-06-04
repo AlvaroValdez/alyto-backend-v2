@@ -119,10 +119,11 @@ export async function scanAndPayQR(req, res) {
     const asset = payload.asset ?? 'BOB';
     if (asset === 'USDC') {
       const finalAmount = payload.type === 'deposit' ? Number(overrideAmount) : Number(payload.amount);
-      if (!Number.isFinite(finalAmount) || finalAmount < 1) {
+      if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
         await session.abortTransaction();
-        return res.status(400).json({ error: 'Monto inválido. Mínimo 1 USDC.' });
+        return res.status(400).json({ error: 'Monto inválido.' });
       }
+      // Límites (mín/máx por-tx, diario) se enforce en executeUsdcP2pTransfer.
       const recipient = await User.findById(payload.creatorUserId)
         .select('_id firstName lastName alytoAlias legalEntity accountType').lean();
       if (!recipient || recipient.legalEntity !== 'SRL') {
