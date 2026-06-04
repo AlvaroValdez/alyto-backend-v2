@@ -28,6 +28,8 @@ import {
   TagResourceCommand,
 } from '@aws-sdk/client-kms';
 
+import crypto from 'node:crypto';
+
 import { Keypair, TransactionBuilder, Operation, Networks } from '@stellar/stellar-sdk';
 
 import {
@@ -56,16 +58,78 @@ const USER_KEYPAIR_KMS_KEY_ID = process.env.USER_KEYPAIR_KMS_KEY_ID
   ?? process.env.AWS_SECRETS_KMS_KEY_ID
   ?? 'alias/aws/secretsmanager'; // default: KMS key gestionada por AWS
 
+// ─── Fallback de custodia testnet-only (sin KMS) ─────────────────────────────
+//
+// AWS es solo-VPS (producción/mainnet). Staging (Render, testnet) NO tiene KMS,
+// por lo que no podría provisionar keypairs custodiales. Este fallback cifra la
+// secretKey con AES-256-GCM usando una clave local de entorno, EXCLUSIVAMENTE en
+// testnet y bajo opt-in explícito. Producción (mainnet) sigue 100% KMS.
+//
+// Blindaje (hard-gated): se activa solo si CUSTODY_KMS_FALLBACK=true Y la red es
+// testnet. Si el flag está activo en mainnet → lanza (prohibido). Los ciphertext
+// de fallback llevan prefijo 'FB1:' para detectarlos; mainnet rechaza descifrarlos.
+
+const FALLBACK_PREFIX = 'FB1:';
+
+/**
+ * Indica si el fallback de custodia testnet-only está activo.
+ * @throws si el flag está activo en una red que NO es testnet (prohibición mainnet).
+ */
+function isKmsFallbackActive() {
+  const flagOn    = process.env.CUSTODY_KMS_FALLBACK === 'true';
+  const isTestnet = NETWORK_PASSPHRASE === Networks.TESTNET;
+  if (flagOn && !isTestnet) {
+    throw new Error(
+      '[custody] CUSTODY_KMS_FALLBACK activo pero la red NO es testnet — ' +
+      'el fallback sin KMS está PROHIBIDO en mainnet. Abortando.',
+    );
+  }
+  return flagOn && isTestnet;
+}
+
+/** Deriva una clave AES-256 determinística desde CUSTODY_FALLBACK_KEY. */
+function getFallbackKey() {
+  const secret = process.env.CUSTODY_FALLBACK_KEY;
+  if (!secret || secret.length < 16) {
+    throw new Error('[custody] CUSTODY_FALLBACK_KEY no configurada o < 16 chars (requerida para el fallback testnet).');
+  }
+  return crypto.createHash('sha256').update(secret, 'utf8').digest();
+}
+
+function fallbackEncrypt(secretKey, userId) {
+  const iv     = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getFallbackKey(), iv);
+  cipher.setAAD(Buffer.from(`${userId}:alyto-stellar-custody`, 'utf8'));
+  const enc = Buffer.concat([cipher.update(secretKey, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return FALLBACK_PREFIX + Buffer.concat([iv, tag, enc]).toString('base64');
+}
+
+function fallbackDecrypt(stored, userId) {
+  const raw      = Buffer.from(stored.slice(FALLBACK_PREFIX.length), 'base64');
+  const iv       = raw.subarray(0, 12);
+  const tag      = raw.subarray(12, 28);
+  const enc      = raw.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', getFallbackKey(), iv);
+  decipher.setAAD(Buffer.from(`${userId}:alyto-stellar-custody`, 'utf8'));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+}
+
 // ─── Utilidades KMS ─────────────────────────────────────────────────────────
 
 /**
- * Cifra una secretKey usando AWS KMS.
+ * Cifra una secretKey usando AWS KMS (o el fallback testnet-only si está activo).
  * Retorna el ciphertext en base64.
  * @param {string} secretKey - S... (56 chars)
  * @param {string} userId    - MongoDB ObjectId del usuario (contexto de cifrado)
  * @returns {Promise<string>} ciphertext en base64
  */
 async function encryptSecretKey(secretKey, userId) {
+  if (isKmsFallbackActive()) {
+    logger.warn('[custody] Cifrando secretKey con FALLBACK testnet (sin KMS)', { userId: String(userId) });
+    return fallbackEncrypt(secretKey, userId);
+  }
   const kms = getKmsClient();
   const cmd = new EncryptCommand({
     KeyId:             USER_KEYPAIR_KMS_KEY_ID,
@@ -78,11 +142,19 @@ async function encryptSecretKey(secretKey, userId) {
 
 /**
  * Descifra una secretKey almacenada en base64 usando AWS KMS.
+ * Si el ciphertext lleva prefijo de fallback ('FB1:'), usa el descifrado local
+ * testnet-only (rechazado en mainnet).
  * @param {string} ciphertextBase64 - valor almacenado en User.stellarAccount.secretKeyCiphertext
  * @param {string} userId
  * @returns {Promise<string>} secretKey en texto plano — usar inmediatamente, no almacenar
  */
 async function decryptSecretKey(ciphertextBase64, userId) {
+  if (ciphertextBase64.startsWith(FALLBACK_PREFIX)) {
+    if (NETWORK_PASSPHRASE !== Networks.TESTNET) {
+      throw new Error('[custody] Ciphertext de fallback detectado en red NO testnet — abortando descifrado.');
+    }
+    return fallbackDecrypt(ciphertextBase64, userId);
+  }
   const kms = getKmsClient();
   const cmd = new DecryptCommand({
     CiphertextBlob:    Buffer.from(ciphertextBase64, 'base64'),
