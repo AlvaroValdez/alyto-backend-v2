@@ -726,13 +726,75 @@ async function generateComprobanteOnCompletion(transaction) {
 export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
-  // Guard idempotencia: si ya tiene transferId, no procesar de nuevo
+  // Guard idempotencia: si ya tiene transferId Y el USDC ya fue enviado → abortar.
+  // Si el USDC NO fue enviado (stellarTxHash vacío), permitir reintento del envío Stellar
+  // reutilizando el transfer existente (memo idempotente vía _findTransactionByMemo).
   if (transaction.harborTransfer?.transferId) {
-    console.warn('[tryOwlPayV2] Transfer ya existe para esta tx, abortando duplicado:', {
+    const usdcAlreadySent = !!transaction.stellarTxHash;
+    if (usdcAlreadySent) {
+      console.warn('[tryOwlPayV2] Transfer ya procesado (USDC ya enviado) — abortando:', {
+        transactionId:      transaction.alytoTransactionId,
+        existingTransferId: transaction.harborTransfer.transferId,
+      });
+      return;
+    }
+
+    // Transfer creado pero USDC no enviado — reenviar solamente (idempotente via memo)
+    console.info('[tryOwlPayV2] Reintentando USDC send para transfer existente:', {
       transactionId: transaction.alytoTransactionId,
-      existingTransferId: transaction.harborTransfer.transferId,
+      transferId:    transaction.harborTransfer.transferId,
     });
-    return;
+
+    const retryAddress = transaction.harborTransfer.instructionAddress;
+    const retryMemo    = transaction.harborTransfer.instructionMemo;
+    const retryAmount  = transaction.harborTransfer.usdcAmountRequired ?? netAmountUSD;
+
+    if (!retryAddress || !retryMemo) {
+      throw new Error(
+        `[Harbor] Retry USDC: faltan instruction_address/memo en harborTransfer ` +
+        `(tx: ${transaction.alytoTransactionId})`,
+      );
+    }
+
+    const usdcSendEnabled = ['true', '1'].includes(process.env.OWLPAY_USDC_SEND_ENABLED ?? '');
+    if (!usdcSendEnabled) {
+      console.warn('[tryOwlPayV2] Retry USDC: OWLPAY_USDC_SEND_ENABLED=0 — sin acción');
+      return { provider: 'owlpay', status: 'payout_pending_usdc_send', transferId: transaction.harborTransfer.transferId };
+    }
+
+    const stellarResult = await sendUSDCToHarbor({
+      destinationAddress: retryAddress,
+      amount:             retryAmount,
+      memo:               retryMemo,
+      transactionId:      transaction.alytoTransactionId,
+    });
+
+    transaction.stellarTxHash = stellarResult.hash;
+    transaction.status        = 'payout_sent';
+    transaction.statusReason  = null;
+    transaction.ipnLog.push({
+      provider:   'stellar',
+      eventType:  'usdc_sent_to_harbor',
+      status:     'payout_sent',
+      rawPayload: {
+        hash:     stellarResult.hash,
+        ledger:   stellarResult.ledger,
+        amount:   retryAmount,
+        memo:     retryMemo,
+        existing: stellarResult.existing ?? false,
+        retry:    true,
+      },
+      receivedAt: new Date(),
+    });
+    await transaction.save();
+
+    console.log('[OwlPay] USDC sent (retry):', stellarResult.hash);
+    return {
+      provider:    'owlpay',
+      status:      'payout_sent',
+      transferId:  transaction.harborTransfer.transferId,
+      stellarHash: stellarResult.hash,
+    };
   }
 
   // ── STEP 0: Validar que el NETO USDC esté en el rango que Harbor acepta ───

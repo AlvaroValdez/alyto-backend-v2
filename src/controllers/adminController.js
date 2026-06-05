@@ -589,7 +589,7 @@ export async function updateTransactionStatus(req, res) {
   if (newStatus === 'payin_confirmed') {
     // Disparar dispatch si el payin fue confirmado manualmente (desde payin_pending)
     // o si el admin re-confirma para reintentar tras insufficient USDC (desde pending_funding).
-    const DISPATCH_FROM = ['payin_pending', 'pending_funding'];
+    const DISPATCH_FROM = ['payin_pending', 'pending_funding', 'payout_pending_usdc_send'];
     if (!DISPATCH_FROM.includes(previousStatus)) {
       console.warn('[Admin] dispatchPayout bloqueado — status ya avanzado:', {
         transactionId: transaction.alytoTransactionId,
