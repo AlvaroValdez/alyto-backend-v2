@@ -2346,6 +2346,11 @@ export async function handleOwlPayIPN(req, res) {
       if (externalReference) {
         transaction = await Transaction.findOne({ alytoTransactionId: externalReference });
       }
+      // Secondary: application_transfer_uuid es nuestro ALY-* ID enviado al crear el transfer.
+      // Harbor lo incluye en transfer.status.* pero a veces omite external_reference.
+      if (!transaction && applicationTransferId) {
+        transaction = await Transaction.findOne({ alytoTransactionId: applicationTransferId });
+      }
       // Fallback: Harbor's own transfer ID stored in harborTransfer sub-schema
       if (!transaction && transferId) {
         transaction = await Transaction.findOne({
@@ -2556,6 +2561,28 @@ export async function handleOwlPayIPN(req, res) {
         const user = await User.findById(transaction.userId).lean();
         if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
       } catch (e) { console.error('[OwlPay IPN] Error email expired:', e.message); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // transfer.status.* — Harbor notifica cambio de estado interno.
+    // No requiere acción Alyto pero actualizamos harborTransfer.status.
+    // ═══════════════════════════════════════════════════════════════════════
+    else if (event?.startsWith('transfer.status.')) {
+      const harborStatus = event.replace('transfer.status.', '');
+      if (transaction.harborTransfer) {
+        transaction.harborTransfer.status = harborStatus;
+        // Guardar Harbor transferId si no lo tenemos aún (race condition en creación)
+        if (!transaction.harborTransfer.transferId && transferId) {
+          transaction.harborTransfer.transferId = transferId;
+          transaction.payoutReference = transferId;
+        }
+        await transaction.save();
+      }
+      console.info('[Alyto IPN/OwlPay] Harbor status update.', {
+        transactionId: transaction.alytoTransactionId,
+        harborStatus,
+        event,
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════════
