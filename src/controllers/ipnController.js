@@ -905,6 +905,16 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
 
   console.log('[OwlPay] Quote created:', quoteId);
 
+  // ── DEBUG: Para US, loguear requirements schema para auditar enum state_province ──
+  if ((corridor.destinationCountry ?? '').toUpperCase() === 'US') {
+    getRequirementsSchema(quoteId, 'US')
+      .then(s => {
+        const schemaStr = JSON.stringify(s?.schema ?? s?.raw ?? s);
+        console.log('[Harbor DEBUG US requirements]', schemaStr.slice(0, 2000));
+      })
+      .catch(e => console.warn('[Harbor DEBUG US requirements] fetch falló:', e.message));
+  }
+
   // ── STEP C: Build beneficiary from stored form values ────────────────────
   // Schema fetching removed — form fields are defined statically in owlPayForms.js.
   // buildOwlPayBeneficiary reads from transaction.beneficiary.dynamicFields.
