@@ -603,7 +603,7 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
     };
   }
 
-  console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, beneficiaryName, payout_instrument });
+  console.log('[OwlPay] buildOwlPayBeneficiary:', { dest, beneficiaryName, payout_instrument, beneficiary_address: beneficiary_info?.beneficiary_address });
 
   return {
     beneficiary_info,
