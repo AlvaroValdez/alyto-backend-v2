@@ -436,8 +436,12 @@ function buildOwlPayBeneficiary(rawBeneficiary, schema, destCountry, paymentMeth
     if (!city)   throw new Error(`[Harbor] city requerido en beneficiary_address (${countryCode})`);
     if (!postal) throw new Error(`[Harbor] postal_code requerido en beneficiary_address (${countryCode})`);
 
-    // state_province requerido por impl Harbor; fallback al country code
-    // para países sin estados/provincias reales (HK, SG, etc.)
+    // state_province: Harbor valida contra enum. Para US exige abreviatura de estado (CA, NY…);
+    // el fallback countryCode='US' no es un estado válido → lanzar error explícito.
+    // Para países sin subdivisiones reales (HK, SG, NG…) el country code es aceptado por Harbor.
+    if (!state && countryCode === 'US') {
+      throw new Error('[Harbor] state_province requerido para US (ej. CA, NY, TX)');
+    }
     const stateProvince = state || countryCode;
 
     return {

@@ -97,12 +97,47 @@ export { SUPPORTED_METHODS_BY_COUNTRY };
 export const HARBOR_FORM_FIELDS = {
 
   // ── US: ACH_PUSH / DOMESTIC_WIRE / FEDWIRE / WIRE — mismo schema ─────────
+  // Harbor valida beneficiary_address.state_province contra enum de abreviaturas
+  // de estados. Los 4 campos de dirección son requeridos por Harbor (verificado).
   US: [
-    { key: 'account_holder_name', label: 'Nombre completo del titular', type: 'text',  required: true,  placeholder: 'John Doe' },
-    { key: 'bank_name',           label: 'Nombre del banco',            type: 'text',  required: true,  placeholder: 'Bank of America' },
-    { key: 'account_number',      label: 'Número de cuenta',            type: 'text',  required: true,  placeholder: '123456789012' },
-    { key: 'routing_number',      label: 'Routing Number (ABA)',        type: 'text',  required: true,  placeholder: '021000021',
+    { key: 'account_holder_name', label: 'Nombre completo del titular', type: 'text',   required: true,  placeholder: 'John Doe' },
+    { key: 'bank_name',           label: 'Nombre del banco',            type: 'text',   required: true,  placeholder: 'Bank of America' },
+    { key: 'account_number',      label: 'Número de cuenta',            type: 'text',   required: true,  placeholder: '123456789012' },
+    { key: 'routing_number',      label: 'Routing Number (ABA)',        type: 'text',   required: true,  placeholder: '021000021',
       hint: '9 dígitos — identifica al banco en EEUU', min: 9, max: 9, pattern: '^[0-9]{9}$' },
+    { key: 'street',              label: 'Dirección del beneficiario',  type: 'text',   required: true,  placeholder: '123 Main St, Apt 4B' },
+    { key: 'city',                label: 'Ciudad',                      type: 'text',   required: true,  placeholder: 'New York' },
+    { key: 'state_province',      label: 'Estado',                      type: 'select', required: true,  placeholder: 'Selecciona un estado',
+      options: [
+        { value: 'AL', label: 'Alabama' }, { value: 'AK', label: 'Alaska' },
+        { value: 'AZ', label: 'Arizona' }, { value: 'AR', label: 'Arkansas' },
+        { value: 'CA', label: 'California' }, { value: 'CO', label: 'Colorado' },
+        { value: 'CT', label: 'Connecticut' }, { value: 'DE', label: 'Delaware' },
+        { value: 'DC', label: 'District of Columbia' }, { value: 'FL', label: 'Florida' },
+        { value: 'GA', label: 'Georgia' }, { value: 'HI', label: 'Hawaii' },
+        { value: 'ID', label: 'Idaho' }, { value: 'IL', label: 'Illinois' },
+        { value: 'IN', label: 'Indiana' }, { value: 'IA', label: 'Iowa' },
+        { value: 'KS', label: 'Kansas' }, { value: 'KY', label: 'Kentucky' },
+        { value: 'LA', label: 'Louisiana' }, { value: 'ME', label: 'Maine' },
+        { value: 'MD', label: 'Maryland' }, { value: 'MA', label: 'Massachusetts' },
+        { value: 'MI', label: 'Michigan' }, { value: 'MN', label: 'Minnesota' },
+        { value: 'MS', label: 'Mississippi' }, { value: 'MO', label: 'Missouri' },
+        { value: 'MT', label: 'Montana' }, { value: 'NE', label: 'Nebraska' },
+        { value: 'NV', label: 'Nevada' }, { value: 'NH', label: 'New Hampshire' },
+        { value: 'NJ', label: 'New Jersey' }, { value: 'NM', label: 'New Mexico' },
+        { value: 'NY', label: 'New York' }, { value: 'NC', label: 'North Carolina' },
+        { value: 'ND', label: 'North Dakota' }, { value: 'OH', label: 'Ohio' },
+        { value: 'OK', label: 'Oklahoma' }, { value: 'OR', label: 'Oregon' },
+        { value: 'PA', label: 'Pennsylvania' }, { value: 'RI', label: 'Rhode Island' },
+        { value: 'SC', label: 'South Carolina' }, { value: 'SD', label: 'South Dakota' },
+        { value: 'TN', label: 'Tennessee' }, { value: 'TX', label: 'Texas' },
+        { value: 'UT', label: 'Utah' }, { value: 'VT', label: 'Vermont' },
+        { value: 'VA', label: 'Virginia' }, { value: 'WA', label: 'Washington' },
+        { value: 'WV', label: 'West Virginia' }, { value: 'WI', label: 'Wisconsin' },
+        { value: 'WY', label: 'Wyoming' },
+      ] },
+    { key: 'postal_code',         label: 'Código Postal (ZIP)',         type: 'text',   required: true,  placeholder: '10001',
+      hint: '5 dígitos (o ZIP+4: 10001-1234)', min: 5, max: 10, pattern: '^[0-9]{5}(-[0-9]{4})?$' },
   ],
 
   // ── EU / Eurozona: WIRE (SEPA deshabilitado por bug Harbor) ───────────────
