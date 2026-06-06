@@ -35,7 +35,7 @@ export async function upsertExchangeRate(req, res) {
 
     // Admin siempre guarda como 'manual' — distingue overrides de valores auto-computados
     const source = 'manual';
-    const normalizedPair = pair.trim().toUpperCase();
+    const normalizedPair = pair.trim().toUpperCase().replace('/', '-');
 
     // Leer tasa actual para guardar en previousRate
     const existing = await ExchangeRate.findOne({ pair: normalizedPair });

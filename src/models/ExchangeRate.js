@@ -54,7 +54,7 @@ const exchangeRateSchema = new Schema(
      */
     source: {
       type:    String,
-      enum:    ['manual', 'binance_p2p', 'api', 'calculated'],
+      enum:    ['manual', 'binance_p2p', 'binance_p2p_auto', 'api', 'calculated'],
       default: 'manual',
     },
 
