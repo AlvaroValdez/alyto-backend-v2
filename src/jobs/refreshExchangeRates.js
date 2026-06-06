@@ -1,13 +1,11 @@
 /**
- * refreshExchangeRates.js — Job de actualización automática de tasas BOB/USDT
+ * refreshExchangeRates.js — Job de actualización automática de tasas BOB/USDT y BOB/USDC
  *
- * Consulta Binance P2P cada 30 min y actualiza MongoDB ExchangeRate con la
- * mediana del mercado, marcando source='binance_p2p_auto'.
- *
- * Esto garantiza que getBOBRate() siempre tenga una tasa fresca aunque el
- * admin no actualice manualmente el panel.
- *
- * El admin puede seguir sobreescribiendo con BOB/USDC para margen USDC específico.
+ * Consulta Binance P2P cada 30 min y actualiza MongoDB ExchangeRate:
+ *   - BOB-USDT: mediana de mercado, source='binance_p2p_auto'
+ *   - BOB-USDC: BOB-USDT × (1 + spread%), source='binance_p2p_auto'
+ *     Solo actualiza BOB-USDC si el documento existente NO tiene source='manual'
+ *     (preserva overrides manuales del admin).
  *
  * Triggers:
  *   - setInterval en server.js cada 30 min (primera corrida 90s post-start)
@@ -15,6 +13,8 @@
 
 import ExchangeRate           from '../models/ExchangeRate.js';
 import { fetchBOBUSDTRate }   from '../services/binanceP2PService.js';
+
+const round6 = n => Math.round(n * 1e6) / 1e6;
 
 export async function refreshExchangeRates() {
   console.log('[RefreshRates] Iniciando actualización de tasa BOB/USDT desde Binance P2P…');
@@ -27,6 +27,7 @@ export async function refreshExchangeRates() {
     return;
   }
 
+  // ── BOB-USDT ─────────────────────────────────────────────────────────────────
   try {
     const result = await ExchangeRate.findOneAndUpdate(
       { pair: 'BOB-USDT' },
@@ -45,7 +46,38 @@ export async function refreshExchangeRates() {
       '| source:', result.source);
 
   } catch (err) {
-    // MongoDB error no cancela el job — siguiente corrida lo reintentará
-    console.error('[RefreshRates] Error actualizando MongoDB:', err.message);
+    console.error('[RefreshRates] Error actualizando BOB-USDT en MongoDB:', err.message);
+  }
+
+  // ── BOB-USDC (derivada = BOB-USDT × (1 + spread%)) ───────────────────────────
+  // Solo actualiza si no hay un override manual del admin. Los overrides manuales
+  // tienen source='manual' y deben permanecer intactos hasta que el admin los borre.
+  try {
+    const existing = await ExchangeRate.findOne({ pair: 'BOB-USDC' }).lean();
+    if (existing?.source === 'manual') {
+      console.log('[RefreshRates] BOB-USDC tiene override manual (', existing.rate,
+        ') — no se sobreescribe');
+    } else {
+      const spreadPct     = parseFloat(process.env.USDC_CONVERT_SPREAD_PCT ?? process.env.FX_BUFFER_PCT ?? '2');
+      const derivedBOBUSDC = round6(rate * (1 + spreadPct / 100));
+
+      const result = await ExchangeRate.findOneAndUpdate(
+        { pair: 'BOB-USDC' },
+        {
+          $set: {
+            rate:      derivedBOBUSDC,
+            source:    'binance_p2p_auto',
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true, returnDocument: 'after' },
+      );
+
+      console.log('[RefreshRates] BOB-USDC actualizado en MongoDB:',
+        result.rate, '| spread:', spreadPct + '%',
+        '| market:', rate, '| source:', result.source);
+    }
+  } catch (err) {
+    console.error('[RefreshRates] Error actualizando BOB-USDC en MongoDB:', err.message);
   }
 }

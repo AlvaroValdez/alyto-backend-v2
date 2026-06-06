@@ -72,6 +72,7 @@ import {
   listExchangeRates,
   getCLPBOBRate,
   updateCLPBOBRate,
+  deleteBOBUSDCOverride,
 } from '../controllers/exchangeRateController.js';
 import {
   listKYBApplications,
@@ -383,9 +384,16 @@ router.patch('/exchange-rates/clp-bob', updateCLPBOBRate);
 /**
  * POST /api/v1/admin/exchange-rates
  * Crea o actualiza la tasa para un par (upsert). Guarda previousRate automáticamente.
- * Body: { pair, rate, source?, note? }
+ * Body: { pair, rate, note? }
  */
 router.post('/exchange-rates', upsertExchangeRate);
+
+/**
+ * DELETE /api/v1/admin/exchange-rates/bob-usdc-override
+ * Elimina el override manual BOB-USDC y vuelve al auto-computado (job ≤ 30 min).
+ * Falla si no hay override manual activo.
+ */
+router.delete('/exchange-rates/bob-usdc-override', deleteBOBUSDCOverride);
 
 /**
  * GET /api/v1/admin/exchange-rates

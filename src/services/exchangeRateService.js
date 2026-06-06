@@ -130,7 +130,10 @@ export async function getBOBUSDCRateDetailed() {
     const records = await ExchangeRate.find({
       pair: { $in: ['BOB-USDC', 'BOB/USDC'] },
     }).sort({ updatedAt: -1 }).lean();
-    const rec = records.find(r => r?.rate > 0);
+    // Solo cuenta como override si el admin lo fijó manualmente (source='manual').
+    // Los registros source='binance_p2p_auto' son para visibilidad en el panel,
+    // no deben interferir con la derivación live.
+    const rec = records.find(r => r?.rate > 0 && r.source === 'manual');
     if (rec) override = rec.rate;
   } catch (_) { /* sin override → solo derivada */ }
 

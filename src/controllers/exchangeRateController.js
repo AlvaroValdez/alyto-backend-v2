@@ -7,6 +7,7 @@
  */
 
 import ExchangeRate from '../models/ExchangeRate.js';
+import { getBOBUSDCRateDetailed } from '../services/exchangeRateService.js';
 
 // ─── POST /api/v1/admin/exchange-rates ───────────────────────────────────────
 
@@ -22,7 +23,7 @@ import ExchangeRate from '../models/ExchangeRate.js';
  */
 export async function upsertExchangeRate(req, res) {
   try {
-    const { pair, rate, source = 'manual', note } = req.body;
+    const { pair, rate, note } = req.body;
 
     if (!pair || rate == null) {
       return res.status(400).json({ error: 'Faltan campos requeridos: pair, rate' });
@@ -32,6 +33,8 @@ export async function upsertExchangeRate(req, res) {
       return res.status(400).json({ error: 'rate debe ser mayor a 0' });
     }
 
+    // Admin siempre guarda como 'manual' — distingue overrides de valores auto-computados
+    const source = 'manual';
     const normalizedPair = pair.trim().toUpperCase();
 
     // Leer tasa actual para guardar en previousRate
@@ -84,6 +87,24 @@ export async function listExchangeRates(req, res) {
     const rates = await ExchangeRate.find({})
       .sort({ pair: 1 })
       .populate('updatedBy', 'name email');
+
+    // Inyectar BOB/USDC calculada si no hay override manual en DB.
+    // Así el frontend siempre recibe la tasa real vigente con source correcto.
+    const hasBobUsdcOverride = rates.some(r => ['BOB-USDC', 'BOB/USDC'].includes(r.pair));
+    if (!hasBobUsdcOverride) {
+      try {
+        const detail = await getBOBUSDCRateDetailed();
+        rates.push({
+          pair:       'BOB/USDC',
+          rate:       detail.bobPerUsdc,
+          source:     detail.source,           // 'binance_p2p+spread'
+          marketRate: detail.marketRate,
+          spreadPct:  detail.spreadPct,
+          computed:   true,                    // flag: no es documento DB
+          updatedAt:  new Date(),
+        });
+      } catch (_) { /* si falla no bloquear la lista */ }
+    }
 
     return res.status(200).json({ rates });
   } catch (err) {
@@ -213,6 +234,47 @@ export async function updateCLPBOBRate(req, res) {
   } catch (err) {
     console.error('[ExchangeRate] Error updateCLPBOBRate:', err);
     return res.status(500).json({ error: 'Error interno al actualizar tasas CLP-BOB.' });
+  }
+}
+
+// ─── DELETE /api/v1/admin/exchange-rates/bob-usdc-override ───────────────────
+
+/**
+ * Elimina el override manual de BOB-USDC y vuelve al auto-computado (job cada 30 min).
+ * Si no hay override manual, responde 404.
+ */
+export async function deleteBOBUSDCOverride(req, res) {
+  try {
+    const doc = await ExchangeRate.findOne({ pair: 'BOB-USDC' }).lean();
+
+    if (!doc) {
+      return res.status(404).json({ error: 'No existe ningún registro BOB-USDC en la base de datos.' });
+    }
+
+    if (doc.source !== 'manual') {
+      return res.status(400).json({
+        error: 'El registro BOB-USDC actual no es un override manual.',
+        source: doc.source,
+        rate: doc.rate,
+      });
+    }
+
+    await ExchangeRate.deleteOne({ pair: 'BOB-USDC' });
+
+    console.log(
+      `[ExchangeRate] Override manual BOB-USDC eliminado (era ${doc.rate}) ` +
+      `por userId=${req.user._id}. Próximo refresh del job restaurará el auto-computado.`,
+    );
+
+    return res.status(200).json({
+      success:          true,
+      deleted:          true,
+      previousRate:     doc.rate,
+      message:          'Override eliminado. El job refreshExchangeRates restaurará la tasa auto-computada en la próxima corrida (≤ 30 min).',
+    });
+  } catch (err) {
+    console.error('[ExchangeRate] Error al eliminar override BOB-USDC:', err);
+    return res.status(500).json({ error: 'Error interno al eliminar el override.' });
   }
 }
 
