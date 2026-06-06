@@ -65,6 +65,7 @@ import {
   getWalletFeeConfig,
   updateWalletFeeConfig,
   getWalletFeeRevenue,
+  harvestRevenueToTreasury,
 } from '../controllers/walletFeeController.js';
 import {
   upsertExchangeRate,
@@ -353,11 +354,13 @@ router.patch('/funding/intents/:intentId/cancel', cancelFundingIntent);
 
 /**
  * Comisiones de wallet (P3 USDC P2P).
- * GET  /api/v1/admin/wallet-fees          — config actual
- * PUT  /api/v1/admin/wallet-fees          — actualizar comisiones
- * GET  /api/v1/admin/wallet-fees/revenue  — revenue acumulada + verificación
+ * GET  /api/v1/admin/wallet-fees                  — config actual
+ * PUT  /api/v1/admin/wallet-fees                  — actualizar comisiones
+ * GET  /api/v1/admin/wallet-fees/revenue           — revenue acumulada + verificación
+ * POST /api/v1/admin/wallet-fees/harvest-revenue   — cosecha revenue → tesorería SRL (?dryRun=true)
  */
 router.get('/wallet-fees/revenue', getWalletFeeRevenue);
+router.post('/wallet-fees/harvest-revenue', harvestRevenueToTreasury);
 router.get('/wallet-fees', getWalletFeeConfig);
 router.put('/wallet-fees', updateWalletFeeConfig);
 

@@ -266,6 +266,56 @@ export async function hasCustodialKeypair(userId) {
   return !!user?.stellarAccount?.publicKey;
 }
 
+/**
+ * Envía USDC desde una wallet custodial de usuario a una dirección Stellar destino.
+ * Patrón Fee Bump: la channelAccount (STELLAR_MASTER_SECRET) paga los fees XLM.
+ *
+ * Uso principal: harvest de revenue P2P hacia la tesorería SRL.
+ *
+ * @param {string}        userId             — MongoDB ObjectId del usuario (para KMS)
+ * @param {string}        sourcePublicKey    — Public key Stellar del usuario
+ * @param {string}        destinationPublicKey — Destino (ej. STELLAR_SRL_PUBLIC_KEY)
+ * @param {string|number} amount             — Monto USDC (se normaliza a 7 decimales)
+ * @returns {Promise<string>} Hash de la transacción Stellar enviada
+ */
+export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPublicKey, amount) {
+  const userKeypair    = await getUserKeypair(userId);
+  const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
+  const sourceAccount  = await horizonServer.loadAccount(sourcePublicKey);
+
+  const innerTx = new TransactionBuilder(sourceAccount, {
+    fee:               PRIORITY_FEE_STROOPS,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(Operation.payment({
+      destination: destinationPublicKey,
+      asset:       ASSETS.USDC,
+      amount:      parseFloat(amount).toFixed(7),
+    }))
+    .setTimeout(TX_TIMEOUT_SECONDS)
+    .build();
+
+  innerTx.sign(userKeypair);
+
+  const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+    channelKeypair,
+    PRIORITY_FEE_STROOPS,
+    innerTx,
+    NETWORK_PASSPHRASE,
+  );
+  feeBumpTx.sign(channelKeypair);
+
+  const result = await horizonServer.submitTransaction(feeBumpTx);
+  logger.info('[custody] sendCustodialUSDC OK', {
+    userId:      String(userId),
+    source:      sourcePublicKey,
+    destination: destinationPublicKey,
+    amount:      parseFloat(amount).toFixed(7),
+    txHash:      result.hash,
+  });
+  return result.hash;
+}
+
 // ─── Operaciones Stellar internas ────────────────────────────────────────────
 
 /**
