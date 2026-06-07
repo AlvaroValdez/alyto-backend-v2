@@ -553,10 +553,11 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
           swift_code:          get('bic') ?? must('swift_code', 'BIC/SWIFT'),
         };
       }
-      // SEPA default
+      // SEPA: Harbor requiere swift_code (BIC) además de IBAN
       return {
         account_holder_name: holder(),
         account_number:      iban ?? must('iban', 'IBAN'),
+        swift_code:          get('bic') ?? must('swift_code', 'BIC/SWIFT'),
       };
     }
 
@@ -570,8 +571,9 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
         sort_code:           must('sort_code'),
       };
 
-    // ── US: ACH_PUSH, DOMESTIC_WIRE, FEDWIRE, WIRE — todos mismo schema ──────
+    // ── US: ACH_PUSH, DOMESTIC_WIRE, FEDWIRE — routing_number (ABA) ──────────
     // required: account_holder_name, bank_name, account_number, routing_number (^[0-9]{9}$)
+    // NOTA: WIRE internacional (US) usa swift_code — se filtra en harborMethodSupport (no soportado)
     case 'US': {
       const routing = must('routing_number');
       // Validar formato ABA routing (9 dígitos) ANTES de enviar — un routing mal
@@ -587,16 +589,16 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
       };
     }
 
-    // ── AE: FTS, AANI, BANK-TRANSFER — mismo schema ──────────────────────────
-    // required: account_holder_name, phone_number (^\+971[0-9]{8,9}$),
-    //           swift_code, account_number (IBAN ^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$)
-    // NOTA: NO incluye bank_name
+    // ── AE: BANK-TRANSFER — schema verificado 2026-06-06 ─────────────────────
+    // required: account_holder_name, account_number, swift_code
+    // beneficiary_info requiere además: beneficiary_dob, beneficiary_id_doc_number
+    // (se envían desde tryOwlPayV2 vía beneficiary.dateOfBirth/documentNumber)
+    // NOTA: phone_number fue eliminado del schema por Harbor (rechaza como campo extra)
     case 'AE': {
       return {
         account_holder_name: holder(),
-        phone_number:        must('phone_number'),
-        swift_code:          must('swift_code'),
         account_number:      get('iban') ?? must('account_number'),
+        swift_code:          must('swift_code'),
       };
     }
 
@@ -665,8 +667,8 @@ export async function createHarborTransfer({
     destination: {
       beneficiary_info: {
         beneficiary_name:          `${beneficiary.firstName ?? ''} ${beneficiary.lastName ?? ''}`.trim(),
-        beneficiary_dob:           beneficiary.dateOfBirth ?? beneficiary.dob ?? '1990-01-01',
-        beneficiary_id_doc_number: beneficiary.documentNumber ?? beneficiary.idDocNumber ?? '',
+        beneficiary_dob:           df.beneficiary_dob          ?? beneficiary.dateOfBirth ?? beneficiary.dob         ?? '1990-01-01',
+        beneficiary_id_doc_number: df.beneficiary_id_doc_number ?? beneficiary.documentNumber ?? beneficiary.idDocNumber ?? '',
         beneficiary_address: {
           street:  beneficiary.address?.street  ?? beneficiary.address     ?? 'N/A',
           city:    beneficiary.address?.city    ?? 'N/A',

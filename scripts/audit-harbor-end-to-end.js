@@ -64,18 +64,16 @@ const TEST_CASES = [
     payout:    { mx_clabe: '646180157000000004' },
   },
   {
-    label:     'AE FTS',
-    country:   'AE', currency: 'AED', amount: 100, methodPref: 'FTS',
+    // Schema AE verificado 2026-06-06: payout={account_holder_name, account_number, swift_code}
+    // beneficiary_info requiere: beneficiary_dob + beneficiary_id_doc_number
+    // phone_number ELIMINADO del schema por Harbor
+    label:     'AE BANK-TRANSFER',
+    country:   'AE', currency: 'AED', amount: 100, methodPref: 'BANK-TRANSFER',
     addr:      { street: 'Sheikh Zayed Rd', city: 'Dubai', state_province: 'DU', country: 'AE', postal_code: '00000' },
     benefName: 'Ahmed Al Rashidi',
-    payout:    { account_holder_name: 'Ahmed Al Rashidi', phone_number: '+971501234567', swift_code: 'EBILAEAD', account_number: 'AE070331234567890123456' },
-  },
-  {
-    label:     'AE AANI',
-    country:   'AE', currency: 'AED', amount: 100, methodPref: 'AANI',
-    addr:      { street: 'Sheikh Zayed Rd', city: 'Dubai', state_province: 'DU', country: 'AE', postal_code: '00000' },
-    benefName: 'Ahmed Al Rashidi',
-    payout:    { account_holder_name: 'Ahmed Al Rashidi', phone_number: '+971501234567', swift_code: 'EBILAEAD', account_number: 'AE070331234567890123456' },
+    benefDob:  '1985-03-15',
+    benefIdDoc:'784-1985-1234567-1',
+    payout:    { account_holder_name: 'Ahmed Al Rashidi', account_number: 'AE070331234567890123456', swift_code: 'EBILAEAD' },
   },
   // HK CHATS removido — no disponible para nuestro customer en sandbox.
   {
@@ -108,7 +106,8 @@ const TEST_CASES = [
     country:   'DE', currency: 'EUR', amount: 100, methodPref: 'SEPA',
     addr:      { street: 'Hauptstraße 15', city: 'Berlin', country: 'DE', postal_code: '10115' },
     benefName: 'Hans Müller',
-    payout:    { account_holder_name: 'Hans Müller', account_number: 'DE89370400440532013000' },
+    // Harbor requiere swift_code (BIC) también en SEPA (confirmado 2026-06-07)
+    payout:    { account_holder_name: 'Hans Müller', account_number: 'DE89370400440532013000', swift_code: 'COBADEFFXXX' },
   },
   {
     label:     'EU WIRE',
@@ -117,6 +116,45 @@ const TEST_CASES = [
     benefName: 'Hans Müller',
     payout:    { account_holder_name: 'Hans Müller', bank_name: 'Commerzbank', account_number: 'DE89370400440532013000', swift_code: 'COBADEFFXXX' },
   },
+  {
+    // mínimo GB = $120 (confirmado en este run 2026-06-06)
+    label:     'GB FPS',
+    country:   'GB', currency: 'GBP', amount: 150, methodPref: 'FPS',
+    addr:      { street: '10 Downing St', city: 'London', state_province: 'ENG', country: 'GB', postal_code: 'SW1A2AA' },
+    benefName: 'James Smith',
+    payout:    { account_holder_name: 'James Smith', account_number: '12345678', sort_code: '20-00-00' },
+  },
+  {
+    // mínimo JP = $120 (confirmado en este run 2026-06-06)
+    label:     'JP BANK-TRANSFER',
+    country:   'JP', currency: 'JPY', amount: 150, methodPref: 'BANK-TRANSFER',
+    addr:      { street: '1-1 Marunouchi', city: 'Tokyo', state_province: 'TKY', country: 'JP', postal_code: '100-0005' },
+    benefName: 'Yamamoto Taro',
+    payout:    { account_holder_name: 'Yamamoto Taro', bank_name: 'Mitsubishi UFJ Bank', account_number: '1234567', swift_code: 'BOTKJPJTXXX' },
+  },
+  {
+    label:     'JP WIRE',
+    country:   'JP', currency: 'JPY', amount: 150, methodPref: 'WIRE',
+    addr:      { street: '1-1 Marunouchi', city: 'Tokyo', state_province: 'TKY', country: 'JP', postal_code: '100-0005' },
+    benefName: 'Yamamoto Taro',
+    payout:    { account_holder_name: 'Yamamoto Taro', bank_name: 'Mitsubishi UFJ Bank', account_number: '1234567', swift_code: 'BOTKJPJTXXX' },
+  },
+  {
+    label:     'US ACH_PUSH',
+    country:   'US', currency: 'USD', amount: 50, methodPref: 'ACH_PUSH',
+    addr:      { street: '123 Main St', city: 'Los Angeles', state_province: 'CA', country: 'US', postal_code: '90001' },
+    benefName: 'John Smith',
+    payout:    { account_holder_name: 'John Smith', bank_name: 'Bank of America', account_number: '123456789012', routing_number: '021000021' },
+  },
+  {
+    label:     'US DOMESTIC_WIRE',
+    country:   'US', currency: 'USD', amount: 50, methodPref: 'DOMESTIC_WIRE',
+    addr:      { street: '123 Main St', city: 'Los Angeles', state_province: 'CA', country: 'US', postal_code: '90001' },
+    benefName: 'John Smith',
+    payout:    { account_holder_name: 'John Smith', bank_name: 'Bank of America', account_number: '123456789012', routing_number: '021000021' },
+  },
+  // US WIRE = internacional (requiere SWIFT) — diferente a ACH_PUSH/DOMESTIC_WIRE (ABA routing)
+  // Filtrado de SUPPORTED_HARBOR_METHODS.US — no se usa en producción Alyto
 ];
 
 const results = [];

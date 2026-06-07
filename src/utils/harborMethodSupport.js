@@ -13,7 +13,8 @@
 
 const SUPPORTED_METHODS_BY_COUNTRY = {
   CN: ['CIPS', 'WIRE'],
-  EU: ['WIRE'],                                     // SEPA deshabilitado por bug Harbor
+  // SEPA deshabilitado — Harbor requiere swift_code en SEPA también (2026-06-07); reactivar post e2e real
+  EU: ['WIRE'],
   DE: ['WIRE'], FR: ['WIRE'], ES: ['WIRE'], IT: ['WIRE'],
   NL: ['WIRE'], BE: ['WIRE'], PT: ['WIRE'], AT: ['WIRE'],
   PL: ['WIRE'], SE: ['WIRE'], CH: ['WIRE'], NO: ['WIRE'],
@@ -27,7 +28,7 @@ const SUPPORTED_METHODS_BY_COUNTRY = {
   JP: ['BANK-TRANSFER', 'WIRE'],
   SG: ['BANK-TRANSFER'],
   IN: ['IMPS'],
-  US: ['ACH_PUSH', 'DOMESTIC_WIRE', 'FEDWIRE', 'WIRE'],
+  US: ['ACH_PUSH', 'DOMESTIC_WIRE', 'FEDWIRE'],
 };
 
 /**
@@ -205,14 +206,18 @@ export const HARBOR_FORM_FIELDS = {
     { key: 'account_number', label: 'Número de cuenta bancaria', type: 'text', required: true, placeholder: '12345678901' },
   ],
 
-  // ── AE: FTS / AANI / BANK-TRANSFER ───────────────────────────────────────
+  // ── AE: BANK-TRANSFER — schema Harbor verificado 2026-06-06 ──────────────
+  // payout_instrument: { account_holder_name, account_number, swift_code }
+  // beneficiary_info:  { + beneficiary_dob, beneficiary_id_doc_number } (requeridos)
   AE: [
-    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'Mohammed Al Rashid' },
-    { key: 'phone_number',        label: 'Teléfono UAE',       type: 'tel',  required: true, placeholder: '+971501234567',
-      hint: 'Número local UAE: +971 seguido de 8-9 dígitos', pattern: '^\\+971[0-9]{8,9}$' },
-    { key: 'swift_code',          label: 'Código SWIFT',       type: 'text', required: true, placeholder: 'EBILAEAD', min: 8, max: 11 },
-    { key: 'account_number',      label: 'IBAN UAE',           type: 'text', required: true, placeholder: 'AE070331234567890123456',
-      hint: 'IBAN formato: AE + 2 dígitos + 19 caracteres', min: 23, max: 23 },
+    { key: 'account_holder_name',      label: 'Nombre del titular',            type: 'text', required: true, placeholder: 'Mohammed Al Rashid' },
+    { key: 'account_number',           label: 'IBAN UAE',                      type: 'text', required: true, placeholder: 'AE070331234567890123456',
+      hint: 'Formato: AE + 2 dígitos + 19 caracteres', min: 23, max: 23 },
+    { key: 'swift_code',               label: 'Código SWIFT / BIC',            type: 'text', required: true, placeholder: 'EBILAEAD', min: 8, max: 11 },
+    { key: 'beneficiary_dob',          label: 'Fecha de nacimiento',           type: 'text', required: true, placeholder: 'YYYY-MM-DD',
+      hint: 'Formato: año-mes-día (ej. 1990-01-15)', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+    { key: 'beneficiary_id_doc_number', label: 'Número de documento de identidad', type: 'text', required: true, placeholder: 'A12345678',
+      hint: 'Pasaporte, Emirates ID u otro documento oficial' },
   ],
 
   // ── SG: BANK-TRANSFER ─────────────────────────────────────────────────────
