@@ -834,6 +834,74 @@ router.post('/vita/force-complete', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/v1/admin/regenerate-comprobante
+ * Regenera el comprobante PDF de una tx SRL completada.
+ * Útil cuando la generación fire-and-forget falló silenciosamente.
+ * Body: { transactionId: "ALY-C-..." }
+ */
+router.post('/regenerate-comprobante', async (req, res) => {
+  const { transactionId } = req.body;
+  if (!transactionId) return res.status(400).json({ error: 'transactionId requerido' });
+
+  try {
+    const Transaction = (await import('../models/Transaction.js')).default;
+    const tx = await Transaction.findOne({ alytoTransactionId: transactionId });
+    if (!tx) return res.status(404).json({ error: 'Transacción no encontrada' });
+    if (tx.legalEntity !== 'SRL') return res.status(400).json({ error: 'Solo aplica para transacciones SRL' });
+    if (tx.status !== 'completed') return res.status(400).json({ error: `Estado: ${tx.status} — solo se puede regenerar en completed` });
+
+    const User = (await import('../models/User.js')).default;
+    const { generarNumeroCorrelativo } = await import('../utils/correlativoService.js');
+    const { generateOfficialReceipt }  = await import('../utils/pdfGenerator.js');
+    const { uploadBuffer }             = await import('../services/storageService.js');
+
+    const user = await User.findById(tx.userId).lean();
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const numeroComprobante = tx.boliviaCompliance?.numeroComprobante
+      ?? await generarNumeroCorrelativo('BOL');
+
+    const digital    = tx.digitalAssetAmount ?? 0;
+    const tipoCambio = digital > 0
+      ? Number((tx.originalAmount / digital).toFixed(6))
+      : (tx.conversionRate?.rate ?? 0);
+    const comisionServicio = tx.feeBreakdown?.alytoFee ?? tx.feeBreakdown?.totalDeducted ?? 0;
+
+    const dto = {
+      numeroComprobante,
+      nombreCliente:        user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
+      nitOci:               user.taxId ?? user.identityDocument?.number ?? 'NO REGISTRADO',
+      tipoDocumento:        user.taxId ? 'NIT' : 'CI',
+      codigoClienteAlyto:   user._id.toString(),
+      fechaHora:            (tx.createdAt ?? new Date()).toISOString(),
+      tipoOperacion:        'Liquidación de Activo Digital',
+      txid:                 tx.stellarTxId ?? 'PENDIENTE',
+      montoFiatRecibido:    tx.originalAmount,
+      tipoDeCambio:         tipoCambio,
+      montoActivoEntregado: digital,
+      comisionServicio,
+      totalLiquidado:       tx.originalAmount - comisionServicio,
+    };
+
+    const { buffer, filename } = await generateOfficialReceipt(dto);
+    const s3Key  = `pdfs/bolivia/${numeroComprobante}_${filename}`;
+    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+
+    await Transaction.findByIdAndUpdate(tx._id, {
+      $set: {
+        'boliviaCompliance.comprobanteUrl':         url,
+        'boliviaCompliance.numeroComprobante':      numeroComprobante,
+        'boliviaCompliance.comprobanteGeneratedAt': new Date(),
+      },
+    });
+
+    res.json({ ok: true, transactionId, comprobanteUrl: url, numeroComprobante });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack?.split('\n').slice(0, 5) });
+  }
+});
+
 // ─── ROS / UIF Bolivia ────────────────────────────────────────────────────────
 
 /**

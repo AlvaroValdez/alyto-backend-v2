@@ -21,6 +21,7 @@
  */
 
 import PDFDocument from 'pdfkit';
+import QRCode      from 'qrcode';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
   resolveLogoPath, formatBOB, formatUSDC, cleanEnvValue, stellarExplorerTxUrl,
@@ -68,7 +69,7 @@ function validarDTO(data) {
  * @param {TransaccionBoliviaDTO} data
  * @returns {Promise<Buffer>}
  */
-function buildPDF(data) {
+function buildPDF(data, qrBuffer) {
   return new Promise((resolve, reject) => {
     const doc    = new PDFDocument({ size: 'A4', margin: 50 });
     const chunks = [];
@@ -203,18 +204,40 @@ function buildPDF(data) {
     doc.moveDown(0.2);
 
     // Link de verificación en Stellar Expert — exigido por el skill
+    const explorerUrl = stellarExplorerTxUrl(data.txid);
     doc
       .font('Helvetica')
       .fontSize(8)
       .fillColor(COLOR_ACCENT)
       .text(
-        `Verificable en: ${stellarExplorerTxUrl(data.txid)}`,
+        `Verificable en: ${explorerUrl}`,
         marginL,
         doc.y,
-        { link: stellarExplorerTxUrl(data.txid), underline: true },
+        { link: explorerUrl, underline: true },
       );
 
-    doc.moveDown(0.8);
+    doc.moveDown(0.5);
+
+    // QR code de verificación Stellar — escanear para abrir en Stellar Expert
+    if (qrBuffer && data.txid !== 'PENDIENTE') {
+      const qrSize = 70;
+      const qrX    = marginL;
+      const qrY    = doc.y;
+      doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
+      doc
+        .font('Helvetica')
+        .fontSize(7)
+        .fillColor(COLOR_GRAY)
+        .text(
+          'Escanear para verificar en Stellar Explorer',
+          qrX + qrSize + 8,
+          qrY + (qrSize / 2) - 10,
+          { width: contentW - qrSize - 8 },
+        );
+      doc.y = qrY + qrSize + 4;
+    }
+
+    doc.moveDown(0.5);
     drawSeparator(doc);
     doc.moveDown(0.5);
 
@@ -353,7 +376,21 @@ export async function generateOfficialReceipt(data) {
   try {
     validarDTO(data);
 
-    const buffer = await buildPDF(data);
+    // Generar QR de verificación Stellar (best-effort: no falla el PDF si el QR falla)
+    let qrBuffer = null;
+    if (data.txid && data.txid !== 'PENDIENTE') {
+      try {
+        const explorerUrl = stellarExplorerTxUrl(data.txid);
+        qrBuffer = await QRCode.toBuffer(explorerUrl, {
+          type:   'png',
+          width:  200,
+          margin: 1,
+          color:  { dark: '#1D3461', light: '#FFFFFF' },
+        });
+      } catch { /* QR opcional — no bloquea */ }
+    }
+
+    const buffer = await buildPDF(data, qrBuffer);
 
     // Nombre de archivo sugerido según normativa del skill
     const fecha    = new Date(data.fechaHora).toISOString().slice(0, 10).replace(/-/g, '');
