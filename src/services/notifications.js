@@ -73,10 +73,10 @@ export async function sendPushNotification(userId, notification) {
     return null;
   }
 
-  // ── 1. Buscar usuario y sus tokens FCM ───────────────────────────────────
+  // ── 1. Buscar usuario, tokens FCM y preferencias ─────────────────────────
   let user;
   try {
-    user = await User.findById(userId).select('fcmTokens').lean();
+    user = await User.findById(userId).select('fcmTokens preferences').lean();
   } catch (err) {
     console.error('[Alyto FCM] Error buscando usuario para notificación:', {
       userId: userId?.toString(),
@@ -86,6 +86,14 @@ export async function sendPushNotification(userId, notification) {
   }
 
   if (!user?.fcmTokens?.length) return; // Sin dispositivos registrados — salida silenciosa
+
+  // Respetar preferencia del usuario — undefined/true = enviar, false = no enviar
+  if (user.preferences?.notifications?.push === false) {
+    console.info('[FCM] Push deshabilitado por preferencia del usuario — omitido.', {
+      userId: userId?.toString(),
+    });
+    return;
+  }
 
   // ── 2. Enviar a cada token en paralelo ───────────────────────────────────
   const staleTokens = [];
