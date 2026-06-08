@@ -2573,6 +2573,14 @@ export async function getTransactionStatus(req, res) {
     // staging=testnet) para que el link a Stellar Expert no dependa de VITE.
     stellarTxId:       transaction.stellarTxId ?? null,
     stellarNetwork:    process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet',
+    // Comprobante Oficial SRL Bolivia — URL del PDF generado al completar (S3/R2)
+    boliviaCompliance: transaction.boliviaCompliance
+      ? {
+          comprobanteUrl:        transaction.boliviaCompliance.comprobanteUrl        ?? null,
+          numeroComprobante:     transaction.boliviaCompliance.numeroComprobante     ?? null,
+          comprobanteGeneratedAt: transaction.boliviaCompliance.comprobanteGeneratedAt ?? null,
+        }
+      : null,
     // Confianza en la tasa y historial de ajustes (MSA Section 4.2 — UI Liability)
     rateConfidence:    transaction.rateConfidence ?? null,
     rateHistory:       (transaction.rateHistory ?? []).map(h => ({
