@@ -710,7 +710,7 @@ export const EMAILS = {
   walletDepositConfirmed(user, { amount, currency, newBalance, wtxId }) {
     return [
       user.email,
-      process.env.SENDGRID_TEMPLATE_DEPOSIT_CONFIRMED,
+      process.env.SENDGRID_TEMPLATE_DEPOSIT_CONFIRMED ?? process.env.SENDGRID_TEMPLATE_COMPLETED,
       {
         userName:     user.firstName,
         amount:       formatCurrency(amount, currency),

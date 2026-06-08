@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Depósito acreditado — Alyto</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background-color: #F0F4F8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0D1F3C; }
+    .wrapper { max-width: 580px; margin: 32px auto; padding: 0 16px 32px; }
+    .card { background: #FFFFFF; border-radius: 16px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .header { background: #1D3461; padding: 28px 32px 24px; text-align: center; }
+    .header-logo { color: #FFFFFF; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .header-subtitle { color: rgba(255,255,255,0.7); font-size: 12px; margin-top: 4px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .success-banner { background: #22C55E; padding: 20px 32px; text-align: center; }
+    .success-icon { font-size: 36px; margin-bottom: 6px; }
+    .success-title { color: #FFFFFF; font-size: 18px; font-weight: 800; }
+    .success-sub { color: rgba(255,255,255,0.85); font-size: 13px; margin-top: 4px; }
+    .body { padding: 28px 32px; }
+    .greeting { font-size: 16px; font-weight: 600; color: #0D1F3C; margin-bottom: 8px; }
+    .intro { font-size: 14px; color: #4A5568; line-height: 1.6; margin-bottom: 24px; }
+    .section-title { font-size: 11px; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px; }
+    .amount-box { background: #22C55E0D; border: 1.5px solid #22C55E40; border-radius: 12px; padding: 18px 20px; margin-bottom: 20px; text-align: center; }
+    .amount-box .label { font-size: 12px; font-weight: 600; color: #166534; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .amount-box .value { font-size: 32px; font-weight: 900; color: #166534; }
+    .info-box { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 16px 18px; margin-bottom: 20px; }
+    .info-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid #F0F4F8; font-size: 13.5px; }
+    .info-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .info-row .label { color: #4A5568; font-weight: 500; }
+    .info-row .value { color: #0D1F3C; font-weight: 600; text-align: right; }
+    .balance-box { background: #1D346108; border: 1.5px solid #1D346133; border-radius: 10px; padding: 14px 18px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+    .balance-box .label { font-size: 13px; font-weight: 600; color: #1D3461; }
+    .balance-box .value { font-size: 18px; font-weight: 800; color: #1D3461; }
+    .divider { height: 1px; background: #E2E8F0; margin: 20px 0; }
+    .footer-section { padding: 0 32px 28px; }
+    .support-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .support-link { flex: 1; min-width: 140px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 14px; text-align: center; text-decoration: none; font-size: 12.5px; color: #1D3461; font-weight: 600; }
+    .footer-note { font-size: 11px; color: #94A3B8; text-align: center; margin-top: 20px; line-height: 1.5; }
+    @media (max-width: 480px) {
+      .body, .footer-section { padding-left: 20px; padding-right: 20px; }
+      .success-banner { padding: 20px; }
+      .support-link { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="card">
+
+    <!-- HEADER -->
+    <div class="header">
+      <div class="header-logo">Alyto</div>
+      <div class="header-subtitle">Notificación de depósito</div>
+    </div>
+
+    <!-- SUCCESS BANNER -->
+    <div class="success-banner">
+      <div class="success-icon">✓</div>
+      <div class="success-title">¡Depósito acreditado!</div>
+      <div class="success-sub">Tu saldo fue actualizado exitosamente</div>
+    </div>
+
+    <!-- BODY -->
+    <div class="body">
+      <p class="greeting">Hola {{userName}},</p>
+      <p class="intro">
+        Tu depósito ha sido verificado y acreditado en tu billetera Alyto. El saldo ya está disponible para usar.
+      </p>
+
+      <!-- Monto acreditado -->
+      <div class="section-title">Monto acreditado</div>
+      <div class="amount-box">
+        <div class="label">Depósito recibido</div>
+        <div class="value">{{amount}}</div>
+      </div>
+
+      <!-- Saldo actual -->
+      <div class="section-title">Saldo actualizado</div>
+      <div class="balance-box">
+        <span class="label">Saldo disponible en {{currency}}</span>
+        <span class="value">{{newBalance}}</span>
+      </div>
+
+      <!-- Detalle -->
+      <div class="section-title">Detalle de la operación</div>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="label">ID de transacción</span>
+          <span class="value" style="font-family:monospace; font-size:12px;">{{wtxId}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Moneda</span>
+          <span class="value">{{currency}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Fecha y hora</span>
+          <span class="value">{{confirmedAt}}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider" style="margin:0;"></div>
+
+    <!-- FOOTER -->
+    <div class="footer-section">
+      <p style="font-size:13px; color:#4A5568; margin-bottom:14px; margin-top:20px;">¿Tienes alguna duda? Contáctanos:</p>
+      <div class="support-row">
+        <a href="mailto:{{supportEmail}}" class="support-link">✉ {{supportEmail}}</a>
+        <a href="https://wa.me/56988321490" class="support-link">💬 WhatsApp</a>
+      </div>
+      <p class="footer-note">
+        Alyto es operado por AV Finance SRL — Bolivia<br>
+        Este correo es transaccional y no requiere respuesta directa.
+      </p>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

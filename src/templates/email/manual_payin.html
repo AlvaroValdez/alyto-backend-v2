@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Instrucciones de pago — Alyto</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background-color: #F0F4F8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0D1F3C; }
+    .wrapper { max-width: 580px; margin: 32px auto; padding: 0 16px 32px; }
+    .card { background: #FFFFFF; border-radius: 16px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .header { background: #1D3461; padding: 28px 32px 24px; text-align: center; }
+    .header-logo { color: #FFFFFF; font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .header-subtitle { color: rgba(255,255,255,0.7); font-size: 12px; margin-top: 4px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .body { padding: 28px 32px; }
+    .greeting { font-size: 16px; font-weight: 600; color: #0D1F3C; margin-bottom: 8px; }
+    .intro { font-size: 14px; color: #4A5568; line-height: 1.6; margin-bottom: 24px; }
+    .section-title { font-size: 11px; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px; }
+    .info-box { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 16px 18px; margin-bottom: 20px; }
+    .info-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 7px 0; border-bottom: 1px solid #F0F4F8; font-size: 13.5px; }
+    .info-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .info-row .label { color: #4A5568; font-weight: 500; flex: 1; }
+    .info-row .value { color: #0D1F3C; font-weight: 600; text-align: right; flex: 1; word-break: break-all; }
+    .highlight-box { background: #1D346108; border: 1.5px solid #1D346133; border-radius: 10px; padding: 16px 18px; margin-bottom: 20px; }
+    .highlight-box .label { font-size: 11px; font-weight: 700; color: #1D3461; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .highlight-box .value { font-size: 22px; font-weight: 800; color: #1D3461; }
+    .ref-box { background: #22C55E10; border: 1.5px solid #22C55E40; border-radius: 10px; padding: 14px 18px; margin-bottom: 20px; }
+    .ref-box .label { font-size: 11px; font-weight: 700; color: #166534; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .ref-box .value { font-size: 18px; font-weight: 800; color: #166534; letter-spacing: 1px; font-family: monospace; }
+    .ref-box .note { font-size: 11.5px; color: #4A5568; margin-top: 6px; line-height: 1.5; }
+    .warn-box { background: #FEF3C7; border: 1px solid #F59E0B40; border-radius: 10px; padding: 12px 16px; margin-bottom: 20px; font-size: 12.5px; color: #78350F; line-height: 1.5; }
+    .divider { height: 1px; background: #E2E8F0; margin: 20px 0; }
+    .footer-section { padding: 0 32px 28px; }
+    .support-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .support-link { flex: 1; min-width: 140px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 14px; text-align: center; text-decoration: none; font-size: 12.5px; color: #1D3461; font-weight: 600; }
+    .footer-note { font-size: 11px; color: #94A3B8; text-align: center; margin-top: 20px; line-height: 1.5; }
+    @media (max-width: 480px) {
+      .body, .footer-section { padding-left: 20px; padding-right: 20px; }
+      .info-row { flex-direction: column; gap: 2px; }
+      .info-row .value { text-align: left; }
+      .support-link { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="card">
+
+    <!-- HEADER -->
+    <div class="header">
+      <div class="header-logo">Alyto</div>
+      <div class="header-subtitle">Instrucciones de transferencia</div>
+    </div>
+
+    <!-- BODY -->
+    <div class="body">
+      <p class="greeting">Hola {{userName}},</p>
+      <p class="intro">
+        Tu solicitud de pago internacional fue registrada exitosamente.
+        Para completarla, debes realizar una transferencia bancaria a la cuenta de AV Finance SRL con los datos a continuación.
+      </p>
+
+      <!-- Monto a transferir -->
+      <div class="section-title">Monto a transferir</div>
+      <div class="highlight-box">
+        <div class="label">Total a depositar</div>
+        <div class="value">{{originAmount}}</div>
+      </div>
+
+      <!-- Cuenta destino (AV Finance SRL) -->
+      <div class="section-title">Datos de la cuenta receptora</div>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="label">Banco</span>
+          <span class="value">{{bankName}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Titular</span>
+          <span class="value">{{accountHolder}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Número de cuenta</span>
+          <span class="value">{{accountNumber}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Tipo de cuenta</span>
+          <span class="value">{{accountType}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Moneda</span>
+          <span class="value">{{currency}}</span>
+        </div>
+      </div>
+
+      <!-- Referencia OBLIGATORIA -->
+      <div class="section-title">Referencia del pago</div>
+      <div class="ref-box">
+        <div class="label">Concepto / Referencia (OBLIGATORIO)</div>
+        <div class="value">{{reference}}</div>
+        <div class="note">⚠️ Debes incluir este código exactamente en el concepto u observación de tu transferencia. Sin él, no podemos identificar tu pago.</div>
+      </div>
+
+      <!-- Beneficiario que recibirá el dinero -->
+      <div class="section-title">Beneficiario del envío</div>
+      <div class="info-box">
+        <div class="info-row">
+          <span class="label">Nombre</span>
+          <span class="value">{{beneficiaryName}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Banco</span>
+          <span class="value">{{beneficiaryBank}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Cuenta</span>
+          <span class="value">{{beneficiaryAccount}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">País destino</span>
+          <span class="value">{{destinationCountry}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Recibirá aprox.</span>
+          <span class="value">{{destinationAmount}} {{destinationCurrency}}</span>
+        </div>
+      </div>
+
+      <!-- Nota -->
+      <div class="warn-box">
+        Una vez que realices la transferencia, sube el comprobante en la app para que nuestro equipo pueda verificarla y procesar el pago. El tiempo de acreditación es de 1 a 2 días hábiles.
+      </div>
+
+      <div class="info-box" style="font-size:12.5px; color:#4A5568;">
+        <div class="info-row">
+          <span class="label">ID de operación</span>
+          <span class="value" style="font-family:monospace; font-size:12px;">{{transactionId}}</span>
+        </div>
+        <div class="info-row">
+          <span class="label">Fecha de solicitud</span>
+          <span class="value">{{createdAt}}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider" style="margin:0;"></div>
+
+    <!-- FOOTER -->
+    <div class="footer-section">
+      <p style="font-size:13px; color:#4A5568; margin-bottom:14px; margin-top:20px;">¿Tienes alguna duda? Contáctanos:</p>
+      <div class="support-row">
+        <a href="mailto:{{supportEmail}}" class="support-link">✉ {{supportEmail}}</a>
+        <a href="https://wa.me/{{supportWhatsapp}}" class="support-link">💬 WhatsApp</a>
+      </div>
+      <p class="footer-note">
+        Alyto es operado por AV Finance SRL — Bolivia<br>
+        Este correo es transaccional y no requiere respuesta directa.
+      </p>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
