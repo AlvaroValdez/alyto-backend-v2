@@ -100,7 +100,7 @@ router.get('/usdc/deposit-instructions',  protect, requireKycApproved, getDeposi
 router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTransactions)
 router.get('/usdc/transfer-quote',        protect, requireKycApproved, getUSDCTransferQuote)
 router.post('/usdc/send',                 protect, requireKycApproved, checkSanctions, idempotencyCheck, sendUSDC)
-router.post('/usdc/convert-bob',          protect, requireKycApproved, idempotencyCheck, requestBOBtoUSDC)
+router.post('/usdc/convert-bob',          protect, requireKycApproved, checkSanctions, idempotencyCheck, requestBOBtoUSDC)
 
 // ─── Alias Alyto (@usuario) — P2P USDC P1 ────────────────────────────────────
 router.get('/alias/available', protect, checkAliasAvailable)
