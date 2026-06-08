@@ -395,6 +395,26 @@ const RULES_CACHE_TTL_MS   = 60 * 60 * 1000;  // 1 hour
 // Nota: VITA_COUNTRY_KEY_MAP y getVitaCountryKey importados desde vitaWalletService.js
 
 /**
+ * Resuelve un banco a nombre legible usando el cache de withdrawal rules de Vita.
+ * Vita usa códigos numéricos reales que difieren de los fallbacks estáticos;
+ * el cache se popula cuando el usuario abre el formulario del corredor.
+ * Si el cache no tiene la entrada (ej. primer arranque), devuelve el código crudo.
+ */
+function lookupBankName(country, bankCode) {
+  if (!bankCode || !country) return bankCode ?? '';
+  // Buscar en todas las entradas del cache que correspondan al país
+  for (const [cacheKey, cached] of withdrawalRulesCache.entries()) {
+    if (!cacheKey.startsWith(country + ':') && !cacheKey.startsWith(country.toLowerCase() + ':')) continue;
+    const fields = cached?.payload?.fields ?? [];
+    const bankField = fields.find(f => f.key === 'bank_code');
+    if (!bankField?.options) continue;
+    const match = bankField.options.find(o => String(o.value) === String(bankCode));
+    if (match?.label) return match.label;
+  }
+  return bankCode;
+}
+
+/**
  * Reglas de retiro hardcodeadas para CO y PE.
  * Se usan cuando Vita no responde o no devuelve campos para ese país.
  * Los keys siguen la nomenclatura exacta que espera el endpoint de withdrawal de Vita.
@@ -2482,10 +2502,12 @@ export async function getTransactionStatus(req, res) {
     ?? dynFields.account_holder_name
     ?? '';
 
-  // Banco: bankCode schema o dynamic
-  const bankName = ben.bankCode
-    ?? dynFields.bank_name ?? dynFields.bank_code
-    ?? '';
+  // Banco: resolver código → nombre legible (cache Vita) o bank_name si ya es texto
+  const rawBankCode = ben.bankCode ?? dynFields.bank_code ?? '';
+  const storedBankName = dynFields.bank_name ?? '';
+  const bankName = storedBankName
+    || lookupBankName(transaction.destinationCountry, rawBankCode)
+    || rawBankCode;
 
   // Cuenta: accountBank schema o dynamic — enmascarar solo últimos 4
   const rawAccount = ben.accountBank
