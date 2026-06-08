@@ -212,19 +212,26 @@ export async function reconcileVitaTransfers() {
         // Vita puede envolver la tx en data.transaction o data.withdrawal o directamente
         vitaData = resp?.data?.transaction ?? resp?.data?.withdrawal ?? resp?.data ?? resp;
       } catch (err) {
-        // 404 = Vita no tiene ese ID aún (IPN puede llegar después), otro error = API problema
-        const isNotFound = err?.response?.status === 404 || err?.status === 404;
-        if (!isNotFound) {
-          logger.warn('[ReconcileVita] Error consultando Vita', {
-            transactionId: tx.alytoTransactionId,
-            error: err.message,
-          });
-        }
+        const httpStatus = err?.response?.status ?? err?.status;
+        const isNotFound = httpStatus === 404;
+        logger.warn('[ReconcileVita] No se pudo consultar Vita', {
+          transactionId: tx.alytoTransactionId,
+          vitaId:        tx.payoutReference,
+          httpStatus:    httpStatus ?? 'network_error',
+          error:         isNotFound ? '404 Not Found' : err.message,
+        });
         if (ageMs > ALERT_THRESHOLD_MS) unresolved.push(tx);
         continue;
       }
 
       const vitaStatus = vitaData?.status?.toLowerCase?.() ?? '';
+
+      logger.info('[ReconcileVita] Vita status recibido', {
+        transactionId: tx.alytoTransactionId,
+        vitaId:        tx.payoutReference,
+        vitaStatus:    vitaStatus || '(vacío)',
+        ageMin:        Math.round(ageMs / 60_000),
+      });
 
       if (VITA_COMPLETED_STATUSES.has(vitaStatus)) {
         await finalizeVitaCompleted(tx);
@@ -233,7 +240,7 @@ export async function reconcileVitaTransfers() {
         await finalizeVitaFailed(tx, `Payout denegado por Vita (reconcile): status=${vitaStatus}`);
         stats.failed++;
       } else {
-        // pending / processing — Vita aún trabajando, OK
+        // pending / processing / desconocido — Vita aún trabajando
         if (ageMs > ALERT_THRESHOLD_MS) unresolved.push(tx);
       }
     }

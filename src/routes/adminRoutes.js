@@ -777,6 +777,63 @@ router.post('/reconcile-vita', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/v1/admin/vita/force-complete
+ * Fuerza la completación de una tx Vita atascada en payout_sent sin IPN.
+ * Usar cuando Vita confirma el pago externamente (panel Vita Business)
+ * pero el IPN nunca llegó. Genera audit trail Stellar + comprobante + notificaciones.
+ *
+ * Body: { transactionId: "ALY-C-..." }
+ */
+router.post('/vita/force-complete', async (req, res) => {
+  const { transactionId } = req.body;
+  if (!transactionId) return res.status(400).json({ error: 'transactionId requerido' });
+
+  try {
+    const Transaction = (await import('../models/Transaction.js')).default;
+    const tx = await Transaction.findOne({ alytoTransactionId: transactionId });
+    if (!tx) return res.status(404).json({ error: 'Transacción no encontrada' });
+    if (tx.status !== 'payout_sent') {
+      return res.status(400).json({ error: `Estado actual: ${tx.status} — solo se puede forzar desde payout_sent` });
+    }
+    const { generateComprobanteOnCompletion } = await import('../controllers/ipnController.js');
+    const { registerAuditTrail }              = await import('../services/stellarService.js');
+    const { notify, NOTIFICATIONS }           = await import('../services/notifications.js');
+    const { sendEmail, EMAILS }               = await import('../services/email.js');
+    const User                                = (await import('../models/User.js')).default;
+
+    tx.status      = 'completed';
+    tx.completedAt = new Date();
+    tx.ipnLog = tx.ipnLog ?? [];
+    tx.ipnLog.push({
+      provider:   'vitaWallet',
+      eventType:  'payout_completed_admin_forced',
+      status:     'completed',
+      rawPayload: { forcedBy: 'admin', forcedAt: new Date(), source: 'POST /admin/vita/force-complete' },
+      receivedAt: new Date(),
+    });
+    await tx.save();
+
+    const stellarTxId = await registerAuditTrail(tx).catch(() => null);
+    if (stellarTxId) {
+      tx.stellarTxId = stellarTxId;
+      await tx.save().catch(() => {});
+    }
+
+    generateComprobanteOnCompletion(tx).catch(() => {});
+
+    const user = await User.findById(tx.userId).lean();
+    notify(tx.userId, NOTIFICATIONS.paymentCompleted(
+      tx.originalAmount, tx.originCurrency, tx.destinationAmount, tx.destinationCurrency,
+    )).catch(() => {});
+    if (user?.email) sendEmail(...EMAILS.paymentCompleted(user, tx)).catch(() => {});
+
+    res.json({ ok: true, transactionId, stellarTxId: stellarTxId ?? null, completedAt: tx.completedAt });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── ROS / UIF Bolivia ────────────────────────────────────────────────────────
 
 /**
