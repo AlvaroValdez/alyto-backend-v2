@@ -54,19 +54,19 @@ function isSandbox() {
 /**
  * Resuelve el customerUuid de Harbor por entidad legal.
  *
- * Modelo Harbor (verificado contra dashboard 2026-05-14):
- *   Application = AV Finance LLC (firmante del MSA v1.0 30/03/2026).
- *   Bajo esa Application hay MÚLTIPLES Customers en Harbor — uno por
- *   entidad operativa con KYC propio. Cada transfer va on_behalf_of
- *   del Customer correspondiente a la entidad que ejecuta la operación.
+ * Modelo Harbor: Application = AV Finance LLC (firmante del MSA v1.0 30/03/2026).
+ * LLC actúa como Customer de Harbor para todas las entidades del grupo mientras
+ * las entidades operativas no tengan customer propio activo.
  *
- * Variables de entorno por entidad:
- *   OWLPAY_CUSTOMER_UUID_SRL → cus_QhFQdB... (SRL Bolivia — sandbox validado e2e)
- *                              cus_QzUzUt... es el UUID de PRODUCCIÓN, falla en sandbox transfers
- *   OWLPAY_CUSTOMER_UUID_LLC → futuro (corporate B2B desde Delaware)
- *   OWLPAY_CUSTOMER_UUID_SPA → futuro (Chile, post activación Harbor)
+ * Prioridad de resolución:
+ *   1. OWLPAY_CUSTOMER_UUID_<ENTITY>  — entity-specific si está configurado
+ *   2. OWLPAY_CUSTOMER_UUID_LLC        — LLC como fallback (MSA firmado, todas las entidades)
+ *   3. OWLPAY_CUSTOMER_UUID            — fallback genérico legacy
  *
- * Fallback final: OWLPAY_CUSTOMER_UUID si no existe el entity-specific.
+ * UUIDs conocidos:
+ *   LLC sandbox: crear en harbor-sandbox.owlpay.com → OWLPAY_CUSTOMER_UUID_LLC (Render)
+ *   LLC prod:    cus_REDACTED (KYC pendiente completar)
+ *   SRL sandbox: cus_QhFQdB... (existe, no usar — SRL prod sin agreement firmado)
  *
  * @param {'SRL'|'LLC'|'SpA'|string|null} [legalEntity] - default 'SRL'
  * @returns {string|null} Harbor customer UUID, o null si no está configurado
@@ -74,11 +74,14 @@ function isSandbox() {
 export function getCustomerUuid(legalEntity) {
   const entity = (legalEntity ?? 'SRL').toUpperCase();
   const envKey = `OWLPAY_CUSTOMER_UUID_${entity}`;
-  const uuid   = process.env[envKey] ?? process.env.OWLPAY_CUSTOMER_UUID ?? null;
+  const uuid   = process.env[envKey]
+              ?? process.env.OWLPAY_CUSTOMER_UUID_LLC
+              ?? process.env.OWLPAY_CUSTOMER_UUID
+              ?? null;
 
   if (!uuid) {
     console.warn(`[OwlPay] Customer UUID no configurado para entity=${entity}. ` +
-                 `Esperada env: ${envKey} (o fallback OWLPAY_CUSTOMER_UUID).`);
+                 `Esperada env: ${envKey} o OWLPAY_CUSTOMER_UUID_LLC.`);
     return null;
   }
 
