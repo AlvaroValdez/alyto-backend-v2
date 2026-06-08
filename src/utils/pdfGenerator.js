@@ -275,20 +275,18 @@ function buildPDF(data) {
     // seguido del campo override en el DTO, con este texto como fallback compilado.
     const textoLegal = cleanEnvValue(process.env.AV_FINANCE_LEGAL_FOOTER)
       ?? cleanEnvValue(data.textoLegalFooter)
-      ?? 'Este documento constituye el Comprobante Oficial de Liquidación de Activo Digital '
-       + 'emitido por AV Finance SRL (producto Alyto), con domicilio legal en Av. Ramiro Castillo N° 13, La Paz, Bolivia. '
-       + 'La operación registrada constituye un servicio de pago transfronterizo habilitado '
-       + 'conforme al Decreto Supremo N° 5384 de 7 de mayo de 2025, que regula las Empresas de Tecnología '
-       + 'Financiera (ETF) — Proveedor de Servicios de Activos Virtuales (PSAV). '
-       + 'Documentación conforme a la RND N° 102400000021 del Servicio de Impuestos Nacionales '
-       + 'relativa a bancarización y respaldo de operaciones financieras. '
-       + 'Aspectos tributarios: IVA conforme Art. 4 Ley 843; IUE conforme Art. 47 Ley 843. '
-       + 'El tipo de cambio aplicado corresponde a la tasa efectiva de la operación en la fecha '
-       + 'indicada, conforme NC12 y Boletín Técnico CTNAC 2-2024 del Colegio de Auditores Bolivia. '
-       + 'Trazabilidad blockchain verificable en Stellar Network (registro público, inmutable). '
-       + 'Reclamos: presentar comprobante en soporte@alyto.app dentro de los 30 días corridos '
-       + 'posteriores a la emisión. AV Finance SRL — NIT: '
-       + (cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'en trámite ante el SIN') + '.';
+      ?? 'El presente Comprobante Oficial acredita la instrucción de pago transfronterizo ejecutada por '
+       + 'AV Finance S.R.L. (NIT 706138025), Empresa de Tecnología Financiera y Proveedor de Servicios '
+       + 'de Activos Virtuales (PSAV), bajo supervisión de la Autoridad de Supervisión del Sistema '
+       + 'Financiero - ASFI (Trámite N° T-2201402987), conforme al Decreto Supremo N° 5384 de 7 de mayo '
+       + 'de 2025. La operación fue ejecutada íntegramente por canales bancarios formales a través de una '
+       + 'entidad financiera regulada por ASFI. Este documento constituye respaldo documental de la '
+       + 'operación conforme a la Resolución Normativa de Directorio N° 102400000021 (Reglamento de '
+       + 'Bancarización). La nota fiscal correspondiente a la comisión por servicio tecnológico será '
+       + 'emitida por AV Finance S.R.L. conforme a la normativa del Servicio de Impuestos Nacionales '
+       + '(SIN). Las operaciones sobre activos virtuales (USDC) son a riesgo del consumidor financiero, '
+       + 'conforme al Art. 3°, Sección 4 del Reglamento para ETF (Circular ASFI/885/2025). El activo '
+       + 'virtual USDC no constituye moneda de curso legal ni depósito bancario.';
 
     doc
       .font('Helvetica-Bold')

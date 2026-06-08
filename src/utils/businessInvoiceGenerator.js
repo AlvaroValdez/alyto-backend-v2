@@ -74,20 +74,31 @@ function drawLabelValue(doc, label, valor, marginL) {
   doc.moveDown(0.1);
 }
 
-// ── Texto legal por defecto ──────────────────────────────────────────────────
+// ── Texto legal estructurado por defecto ──────────────────────────────────────
 
-const DEFAULT_LEGAL_FOOTER =
-  'Este documento constituye el Comprobante Oficial de Servicio emitido por AV Finance SRL '
-  + '(producto Alyto) conforme a la normativa boliviana vigente. '
-  + 'Los activos virtuales operados constituyen un mecanismo alternativo de pago conforme al '
-  + 'Decreto Supremo N° 5384 de 7 de mayo de 2025 (Empresas de Tecnología Financiera — PSAV) y la Resolución Ministerial N° 055/2025 (MEFP). '
-  + 'La documentación de esta transacción cumple con las obligaciones establecidas en la '
-  + 'RND N° 102400000021 (Bancarización) del Servicio de Impuestos Nacionales. '
-  + 'Aspectos tributarios aplicables: IVA (Art. 4, Ley 843), IUE (Art. 47, Ley 843). '
-  + 'El tipo de cambio utilizado corresponde a la tasa efectiva pagada en la fecha de la operación, '
-  + 'conforme NC12 y Boletín Técnico CTNAC 2-2024. '
-  + 'Trazabilidad blockchain verificable en Stellar Network (red pública, inmutable, descentralizada). '
-  + 'AV Finance SRL — NIT: ' + (cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'en trámite ante el SIN') + '.';
+const DEFAULT_LEGAL_INTRO =
+  'AV Finance S.R.L. | NIT: 706138025 | Régimen General | Empresa de Tecnología Financiera (ETF) '
+  + 'y Proveedor de Servicios de Activos Virtuales (PSAV), bajo supervisión de ASFI — '
+  + 'D.S. N° 5384 de 7 de mayo de 2025, Trámite N° T-2201402987.';
+
+const DEFAULT_LEGAL_SECTIONS = [
+  {
+    title: 'BANCARIZACIÓN (RND N° 102400000021)',
+    body:  'La presente operación fue ejecutada íntegramente mediante transferencia electrónica a través de una entidad financiera regulada, cumpliendo los requisitos del Art. 4° de la citada Resolución. Este comprobante, junto con el extracto bancario correspondiente, constituye el respaldo documental de la transacción.',
+  },
+  {
+    title: 'IVA (Ley N° 843, Art. 12)',
+    body:  'La comisión por servicio tecnológico de instrucción de pagos transfronterizos e intermediación en activos virtuales está sujeta a la alícuota general del Impuesto al Valor Agregado. La nota fiscal correspondiente será emitida por AV Finance S.R.L. conforme a la normativa del Servicio de Impuestos Nacionales.',
+  },
+  {
+    title: 'IUE (Ley N° 843, Art. 36 y D.S. N° 24051, Art. 8°)',
+    body:  'El pago de la comisión por servicio constituye gasto deducible a efectos del Impuesto sobre las Utilidades de las Empresas, en tanto esté vinculado a la actividad gravada del cliente y respaldado con nota fiscal original emitida por AV Finance S.R.L.',
+  },
+  {
+    title: 'ACTIVO VIRTUAL',
+    body:  'El USDC (USD Coin) es un activo virtual estable emitido por Circle Financial LLC, clasificado conforme al D.S. N° 5384 y la Resolución Ministerial N° 055/2025 del MEFP. No constituye moneda de curso legal ni depósito bancario. Las operaciones sobre activos virtuales son a riesgo del consumidor financiero (Circular ASFI/885/2025, Art. 3° Sec. 4).',
+  },
+];
 
 // ── Constructor del PDF ──────────────────────────────────────────────────────
 
@@ -230,9 +241,8 @@ function buildBusinessPDF(data) {
     drawSeparator(doc);
 
     // ── SECCIÓN 7 — NOTA LEGAL + QR (lado a lado) ────────────────────────
-    const textoLegal = cleanEnvValue(data.textoLegalFooter)
-      ?? cleanEnvValue(process.env.AV_FINANCE_B2B_LEGAL_FOOTER)
-      ?? DEFAULT_LEGAL_FOOTER;
+    const textoLegalOverride = cleanEnvValue(data.textoLegalFooter)
+      ?? cleanEnvValue(process.env.AV_FINANCE_B2B_LEGAL_FOOTER);
 
     const qrSize     = 60;
     const qrGap      = 8;
@@ -240,12 +250,27 @@ function buildBusinessPDF(data) {
     const legalWidth  = hasQR ? contentW - qrSize - qrGap : contentW;
 
     doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR_PRIMARY)
-      .text('NOTA LEGAL', marginL, doc.y);
+      .text('NOTA LEGAL Y FISCAL', marginL, doc.y);
     doc.moveDown(0.15);
 
     const legalStartY = doc.y;
-    doc.font('Helvetica').fontSize(6.5).fillColor(COLOR_GRAY)
-      .text(textoLegal, marginL, doc.y, { width: legalWidth, align: 'justify' });
+
+    if (textoLegalOverride) {
+      doc.font('Helvetica').fontSize(6.5).fillColor(COLOR_GRAY)
+        .text(textoLegalOverride, marginL, doc.y, { width: legalWidth, align: 'justify' });
+    } else {
+      // Intro institucional
+      doc.font('Helvetica').fontSize(6.5).fillColor(COLOR_GRAY)
+        .text(DEFAULT_LEGAL_INTRO, marginL, doc.y, { width: legalWidth, align: 'justify' });
+      // Secciones normativas con títulos en negrita
+      DEFAULT_LEGAL_SECTIONS.forEach(section => {
+        doc.moveDown(0.2);
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(COLOR_GRAY)
+          .text(`${section.title}: `, marginL, doc.y, { continued: true, width: legalWidth });
+        doc.font('Helvetica').fontSize(6.5).fillColor(COLOR_GRAY)
+          .text(section.body, { width: legalWidth });
+      });
+    }
 
     // QR al lado derecho de la nota legal
     if (hasQR) {
