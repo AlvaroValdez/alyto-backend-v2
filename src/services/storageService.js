@@ -101,15 +101,12 @@ export async function uploadBuffer(buffer, key, opts = {}) {
 // Retención ASFI Bolivia: 5 años = 1825 días
 const ASFI_RETENTION_DAYS = 1825
 
-function _objectLockParams(key) {
-  if (process.env.S3_OBJECT_LOCK_ENABLED !== 'true') return {}
-  if (!key.startsWith('pdfs/')) return {}
-  const retainUntil = new Date()
-  retainUntil.setDate(retainUntil.getDate() + ASFI_RETENTION_DAYS)
-  return {
-    ObjectLockMode:            'COMPLIANCE',
-    ObjectLockRetainUntilDate: retainUntil,
-  }
+// El bucket alyto-pdfs-compliance tiene Object Lock con retención default de 1825d
+// configurada a nivel de bucket — aplica automáticamente a cada PutObject sin
+// necesidad de especificar ObjectLockMode/ObjectLockRetainUntilDate por objeto.
+// Especificarlo requiere s3:PutObjectRetention (permiso separado innecesario).
+function _objectLockParams(_key) {
+  return {}
 }
 
 async function _uploadToS3(buffer, key, contentType, disposition) {
