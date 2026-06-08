@@ -64,9 +64,9 @@ function isSandbox() {
  *   3. OWLPAY_CUSTOMER_UUID            — fallback genérico legacy
  *
  * UUIDs conocidos:
- *   LLC sandbox: crear en harbor-sandbox.owlpay.com → OWLPAY_CUSTOMER_UUID_LLC (Render)
- *   LLC prod:    cus_REDACTED (KYC pendiente completar)
- *   SRL sandbox: cus_QhFQdB... (existe, no usar — SRL prod sin agreement firmado)
+ *   LLC sandbox: cus_REDACTED → OWLPAY_CUSTOMER_UUID_LLC (Render)
+ *   LLC prod:    cus_REDACTED → OWLPAY_CUSTOMER_UUID_LLC (VPS, KYC pendiente)
+ *   SRL sandbox: cus_QhFQdB... (sin agreement firmado — no usar)
  *
  * @param {'SRL'|'LLC'|'SpA'|string|null} [legalEntity] - default 'SRL'
  * @returns {string|null} Harbor customer UUID, o null si no está configurado
