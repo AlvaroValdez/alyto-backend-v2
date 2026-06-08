@@ -110,7 +110,12 @@ function checkEnvVars() {
     { name: 'SENDGRID_TEMPLATE_INITIATED',   test: v => !!v,                     hint: 'Template ID para transacción iniciada' },
     { name: 'SENDGRID_TEMPLATE_COMPLETED',   test: v => !!v,                     hint: 'Template ID para transacción completada' },
     { name: 'SENDGRID_TEMPLATE_FAILED',      test: v => !!v,                     hint: 'Template ID para transacción fallida' },
-    { name: 'SENDGRID_TEMPLATE_ADMIN_BOLIVIA', test: v => !!v,                   hint: 'Template ID para notificación admin Bolivia' },
+    { name: 'SENDGRID_TEMPLATE_ADMIN_BOLIVIA',  test: v => !!v, hint: 'Template ID para notificación admin Bolivia' },
+    { name: 'SENDGRID_TEMPLATE_MANUAL_PAYIN',  test: v => !!v, hint: 'Template ID instrucciones payin manual SRL' },
+    { name: 'SENDGRID_TEMPLATE_DEPOSIT_CONFIRMED', test: v => !!v, hint: 'Template ID depósito wallet BOB confirmado' },
+    { name: 'SENDGRID_TEMPLATE_RECLAMO_RECIBIDO',  test: v => !!v, hint: 'Template ID PRILI — reclamo recibido (usuario)' },
+    { name: 'SENDGRID_TEMPLATE_ADMIN_RECLAMO',     test: v => !!v, hint: 'Template ID PRILI — alerta admin nuevo reclamo' },
+    { name: 'SENDGRID_TEMPLATE_RECLAMO_RESUELTO',  test: v => !!v, hint: 'Template ID PRILI — respuesta reclamo (usuario)' },
 
     // Firebase
     { name: 'FIREBASE_PROJECT_ID',    test: v => !!v, hint: 'Firebase Project ID' },
