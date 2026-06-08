@@ -673,6 +673,13 @@ async function startServer() {
       setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
       console.info('[Server] Reconcile Harbor job programado cada 15 min');
 
+      // Job de reconciliation Vita — recupera tx en payout_sent atascadas por
+      // IPN perdido. Consulta Vita API y finaliza o alerta admin.
+      const { reconcileVitaTransfers } = await import('./jobs/reconcileVitaTransfers.js');
+      setTimeout(reconcileVitaTransfers, 45 * 1000);                    // primera corrida 45s post-start
+      setInterval(reconcileVitaTransfers, 15 * 60 * 1000);              // cada 15 min
+      console.info('[Server] Reconcile Vita job programado cada 15 min');
+
       // Job de reconciliation Stellar — retry payin_completed sin tránsito +
       // alertas in_transit >2h + auto-fail >7 días
       const { reconcileStellarTransits } = await import('./jobs/reconcileStellarTransits.js');

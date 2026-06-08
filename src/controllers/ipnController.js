@@ -183,7 +183,7 @@ async function appendIpnLog(transaction, eventType, provider, status, rawPayload
  *
  * @param {object} transaction — Documento Mongoose con beneficiary y montos
  */
-async function notifyAdminManualPayout(transaction) {
+export async function notifyAdminManualPayout(transaction) {
   await sendEmail(...EMAILS.adminBoliviaAlert(transaction));
 }
 
@@ -703,7 +703,7 @@ async function generateSrlComprobante(transaction) {
  *
  * @param {object} transaction — Documento Transaction (mongoose, no lean)
  */
-async function generateComprobanteOnCompletion(transaction) {
+export async function generateComprobanteOnCompletion(transaction) {
   try {
     if (transaction.legalEntity !== 'SRL') return;
     const user = await User.findById(transaction.userId).lean();

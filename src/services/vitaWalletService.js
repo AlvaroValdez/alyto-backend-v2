@@ -562,3 +562,18 @@ export function getDeposits() {
 export function getCryptoPrices() {
   return vitaRequest('GET', '/crypto_prices');
 }
+
+/**
+ * getVitaTransaction(vitaId)
+ * GET /api/businesses/transactions/:id
+ *
+ * Consulta el estado de una transacción Vita por su ID interno.
+ * Usado por el job reconcileVitaTransfers para recuperar tx cuyo IPN se perdió.
+ * Vita es primariamente event-driven — este endpoint es best-effort.
+ *
+ * @param {string} vitaId  ID interno de Vita (= payoutReference en Transaction)
+ * @returns {Promise<object>}
+ */
+export function getVitaTransaction(vitaId) {
+  return vitaRequest('GET', `/transactions/${vitaId}`);
+}

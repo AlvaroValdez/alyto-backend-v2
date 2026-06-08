@@ -731,6 +731,7 @@ router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
 
 import { cleanupOrphanTransactions } from '../jobs/cleanupOrphanTransactions.js';
 import { reconcileHarborTransfers }  from '../jobs/reconcileHarborTransfers.js';
+import { reconcileVitaTransfers }    from '../jobs/reconcileVitaTransfers.js';
 import { rosMonitor }                from '../jobs/rosMonitor.js';
 import { rosMonitorWallet }          from '../jobs/rosMonitorWallet.js';
 import ROSAlert                      from '../models/ROSAlert.js';
@@ -756,6 +757,20 @@ router.post('/cleanup-orphans', async (req, res) => {
 router.post('/reconcile-harbor', async (req, res) => {
   try {
     const stats = await reconcileHarborTransfers();
+    res.json({ stats, runAt: new Date() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/admin/reconcile-vita
+ * Ejecuta manualmente el job de reconciliation Vita.
+ * Útil para forzar polling cuando un IPN se perdió y la tx quedó en payout_sent.
+ */
+router.post('/reconcile-vita', async (req, res) => {
+  try {
+    const stats = await reconcileVitaTransfers();
     res.json({ stats, runAt: new Date() });
   } catch (err) {
     res.status(500).json({ error: err.message });

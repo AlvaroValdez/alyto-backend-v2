@@ -26,6 +26,8 @@ const JOBS = {
     import('./kycIncompleteMonitor.js').then((m) => m.kycIncompleteMonitor),
   'reconcile-harbor': () =>
     import('./reconcileHarborTransfers.js').then((m) => m.reconcileHarborTransfers),
+  'reconcile-vita': () =>
+    import('./reconcileVitaTransfers.js').then((m) => m.reconcileVitaTransfers),
   'reconcile-stellar': () =>
     import('./reconcileStellarTransits.js').then((m) => m.reconcileStellarTransits),
   // monitorChannelXLM NO se registra aquí a propósito: corre SIEMPRE in-process
