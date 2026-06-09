@@ -30,6 +30,7 @@ BACKEND_URL="${BACKEND_URL:-https://api.alyto.app}"
 INTERNAL_JOB_TOKEN="${INTERNAL_JOB_TOKEN:-}"
 FUNCTION_NAME="alyto-job-trigger"
 ROLE_NAME="alyto-lambda-job-trigger-role"
+LAMBDA_ROLE_ARN="${LAMBDA_ROLE_ARN:-}"   # si ya existe, pasar el ARN y se salta la creación del role
 LAMBDA_TIMEOUT=120  # segundos (jobs pesados deben responder antes)
 LAMBDA_MEMORY=128   # MB — solo hace una llamada HTTP saliente
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -54,35 +55,40 @@ echo "==> Función: ${FUNCTION_NAME}"
 echo
 
 # ─── Paso 1: IAM Role ─────────────────────────────────────────────────────────
-echo "==> Paso 1: IAM Role ${ROLE_NAME}"
+echo "==> Paso 1: IAM Role"
 
-TRUST_POLICY='{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Service": "lambda.amazonaws.com" },
-    "Action": "sts:AssumeRole"
-  }]
-}'
-
-ROLE_ARN=$(aws iam get-role \
-  --role-name "${ROLE_NAME}" \
-  --query 'Role.Arn' --output text 2>/dev/null || true)
-
-if [ -z "${ROLE_ARN}" ]; then
-  echo "    Creando role..."
-  ROLE_ARN=$(aws iam create-role \
-    --role-name "${ROLE_NAME}" \
-    --assume-role-policy-document "${TRUST_POLICY}" \
-    --query 'Role.Arn' --output text)
-  # Permiso básico de ejecución Lambda (CloudWatch Logs)
-  aws iam attach-role-policy \
-    --role-name "${ROLE_NAME}" \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-  echo "    Role creado. Esperando propagación IAM (10s)..."
-  sleep 10
+if [ -n "${LAMBDA_ROLE_ARN}" ]; then
+  # Role provisto externamente (ej. creado manualmente en consola por falta de iam:CreateRole)
+  ROLE_ARN="${LAMBDA_ROLE_ARN}"
+  echo "    Usando role externo: ${ROLE_ARN}"
 else
-  echo "    Role ya existe."
+  TRUST_POLICY='{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "Service": "lambda.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+  ROLE_ARN=$(aws iam get-role \
+    --role-name "${ROLE_NAME}" \
+    --query 'Role.Arn' --output text 2>/dev/null || true)
+
+  if [ -z "${ROLE_ARN}" ]; then
+    echo "    Creando role ${ROLE_NAME}..."
+    ROLE_ARN=$(aws iam create-role \
+      --role-name "${ROLE_NAME}" \
+      --assume-role-policy-document "${TRUST_POLICY}" \
+      --query 'Role.Arn' --output text)
+    aws iam attach-role-policy \
+      --role-name "${ROLE_NAME}" \
+      --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    echo "    Role creado. Esperando propagación IAM (10s)..."
+    sleep 10
+  else
+    echo "    Role ya existe."
+  fi
 fi
 echo "    ARN: ${ROLE_ARN}"
 
