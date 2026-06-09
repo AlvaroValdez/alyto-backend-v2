@@ -58,7 +58,7 @@ import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
-import { uploadBuffer }              from '../services/storageService.js';
+import { uploadBuffer, getDownloadUrl } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
 import { recordSent }       from './contactsController.js';
 
@@ -673,11 +673,15 @@ async function generateSrlComprobante(transaction) {
 
     const { buffer, filename } = await generateOfficialReceipt(dto);
     const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`;
-    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+    const { url, key } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+
+    // Presigned URL de 6 días guardada en BD (max SigV4 = 7 días)
+    const resolvedUrl = await getDownloadUrl(key ?? s3Key, 6 * 24 * 3600).catch(() => null);
+    const storedUrl   = resolvedUrl ?? url;
 
     await Transaction.findByIdAndUpdate(transaction._id, {
       $set: {
-        'boliviaCompliance.comprobanteUrl':        url,
+        'boliviaCompliance.comprobanteUrl':        storedUrl,
         'boliviaCompliance.numeroComprobante':     numeroComprobante,
         'boliviaCompliance.comprobanteGeneratedAt': new Date(),
       },
