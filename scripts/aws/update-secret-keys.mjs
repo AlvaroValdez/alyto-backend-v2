@@ -22,7 +22,7 @@
 //   - Hace dry-run con --dry-run (no escribe, solo muestra el diff de claves).
 //   - NUNCA imprime valores de secretos, solo nombres.
 
-import 'dotenv/config';
+// dotenv eliminado — usar --env-file=.env (Node 20+) o configurar vars de entorno directamente.
 import {
   SecretsManagerClient,
   GetSecretValueCommand,

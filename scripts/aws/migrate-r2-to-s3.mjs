@@ -20,7 +20,7 @@
 //   node scripts/aws/migrate-r2-to-s3.mjs --dry-run     # solo lista qué copiaría
 //   node scripts/aws/migrate-r2-to-s3.mjs               # copia de verdad
 
-import 'dotenv/config';
+// dotenv eliminado — usar --env-file=.env (Node 20+) o configurar vars de entorno directamente.
 import {
   S3Client,
   ListObjectsV2Command,
