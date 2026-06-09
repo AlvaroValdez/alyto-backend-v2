@@ -128,11 +128,12 @@ async function _uploadToS3(buffer, key, contentType, disposition) {
 
   await getS3Client().send(cmd)
 
-  // URL pública si el bucket lo permite, o pre-firmada si no
+  // Si hay base URL pública (CDN) → URL directa. Si no → guardar referencia al key;
+  // las URLs pre-firmadas se generan on-demand con getDownloadUrl() (máx 7 días SigV4).
   const baseUrl = process.env.S3_PDF_BASE_URL
   const url = baseUrl
     ? `${baseUrl.replace(/\/$/, '')}/${key}`
-    : await _presign(key, 365 * 24 * 3600) // URL larga (1 año) para persistencia en BD
+    : `s3key://${key}`
 
   return { url, key, storage: 'S3' }
 }
@@ -184,4 +185,23 @@ export async function getDownloadUrl(key, expiresIn = 3600) {
 async function _presign(key, expiresIn) {
   const cmd = new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key })
   return getSignedUrl(getS3Client(), cmd, { expiresIn })
+}
+
+/**
+ * Resuelve una referencia de comprobante almacenada en BD a una URL descargable.
+ * Acepta:
+ *   - 's3key://<key>'  → genera presigned URL fresca (1 hora)
+ *   - URL http/https   → devuelve tal cual (URL pública o presigned ya generada)
+ *   - null/undefined   → devuelve null
+ *
+ * @param {string|null} stored — valor de boliviaCompliance.comprobanteUrl en MongoDB
+ * @returns {Promise<string|null>}
+ */
+export async function resolveComprobanteUrl(stored) {
+  if (!stored) return null
+  if (stored.startsWith('s3key://')) {
+    const key = stored.slice('s3key://'.length)
+    return getDownloadUrl(key, 3600) // URL fresca de 1 hora
+  }
+  return stored
 }

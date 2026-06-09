@@ -64,6 +64,7 @@ import {
   resolveHarborCountry,
 }                              from '../services/owlPayService.js';
 import { getAuditTrail }       from '../services/stellarService.js';
+import { resolveComprobanteUrl } from '../services/storageService.js';
 import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
@@ -2595,11 +2596,11 @@ export async function getTransactionStatus(req, res) {
     // staging=testnet) para que el link a Stellar Expert no dependa de VITE.
     stellarTxId:       transaction.stellarTxId ?? null,
     stellarNetwork:    process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet',
-    // Comprobante Oficial SRL Bolivia — URL del PDF generado al completar (S3/R2)
+    // Comprobante Oficial SRL Bolivia — URL pre-firmada fresca (s3key:// → presigned 1h)
     boliviaCompliance: transaction.boliviaCompliance
       ? {
-          comprobanteUrl:        transaction.boliviaCompliance.comprobanteUrl        ?? null,
-          numeroComprobante:     transaction.boliviaCompliance.numeroComprobante     ?? null,
+          comprobanteUrl:         await resolveComprobanteUrl(transaction.boliviaCompliance.comprobanteUrl),
+          numeroComprobante:      transaction.boliviaCompliance.numeroComprobante     ?? null,
           comprobanteGeneratedAt: transaction.boliviaCompliance.comprobanteGeneratedAt ?? null,
         }
       : null,
