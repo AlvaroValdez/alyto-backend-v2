@@ -871,7 +871,10 @@ router.post('/regenerate-comprobante', async (req, res) => {
     const dto = {
       numeroComprobante,
       nombreCliente:        user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
-      nitOci:               user.taxId ?? user.identityDocument?.number ?? 'NO REGISTRADO',
+      nitOci:               user.taxId
+        ?? (user.identityDocument?.number && !/pending|verification/i.test(user.identityDocument.number)
+            ? user.identityDocument.number : null)
+        ?? 'NO REGISTRADO',
       tipoDocumento:        user.taxId ? 'NIT' : 'CI',
       codigoClienteAlyto:   user._id.toString(),
       fechaHora:            (tx.createdAt ?? new Date()).toISOString(),

@@ -140,17 +140,16 @@ function buildPDF(data, qrBuffer) {
 
     doc.moveDown(0.4);
 
-    // Fecha y hora — ISO 8601 con timezone explícito
+    // Fecha y hora en zona horaria Bolivia (UTC-4)
     const fechaFormateada = new Date(data.fechaHora).toLocaleString('es-BO', {
-      timeZone:     'America/La_Paz',
-      day:          '2-digit',
-      month:        '2-digit',
-      year:         'numeric',
-      hour:         '2-digit',
-      minute:       '2-digit',
-      second:       '2-digit',
-      timeZoneName: 'short',
-    });
+      timeZone: 'America/La_Paz',
+      day:      '2-digit',
+      month:    '2-digit',
+      year:     'numeric',
+      hour:     '2-digit',
+      minute:   '2-digit',
+      second:   '2-digit',
+    }) + ' (UTC-4 Bolivia)';
 
     doc
       .font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
