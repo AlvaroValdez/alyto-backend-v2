@@ -78,6 +78,18 @@ export function formatUSDC(amount) {
 }
 
 /**
+ * Formatea una tasa de cambio BOB/USDC con 4 decimales.
+ * Usa más precisión que formatBOB (2 dec) para que el cálculo cuadre visualmente.
+ * Ej: 11.235955 → "Bs. 11,2360"
+ */
+export function formatRate(rate) {
+  const n = Number(rate).toFixed(4);
+  const [intPart, decPart] = n.split('.');
+  const intFormatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return `Bs. ${intFormatted},${decPart}`;
+}
+
+/**
  * URL de Stellar Expert para un TXID, según la red del entorno.
  * Prod (VPS) = mainnet → 'public'; staging = testnet.
  */

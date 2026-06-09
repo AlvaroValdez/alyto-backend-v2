@@ -24,7 +24,7 @@ import PDFDocument from 'pdfkit';
 import QRCode      from 'qrcode';
 import {
   COLOR_PRIMARY, COLOR_ACCENT, COLOR_GRAY, COLOR_LIGHT_BG,
-  resolveLogoPath, formatBOB, formatUSDC, cleanEnvValue, stellarExplorerTxUrl,
+  resolveLogoPath, formatBOB, formatUSDC, formatRate, cleanEnvValue, stellarExplorerTxUrl,
   drawSeparator, drawTableRow, drawInstitutionalHeader, drawFooterBar,
 } from './pdfHelpers.js';
 
@@ -266,7 +266,7 @@ function buildPDF(data, qrBuffer) {
     // Filas del desglose
     const filas = [
       ['Monto Fiat Recibido (BOB)',                 formatBOB(data.montoFiatRecibido)],
-      ['Tipo de Cambio aplicado (BOB/USDC)',         `1 USDC = ${formatBOB(data.tipoDeCambio)}`],
+      ['Tipo de Cambio aplicado (BOB/USDC)',         `1 USDC = ${formatRate(data.tipoDeCambio)}`],
       ['Activo Digital Entregado',                  formatUSDC(data.montoActivoEntregado)],
       ['Comisión de Servicio Alyto',                `- ${formatBOB(data.comisionServicio)}`],
     ];
