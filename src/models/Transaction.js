@@ -201,14 +201,24 @@ const ipnLogEntrySchema = new Schema(
 
 const boliviaComplianceSchema = new Schema(
   {
-    /** URL del PDF del Comprobante Oficial de Transacción en S3 */
-    comprobantePdfUrl: {
+    /** URL descargable del Comprobante Oficial (presigned S3 o pública) */
+    comprobanteUrl: {
+      type:  String,
+      trim:  true,
+    },
+    /** Número correlativo del comprobante — ej. BOL-202606-000001 */
+    numeroComprobante: {
       type:  String,
       trim:  true,
     },
     /** Timestamp de generación del comprobante */
     comprobanteGeneratedAt: {
       type: Date,
+    },
+    /** Legacy: alias de comprobanteUrl (mantener para registros anteriores) */
+    comprobantePdfUrl: {
+      type:  String,
+      trim:  true,
     },
     /** NIT o CI del cliente boliviano para el comprobante */
     clientTaxId: {
