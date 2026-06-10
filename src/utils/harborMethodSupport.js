@@ -19,7 +19,7 @@ const SUPPORTED_METHODS_BY_COUNTRY = {
   NL: ['WIRE'], BE: ['WIRE'], PT: ['WIRE'], AT: ['WIRE'],
   PL: ['WIRE'], SE: ['WIRE'], CH: ['WIRE'], NO: ['WIRE'],
   DK: ['WIRE'], FI: ['WIRE'], IE: ['WIRE'],
-  GB: ['FPS'],
+  GB: ['FPS', 'WIRE'],  // FPS=GBP (sort_code), WIRE=USD (swift_code) — confirmado Jolin 2026-06-09
   NG: ['BANK-TRANSFER'],
   BR: ['PIX'],
   MX: ['SPEI'],
@@ -152,12 +152,16 @@ export const HARBOR_FORM_FIELDS = {
       hint: '8 u 11 caracteres alfanuméricos', min: 8, max: 11 },
   ],
 
-  // ── GB: FPS (Faster Payments) ─────────────────────────────────────────────
+  // ── GB: WIRE (USD, SWIFT) — confirmado Jolin OwlPay 2026-06-09 ─────────────
+  // Harbor acepta country=GB + asset=USD vía WIRE (swift_code).
+  // FPS (sort_code) es GBP-only; corredor bo-gb usa USD → siempre WIRE.
   GB: [
-    { key: 'account_holder_name', label: 'Nombre del titular',   type: 'text', required: true, placeholder: 'James Smith' },
-    { key: 'account_number',      label: 'Número de cuenta',     type: 'text', required: true, placeholder: '12345678', min: 8, max: 8 },
-    { key: 'sort_code',           label: 'Sort Code',            type: 'text', required: true, placeholder: '12-34-56',
-      hint: '6 dígitos del banco UK (formato: 12-34-56)', min: 6, max: 8 },
+    { key: 'account_holder_name', label: 'Nombre del titular', type: 'text', required: true, placeholder: 'James Smith' },
+    { key: 'bank_name',           label: 'Nombre del banco',   type: 'text', required: true, placeholder: 'Barclays Bank' },
+    { key: 'account_number',      label: 'Número de cuenta o IBAN', type: 'text', required: true, placeholder: 'GB29NWBK60161331926819',
+      hint: 'IBAN UK: GB + 2 dígitos + 4 letras banco + 14 dígitos', min: 8, max: 34 },
+    { key: 'swift_code',          label: 'Código SWIFT / BIC', type: 'text', required: true, placeholder: 'BARCGB22',
+      hint: '8 u 11 caracteres alfanuméricos', min: 8, max: 11 },
   ],
 
   // ── BR: PIX ───────────────────────────────────────────────────────────────

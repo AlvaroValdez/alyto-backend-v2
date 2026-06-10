@@ -564,10 +564,20 @@ export function buildPayoutInstrument(beneficiary, destCountry, paymentMethod = 
       };
     }
 
-    // ── GB: FPS ──────────────────────────────────────────────────────────────
-    // Corredor SRL no activo en sandbox — esperando LLC.
-    // Schema asumido basado en UK Faster Payments standard.
+    // ── GB: WIRE (USD) o FPS (GBP) ──────────────────────────────────────────
+    // Harbor acepta GB + USD vía WIRE (swift_code). Confirmado Jolin 2026-06-09.
+    // Corredor bo-gb usa destinationCurrency=USD → siempre WIRE en producción.
+    // FPS (sort_code) queda como fallback para GBP si se añade ese corredor.
     case 'GB':
+      if (method === 'WIRE' || get('swift_code')) {
+        return {
+          account_holder_name: holder(),
+          bank_name:           must('bank_name'),
+          account_number:      get('iban') ?? must('account_number'),
+          swift_code:          must('swift_code'),
+        };
+      }
+      // FPS fallback (GBP)
       return {
         account_holder_name: holder(),
         account_number:      must('account_number'),
