@@ -102,26 +102,24 @@ function buildPDF(data, qrBuffer) {
 
     doc.moveDown(0.4);
 
-    // Fondo de la sección KYC
-    const kycSectionY = doc.y;
+    const LABEL_W = 175;  // columna izquierda para el label
 
-    const kycFields = [
+    // Layout dos columnas: label izquierda (LABEL_W), valor derecha (resto de la página).
+    // Evita la superposición que causaba { continued: true, width: 180 }.
+    const kycRows = [
       ['Nombre / Razón Social',   data.nombreCliente],
-      [`${data.tipoDocumento}`,   data.nitOci],
-      ['Tipo de Documento',       data.tipoDocumento],
+      [data.tipoDocumento === 'NIT' ? 'NIT Empresarial' : 'Cédula de Identidad', data.nitOci],
       ['Código Cliente Alyto',    data.codigoClienteAlyto],
     ];
 
-    kycFields.forEach(([label, valor]) => {
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(9)
-        .fillColor(COLOR_GRAY)
-        .text(`${label}:`, marginL, doc.y, { continued: true, width: 180 })
-        .font('Helvetica')
-        .fillColor('#222222')
-        .text(`  ${valor}`);
-      doc.moveDown(0.2);
+    kycRows.forEach(([label, valor]) => {
+      const rowY = doc.y;
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
+        .text(`${label}:`, marginL, rowY, { width: LABEL_W, lineBreak: false });
+      doc.font('Helvetica').fontSize(9).fillColor('#222222')
+        .text(`${valor}`, marginL + LABEL_W, rowY, { width: contentW - LABEL_W });
+      // Avanzar al menos 16pt aunque el valor no haya wrapeado
+      doc.y = Math.max(doc.y, rowY + 16);
     });
 
     doc.moveDown(0.5);
@@ -151,27 +149,20 @@ function buildPDF(data, qrBuffer) {
       second:   '2-digit',
     }) + ' (UTC-4 Bolivia)';
 
-    doc
-      .font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
-      .text('Fecha y Hora:', marginL, doc.y, { continued: true, width: 180 })
-      .font('Helvetica').fillColor('#222222')
-      .text(`  ${fechaFormateada}`);
+    const web3Rows = [
+      ['Fecha y Hora',      fechaFormateada],
+      ['Tipo de Operación', data.tipoOperacion],
+      ['Red Utilizada',     'Stellar Network'],
+    ];
 
-    doc.moveDown(0.2);
-
-    doc
-      .font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
-      .text('Tipo de Operación:', marginL, doc.y, { continued: true, width: 180 })
-      .font('Helvetica').fillColor('#222222')
-      .text(`  ${data.tipoOperacion}`);
-
-    doc.moveDown(0.2);
-
-    doc
-      .font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
-      .text('Red Utilizada:', marginL, doc.y, { continued: true, width: 180 })
-      .font('Helvetica').fillColor('#222222')
-      .text('  Stellar Network');    // Valor fijo — no parametrizar
+    web3Rows.forEach(([label, valor]) => {
+      const rowY = doc.y;
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(COLOR_GRAY)
+        .text(`${label}:`, marginL, rowY, { width: LABEL_W, lineBreak: false });
+      doc.font('Helvetica').fontSize(9).fillColor('#222222')
+        .text(valor, marginL + LABEL_W, rowY, { width: contentW - LABEL_W });
+      doc.y = Math.max(doc.y, rowY + 16);
+    });
 
     doc.moveDown(0.5);
 

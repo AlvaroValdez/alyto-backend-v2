@@ -648,12 +648,17 @@ async function generateSrlComprobante(transaction) {
     if (!user) return;
 
     const numeroComprobante = await generarNumeroCorrelativo('BOL');
-    const digital   = transaction.digitalAssetAmount ?? 0;
-    const tipoCambio = digital > 0
-      ? Number((transaction.originalAmount / digital).toFixed(6))
-      : (transaction.conversionRate?.rate ?? 0);
-    const comisionServicio = transaction.feeBreakdown?.alytoFee
-      ?? transaction.feeBreakdown?.totalDeducted ?? 0;
+    const digital          = transaction.digitalAssetAmount ?? 0;
+    const comisionServicio = transaction.fees?.totalDeducted ?? 0;
+    // Tasa BOB/USDC: usar conversionRate.rate si está guardado (más preciso);
+    // si no, calcular desde netBOB (excluye fees) para no inflar la tasa mostrada.
+    const netBOB = transaction.originalAmount
+      - (transaction.fees?.totalDeducted   ?? 0)
+      - (transaction.fees?.profitRetention ?? 0);
+    const tipoCambio = transaction.conversionRate?.rate
+      ?? (digital > 0 && netBOB > 0
+        ? Number((netBOB / digital).toFixed(6))
+        : 0);
 
     const dto = {
       numeroComprobante,
