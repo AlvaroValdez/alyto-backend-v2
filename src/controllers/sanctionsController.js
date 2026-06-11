@@ -26,9 +26,11 @@ export async function listSanctions(req, res) {
     if (type)              filter.type       = type
     if (active !== undefined) filter.isActive = active !== 'false'
     if (search) {
+      // Escapar metacaracteres — evita ReDoS / regex injection en la búsqueda
+      const safeSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       filter.$or = [
-        { fullName:       { $regex: search, $options: 'i' } },
-        { aliases:        { $elemMatch: { $regex: search, $options: 'i' } } },
+        { fullName:       { $regex: safeSearch, $options: 'i' } },
+        { aliases:        { $elemMatch: { $regex: safeSearch, $options: 'i' } } },
         { documentNumbers: search },
       ]
     }

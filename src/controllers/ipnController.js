@@ -2212,7 +2212,11 @@ export async function handleFintocIPN(req, res) {
       return res.status(400).json({ error: 'Invalid signature' });
     }
   } else {
-    console.warn('[Alyto IPN/Fintoc] FINTOC_WEBHOOK_SECRET no configurado — saltando verificación de firma.');
+    // Fail-closed (audit 2026-06-11): sin secret NO se procesa el webhook —
+    // antes era fail-open y un POST sin firma podía confirmar payins.
+    // Mismo comportamiento que Vita/OwlPay/Stripe.
+    console.error('[Alyto IPN/Fintoc] FINTOC_WEBHOOK_SECRET no configurado — webhook RECHAZADO (fail-closed).');
+    return res.status(500).json({ error: 'Webhook secret not configured' });
   }
 
   // ── AWS-2B: buffer SQS (ver handleVitaIPN). ──────────────────────────────

@@ -13,7 +13,16 @@
 import crypto from 'crypto';
 import QRCode  from 'qrcode';
 
-const QR_SECRET = process.env.QR_HMAC_SECRET ?? process.env.JWT_SECRET;
+// Clave de firma de QR. Si falta QR_HMAC_SECRET, se DERIVA una clave distinta
+// del JWT_SECRET (domain separation) en vez de reusarlo crudo — comprometer un
+// dominio ya no compromete el otro (audit 2026-06-11). Configurar QR_HMAC_SECRET
+// en producción sigue siendo lo recomendado.
+const QR_SECRET = process.env.QR_HMAC_SECRET
+  ?? crypto.createHmac('sha256', process.env.JWT_SECRET ?? '').update('alyto-qr-wallet-v1').digest('hex');
+
+if (!process.env.QR_HMAC_SECRET) {
+  console.warn('[QRWallet] ⚠️ QR_HMAC_SECRET no configurado — usando clave derivada de JWT_SECRET. Configurar QR_HMAC_SECRET en producción.');
+}
 
 // TTL por defecto en segundos por tipo (configurable via env)
 const DEFAULT_TTL = {

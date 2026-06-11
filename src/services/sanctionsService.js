@@ -27,6 +27,14 @@ function normalize(str = '') {
 }
 
 /**
+ * Escapa metacaracteres de regex en input de usuario antes de usarlo en $regex.
+ * Sin esto, un nombre con regex maligno causa ReDoS o degrada el match AML.
+ */
+function escapeRegex(str = '') {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
  * Verifica si un usuario está en la lista de sanciones.
  * Busca por nombre completo, aliases y número de documento.
  *
@@ -38,14 +46,15 @@ export async function screenUser({ firstName, lastName, documentNumber } = {}) {
     const orConditions = []
 
     if (firstName?.trim()) {
+      const safeFirst = escapeRegex(firstName.trim())
       orConditions.push(
-        { fullName: { $regex: firstName.trim(), $options: 'i' } },
-        { aliases:  { $elemMatch: { $regex: firstName.trim(), $options: 'i' } } },
+        { fullName: { $regex: safeFirst, $options: 'i' } },
+        { aliases:  { $elemMatch: { $regex: safeFirst, $options: 'i' } } },
       )
     }
     if (lastName?.trim()) {
       orConditions.push(
-        { fullName: { $regex: lastName.trim(), $options: 'i' } },
+        { fullName: { $regex: escapeRegex(lastName.trim()), $options: 'i' } },
       )
     }
     if (documentNumber?.trim()) {

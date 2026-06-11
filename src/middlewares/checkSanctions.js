@@ -12,17 +12,27 @@
  *   router.post('/crossborder', protect, checkSanctions, initCrossBorderPayment)
  */
 
+import * as Sentry from '@sentry/node'
 import { screenUser } from '../services/sanctionsService.js'
+import User from '../models/User.js'
 
 export async function checkSanctions(req, res, next) {
   try {
     const user = req.user
     if (!user) return next()
 
+    // protect() no incluye identityDocument en su .select() — sin esta lectura
+    // el screening corría SIEMPRE solo por nombre (audit 2026-06-11).
+    let documentNumber = user.identityDocument?.number
+    if (!documentNumber && user._id) {
+      const docUser = await User.findById(user._id).select('identityDocument.number').lean()
+      documentNumber = docUser?.identityDocument?.number
+    }
+
     const result = await screenUser({
       firstName:      user.firstName,
       lastName:       user.lastName,
-      documentNumber: user.identityDocument?.number,
+      documentNumber,
     })
 
     if (!result.isClean) {
@@ -43,8 +53,10 @@ export async function checkSanctions(req, res, next) {
     next()
 
   } catch (err) {
-    // Error inesperado en el middleware: no bloquear flujo
+    // Error inesperado en el middleware: no bloquear flujo, pero SÍ reportar —
+    // un fallo sostenido del screening AML debe ser visible (audit 2026-06-11).
     console.error('[Sanctions] Error en middleware checkSanctions:', err.message)
+    Sentry.captureException(err, { tags: { middleware: 'checkSanctions' } })
     next()
   }
 }
