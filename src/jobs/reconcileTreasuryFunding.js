@@ -81,6 +81,10 @@ export async function reconcileTreasuryFunding() {
         stats.errors++
         console.error('[Treasury Reconcile] Error procesando operación:', { operationId: record?.id, error: err.message })
         Sentry.captureException(err, { tags: { job: 'reconcileTreasuryFunding' }, extra: { operationId: record?.id } })
+        // NO avanzar el cursor sobre un inflow fallido: antes se saltaba para
+        // siempre (sin FundingRecord ni alerta). Se reintenta el próximo ciclo;
+        // el dedupe por horizonOperationId evita doble registro (audit 2026-06-11).
+        break
       }
       await SystemConfig.setValue(cursorKey, record.paging_token)
     }

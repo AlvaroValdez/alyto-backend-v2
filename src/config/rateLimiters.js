@@ -105,3 +105,22 @@ export const paymentsLimiter = makeLimiter({
   maxPermissive: 100,
   message:       'Límite de solicitudes de pago excedido. Intenta de nuevo en un minuto.',
 });
+
+// ─── Limiter: Operaciones financieras de Wallet (send/QR/convert/withdraw) ─────
+// Audit 2026-06-11: estos endpoints solo tenían el generalLimiter (200/15min).
+
+export const walletOpsLimiter = makeLimiter({
+  windowMs:      60 * 1000,
+  max:           15,
+  maxPermissive: 100,
+  message:       'Límite de operaciones de wallet excedido. Intenta de nuevo en un minuto.',
+});
+
+// ─── Limiter: KYC session (cada llamada crea una sesión en Stripe = costo) ─────
+
+export const kycSessionLimiter = makeLimiter({
+  windowMs:      60 * 60 * 1000,
+  max:           10,
+  maxPermissive: 60,
+  message:       'Demasiadas solicitudes de verificación de identidad. Intenta más tarde.',
+});

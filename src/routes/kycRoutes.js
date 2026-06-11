@@ -11,15 +11,16 @@
 import { Router }                                    from 'express';
 import { createKycSession, getKycStatus, getKycDebug, approveKycTest } from '../controllers/kycController.js';
 import { protect, requireAdmin }                      from '../middlewares/authMiddleware.js';
+import { kycSessionLimiter }                          from '../config/rateLimiters.js';
 
 const router = Router();
 
 /**
  * GET /api/v1/kyc/session
  * Crea una sesión biométrica de Stripe Identity.
- * Requiere JWT válido.
+ * Requiere JWT válido. Rate-limited: cada llamada crea una sesión en Stripe (costo).
  */
-router.get('/session', protect, createKycSession);
+router.get('/session', protect, kycSessionLimiter, createKycSession);
 
 /**
  * GET /api/v1/kyc/status
