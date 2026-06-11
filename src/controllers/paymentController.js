@@ -94,13 +94,16 @@ import { resolveEuCorridorByAmount, isEuSepaDestination } from '../routing/euAmo
  * }
  */
 export async function initiateFintocPayin(req, res) {
-  const { userId, amount } = req.body;
+  // userId SIEMPRE del JWT — el body permitía crear payins atribuidos a
+  // usuarios arbitrarios (IDOR, audit 2026-06-11).
+  const userId = req.user?._id;
+  const { amount } = req.body;
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
   if (!userId || !amount) {
     return res.status(400).json({
       success: false,
-      error:   'Los campos userId y amount son requeridos.',
+      error:   'El campo amount es requerido.',
     });
   }
 

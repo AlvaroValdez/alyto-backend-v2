@@ -43,13 +43,16 @@ import { createOnRampOrder } from '../services/owlPayService.js';
  * }
  */
 export async function initiateCorporateOnRamp(req, res) {
-  const { userId, amount, destinationWallet, memo } = req.body;
+  // userId SIEMPRE del JWT — el body permitía operar a nombre de usuarios
+  // arbitrarios con destinationWallet del atacante (IDOR, audit 2026-06-11).
+  const userId = req.user?._id;
+  const { amount, destinationWallet, memo } = req.body;
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
   if (!userId || !amount || !destinationWallet) {
     return res.status(400).json({
       success: false,
-      error:   'Los campos userId, amount y destinationWallet son requeridos.',
+      error:   'Los campos amount y destinationWallet son requeridos.',
     });
   }
 
