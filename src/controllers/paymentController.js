@@ -1141,6 +1141,48 @@ export async function initCrossBorderPayment(req, res) {
   console.log('  corridorId:', corridorId);
   console.log('  Fees calculados:', { payinFee, alytoCSpread, fixedFee, profitRetention, payoutFee });
 
+  // ── 3c. USDC de tránsito: SIEMPRE recalculado server-side (corredores SRL/BOB) ──
+  // transaction.digitalAssetAmount es el monto que dispatchPayout envía a Vita/Harbor.
+  // El valor del body (quotedUsdcTransitAmount) solo se acepta si coincide con el
+  // cálculo del servidor dentro de una tolerancia estrecha (drift de tasa entre el
+  // quote y este create). Fuera de tolerancia → se usa el valor del servidor y se
+  // reporta a Sentry como posible manipulación.
+  const USDC_TRANSIT_TOLERANCE = 0.015; // 1.5% — cubre drift quote→create con tasa de mercado+buffer
+  let serverUsdcTransit = null;
+  if (corridor.legalEntity === 'SRL' && corridor.originCurrency === 'BOB') {
+    try {
+      const { bobPerUsdc } = await resolveQuoteRate(corridor);
+      const netBOB = round2(amount - (payinFee + alytoCSpread + fixedFee + profitRetention));
+      if (bobPerUsdc > 0 && netBOB > 0) serverUsdcTransit = round2(netBOB / bobPerUsdc);
+    } catch (rateErr) {
+      // Sin tasa ahora mismo: dejamos digitalAssetAmount sin setear — dispatchPayout
+      // recalcula server-side (convertBobToUsdc) al despachar. NUNCA el valor del cliente.
+      console.warn('[CrossBorder] resolveQuoteRate falló — usdcTransit se recalculará al despachar:', rateErr.message);
+    }
+  }
+  let digitalAssetAmountFinal = null;
+  if (serverUsdcTransit > 0) {
+    const quotedUsdc = Number(quotedUsdcTransitAmount);
+    if (
+      Number.isFinite(quotedUsdc) && quotedUsdc > 0 &&
+      Math.abs(quotedUsdc - serverUsdcTransit) / serverUsdcTransit <= USDC_TRANSIT_TOLERANCE
+    ) {
+      // Coincide con lo cotizado al usuario — honrar el monto mostrado.
+      digitalAssetAmountFinal = quotedUsdc;
+    } else {
+      digitalAssetAmountFinal = serverUsdcTransit;
+      if (quotedUsdcTransitAmount != null) {
+        console.warn('[CrossBorder] ⚠️ usdcTransitAmount del cliente fuera de tolerancia — usando cálculo server-side:', {
+          quoted: quotedUsdcTransitAmount, server: serverUsdcTransit, userId: String(userId),
+        });
+        Sentry.captureMessage('usdcTransitAmount del cliente fuera de tolerancia (posible manipulación)', {
+          level: 'warning',
+          extra: { quoted: quotedUsdcTransitAmount, server: serverUsdcTransit, corridorId, userId: String(userId) },
+        });
+      }
+    }
+  }
+
   // ── 4. Crear payin según el método del corredor ───────────────────────────
   //
   //   fintoc    → Checkout Session en Fintoc. Fondos llegan a cuenta SpA en Chile.
@@ -1314,10 +1356,10 @@ export async function initCrossBorderPayment(req, res) {
       destinationCurrency: corridor.destinationCurrency,
       // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
       ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
-      // usdcTransitAmount cotizado: almacenado para que dispatchPayout use el mismo
-      // monto que se le mostró al usuario, sin recalcular.
-      ...(quotedUsdcTransitAmount != null && corridor.legalEntity === 'SRL'
-        ? { digitalAssetAmount: Number(quotedUsdcTransitAmount) }
+      // usdcTransitAmount: calculado server-side (sección 3c). El valor del body
+      // solo se usa si coincide con el cálculo del servidor dentro de tolerancia.
+      ...(digitalAssetAmountFinal != null && corridor.legalEntity === 'SRL'
+        ? { digitalAssetAmount: digitalAssetAmountFinal }
         : {}),
       // destinationAmount estimado del WS/getQuote. tryOwlPayV2 lo sobreescribirá
       // con el monto real de Harbor al crear el transfer (rateConfidence='exact').
