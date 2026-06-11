@@ -284,10 +284,11 @@ export async function uploadAvatar(req, res) {
  * processKyc
  *
  * Valida los archivos recibidos, registra la aceptación del ToS con IP y
- * user-agent para auditoría, y actualiza kycStatus del usuario a 'approved'.
+ * user-agent para auditoría, y deja al usuario en 'under_review'.
  *
- * En producción: cambiar kycStatus a 'under_review' y enviar a proveedor
- * KYC externo (Stripe Identity, Jumio, etc.). Subir archivos a S3/GCS.
+ * ⚠️ Este endpoint NUNCA aprueba KYC. La aprobación llega solo por dos vías:
+ * Stripe Identity (webhook verified) o revisión manual del admin. Flujo legacy
+ * de subida manual — el frontend actual usa Stripe Identity (pages/Kyc).
  */
 export async function processKyc(req, res) {
   try {
@@ -337,8 +338,9 @@ export async function processKyc(req, res) {
       userId,
       {
         $set: {
-          kycStatus:     'approved',  // 'under_review' en producción
-          kycApprovedAt: new Date(),
+          // Auto-aprobación ELIMINADA (audit 2026-06-11): un usuario autenticado
+          // podía aprobarse su propio KYC subiendo 3 archivos cualesquiera.
+          kycStatus:     'under_review',
           kycProvider:   'manual_upload',
           tosAcceptance: tosAcceptancePayload,
         },
