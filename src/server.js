@@ -34,6 +34,8 @@ import { generalLimiter, paymentsLimiter } from './config/rateLimiters.js';
 import compression    from 'compression';
 import cookieParser   from 'cookie-parser';
 import mongoose       from 'mongoose';
+import { protect }         from './middlewares/authMiddleware.js';
+import { checkAdmin }      from './middlewares/checkAdmin.js';
 import authRoutes          from './routes/authRoutes.js';
 import paymentRoutes       from './routes/paymentRoutes.js';
 import payoutRoutes        from './routes/payoutRoutes.js';
@@ -316,12 +318,9 @@ app.get('/api/v1/health', (req, res) => res.redirect(307, '/api/health'));
  * Diagnóstico de secretos críticos — solo admin autenticado.
  * Muestra NOMBRES de variables presentes/faltantes, NUNCA valores.
  */
-app.get('/api/v1/admin/secrets-audit', (req, res) => {
-  // Validación básica: solo admin (no usa middleware para evitar dependencia circular en startup)
-  const authHeader = req.headers.authorization ?? '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : req.cookies?.alyto_token;
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  // La verificación JWT real la hace el middleware protect() — aquí solo bloqueamos acceso directo
+app.get('/api/v1/admin/secrets-audit', protect, checkAdmin, (req, res) => {
+  // protect verifica el JWT (firma + usuario activo) y checkAdmin exige role admin.
+  // Antes solo se comprobaba la PRESENCIA de un token (cualquier string) — audit 2026-06-11.
   const { present, missing } = auditSecrets(CRITICAL_SECRETS);
   res.json({
     total:    CRITICAL_SECRETS.length,
@@ -360,8 +359,10 @@ app.get('/.well-known/stellar.toml', renderStellarToml);
 
 // ─── Rutas de Desarrollo (opt-in explícito vía ALYTO_ENABLE_DEV_ROUTES=1) ────
 // SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.
+// Doble candado: aunque el flag esté en 1, NUNCA se montan con NODE_ENV=production
+// (audit 2026-06-11 — exponían userIds y transacciones SRL sin auth).
 
-if (process.env.ALYTO_ENABLE_DEV_ROUTES === '1') {
+if (process.env.ALYTO_ENABLE_DEV_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
   /**
    * GET /api/v1/dev/test-user
    * Devuelve el ID del usuario de prueba sembrado al arrancar.
@@ -464,8 +465,10 @@ async function seedDevUser() {
   if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') return;
 
   // Guard adicional: rehusar si la DB parece ser producción o NODE_ENV=production.
+  // La DB de producción se llama 'alyto-v2' (NO contiene 'prod') — chequeo explícito.
   const dbName = mongoose.connection.db.databaseName;
-  if ((dbName && dbName.toLowerCase().includes('prod')) || process.env.NODE_ENV === 'production') {
+  const looksLikeProd = dbName && (dbName.toLowerCase().includes('prod') || dbName.toLowerCase() === 'alyto-v2');
+  if (looksLikeProd || process.env.NODE_ENV === 'production') {
     console.error('FATAL: seedDevUser() refused to run against production database.');
     return;
   }
@@ -757,6 +760,24 @@ async function startServer() {
     process.exit(1);
   }
 }
+
+// ─── Red de seguridad de proceso (audit 2026-06-11) ─────────────────────────
+// En Node ≥15 una promesa rechazada sin handler CRASHEA el proceso — a mitad de
+// un payout en vuelo. Sentry.setupExpressErrorHandler solo cubre rutas Express;
+// jobs, WebSocket y fire-and-forget quedaban fuera.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('[Alyto Server] ⚠️ unhandledRejection (proceso sigue vivo):', err.message);
+  Sentry.captureException(err, { tags: { handler: 'unhandledRejection' } });
+});
+
+process.on('uncaughtException', (err) => {
+  // Estado del proceso indefinido tras una excepción síncrona no capturada:
+  // reportar, drenar Sentry y salir — Docker/Render reinician el contenedor.
+  console.error('[Alyto Server] 💥 uncaughtException — cerrando proceso:', err.message);
+  Sentry.captureException(err, { tags: { handler: 'uncaughtException' } });
+  Sentry.flush(2000).finally(() => process.exit(1));
+});
 
 // Manejo de señales de cierre graceful (Docker, PM2, K8s)
 process.on('SIGTERM', async () => {
