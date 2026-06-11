@@ -265,6 +265,23 @@ export async function sendP2P(req, res) {
       return res.status(400).json({ error: 'No puedes enviarte dinero a ti mismo.' })
     }
 
+    // ── Límite diario de envío (mismo cálculo que getDailyLimits) ──────────
+    const SEND_LIMIT = parseFloat(process.env.WALLET_DAILY_SEND_LIMIT ?? '5000')
+    if (SEND_LIMIT > 0) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const sentAgg = await WalletTransaction.aggregate([
+        { $match: { userId: sender._id, type: 'send', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]).session(session)
+      const sentToday = sentAgg[0]?.total ?? 0
+      if (sentToday + amount > SEND_LIMIT) {
+        await session.abortTransaction()
+        return res.status(400).json({
+          error: `Superas tu límite diario de envío de Bs. ${SEND_LIMIT.toFixed(2)} (enviado hoy: Bs. ${sentToday.toFixed(2)}).`,
+        })
+      }
+    }
+
     // Verificar destinatario
     const recipient = await User.findOne({ email: recipientEmail.toLowerCase() }).lean()
     if (!recipient) {
@@ -298,7 +315,20 @@ export async function sendP2P(req, res) {
     const prevBalanceOrigen  = walletOrigen.balance
     const prevBalanceDestino = walletDestino.balance
 
-    await WalletBOB.updateOne({ _id: walletOrigen._id },  { $inc: { balance: -amount } }, { session })
+    // Débito condicional: re-verifica saldo disponible EN el update (atómico) —
+    // dos requests concurrentes no pueden pasar ambos el check de saldo.
+    const debitResult = await WalletBOB.updateOne(
+      {
+        _id: walletOrigen._id,
+        $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
+      },
+      { $inc: { balance: -amount } },
+      { session },
+    )
+    if (debitResult.modifiedCount !== 1) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Saldo insuficiente.' })
+    }
     await WalletBOB.updateOne({ _id: walletDestino._id }, { $inc: { balance:  amount } }, { session })
 
     const [wtxSend, wtxReceive] = await WalletTransaction.create([
@@ -397,6 +427,23 @@ export async function requestWithdrawal(req, res) {
       return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
     }
 
+    // ── Límite diario de retiro (mismo cálculo que getDailyLimits) ──────────
+    const WITHDRAW_LIMIT = parseFloat(process.env.WALLET_DAILY_WITHDRAW_LIMIT ?? '10000')
+    if (WITHDRAW_LIMIT > 0) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const wAgg = await WalletTransaction.aggregate([
+        { $match: { userId: user._id, type: 'withdrawal', status: { $in: ['pending', 'completed'] }, currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]).session(session)
+      const withdrawnToday = wAgg[0]?.total ?? 0
+      if (withdrawnToday + amount > WITHDRAW_LIMIT) {
+        await session.abortTransaction()
+        return res.status(400).json({
+          error: `Superas tu límite diario de retiro de Bs. ${WITHDRAW_LIMIT.toFixed(2)} (solicitado hoy: Bs. ${withdrawnToday.toFixed(2)}).`,
+        })
+      }
+    }
+
     // ── Límites KYB (solo cuentas business con perfil aprobado) ──────────────
     if (user.accountType === 'business') {
       const bizProfile = await BusinessProfile.findOne({ userId: user._id, kybStatus: 'approved' }).lean()
@@ -418,8 +465,19 @@ export async function requestWithdrawal(req, res) {
       }
     }
 
-    // Reservar monto
-    await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balanceReserved: amount } }, { session })
+    // Reservar monto — condicional: re-verifica disponible EN el update (atómico)
+    const reserveResult = await WalletBOB.updateOne(
+      {
+        _id: wallet._id,
+        $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
+      },
+      { $inc: { balanceReserved: amount } },
+      { session },
+    )
+    if (reserveResult.modifiedCount !== 1) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Saldo insuficiente.' })
+    }
 
     const [wtx] = await WalletTransaction.create([{
       walletId:      wallet._id,

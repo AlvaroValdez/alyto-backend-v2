@@ -743,11 +743,19 @@ export async function getUSDCTransferQuote(req, res) {
  *
  * @returns {Promise<{wtxSend, wtxReceive, fee, total, prevOrigen, senderName, recipientName}>}
  */
-export async function executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source }) {
+export async function executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source, qrId }) {
   const biz = (status, message) => Object.assign(new Error(message), { httpStatus: status })
 
   const cfg   = await WalletFeeConfig.getSingleton(session)
   const isBiz = sender.accountType === 'business'
+
+  // ── Anti-replay QR: charge/p2p son de un solo uso ────────────────────────────
+  if (qrId) {
+    const alreadyPaid = await WalletTransaction.exists(
+      { 'metadata.qrId': qrId, type: 'send', status: 'completed' },
+    ).session(session)
+    if (alreadyPaid) throw biz(409, 'Este QR ya fue utilizado.')
+  }
 
   // ── Límites (P4) ─────────────────────────────────────────────────────────────
   const minTx    = cfg.usdcP2pMinPerTx ?? 1
@@ -786,7 +794,16 @@ export async function executeUsdcP2pTransfer(session, { sender, recipient, amoun
   const prevOrigen  = walletOrigen.balance
   const prevDestino = walletDestino.balance
 
-  await WalletUSDC.updateOne({ _id: walletOrigen._id },  { $inc: { balance: -total }  }, { session })
+  // Débito condicional: re-verifica saldo disponible EN el update (atómico)
+  const debitResult = await WalletUSDC.updateOne(
+    {
+      _id: walletOrigen._id,
+      $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, total] },
+    },
+    { $inc: { balance: -total } },
+    { session },
+  )
+  if (debitResult.modifiedCount !== 1) throw biz(400, 'Saldo USDC insuficiente.')
   await WalletUSDC.updateOne({ _id: walletDestino._id }, { $inc: { balance:  amount } }, { session })
 
   const senderName    = `${sender.firstName ?? ''} ${sender.lastName ?? ''}`.trim()
@@ -806,7 +823,7 @@ export async function executeUsdcP2pTransfer(session, { sender, recipient, amoun
       description:        description ?? `Envío USDC a @${recipient.alytoAlias ?? ''}`.trim(),
       counterpartyUserId: recipient._id,
       confirmedAt:        new Date(),
-      metadata:           { source: source ?? 'alias', recipientAlias: recipient.alytoAlias ?? null, fee },
+      metadata:           { source: source ?? 'alias', recipientAlias: recipient.alytoAlias ?? null, fee, ...(qrId ? { qrId } : {}) },
     },
     {
       walletId:           walletDestino._id,

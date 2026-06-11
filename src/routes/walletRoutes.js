@@ -79,7 +79,7 @@ router.get('/transactions',      protect, requireKycApproved, getWalletTransacti
 router.get('/deposit/qr-images',             protect, requireKycApproved, getDepositQRImages)
 router.post('/deposit/initiate',             protect, requireKycApproved, checkSanctions, idempotencyCheck, initiateDeposit)
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, uploadComprobante.single('comprobante'), uploadDepositProof)
-router.post('/send',             protect, requireKycApproved, checkSanctions, sendP2P)
+router.post('/send',             protect, requireKycApproved, checkSanctions, idempotencyCheck, sendP2P)
 router.post('/withdraw/request', protect, requireKycApproved, checkSanctions, uploadBankQr.single('bankQrImage'), requestWithdrawal)
 
 router.get('/balance-history', protect, requireKycApproved, getBalanceHistory)
@@ -88,7 +88,7 @@ router.get('/export',          protect, requireKycApproved, exportTransactions)
 
 // QR Wallet (Fase 29)
 router.post('/qr/generate', protect, requireKycApproved, generateWalletQR)
-router.post('/qr/scan',     protect, requireKycApproved, scanAndPayQR)
+router.post('/qr/scan',     protect, requireKycApproved, checkSanctions, idempotencyCheck, scanAndPayQR)
 router.get('/qr/preview',   protect, requireKycApproved, previewQR)
 
 // ─── USDC Wallet (Fase 35) ───────────────────────────────────────────────────

@@ -137,6 +137,8 @@ export async function scanAndPayQR(req, res) {
           amount:      finalAmount,
           description: payload.description ? `QR: ${payload.description}` : 'Pago QR USDC',
           source:      'qr',
+          // Anti-replay: charge/p2p son de un solo uso (deposit es reutilizable)
+          ...(payload.type !== 'deposit' && payload.qrId ? { qrId: payload.qrId } : {}),
         });
         await session.commitTransaction();
         fireUSDCAuditTrail(result.wtxSend.wtxId);
@@ -200,15 +202,35 @@ export async function scanAndPayQR(req, res) {
       });
     }
 
+    // 6-bis. Anti-replay: QR charge/p2p son de un solo uso (deposit es reutilizable
+    // por diseño). Si el qrId ya fue cobrado, rechazar el reenvío.
+    if (payload.type !== 'deposit' && payload.qrId) {
+      const alreadyPaid = await WalletTransaction.exists(
+        { 'metadata.qrId': payload.qrId, type: 'send', status: 'completed' },
+      ).session(session);
+      if (alreadyPaid) {
+        await session.abortTransaction();
+        return res.status(409).json({ error: 'Este QR ya fue utilizado.' });
+      }
+    }
+
     // 7. Operación atómica: débito pagador, crédito receptor
     const prevPayer     = walletPayer.balance;
     const prevRecipient = walletRecipient.balance;
 
-    await WalletBOB.updateOne(
-      { _id: walletPayer._id },
+    // Débito condicional: re-verifica saldo disponible EN el update (atómico)
+    const debitResult = await WalletBOB.updateOne(
+      {
+        _id: walletPayer._id,
+        $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, finalAmount] },
+      },
       { $inc: { balance: -finalAmount } },
       { session },
     );
+    if (debitResult.modifiedCount !== 1) {
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'Saldo insuficiente.' });
+    }
     await WalletBOB.updateOne(
       { _id: walletRecipient._id },
       { $inc: { balance: finalAmount } },
