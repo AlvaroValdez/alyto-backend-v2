@@ -159,19 +159,38 @@ ${rows}
 Alyto Backend — ${new Date().toISOString()}
 `.trim();
 
-  await sendRawEmail({
-    to:      adminEmail,
-    subject: `[Alyto] ⚠️ ${transactions.length} tx Vita sin resolver (reconcile)`,
-    text:    body,
-  }).catch(() => {});
+  // Firma posicional (to, subject, html) — se llamaba con un objeto y el email
+  // de alerta fallaba SIEMPRE en silencio (audit 2026-06-11).
+  await sendRawEmail(
+    adminEmail,
+    `[Alyto] ⚠️ ${transactions.length} tx Vita sin resolver (reconcile)`,
+    `<pre style="font-family:monospace;white-space:pre-wrap">${body}</pre>`,
+  ).catch(err => logger.error('[ReconcileVita] Error enviando alerta admin:', { err: err.message }));
 }
 
 /**
  * Job principal.
  * @returns {Promise<{checked: number, completed: number, failed: number, unresolved: number, autoFailed: number}>}
  */
+// Guard de overlap: evita que dos corridas solapadas procesen las mismas
+// tx atascadas en paralelo (audit 2026-06-11).
+let _isRunning = false;
+
 export async function reconcileVitaTransfers() {
   const stats = { checked: 0, completed: 0, failed: 0, unresolved: 0, autoFailed: 0 };
+  if (_isRunning) {
+    logger.warn('[ReconcileVita] Corrida anterior aún en curso — skip');
+    return { ...stats, skipped: true };
+  }
+  _isRunning = true;
+  try {
+    return await _reconcileVitaTransfers(stats);
+  } finally {
+    _isRunning = false;
+  }
+}
+
+async function _reconcileVitaTransfers(stats) {
   const now   = new Date();
 
   try {

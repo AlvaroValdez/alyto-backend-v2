@@ -34,7 +34,24 @@ const IN_TRANSIT_ALERT_AGE_MS  = 2  * 60 * 60 * 1000;   // 2h  → alerta admin
 const IN_TRANSIT_GIVEUP_AGE_MS = 7  * 24 * 60 * 60 * 1000; // 7d → auto-fail
 const MAX_WEB3_RETRIES         = 3;
 
+// Guard de overlap: evita que dos corridas solapadas reintenten el mismo
+// transit Stellar en paralelo (audit 2026-06-11).
+let _isRunning = false;
+
 export async function reconcileStellarTransits() {
+  if (_isRunning) {
+    console.warn('[ReconcileStellar] Corrida anterior aún en curso — skip');
+    return { retried: 0, skipped: true };
+  }
+  _isRunning = true;
+  try {
+    return await _reconcileStellarTransits();
+  } finally {
+    _isRunning = false;
+  }
+}
+
+async function _reconcileStellarTransits() {
   const now   = Date.now();
   const stats = {
     retried: 0, retriedOk: 0, retriedFailed: 0, retriedExhausted: 0,

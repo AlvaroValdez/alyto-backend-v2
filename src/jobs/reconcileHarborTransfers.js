@@ -42,12 +42,28 @@ const HARBOR_TO_ALYTO_STATUS = {
   refunded:                       'refunded',
 };
 
+// Guard de overlap: dos corridas solapadas podían leer la misma tx failed y
+// ambas crear transfer Harbor + enviar USDC dos veces (audit 2026-06-11).
+let _isRunning = false;
+
 export async function reconcileHarborTransfers() {
+  if (_isRunning) {
+    console.warn('[Reconcile] Corrida anterior aún en curso — skip');
+    return { reconciled: 0, skipped: true };
+  }
   if (!getCustomerUuid()) {
     console.info('[Reconcile] OWLPAY_CUSTOMER_UUID no configurado — skip');
     return { reconciled: 0, skipped: true };
   }
+  _isRunning = true;
+  try {
+    return await _reconcileHarborTransfers();
+  } finally {
+    _isRunning = false;
+  }
+}
 
+async function _reconcileHarborTransfers() {
   const now = Date.now();
   const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0, retried: 0, retriedFailed: 0, retriedExhausted: 0 };
 

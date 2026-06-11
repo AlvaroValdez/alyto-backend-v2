@@ -389,9 +389,20 @@ export async function retryPendingFundingTransactions(entity) {
   for (const tx of pendingTxs) {
     console.log('[Funding] Auto-retry → dispatchPayout:', tx.alytoTransactionId);
     try {
-      await dispatchPayout(tx);
-      // Si la tx sigue en pending_funding es que el saldo aún no alcanza — parar
-      if (tx.status === 'pending_funding') {
+      // Re-armar el gate atómico: dispatchPayout SOLO procesa payin_confirmed —
+      // llamarlo con status pending_funding era un no-op silencioso (audit 2026-06-11).
+      const rearmed = await Transaction.findOneAndUpdate(
+        { _id: tx._id, status: 'pending_funding' },
+        { $set: { status: 'payin_confirmed' } },
+        { returnDocument: 'after' },
+      );
+      if (!rearmed) continue; // otro proceso ya la tomó
+
+      await dispatchPayout(rearmed);
+
+      // dispatchPayout muta SU copia del documento — releer el estado real de la DB
+      const fresh = await Transaction.findById(tx._id).select('status').lean();
+      if (fresh?.status === 'pending_funding') {
         console.log('[Funding] Auto-retry: balance insuficiente, deteniendo cola FIFO');
         break;
       }
