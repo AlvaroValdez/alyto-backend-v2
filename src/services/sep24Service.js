@@ -263,11 +263,15 @@ export async function listTransactions({ user, query }) {
 
 /**
  * Retorna una transacción SEP-24 por id, stellar_transaction_id o external_transaction_id.
+ * Scoped al usuario autenticado (SEP-10) — sin userId no hay acceso (IDOR audit 2026-06-11).
  */
-export async function getTransaction({ query }) {
+export async function getTransaction({ query, user }) {
+  if (!user?._id) {
+    throw Object.assign(new Error('SEP-24 requiere una cuenta Alyto vinculada'), { status: 401 });
+  }
   const { id, stellar_transaction_id, external_transaction_id } = query;
 
-  const filter = {};
+  const filter = { userId: user._id };
   if (id)                          filter.alytoTransactionId    = id;
   else if (stellar_transaction_id) filter.stellarTxId           = stellar_transaction_id;
   else if (external_transaction_id) filter.externalTransactionId = external_transaction_id;

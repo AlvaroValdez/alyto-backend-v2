@@ -222,9 +222,13 @@ export async function createTransaction({ body, user }) {
 
 /**
  * Retorna el estado de una transacción SEP-31 en formato estándar.
+ * Scoped al usuario autenticado (SEP-10) — sin userId no hay acceso (IDOR audit 2026-06-11).
  */
-export async function getTransaction({ transactionId }) {
-  const tx = await Transaction.findOne({ alytoTransactionId: transactionId }).lean();
+export async function getTransaction({ transactionId, user }) {
+  if (!user?._id) {
+    throw Object.assign(new Error('SEP-31 requiere una cuenta Alyto vinculada'), { status: 401 });
+  }
+  const tx = await Transaction.findOne({ alytoTransactionId: transactionId, userId: user._id }).lean();
 
   if (!tx) {
     throw Object.assign(new Error('Transaction not found'), { status: 404 });
@@ -241,8 +245,11 @@ export async function getTransaction({ transactionId }) {
  * Actualización del estado por el sending anchor (callback).
  * Principalmente para recibir info cuando el USDC ha sido enviado.
  */
-export async function patchTransaction({ transactionId, body }) {
-  const tx = await Transaction.findOne({ alytoTransactionId: transactionId });
+export async function patchTransaction({ transactionId, body, user }) {
+  if (!user?._id) {
+    throw Object.assign(new Error('SEP-31 requiere una cuenta Alyto vinculada'), { status: 401 });
+  }
+  const tx = await Transaction.findOne({ alytoTransactionId: transactionId, userId: user._id });
   if (!tx) throw Object.assign(new Error('Transaction not found'), { status: 404 });
 
   if (body.status) {

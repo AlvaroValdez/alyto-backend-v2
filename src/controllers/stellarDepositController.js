@@ -61,7 +61,7 @@ export async function handleListTransactions(req, res) {
 
 export async function handleGetTransaction(req, res) {
   try {
-    const result = await getTransaction({ query: req.query });
+    const result = await getTransaction({ query: req.query, user: req.user });
     return res.status(200).json(result);
   } catch (err) {
     logger.error('[sep24] getTransaction error', { err: err.message });

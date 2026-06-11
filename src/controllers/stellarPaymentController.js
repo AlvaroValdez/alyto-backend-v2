@@ -32,7 +32,7 @@ export async function handleCreateTransaction(req, res) {
 
 export async function handleGetTransaction(req, res) {
   try {
-    const result = await getTransaction({ transactionId: req.params.id });
+    const result = await getTransaction({ transactionId: req.params.id, user: req.user });
     return res.status(200).json(result);
   } catch (err) {
     logger.error('[sep31] getTransaction error', { err: err.message });
@@ -42,7 +42,7 @@ export async function handleGetTransaction(req, res) {
 
 export async function handlePatchTransaction(req, res) {
   try {
-    const result = await patchTransaction({ transactionId: req.params.id, body: req.body });
+    const result = await patchTransaction({ transactionId: req.params.id, body: req.body, user: req.user });
     return res.status(200).json(result);
   } catch (err) {
     logger.error('[sep31] patchTransaction error', { err: err.message });

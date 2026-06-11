@@ -31,11 +31,26 @@ export async function sep10Protect(req, res, next) {
     // Token con userId (usuario Alyto registrado)
     if (decoded.id) {
       const user = await User.findById(decoded.id)
-        .select('firstName lastName email kycStatus legalEntity accountType sanctionsFlag stellarAccount')
+        .select('firstName lastName email kycStatus legalEntity accountType sanctionsFlag stellarAccount isActive tokenVersion')
         .lean();
 
       if (!user) {
         return res.status(401).json({ error: 'User not found' });
+      }
+
+      // Mismos guards que protect() (audit 2026-06-11): cuenta suspendida,
+      // flag de sanciones y revocación server-side por tokenVersion.
+      if (user.isActive === false) {
+        return res.status(401).json({ error: 'Account suspended' });
+      }
+      if (user.sanctionsFlag === true) {
+        return res.status(403).json({ error: 'Account restricted' });
+      }
+      const skipTokenVersionCheck = process.env.DISABLE_TOKEN_VERSION_CHECK === 'true';
+      if (process.env.NODE_ENV === 'production' && !skipTokenVersionCheck) {
+        if ((decoded.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+          return res.status(401).json({ error: 'Token revoked' });
+        }
       }
 
       req.user = {
