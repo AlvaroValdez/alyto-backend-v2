@@ -1590,6 +1590,21 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
+  // bankQr: incluir QR image + metadatos necesarios para el frontend
+  if (corridor.payinMethod === 'bankQr') {
+    return res.status(201).json({
+      transactionId:       alytoTransactionId,
+      payinMethod:         payinProvider,
+      status:              'payin_pending',
+      destinationAmount:   transaction.destinationAmount   ?? quotedDestAmount   ?? null,
+      destinationCurrency: transaction.destinationCurrency ?? null,
+      exchangeRate:        getDisplayRate(transaction) || quotedExchangeRate || null,
+      paymentQR,                              // base64 del QR bancario real
+      bankQrId:            bankQrMeta?.qrId, // para polling de estado si lo necesita el FE
+      dueDate:             bankQrMeta?.dueDate,
+    });
+  }
+
   return res.status(201).json({
     transactionId: alytoTransactionId,
     payinUrl:      payinUrl ?? null,

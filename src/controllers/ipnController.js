@@ -2746,9 +2746,9 @@ export function handleBankQrIPN(bankId) {
       return res.status(200).json(OK);
     }
 
-    // Idempotencia: pago ya procesado
-    if (transaction.status !== 'payin_pending') {
-      logger.info(`[BankQr IPN ${bankId}] Tx ya en estado ${transaction.status} — ignorando`, {
+    // Idempotencia: status ya avanzó O ya tenemos un paidAt registrado
+    if (transaction.status !== 'payin_pending' || transaction.bankQr?.paidAt) {
+      logger.info(`[BankQr IPN ${bankId}] Tx ya procesada (status=${transaction.status}) — ignorando`, {
         alytoTransactionId: transaction.alytoTransactionId,
       });
       return res.status(200).json(OK);
@@ -2777,9 +2777,14 @@ export function handleBankQrIPN(bankId) {
     }
 
     // ── Confirmar payin ───────────────────────────────────────────────────────
+    // Usar timestamp real del banco; fallback a now si el formato no parsea
+    const bankPaidAt = payment.paymentDate && payment.paymentTime
+      ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
+      : new Date();
+
     try {
       transaction.status         = 'payin_confirmed';
-      transaction.bankQr.paidAt  = new Date();
+      transaction.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
       transaction.bankQr.payment = payment;
       transaction.payinReference = payment.qrId;
       transaction.ipnLog.push({

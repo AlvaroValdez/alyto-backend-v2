@@ -33,6 +33,9 @@ export async function cleanupOrphanTransactions() {
         paymentInstructionsExpiresAt: { $lt: new Date() },
         'paymentProof.data':          { $exists: false },
         'ipnLog.eventType':           { $ne: 'payment_proof_uploaded' },
+        // Excluir transacciones bankQr: su confirmación llega del banco (webhook o
+        // reconciliación), no del usuario. Archivar en base a dueDate, no paymentInstructionsExpiresAt.
+        'bankQr.qrId':                { $exists: false },
         archivedAt:                   null,
       },
       {

@@ -40,8 +40,13 @@ export async function reconcileBankQrPayments() {
 
         if (!tx) continue;  // ya confirmada por IPN o no existe
 
+        // Usar timestamp real del banco cuando está disponible; fallback a now
+        const bankPaidAt = payment.paymentDate && payment.paymentTime
+          ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
+          : new Date();
+
         tx.status         = 'payin_confirmed';
-        tx.bankQr.paidAt  = new Date();
+        tx.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
         tx.bankQr.payment = payment;
         tx.payinReference = payment.qrId;
         tx.ipnLog.push({
