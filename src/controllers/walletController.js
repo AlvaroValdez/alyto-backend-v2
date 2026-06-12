@@ -380,6 +380,11 @@ export async function sendP2P(req, res) {
 
   } catch (err) {
     await session.abortTransaction()
+    // WriteConflict: dos operaciones concurrentes sobre la misma wallet — la
+    // perdedora se aborta limpiamente (los fondos están protegidos). 409 + retry.
+    if (err.code === 112 || err.errorLabels?.includes('TransientTransactionError')) {
+      return res.status(409).json({ error: 'Operación concurrente detectada. Intenta de nuevo.' })
+    }
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'sendP2P' } })
     console.error('[Wallet] Error en sendP2P:', err.message)
     return res.status(500).json({ error: 'Error al procesar el envío.' })

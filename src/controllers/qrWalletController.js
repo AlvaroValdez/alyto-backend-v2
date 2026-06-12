@@ -295,6 +295,10 @@ export async function scanAndPayQR(req, res) {
 
   } catch (err) {
     await session.abortTransaction();
+    // WriteConflict por concurrencia — fondos protegidos, pedir retry
+    if (err.code === 112 || err.errorLabels?.includes('TransientTransactionError')) {
+      return res.status(409).json({ error: 'Operación concurrente detectada. Intenta de nuevo.' });
+    }
     Sentry.captureException(err, { tags: { controller: 'qrWalletController', fn: 'scanAndPayQR' } });
     return res.status(500).json({ error: 'Error al procesar el pago QR.' });
   } finally {

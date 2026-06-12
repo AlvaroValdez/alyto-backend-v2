@@ -921,6 +921,10 @@ export async function sendUSDC(req, res) {
   } catch (err) {
     await session.abortTransaction()
     if (err.httpStatus) return res.status(err.httpStatus).json({ error: err.message })
+    // WriteConflict por concurrencia — fondos protegidos, pedir retry
+    if (err.code === 112 || err.errorLabels?.includes('TransientTransactionError')) {
+      return res.status(409).json({ error: 'Operación concurrente detectada. Intenta de nuevo.' })
+    }
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'sendUSDC' } })
     console.error('[WalletUSDC] Error en sendUSDC:', err.message)
     return res.status(500).json({ error: 'Error al procesar la transferencia USDC.' })
