@@ -21,7 +21,7 @@
  */
 
 import { Router }                               from 'express';
-import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN } from '../controllers/ipnController.js';
+import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN } from '../controllers/ipnController.js';
 
 const router = Router();
 
@@ -81,6 +81,8 @@ const webhookPingOk = (provider) => (req, res) =>
 router.get('/vita',   webhookPingOk('vita'));
 router.get('/fintoc', webhookPingOk('fintoc'));
 router.get('/owlpay', webhookPingOk('owlpay'));
+// Banco QR boliviano — agregar una línea por banco nuevo
+router.get('/bec',    webhookPingOk('bec'));    // Banco Económico
 
 /**
  * POST /api/v1/ipn/vita
@@ -115,5 +117,16 @@ router.post('/fintoc', captureRawBody, handleFintocIPN);
  *   https://[dominio]/api/v1/ipn/owlpay
  */
 router.post('/owlpay', captureRawBody, handleOwlPayIPN);
+
+/**
+ * POST /api/v1/ipn/bec
+ *
+ * IPN de Banco Económico — notificación de pago de QR.
+ * El banco hace POST a esta URL cuando el usuario paga el QR con su app bancaria.
+ * Payload: { payment: PaymentQR } — ver objeto PaymentQR en API Market Baneco v1.3.0
+ *
+ * Para agregar otro banco: duplicar las dos líneas con el bankId correspondiente.
+ */
+router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
 
 export default router;

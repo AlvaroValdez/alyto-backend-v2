@@ -18,6 +18,7 @@
  *   GET  /:transactionId/status     — Consulta de estado (polling del frontend)
  */
 
+import { logger }        from '../utils/logger.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -1197,10 +1198,11 @@ export async function initCrossBorderPayment(req, res) {
   // El IPN de confirmación usará este ID para encontrar la transacción en BD.
   const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
-  let payinProviderRef         = null;  // ID externo para lookup en IPN
-  let payinUrl                 = null;  // Token/URL que abre el widget de pago
-  let payinProvider            = 'unknown';
-  let manualPaymentInstructions = null; // Solo para payinMethod === 'manual'
+  let payinProviderRef          = null;  // ID externo para lookup en IPN
+  let payinUrl                  = null;  // Token/URL que abre el widget de pago
+  let payinProvider             = 'unknown';
+  let manualPaymentInstructions = null;  // Solo para payinMethod === 'manual'
+  let bankQrMeta                = null;  // Solo para payinMethod === 'bankQr'
 
   if (corridor.payinMethod === 'fintoc') {
     // ── Payin Fintoc (Chile — AV Finance SpA) ─────────────────────────────
@@ -1237,6 +1239,63 @@ export async function initCrossBorderPayment(req, res) {
     console.log('[CrossBorder] Fintoc Checkout Session creado:', {
       checkoutSessionId: fintocResult.id,
       payinUrl:          payinUrl ? '[PRESENTE]' : '[AUSENTE]',
+    });
+
+  } else if (corridor.payinMethod === 'bankQr') {
+    // ── Payin QR Bancario (Bolivia — Banco Económico u otro banco registrado) ─
+    // El banco genera un QR real que el usuario escanea con su app bancaria.
+    // La confirmación es automática via webhook (POST /api/v1/ipn/{bankId}).
+    // No requiere subida de comprobante ni confirmación manual del admin.
+    const bankId = corridor.bankQrConfig?.bankId ?? 'bec';
+
+    let becResult;
+    try {
+      const { getBankQrService } = await import('../services/bankQr/bankQrRegistry.js');
+      const svc = getBankQrService(bankId);
+
+      // dueDate = hoy (usuario debe pagar el mismo día para integridad de la tasa)
+      const today   = new Date();
+      const dueDate = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0'),
+      ].join('-');
+
+      becResult = await svc.generateQR({
+        transactionId: alytoTransactionId,           // 26 chars, bajo el límite de 30
+        amount:        amount,
+        currency:      corridor.originCurrency ?? 'BOB',
+        description:   `Alyto ${alytoTransactionId}`.slice(0, 100),
+        dueDate,
+      });
+    } catch (err) {
+      logger.error('[CrossBorder] Error generando QR bancario:', {
+        bankId, corridorId, error: err.message,
+      });
+      Sentry.captureException(err, {
+        tags:  { component: 'initCrossBorderPayment', payinMethod: 'bankQr' },
+        extra: { corridorId, bankId, amount },
+      });
+      return res.status(502).json({ error: 'No se pudo generar el código QR. Intenta nuevamente.' });
+    }
+
+    payinProvider    = `bankQr:${bankId}`;
+    payinProviderRef = becResult.qrId;
+    payinUrl         = null;
+
+    // La imagen base64 se guarda en paymentQR (mismo campo que el QR manual estático)
+    // y los metadatos del banco en bankQr para la reconciliación.
+    bankQrMeta = {
+      bankId,
+      qrId:    becResult.qrId,
+      dueDate: new Date(),
+      qrImage: becResult.qrImage,  // almacenado temporalmente para pasarlo a la response
+    };
+
+    logger.info('[CrossBorder] QR bancario generado', {
+      bankId,
+      qrId:               becResult.qrId,
+      alytoTransactionId,
     });
 
   } else if (corridor.payinMethod === 'manual') {
@@ -1422,9 +1481,11 @@ export async function initCrossBorderPayment(req, res) {
 
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
+      // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
+      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate } } : {}),
       isPrioritySupport:   req.user?.accountType === 'business',
-      // Manual payin (Bolivia SRL): comienza en 'pending_comprobante' hasta que el usuario
-      // suba el comprobante de su transferencia. uploadPaymentProof() lo mueve a 'payin_pending'.
+      // bankQr y manual comienzan en 'payin_pending' (no requieren comprobante manual).
+      // Manual: admin confirma desde el ledger. bankQr: banco notifica via webhook.
       status: payinProvider === 'manual' ? 'pending_comprobante' : 'payin_pending',
       alytoTransactionId,
     });
@@ -1440,9 +1501,20 @@ export async function initCrossBorderPayment(req, res) {
     });
   }
 
-  // ── 7. QR + Emails para payin manual ─────────────────────────────────────
+  // ── 7. QR + Emails post-creación de transacción ──────────────────────────
   let paymentQR      = null;
   let paymentQRStatic = [];   // QR estáticos subidos por el admin (Tigo Money, Banco, etc.)
+
+  // bankQr: el QR ya fue generado por el banco — solo persistirlo en paymentQR
+  if (corridor.payinMethod === 'bankQr' && bankQrMeta && transaction) {
+    try {
+      transaction.paymentQR = bankQrMeta.qrImage;
+      await transaction.save();
+      paymentQR = bankQrMeta.qrImage;
+    } catch (saveErr) {
+      logger.error('[CrossBorder] Error guardando qrImage del banco:', saveErr.message);
+    }
+  }
 
   if (corridor.payinMethod === 'manual' && transaction) {
     // Generar QR dinámico (codifica datos bancarios para lectura por app bancaria)

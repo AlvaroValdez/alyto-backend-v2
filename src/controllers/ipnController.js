@@ -22,6 +22,7 @@
  */
 
 import crypto            from 'crypto';
+import { logger }        from '../utils/logger.js';
 import { enqueueIpnEvent, isSqsEnabled } from '../utils/sqsBuffer.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -2685,4 +2686,133 @@ export async function handleOwlPayIPN(req, res) {
   }
 
   return res.status(200).json({ received: true });
+}
+
+// ─── handleBankQrIPN ─────────────────────────────────────────────────────────
+
+/**
+ * Factory: devuelve un handler Express para el IPN de cualquier banco QR boliviano.
+ *
+ * El banco llama a POST /api/v1/ipn/{bankId} cuando el usuario paga el QR.
+ * Respondemos { responseCode: 0, message: "" } siempre con HTTP 200 para
+ * evitar reintentos del banco ante errores internos nuestros.
+ *
+ * Payload recibido del banco (objeto PaymentQR de Banco Económico):
+ * {
+ *   "payment": {
+ *     "qrId":             "21061401016000000003",
+ *     "transactionId":    "1236342",        ← ID interno del banco (≠ alytoTransactionId)
+ *     "paymentDate":      "2021-06-14T00:00:00",
+ *     "paymentTime":      "17:06:29",
+ *     "currency":         "BOB",
+ *     "amount":           150.00,
+ *     "senderBankCode":   "1016",
+ *     "senderName":       "JUAN PEREZ",
+ *     "senderDocumentId": "0",
+ *     "senderAccount":    "******1913",
+ *     "description":      "Alyto ALY-C-..."
+ *   }
+ * }
+ *
+ * @param {string} bankId — 'bec' | 'bisa' | ...
+ */
+export function handleBankQrIPN(bankId) {
+  return async function (req, res) {
+    const OK = { responseCode: 0, message: '' };
+
+    const { payment } = req.body ?? {};
+
+    if (!payment?.qrId) {
+      logger.warn(`[BankQr IPN ${bankId}] Payload sin payment.qrId`, { body: req.body });
+      return res.status(200).json(OK);
+    }
+
+    logger.info(`[BankQr IPN ${bankId}] Pago recibido`, {
+      qrId:   payment.qrId,
+      amount: payment.amount,
+      sender: payment.senderName,
+    });
+
+    let transaction;
+    try {
+      transaction = await Transaction.findOne({ 'bankQr.qrId': payment.qrId });
+    } catch (err) {
+      Sentry.captureException(err, { tags: { component: `bankQrIPN:${bankId}` } });
+      return res.status(200).json(OK);
+    }
+
+    if (!transaction) {
+      logger.warn(`[BankQr IPN ${bankId}] QR no encontrado en BD: ${payment.qrId}`);
+      return res.status(200).json(OK);
+    }
+
+    // Idempotencia: pago ya procesado
+    if (transaction.status !== 'payin_pending') {
+      logger.info(`[BankQr IPN ${bankId}] Tx ya en estado ${transaction.status} — ignorando`, {
+        alytoTransactionId: transaction.alytoTransactionId,
+      });
+      return res.status(200).json(OK);
+    }
+
+    // Validar monto (modifyAmount=false garantiza exactitud en el banco, pero double-check)
+    const expectedAmount = transaction.originalAmount;
+    const receivedAmount = Number(payment.amount);
+    if (Math.abs(receivedAmount - expectedAmount) > 0.02) {
+      logger.warn(`[BankQr IPN ${bankId}] Monto recibido ${receivedAmount} ≠ esperado ${expectedAmount}`, {
+        qrId: payment.qrId,
+      });
+      Sentry.captureMessage(`BankQr IPN amount mismatch [${bankId}]`, {
+        level: 'warning',
+        extra: { qrId: payment.qrId, expectedAmount, receivedAmount, alytoId: transaction.alytoTransactionId },
+      });
+      transaction.ipnLog.push({
+        provider:   `bankQr:${bankId}`,
+        eventType:  'bankqr_amount_mismatch',
+        status:     transaction.status,
+        rawPayload: { payment },
+        receivedAt: new Date(),
+      });
+      await transaction.save().catch(() => {});
+      return res.status(200).json(OK);
+    }
+
+    // ── Confirmar payin ───────────────────────────────────────────────────────
+    try {
+      transaction.status         = 'payin_confirmed';
+      transaction.bankQr.paidAt  = new Date();
+      transaction.bankQr.payment = payment;
+      transaction.payinReference = payment.qrId;
+      transaction.ipnLog.push({
+        provider:   `bankQr:${bankId}`,
+        eventType:  'bankqr_payin_confirmed',
+        status:     'payin_confirmed',
+        rawPayload: { payment },
+        receivedAt: new Date(),
+      });
+      await transaction.save();
+
+      logger.info(`[BankQr IPN ${bankId}] ✅ Payin confirmado`, {
+        alytoTransactionId: transaction.alytoTransactionId,
+        amount:             receivedAmount,
+        sender:             payment.senderName,
+      });
+    } catch (saveErr) {
+      Sentry.captureException(saveErr, { tags: { component: `bankQrIPN:${bankId}` } });
+      return res.status(200).json(OK);
+    }
+
+    // ── Disparar payout (fire-and-forget) ─────────────────────────────────────
+    dispatchPayout(transaction).catch((err) => {
+      logger.error(`[BankQr IPN ${bankId}] Error en dispatchPayout`, {
+        alytoTransactionId: transaction.alytoTransactionId,
+        error:              err.message,
+      });
+      Sentry.captureException(err, {
+        tags:  { component: `bankQrIPN:${bankId}` },
+        extra: { alytoTransactionId: transaction.alytoTransactionId },
+      });
+    });
+
+    return res.status(200).json(OK);
+  };
 }

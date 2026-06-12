@@ -497,9 +497,26 @@ const transactionSchema = new Schema(
     paymentInstructions: { type: Schema.Types.Mixed },
     /**
      * QR de pago generado para corredores manuales (SRL Bolivia).
-     * Base64 data URL (image/png) — incrustar directo en <img src="..."> o email.
+     * Para payinMethod='manual': JSON bancario codificado como QR estático.
+     * Para payinMethod='bankQr': imagen base64 real generada por el banco (BEC, etc.).
+     * Incrustar directo en <img src="data:image/png;base64,..."> o email.
      */
     paymentQR: { type: String },
+
+    /**
+     * Metadatos del QR bancario (solo payinMethod='bankQr').
+     * qrId identifica el QR en el sistema del banco — usado para buscar la tx
+     * cuando llega el IPN o en la reconciliación diaria.
+     */
+    bankQr: {
+      type: new Schema({
+        bankId:  { type: String, trim: true },  // 'bec' | 'bisa' | ...
+        qrId:    { type: String, trim: true },  // ID único del QR en el banco
+        dueDate: { type: Date },                // Fecha de vencimiento del QR
+        paidAt:  { type: Date },                // Timestamp de confirmación del banco
+        payment: { type: Schema.Types.Mixed },  // Objeto PaymentQR completo del banco
+      }, { _id: false }),
+    },
     /**
      * Detalles de la confirmación manual del payin (rellenado por el admin).
      * Solo en corredores con payinMethod: 'manual'.

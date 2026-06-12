@@ -18,6 +18,7 @@
 import stripeProvider       from '../providers/payin/stripeProvider.js';
 import fintocProvider       from '../providers/payin/fintocProvider.js';
 import rampNetworkProvider  from '../providers/payin/rampNetworkProvider.js';
+import { becQrProvider }    from '../providers/payin/bankQrProvider.js';
 import owlPayProvider       from '../providers/transit/owlPayProvider.js';
 import stellarProvider      from '../providers/transit/stellarProvider.js';
 import anchorBoliviaProvider from '../providers/payout/anchorBoliviaProvider.js';
@@ -28,6 +29,7 @@ const registry = new Map([
   ['stripe',        stripeProvider],        // Escenario A — principal
   ['fintoc',        fintocProvider],        // Escenario B — principal
   ['rampNetwork',   rampNetworkProvider],   // Fallback global (todos los escenarios)
+  ['bankQr:bec',    becQrProvider],         // Escenario C — Banco Económico Bolivia QR
 
   // ── Tránsito ──────────────────────────────────────────────────────────
   ['owlPay',        owlPayProvider],        // Escenario A — on-ramp institucional

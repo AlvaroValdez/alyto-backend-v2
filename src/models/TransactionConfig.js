@@ -94,7 +94,7 @@ const transactionConfigSchema = new Schema(
     payinMethod: {
       type:     String,
       required: true,
-      enum:     ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'rampNetwork', 'manual'],
+      enum:     ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'rampNetwork', 'manual', 'bankQr'],
     },
     /** Proveedor utilizado para la etapa de dispersión (pay-out / off-ramp) */
     payoutMethod: {
@@ -240,6 +240,18 @@ const transactionConfigSchema = new Schema(
     fxBufferPct: {
       type:    Number,
       min:     0,
+      default: null,
+    },
+
+    /**
+     * Configuración específica de QR bancario (solo payinMethod: 'bankQr').
+     * bankId identifica el proveedor en bankQrRegistry (ej. 'bec', 'bisa').
+     * Al agregar un banco nuevo: registrar el service + poner aquí su bankId.
+     */
+    bankQrConfig: {
+      type: new mongoose.Schema({
+        bankId: { type: String, trim: true, default: 'bec' },
+      }, { _id: false }),
       default: null,
     },
 

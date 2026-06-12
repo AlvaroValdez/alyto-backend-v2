@@ -702,6 +702,12 @@ async function startServer() {
       setInterval(rosMonitorWallet, 6 * 60 * 60 * 1000);        // cada 6h
       console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
 
+      // Reconciliación QR bancario boliviano — safety net para IPN perdidos
+      const { reconcileBankQrPayments } = await import('./jobs/reconcileBankQrPayments.js');
+      setTimeout(reconcileBankQrPayments, 5 * 60 * 1000);              // primera corrida 5 min post-start
+      setInterval(reconcileBankQrPayments, 30 * 60 * 1000);            // cada 30 min
+      console.info('[Server] Reconcile BankQR payments programado cada 30 min');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
