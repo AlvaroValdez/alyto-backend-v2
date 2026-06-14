@@ -120,6 +120,36 @@ async function apiFetch(path, options = {}) {
   return res.json();
 }
 
+// ── Mock mode ─────────────────────────────────────────────────────────────────
+// Activado cuando BEC_MOCK_ENABLED=true O cuando las credenciales no están
+// configuradas. Permite testear el flujo completo admin sin credenciales reales.
+
+/** @returns {boolean} true si las vars mínimas están configuradas */
+export function isAvailable() {
+  return !!(cfg.username() && cfg.aesKey() && cfg.accountCredit() && cfg.password());
+}
+
+function isMockMode() {
+  return process.env.BEC_MOCK_ENABLED === 'true' || !isAvailable();
+}
+
+// SVG placeholder — se convierte a base64 para <img src="data:image/svg+xml;base64,...">
+const MOCK_QR_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220">',
+  '<rect width="220" height="220" fill="#EFF6FF"/>',
+  '<rect x="20" y="20" width="60" height="60" rx="4" fill="none" stroke="#1D4ED8" stroke-width="6"/>',
+  '<rect x="35" y="35" width="30" height="30" rx="2" fill="#1D4ED8"/>',
+  '<rect x="140" y="20" width="60" height="60" rx="4" fill="none" stroke="#1D4ED8" stroke-width="6"/>',
+  '<rect x="155" y="35" width="30" height="30" rx="2" fill="#1D4ED8"/>',
+  '<rect x="20" y="140" width="60" height="60" rx="4" fill="none" stroke="#1D4ED8" stroke-width="6"/>',
+  '<rect x="35" y="155" width="30" height="30" rx="2" fill="#1D4ED8"/>',
+  '<text x="110" y="108" font-family="monospace" font-size="11" font-weight="bold" text-anchor="middle" fill="#1D4ED8">QR SANDBOX</text>',
+  '<text x="110" y="124" font-family="monospace" font-size="9" text-anchor="middle" fill="#3B82F6">BEC — Simulado</text>',
+  '</svg>',
+].join('');
+
+const MOCK_QR_B64 = Buffer.from(MOCK_QR_SVG).toString('base64');
+
 // ── Public API (IBankQrService) ───────────────────────────────────────────────
 
 /**
@@ -132,9 +162,15 @@ async function apiFetch(path, options = {}) {
  * @param {string} [params.description]  — glosa del cobro (≤ 100 chars)
  * @param {string} params.dueDate        — fecha de vencimiento 'yyyy-MM-dd'
  * @returns {Promise<{ qrId: string, qrImage: string }>}
- *   qrImage = imagen en Base64 lista para <img src="data:image/png;base64,...">
+ *   qrImage = imagen en Base64 lista para <img src="data:image/svg+xml;base64,...">
  */
 export async function generateQR({ transactionId, amount, currency = 'BOB', description, dueDate }) {
+  if (isMockMode()) {
+    const qrId = `mock-bec-${Date.now()}-${transactionId.slice(-8)}`;
+    logger.warn(`[BEC] Mock mode activo — QR simulado generado: ${qrId} | ${amount} ${currency}`);
+    return { qrId, qrImage: MOCK_QR_B64, _mock: true };
+  }
+
   const data = await apiFetch('/api/qrsimple/generateQR', {
     method: 'POST',
     body:   JSON.stringify({
@@ -159,6 +195,8 @@ export async function generateQR({ transactionId, amount, currency = 'BOB', desc
  * Solo anula singleUse=true si no está pagado, o singleUse=false siempre.
  */
 export async function cancelQR(qrId) {
+  if (isMockMode()) { logger.warn(`[BEC] Mock cancelQR: ${qrId}`); return; }
+
   const data = await apiFetch('/api/qrsimple/cancelQR', {
     method: 'DELETE',
     body:   JSON.stringify({ qrId }),
@@ -172,6 +210,11 @@ export async function cancelQR(qrId) {
  * @returns {{ status: 'pending'|'paid'|'cancelled', payment: object|null }}
  */
 export async function getQRStatus(qrId) {
+  if (isMockMode()) {
+    logger.warn(`[BEC] Mock getQRStatus: ${qrId} → pending`);
+    return { status: 'pending', payment: null };
+  }
+
   const data = await apiFetch(`/api/qrsimple/v2/statusQR/${encodeURIComponent(qrId)}`);
   if (data.responseCode !== 0) throw new Error(`BEC statusQR error: ${data.message}`);
 
@@ -190,6 +233,8 @@ export async function getQRStatus(qrId) {
  * @returns {Promise<PaymentQR[]>}
  */
 export async function getPaidQRs(date) {
+  if (isMockMode()) { return []; }
+
   // API espera formato yyyyMMdd
   const pad    = (n) => String(n).padStart(2, '0');
   const dateStr = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
@@ -197,11 +242,6 @@ export async function getPaidQRs(date) {
   const data = await apiFetch(`/api/qrsimple/v2/paidQR/${dateStr}`);
   if (data.responseCode !== 0) throw new Error(`BEC paidQR error: ${data.message}`);
   return data.paymentList ?? [];
-}
-
-/** @returns {boolean} true si las vars mínimas están configuradas */
-export function isAvailable() {
-  return !!(cfg.username() && cfg.aesKey() && cfg.accountCredit() && cfg.password());
 }
 
 /** Para tests de integración: verifica que nuestro cifrado sea compatible con el banco */
