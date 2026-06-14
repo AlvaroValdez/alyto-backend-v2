@@ -1248,13 +1248,21 @@ export async function initCrossBorderPayment(req, res) {
     // No requiere subida de comprobante ni confirmación manual del admin.
     const bankId = corridor.bankQrConfig?.bankId ?? 'bec';
 
-    // dueDate en scope externo para acceso fuera del try
-    const today   = new Date();
+    // Vencimiento del QR. dueDate='hoy' expiraba a medianoche → un usuario que
+    // genera el QR a las 23:30 tenía 30 min para pagar. BANK_QR_DUE_DAYS (default 1)
+    // extiende la validez. dueDate en scope externo para acceso fuera del try.
+    const BANK_QR_DUE_DAYS = Math.max(0, Number(process.env.BANK_QR_DUE_DAYS ?? 1));
+    const dueDateObj = new Date();
+    dueDateObj.setDate(dueDateObj.getDate() + BANK_QR_DUE_DAYS);
     const dueDate = [
-      today.getFullYear(),
-      String(today.getMonth() + 1).padStart(2, '0'),
-      String(today.getDate()).padStart(2, '0'),
+      dueDateObj.getFullYear(),
+      String(dueDateObj.getMonth() + 1).padStart(2, '0'),
+      String(dueDateObj.getDate()).padStart(2, '0'),
     ].join('-');
+    // Fin del día de vencimiento (23:59:59 local) — sincroniza el TTL de la tx
+    // con la vida real del QR en el banco, para cleanup/reconciliación.
+    const dueExpiresAt = new Date(dueDateObj);
+    dueExpiresAt.setHours(23, 59, 59, 999);
 
     let becResult;
     try {
@@ -1288,8 +1296,9 @@ export async function initCrossBorderPayment(req, res) {
     bankQrMeta = {
       bankId,
       qrId:    becResult.qrId,
-      dueDate,                     // string 'yyyy-MM-dd' — mismo valor enviado al banco
-      qrImage: becResult.qrImage,  // almacenado temporalmente para pasarlo a la response
+      dueDate,                       // string 'yyyy-MM-dd' — mismo valor enviado al banco
+      expiresAt: dueExpiresAt,       // Date — fin del día de vencimiento (TTL de la tx)
+      qrImage: becResult.qrImage,    // almacenado temporalmente para pasarlo a la response
     };
 
     logger.info('[CrossBorder] QR bancario generado', {
@@ -1483,6 +1492,9 @@ export async function initCrossBorderPayment(req, res) {
       paymentInstructions: manualPaymentInstructions ?? undefined,
       // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
       ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate } } : {}),
+      // bankQr: TTL de la tx = fin del día de vencimiento del QR (no el default +24h),
+      // para que el barrido de expiración reconcilie/cancele en el momento correcto.
+      ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),
       isPrioritySupport:   req.user?.accountType === 'business',
       // bankQr y manual comienzan en 'payin_pending' (no requieren comprobante manual).
       // Manual: admin confirma desde el ledger. bankQr: banco notifica via webhook.

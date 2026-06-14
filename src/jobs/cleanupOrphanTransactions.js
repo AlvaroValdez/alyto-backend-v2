@@ -29,12 +29,18 @@ export async function cleanupOrphanTransactions() {
   try {
     const result = await Transaction.updateMany(
       {
-        status:                       'payin_pending',
+        // payin_pending: payin manual que subió comprobante pero expiró sin confirmar.
+        // pending_comprobante: intento manual abandonado — el usuario nunca subió el
+        //   comprobante (sin él, la tx jamás avanza). Antes quedaba zombie para siempre
+        //   porque el cleanup solo miraba payin_pending. El guard de paymentProof.data
+        //   excluye las que sí esperan revisión del admin.
+        status:                       { $in: ['payin_pending', 'pending_comprobante'] },
         paymentInstructionsExpiresAt: { $lt: new Date() },
         'paymentProof.data':          { $exists: false },
         'ipnLog.eventType':           { $ne: 'payment_proof_uploaded' },
         // Excluir transacciones bankQr: su confirmación llega del banco (webhook o
-        // reconciliación), no del usuario. Archivar en base a dueDate, no paymentInstructionsExpiresAt.
+        // reconciliación), no del usuario. Las vencidas las archiva reconcileBankQrPayments
+        // (barrido de expiración con cancelación del QR en el banco).
         'bankQr.qrId':                { $exists: false },
         archivedAt:                   null,
       },
