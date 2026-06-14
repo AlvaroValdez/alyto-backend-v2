@@ -1248,18 +1248,18 @@ export async function initCrossBorderPayment(req, res) {
     // No requiere subida de comprobante ni confirmación manual del admin.
     const bankId = corridor.bankQrConfig?.bankId ?? 'bec';
 
+    // dueDate en scope externo para acceso fuera del try
+    const today   = new Date();
+    const dueDate = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, '0'),
+      String(today.getDate()).padStart(2, '0'),
+    ].join('-');
+
     let becResult;
     try {
       const { getBankQrService } = await import('../services/bankQr/bankQrRegistry.js');
       const svc = getBankQrService(bankId);
-
-      // dueDate = hoy (usuario debe pagar el mismo día para integridad de la tasa)
-      const today   = new Date();
-      const dueDate = [
-        today.getFullYear(),
-        String(today.getMonth() + 1).padStart(2, '0'),
-        String(today.getDate()).padStart(2, '0'),
-      ].join('-');
 
       becResult = await svc.generateQR({
         transactionId: alytoTransactionId,           // 26 chars, bajo el límite de 30
