@@ -1279,7 +1279,7 @@ export async function initCrossBorderPayment(req, res) {
       return res.status(502).json({ error: 'No se pudo generar el código QR. Intenta nuevamente.' });
     }
 
-    payinProvider    = `bankQr:${bankId}`;
+    payinProvider    = 'bankQr';   // bankId específico en bankQr.bankId
     payinProviderRef = becResult.qrId;
     payinUrl         = null;
 
@@ -1288,7 +1288,7 @@ export async function initCrossBorderPayment(req, res) {
     bankQrMeta = {
       bankId,
       qrId:    becResult.qrId,
-      dueDate: new Date(),
+      dueDate,                     // string 'yyyy-MM-dd' — mismo valor enviado al banco
       qrImage: becResult.qrImage,  // almacenado temporalmente para pasarlo a la response
     };
 

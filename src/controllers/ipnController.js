@@ -2766,10 +2766,10 @@ export function handleBankQrIPN(bankId) {
         extra: { qrId: payment.qrId, expectedAmount, receivedAmount, alytoId: transaction.alytoTransactionId },
       });
       transaction.ipnLog.push({
-        provider:   `bankQr:${bankId}`,
+        provider:   'bankQr',
         eventType:  'bankqr_amount_mismatch',
         status:     transaction.status,
-        rawPayload: { payment },
+        rawPayload: { payment, bankId },
         receivedAt: new Date(),
       });
       await transaction.save().catch(() => {});
@@ -2788,10 +2788,10 @@ export function handleBankQrIPN(bankId) {
       transaction.bankQr.payment = payment;
       transaction.payinReference = payment.qrId;
       transaction.ipnLog.push({
-        provider:   `bankQr:${bankId}`,
+        provider:   'bankQr',
         eventType:  'bankqr_payin_confirmed',
         status:     'payin_confirmed',
-        rawPayload: { payment },
+        rawPayload: { payment, bankId },
         receivedAt: new Date(),
       });
       await transaction.save();

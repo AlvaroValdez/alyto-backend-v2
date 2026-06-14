@@ -50,7 +50,7 @@ export async function reconcileBankQrPayments() {
         tx.bankQr.payment = payment;
         tx.payinReference = payment.qrId;
         tx.ipnLog.push({
-          provider:   `bankQr:${bankId}`,
+          provider:   'bankQr',
           eventType:  'bankqr_reconciled',
           status:     'payin_confirmed',
           rawPayload: { payment, source: 'reconciliation_job' },

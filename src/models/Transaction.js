@@ -103,7 +103,7 @@ const paymentLegSchema = new Schema(
     /** Proveedor que ejecutó esta etapa */
     provider: {
       type: String,
-      enum: ['stripe', 'fintoc', 'owlPay', 'stellar', 'anchorBolivia', 'vitaWallet', 'rampNetwork', 'manual'],
+      enum: ['stripe', 'fintoc', 'owlPay', 'stellar', 'anchorBolivia', 'vitaWallet', 'rampNetwork', 'manual', 'bankQr'],
     },
     /** Status de esta etapa específica */
     status: {
@@ -177,7 +177,7 @@ const ipnLogEntrySchema = new Schema(
     /** Proveedor que envió la notificación */
     provider: {
       type: String,
-      enum: ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'anchorBolivia', 'rampNetwork', 'stellar', 'system', 'manual', 'reconcile'],
+      enum: ['stripe', 'fintoc', 'owlPay', 'vitaWallet', 'anchorBolivia', 'rampNetwork', 'stellar', 'system', 'manual', 'reconcile', 'bankQr'],
     },
     /** Tipo de evento tal como lo reportó el proveedor (ej. 'payment.completed') */
     eventType: { type: String, trim: true },
