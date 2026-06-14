@@ -1835,6 +1835,79 @@ export async function getMemoryStats(req, res) {
  * repetidos en staging). Invalida el cache para que el próximo request
  * relea el documento desde MongoDB.
  */
+// ─── simulateBankQrPayment ────────────────────────────────────────────────────
+/**
+ * POST /api/v1/admin/transactions/:transactionId/simulate-bankqr-payment
+ *
+ * Simula el webhook IPN del banco para una transacción bankQr en payin_pending.
+ * SOLO PARA SANDBOX — confirma el pago sin intervención del banco real.
+ * Equivale a lo que haría el IPN de BEC cuando el usuario paga el QR.
+ */
+export async function simulateBankQrPayment(req, res) {
+  const { transactionId } = req.params;
+
+  const transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+  if (transaction.status !== 'payin_pending') {
+    return res.status(409).json({
+      error: `Estado inválido para simular: ${transaction.status}. Solo aplica a payin_pending.`,
+    });
+  }
+  if (!transaction.bankQr?.qrId) {
+    return res.status(400).json({ error: 'La transacción no tiene un QR bancario asociado.' });
+  }
+
+  const now = new Date();
+
+  transaction.status        = 'payin_confirmed';
+  transaction.bankQr.paidAt = now;
+  transaction.bankQr.payment = {
+    simulated:   true,
+    simulatedAt: now.toISOString(),
+    simulatedBy: req.user?.email ?? 'admin',
+    qrId:        transaction.bankQr.qrId,
+    amount:      transaction.originalAmount,
+    currency:    transaction.originCurrency,
+  };
+  transaction.payinReference = transaction.bankQr.qrId;
+  transaction.confirmationDetails = {
+    confirmedBy:      req.user._id,
+    confirmedAt:      now,
+    confirmationNote: 'Pago simulado en sandbox por admin',
+    bankReference:    `SIM-${transaction.bankQr.qrId}`,
+  };
+  transaction.ipnLog.push({
+    provider:   'bankQr',
+    eventType:  'bankqr_payin_confirmed',
+    status:     'payin_confirmed',
+    rawPayload: { simulated: true, simulatedBy: req.user?.email, qrId: transaction.bankQr.qrId },
+    receivedAt: now,
+  });
+
+  try {
+    await transaction.save();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error guardando transacción simulada.' });
+  }
+
+  // Notificar usuario
+  notify(transaction.userId, NOTIFICATIONS.payinConfirmed(
+    transaction.originalAmount, transaction.originCurrency,
+  )).catch(() => {});
+
+  // Dispatch payout fire-and-forget
+  dispatchPayout(transaction).catch(() => {});
+
+  return res.json({
+    success: true,
+    transactionId,
+    message: 'Pago bancario simulado. Payout iniciado.',
+  });
+}
+
 export async function resetUserTokenVersion(req, res) {
   const { userId } = req.params;
   const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');

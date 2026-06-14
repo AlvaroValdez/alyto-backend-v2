@@ -50,6 +50,7 @@ import {
   testPush,
   getMemoryStats,
   resetUserTokenVersion,
+  simulateBankQrPayment,
 } from '../controllers/adminController.js';
 import adminSSE from './adminSSE.js';
 import {
@@ -245,6 +246,12 @@ router.get('/transactions/:transactionId/business-invoice', adminGetBusinessInvo
  * Body: { status: String, note: String }
  */
 router.patch('/transactions/:transactionId/status', idempotencyCheck, updateTransactionStatus);
+
+/**
+ * POST /api/v1/admin/transactions/:transactionId/simulate-bankqr-payment
+ * Simula el webhook IPN del banco para sandbox. Solo transacciones bankQr en payin_pending.
+ */
+router.post('/transactions/:transactionId/simulate-bankqr-payment', simulateBankQrPayment);
 
 // ─── Corredores ───────────────────────────────────────────────────────────────
 
