@@ -722,9 +722,9 @@ export async function setCorridorRate(req, res) {
     return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado.` });
   }
 
-  if (corridor.payinMethod !== 'manual') {
+  if (!['manual', 'bankQr'].includes(corridor.payinMethod)) {
     return res.status(400).json({
-      error:        `setCorridorRate solo aplica a corredores manuales (payinMethod: 'manual'). Este corredor usa '${corridor.payinMethod}'.`,
+      error:        `setCorridorRate solo aplica a corredores manual o bankQr. Este corredor usa '${corridor.payinMethod}'.`,
       payinMethod:  corridor.payinMethod,
       corridorId:   corridor.corridorId,
     });
