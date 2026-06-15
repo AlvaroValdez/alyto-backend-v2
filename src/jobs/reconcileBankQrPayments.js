@@ -25,12 +25,14 @@
  */
 
 import Transaction from '../models/Transaction.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 import {
   listAvailableBankIds,
   listBankIds,
   getBankQrService,
 } from '../services/bankQr/bankQrRegistry.js';
 import { dispatchPayout } from '../controllers/ipnController.js';
+import { confirmBankQrDeposit, failExpiredBankQrDeposit } from '../controllers/walletController.js';
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
 
@@ -136,9 +138,20 @@ async function reconcilePaidQRs() {
             'bankQr.qrId': payment.qrId,
             status:        'payin_pending',
           });
-          if (!tx) continue;  // ya confirmada por IPN o inexistente
-          await confirmBankQrTx(tx, payment, bankId, 'reconciliation_job');
-          fixed++;
+          if (tx) {
+            await confirmBankQrTx(tx, payment, bankId, 'reconciliation_job');
+            fixed++;
+            continue;
+          }
+          // ¿Carga de Wallet BOB con IPN perdido?
+          const wtx = await WalletTransaction.findOne({
+            'bankQr.qrId': payment.qrId,
+            type:          'deposit',
+            status:        'pending',
+          });
+          if (!wtx) continue;  // ya confirmada por IPN o inexistente
+          const r = await confirmBankQrDeposit(wtx, payment, bankId, 'reconciliation_job');
+          if (r.ok) fixed++;
         } catch (err) {
           logger.error('[reconcileBankQr] Error confirmando tx via paidQR:', err.message);
           Sentry.captureException(err, { tags: { component: 'reconcileBankQrPayments', phase: 'A', bankId } });
@@ -216,6 +229,69 @@ async function sweepExpiredQRs() {
   return handled;
 }
 
+// ── FASE B (wallet) — barrido de cargas Wallet BOB vencidas ────────────────────
+async function sweepExpiredWalletQRs() {
+  const now        = Date.now();
+  const registered = new Set(listBankIds());
+  let   handled    = 0;
+
+  const expired = await WalletTransaction.find({
+    'bankQr.qrId':   { $exists: true },
+    'bankQr.paidAt': { $exists: false },
+    type:            'deposit',
+    status:          'pending',
+    expiresAt:       { $lt: new Date(now - EXPIRY_GRACE_MS) },
+  }).limit(SWEEP_LIMIT);
+
+  for (const wtx of expired) {
+    const bankId = wtx.bankQr?.bankId ?? 'bec';
+    const ageMs  = now - new Date(wtx.expiresAt).getTime();
+
+    try {
+      if (!registered.has(bankId)) {
+        if (ageMs > HARD_GIVEUP_MS) { await failExpiredBankQrDeposit(wtx, bankId, `Banco '${bankId}' no registrado — give-up por antigüedad`); handled++; }
+        continue;
+      }
+
+      const svc = getBankQrService(bankId);
+
+      let statusInfo;
+      try {
+        statusInfo = await svc.getQRStatus(wtx.bankQr.qrId);
+      } catch (err) {
+        if (ageMs > HARD_GIVEUP_MS) {
+          await failExpiredBankQrDeposit(wtx, bankId, `Banco no responde tras ${Math.floor(ageMs / 86400000)}d — give-up`);
+          handled++;
+        } else {
+          logger.warn(`[reconcileBankQr] getQRStatus wallet falló para ${wtx.wtxId} — reintenta próxima corrida:`, err.message);
+        }
+        continue;
+      }
+
+      if (statusInfo.status === 'paid' && statusInfo.payment) {
+        // Pagado fuera de la ventana de FASE A → acreditar.
+        const r = await confirmBankQrDeposit(wtx, statusInfo.payment, bankId, 'sweep');
+        if (r.ok) handled++;
+        continue;
+      }
+
+      // Pendiente o cancelado: cancelar en el banco antes de fallar (evita pago tardío).
+      if (statusInfo.status === 'pending') {
+        await svc.cancelQR(wtx.bankQr.qrId).catch((err) =>
+          logger.warn(`[reconcileBankQr] cancelQR wallet falló para ${wtx.bankQr.qrId} (continúo):`, err.message),
+        );
+      }
+      await failExpiredBankQrDeposit(wtx, bankId, `QR vencido (estado banco: ${statusInfo.status})`);
+      handled++;
+    } catch (err) {
+      logger.error(`[reconcileBankQr] Error en barrido wallet de ${wtx.wtxId}:`, err.message);
+      Sentry.captureException(err, { tags: { component: 'reconcileBankQrPayments', phase: 'B-wallet', bankId } });
+    }
+  }
+
+  return handled;
+}
+
 export async function reconcileBankQrPayments() {
   if (_isRunning) {
     logger.warn('[reconcileBankQr] Corrida anterior aún en curso — skip');
@@ -223,13 +299,14 @@ export async function reconcileBankQrPayments() {
   }
   _isRunning = true;
   try {
-    const confirmed = await reconcilePaidQRs();
-    const expired   = await sweepExpiredQRs();
+    const confirmed     = await reconcilePaidQRs();
+    const expired       = await sweepExpiredQRs();
+    const expiredWallet = await sweepExpiredWalletQRs();
 
-    if (confirmed > 0 || expired > 0) {
-      logger.info(`[reconcileBankQr] ${confirmed} confirmadas, ${expired} vencidas`);
+    if (confirmed > 0 || expired > 0 || expiredWallet > 0) {
+      logger.info(`[reconcileBankQr] ${confirmed} confirmadas, ${expired} vencidas (cross-border), ${expiredWallet} vencidas (wallet)`);
     }
-    return { confirmed, expired };
+    return { confirmed, expired: expired + expiredWallet };
   } catch (err) {
     logger.error('[reconcileBankQr] Error inesperado en el job:', err.message);
     Sentry.captureException(err, { tags: { component: 'reconcileBankQrPayments' } });

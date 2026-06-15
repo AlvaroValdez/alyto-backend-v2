@@ -120,11 +120,28 @@ const walletTransactionSchema = new mongoose.Schema({
     type:    Date,
     default: null,
   },
+  /**
+   * Metadatos del QR bancario (payin automático bankQr, Fase 42 — extendido a la
+   * carga de Wallet BOB). Solo presente en depósitos pagados por QR del banco.
+   * La confirmación es automática vía IPN / job de reconciliación — sin admin.
+   */
+  bankQr: {
+    type: new mongoose.Schema({
+      bankId:  { type: String, trim: true },              // 'bec' | 'bisa' | ...
+      qrId:    { type: String, trim: true },              // ID único del QR en el banco
+      dueDate: { type: String },                          // 'yyyy-MM-dd' (vencimiento)
+      paidAt:  { type: Date },                            // timestamp de confirmación
+      payment: { type: mongoose.Schema.Types.Mixed },     // objeto PaymentQR del banco
+    }, { _id: false }),
+    default: undefined,
+  },
 }, { timestamps: true, collection: 'wallettransactions' })
 
 // ─── Índices ──────────────────────────────────────────────────────────────────
 
 walletTransactionSchema.index({ type: 1, status: 1 })
 walletTransactionSchema.index({ createdAt: -1 })
+// Lookup por QR bancario (IPN + job de reconciliación). Sparse: solo depósitos bankQr.
+walletTransactionSchema.index({ 'bankQr.qrId': 1 }, { sparse: true })
 
 export default mongoose.model('WalletTransaction', walletTransactionSchema)

@@ -26,7 +26,9 @@ import { logger }        from '../utils/logger.js';
 import { enqueueIpnEvent, isSqsEnabled } from '../utils/sqsBuffer.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 import User              from '../models/User.js';
+import { confirmBankQrDeposit } from './walletController.js';
 import {
   createPayout,
   createVitaSentPayout,
@@ -2742,6 +2744,53 @@ export function handleBankQrIPN(bankId) {
     }
 
     if (!transaction) {
+      // ¿Es una carga de Wallet BOB pagada por QR bancario? (mismo endpoint IPN)
+      let wtx;
+      try {
+        wtx = await WalletTransaction.findOne({ 'bankQr.qrId': payment.qrId });
+      } catch (err) {
+        Sentry.captureException(err, { tags: { component: `bankQrIPN:${bankId}` } });
+        return res.status(200).json(OK);
+      }
+
+      if (wtx) {
+        // Idempotencia
+        if (wtx.status !== 'pending' || wtx.bankQr?.paidAt) {
+          logger.info(`[BankQr IPN ${bankId}] Depósito wallet ya procesado (status=${wtx.status}) — ignorando`, {
+            wtxId: wtx.wtxId,
+          });
+          return res.status(200).json(OK);
+        }
+
+        // Validar monto exacto (modifyAmount=false en el banco, double-check)
+        const expectedDep = wtx.amount;
+        const receivedDep = Number(payment.amount);
+        if (Math.abs(receivedDep - expectedDep) > 0.02) {
+          logger.warn(`[BankQr IPN ${bankId}] Depósito wallet: monto ${receivedDep} ≠ esperado ${expectedDep}`, {
+            qrId: payment.qrId,
+          });
+          Sentry.captureMessage(`BankQr wallet deposit amount mismatch [${bankId}]`, {
+            level: 'warning',
+            extra: { qrId: payment.qrId, expectedDep, receivedDep, wtxId: wtx.wtxId },
+          });
+          return res.status(200).json(OK);
+        }
+
+        try {
+          const result = await confirmBankQrDeposit(wtx, payment, bankId, 'ipn');
+          logger.info(`[BankQr IPN ${bankId}] ✅ Depósito wallet ${result.ok ? 'acreditado' : 'no procesado'}`, {
+            wtxId:  wtx.wtxId,
+            reason: result.reason,
+          });
+        } catch (err) {
+          Sentry.captureException(err, {
+            tags:  { component: `bankQrIPN:${bankId}` },
+            extra: { wtxId: wtx.wtxId },
+          });
+        }
+        return res.status(200).json(OK);
+      }
+
       logger.warn(`[BankQr IPN ${bankId}] QR no encontrado en BD: ${payment.qrId}`);
       return res.status(200).json(OK);
     }

@@ -20,7 +20,9 @@
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 import { dispatchPayout } from './ipnController.js';
+import { confirmBankQrDeposit } from './walletController.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS }    from '../services/email.js';
 import {
@@ -1849,6 +1851,35 @@ export async function simulateBankQrPayment(req, res) {
   const transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
 
   if (!transaction) {
+    // ¿Es una carga de Wallet BOB vía bankQr? (el id es el wtxId)
+    const wtx = await WalletTransaction.findOne({ wtxId: transactionId });
+    if (wtx) {
+      if (wtx.status !== 'pending') {
+        return res.status(409).json({ error: `Estado inválido para simular: ${wtx.status}. Solo aplica a pending.` });
+      }
+      if (!wtx.bankQr?.qrId) {
+        return res.status(400).json({ error: 'El depósito no tiene un QR bancario asociado.' });
+      }
+      const nowSim = new Date();
+      const simPayment = {
+        simulated:   true,
+        simulatedAt: nowSim.toISOString(),
+        simulatedBy: req.user?.email ?? 'admin',
+        qrId:        wtx.bankQr.qrId,
+        amount:      wtx.amount,
+        currency:    'BOB',
+      };
+      try {
+        const r = await confirmBankQrDeposit(wtx, simPayment, wtx.bankQr.bankId ?? 'bec', 'admin_simulate');
+        return res.json({
+          success: true,
+          wtxId:   wtx.wtxId,
+          message: r.ok ? 'Depósito wallet simulado y acreditado.' : `No procesado: ${r.reason}`,
+        });
+      } catch (err) {
+        return res.status(500).json({ error: 'Error acreditando depósito simulado.' });
+      }
+    }
     return res.status(404).json({ error: 'Transacción no encontrada.' });
   }
   if (transaction.status !== 'payin_pending') {
