@@ -181,8 +181,10 @@ export async function getWalletTransactions(req, res) {
 // ─── FUNCIÓN 4: POST /api/v1/wallet/deposit/initiate ─────────────────────────
 
 /**
- * Inicia un depósito BOB: crea una WalletTransaction pending y
- * retorna las instrucciones bancarias para que el usuario transfiera.
+ * Inicia un depósito BOB. Crea una WalletTransaction en 'awaiting_proof' (aún NO
+ * es un depósito generado) y retorna las instrucciones de pago. El depósito pasa a
+ * 'pending' recién cuando: (manual) el usuario adjunta el comprobante, o (bankQr)
+ * el banco devuelve un QR válido. Solo entonces es acreditable / visible al admin.
  */
 export async function initiateDeposit(req, res) {
   try {
@@ -223,7 +225,10 @@ export async function initiateDeposit(req, res) {
       const dueExpiresAt = new Date(dueObj)
       dueExpiresAt.setHours(23, 59, 59, 999)
 
-      // Crear el registro pending primero — su wtxId identifica el QR en el banco
+      // Crear el registro en 'awaiting_proof' primero — su wtxId identifica el QR en
+      // el banco. NO es un depósito "generado" todavía: pasa a 'pending' SOLO si el
+      // banco devuelve un QR válido (respuesta correcta). Si la generación falla,
+      // queda 'failed' y nunca se considera un depósito real.
       const wtx = await WalletTransaction.create({
         walletId:      wallet._id,
         userId:        user._id,
@@ -231,7 +236,7 @@ export async function initiateDeposit(req, res) {
         amount,
         balanceBefore: wallet.balance,
         balanceAfter:  wallet.balance,  // se actualiza al confirmarse el pago
-        status:        'pending',
+        status:        'awaiting_proof',
         currency:      'BOB',
         description:   'Depósito BOB vía QR bancario',
         reference:     null,
@@ -258,7 +263,10 @@ export async function initiateDeposit(req, res) {
         return res.status(502).json({ error: 'No se pudo generar el QR bancario. Intenta nuevamente en unos minutos.' })
       }
 
+      // QR válido recibido → recién ahora el depósito existe como 'pending'
+      // (a la espera de la confirmación automática del banco vía IPN).
       await WalletTransaction.updateOne({ _id: wtx._id }, {
+        status:    'pending',
         reference: wtx.wtxId,
         bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate },
       })
@@ -277,7 +285,11 @@ export async function initiateDeposit(req, res) {
     }
 
     // ── Camino manual: transferencia bancaria + confirmación admin (legacy) ────
-    // Crear WalletTransaction pendiente
+    // Se crea en 'awaiting_proof': el depósito NO está "generado" todavía. Solo
+    // existe para entregarle al usuario la referencia que debe poner en la
+    // transferencia. Pasa a 'pending' (y entra a la cola admin) recién cuando el
+    // usuario adjunta el comprobante (uploadDepositProof). Por eso NO se notifica
+    // al admin acá — no hay nada que confirmar aún.
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
     const wtx = await WalletTransaction.create({
       walletId:      wallet._id,
@@ -286,16 +298,12 @@ export async function initiateDeposit(req, res) {
       amount,
       balanceBefore: wallet.balance,
       balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
-      status:        'pending',
-      description:   'Depósito pendiente de confirmación admin',
+      status:        'awaiting_proof',
+      description:   'Depósito iniciado — pendiente de comprobante',
       expiresAt,
     })
     // Usar wtxId como referencia para identificar la transferencia
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId })
-
-    // Notificar a admins — push + in-app
-    const fullName = `${user.firstName} ${user.lastName}`.trim();
-    notifyAdmins(NOTIFICATIONS.adminDepositRequest(amount, fullName)).catch(() => {});
 
     return res.status(201).json({
       wtxId:         wtx.wtxId,
@@ -657,6 +665,16 @@ export async function adminConfirmDeposit(req, res) {
       await session.abortTransaction()
       return res.status(400).json({ error: 'La transacción no es un depósito.' })
     }
+    // Los depósitos vía QR bancario se acreditan automáticamente (IPN del banco /
+    // job de reconciliación). Bloquear la confirmación manual evita doble crédito.
+    if (wtx.bankQr?.qrId) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Este depósito es automático (QR bancario); no se confirma manualmente.' })
+    }
+    if (wtx.status === 'awaiting_proof') {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'El depósito aún no tiene comprobante adjunto.' })
+    }
     if (wtx.status !== 'pending') {
       await session.abortTransaction()
       return res.status(400).json({ error: `El depósito ya fue procesado (status: ${wtx.status}).` })
@@ -889,18 +907,93 @@ export async function adminListWallets(req, res) {
  */
 export async function adminListPendingDeposits(req, res) {
   try {
-    const pending = await WalletTransaction.find({ type: 'deposit', status: 'pending' })
+    // Cola de confirmación MANUAL: solo depósitos 'pending' (con comprobante adjunto)
+    // y SIN bankQr (los QR bancarios se confirman solos vía IPN — no van a esta cola).
+    // Los 'awaiting_proof' (iniciados sin comprobante) quedan excluidos por el status.
+    const pending = await WalletTransaction.find({
+      type:   'deposit',
+      status: 'pending',
+      $or: [{ bankQr: { $exists: false } }, { 'bankQr.qrId': { $exists: false } }],
+    })
       .sort({ createdAt: -1 })
-      .populate('userId', 'firstName lastName email kycStatus')
+      .populate('userId', 'firstName lastName email kycStatus phone identityDocument.type')
       .lean()
 
-    return res.json({ deposits: pending, total: pending.length })
+    // Shape explícito y liviano: toda la info que el admin necesita SIN el blob
+    // base64 del comprobante (se obtiene aparte vía /deposits/:wtxId/comprobante).
+    const deposits = pending.map((d) => {
+      const u     = d.userId ?? {}
+      const proof = d.metadata?.paymentProof ?? null
+      return {
+        wtxId:       d.wtxId,
+        amount:      d.amount,
+        currency:    d.currency ?? 'BOB',
+        reference:   d.reference,
+        method:      'manual',
+        status:      d.status,
+        description: d.description,
+        createdAt:   d.createdAt,
+        expiresAt:   d.expiresAt,
+        user: {
+          id:           u._id,
+          name:         `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || '—',
+          email:        u.email ?? null,
+          phone:        u.phone ?? null,
+          documentType: u.identityDocument?.type ?? null,
+          kycStatus:    u.kycStatus ?? null,
+        },
+        comprobante: proof
+          ? { present: true, filename: proof.filename, mimetype: proof.mimetype,
+              size: proof.size, uploadedAt: proof.uploadedAt }
+          : { present: false },
+      }
+    })
+
+    return res.json({ deposits, total: deposits.length })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminListPendingDeposits' } })
     console.error('[Wallet] Error en adminListPendingDeposits:', err.message)
     return res.status(500).json({ error: 'Error al listar depósitos pendientes.' })
   }
+}
+
+// ─── ADMIN: GET /api/v1/admin/wallet/deposits/:wtxId/comprobante ───────────────
+
+/**
+ * Devuelve la imagen del comprobante (base64) de un depósito BOB manual, para que
+ * el admin la revise antes de confirmar. Espeja getTransactionComprobante pero
+ * sobre WalletTransaction.
+ */
+export async function adminGetDepositComprobante(req, res) {
+  const { wtxId } = req.params
+
+  let wtx
+  try {
+    wtx = await WalletTransaction.findOne({ wtxId, type: 'deposit' })
+      .select('wtxId metadata userId amount currency status')
+      .lean()
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminGetDepositComprobante' } })
+    return res.status(500).json({ error: 'Error interno del servidor.' })
+  }
+
+  if (!wtx) {
+    return res.status(404).json({ error: 'Depósito no encontrado.' })
+  }
+
+  const proof = wtx.metadata?.paymentProof
+  if (!proof?.data) {
+    return res.status(404).json({ error: 'Este depósito no tiene comprobante subido.' })
+  }
+
+  return res.status(200).json({
+    base64:     proof.data,
+    mimeType:   proof.mimetype,
+    filename:   proof.filename,
+    size:       proof.size,
+    uploadedAt: proof.uploadedAt,
+  })
 }
 
 // ─── FUNCIÓN 10 (ADMIN): PATCH /api/v1/admin/wallet/:userId/freeze ────────────
@@ -1139,7 +1232,15 @@ export async function uploadDepositProof(req, res) {
     return res.status(404).json({ error: 'Depósito no encontrado.' })
   }
 
-  if (wtx.status !== 'pending') {
+  // Los depósitos vía QR bancario (bankQr) se confirman solos vía IPN — no se les
+  // adjunta comprobante manual.
+  if (wtx.bankQr?.qrId) {
+    return res.status(400).json({ error: 'Este depósito se confirma automáticamente; no requiere comprobante.' })
+  }
+
+  // Solo un depósito manual a la espera de comprobante puede recibirlo. Si ya está
+  // 'pending' (comprobante subido), 'completed', etc. → ya fue procesado.
+  if (wtx.status !== 'awaiting_proof') {
     return res.status(400).json({ error: 'Este depósito ya fue procesado.' })
   }
 
@@ -1158,6 +1259,8 @@ export async function uploadDepositProof(req, res) {
       uploadedAt: new Date(),
     },
   }
+  // Comprobante adjunto → el depósito "se genera" y entra a la cola del admin.
+  wtx.status = 'pending'
 
   try {
     await wtx.save()

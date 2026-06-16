@@ -98,6 +98,7 @@ import {
 import {
   adminListWallets,
   adminListPendingDeposits,
+  adminGetDepositComprobante,
   adminConfirmDeposit,
   adminFreezeWallet,
   adminUnfreezeWallet,
@@ -576,6 +577,13 @@ router.get('/wallet',                    adminListWallets);
  * no interprete "deposits" como un userId.
  */
 router.get('/wallet/deposits/pending',   adminListPendingDeposits);
+
+/**
+ * GET /api/v1/admin/wallet/deposits/:wtxId/comprobante
+ * Devuelve la imagen del comprobante (base64) de un depósito BOB manual.
+ * IMPORTANTE: va ANTES de /wallet/:userId/* por el mismo motivo de orden.
+ */
+router.get('/wallet/deposits/:wtxId/comprobante', adminGetDepositComprobante);
 
 /**
  * POST /api/v1/admin/wallet/deposit/confirm
