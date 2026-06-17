@@ -13,10 +13,11 @@
 
 import { Router } from 'express';
 import multer     from 'multer';
-import { protect } from '../middlewares/authMiddleware.js';
+import { protect, requireEmailVerified } from '../middlewares/authMiddleware.js';
 import {
   getProfile,
   updateProfile,
+  updateKycProfile,
   changePassword,
   deleteFcmToken,
   getSessions,
@@ -56,6 +57,10 @@ router.get('/profile', protect, getProfile);
 
 // PATCH /api/v1/user/profile
 router.patch('/profile', protect, updateProfile);
+
+// PATCH /api/v1/user/kyc-profile — info de cumplimiento (CDD) previa a Stripe Identity.
+// Requiere email verificado: el orden del onboarding es verify-email → kyc-profile → biometría.
+router.patch('/kyc-profile', protect, requireEmailVerified, updateKycProfile);
 
 // POST /api/v1/user/change-password
 router.post('/change-password', protect, changePassword);

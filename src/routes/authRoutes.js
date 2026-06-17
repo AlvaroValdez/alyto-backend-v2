@@ -21,6 +21,8 @@ import {
   forgotPassword,
   resetPassword,
   registerFcmToken,
+  verifyEmail,
+  resendVerification,
 } from '../controllers/authController.js';
 import { protect } from '../middlewares/authMiddleware.js';
 import {
@@ -28,6 +30,7 @@ import {
   registerLimiter,
   forgotPasswordLimiter,
   resetPasswordLimiter,
+  emailVerifyLimiter,
 } from '../config/rateLimiters.js';
 
 const router = Router();
@@ -51,6 +54,19 @@ router.post('/register', registerLimiter, registerUser);
  * vector de brute-force. Solo aplica el generalLimiter del servidor.
  */
 router.get('/me', protect, getMe);
+
+/**
+ * POST /api/v1/auth/verify-email   (protegido)
+ * Confirma el email del usuario con el código de 6 dígitos.
+ * Body: { code }
+ */
+router.post('/verify-email', protect, emailVerifyLimiter, verifyEmail);
+
+/**
+ * POST /api/v1/auth/resend-verification   (protegido)
+ * Reenvía el código de verificación (cooldown 60s por usuario).
+ */
+router.post('/resend-verification', protect, emailVerifyLimiter, resendVerification);
 
 /**
  * POST /api/v1/auth/forgot-password

@@ -26,7 +26,10 @@ import { logger }        from '../utils/logger.js';
 import { enqueueIpnEvent, isSqsEnabled } from '../utils/sqsBuffer.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 import User              from '../models/User.js';
+import { confirmBankQrDeposit } from './walletController.js';
+import { getBankQrService }     from '../services/bankQr/bankQrRegistry.js';
 import {
   createPayout,
   createVitaSentPayout,
@@ -2733,6 +2736,40 @@ export function handleBankQrIPN(bankId) {
       sender: payment.senderName,
     });
 
+    // ── Gate de autenticidad ──────────────────────────────────────────────────
+    // El endpoint es público (sin JWT) → el body NO es confiable para mover dinero.
+    // Delegamos al adapter del banco (verifyIpn): firma HMAC opcional + reconfirmación
+    // autoritativa contra el banco. Si el banco no implementa verifyIpn, rechazamos
+    // por seguridad (no acreditar sin verificación). Se invoca SOLO cuando ya hay un
+    // registro que matchea el qrId (más abajo), para no amplificar spam con llamadas
+    // al banco por qrIds inexistentes.
+    const verifyAuthenticity = async () => {
+      let svc;
+      try {
+        svc = getBankQrService(bankId);
+      } catch (err) {
+        return { ok: false, reason: `bank-not-registered:${err.message}` };
+      }
+      if (typeof svc.verifyIpn !== 'function') {
+        return { ok: false, reason: 'no-verifier-implemented' };
+      }
+      try {
+        return await svc.verifyIpn(req);
+      } catch (err) {
+        return { ok: false, reason: `verifier-error:${err.message}` };
+      }
+    };
+    const rejectUnauthentic = (auth) => {
+      logger.warn(`[BankQr IPN ${bankId}] IPN no autenticado — ignorando`, {
+        qrId: payment.qrId, reason: auth.reason,
+      });
+      Sentry.captureMessage(`BankQr IPN rejected [${bankId}]: ${auth.reason}`, {
+        level: 'warning',
+        extra: { qrId: payment.qrId, sender: payment.senderName, amount: payment.amount },
+      });
+      return res.status(200).json(OK);
+    };
+
     let transaction;
     try {
       transaction = await Transaction.findOne({ 'bankQr.qrId': payment.qrId });
@@ -2742,6 +2779,56 @@ export function handleBankQrIPN(bankId) {
     }
 
     if (!transaction) {
+      // ¿Es una carga de Wallet BOB pagada por QR bancario? (mismo endpoint IPN)
+      let wtx;
+      try {
+        wtx = await WalletTransaction.findOne({ 'bankQr.qrId': payment.qrId });
+      } catch (err) {
+        Sentry.captureException(err, { tags: { component: `bankQrIPN:${bankId}` } });
+        return res.status(200).json(OK);
+      }
+
+      if (wtx) {
+        // Idempotencia
+        if (wtx.status !== 'pending' || wtx.bankQr?.paidAt) {
+          logger.info(`[BankQr IPN ${bankId}] Depósito wallet ya procesado (status=${wtx.status}) — ignorando`, {
+            wtxId: wtx.wtxId,
+          });
+          return res.status(200).json(OK);
+        }
+
+        // Validar monto exacto (modifyAmount=false en el banco, double-check)
+        const expectedDep = wtx.amount;
+        const receivedDep = Number(payment.amount);
+        if (Math.abs(receivedDep - expectedDep) > 0.02) {
+          logger.warn(`[BankQr IPN ${bankId}] Depósito wallet: monto ${receivedDep} ≠ esperado ${expectedDep}`, {
+            qrId: payment.qrId,
+          });
+          Sentry.captureMessage(`BankQr wallet deposit amount mismatch [${bankId}]`, {
+            level: 'warning',
+            extra: { qrId: payment.qrId, expectedDep, receivedDep, wtxId: wtx.wtxId },
+          });
+          return res.status(200).json(OK);
+        }
+
+        const authW = await verifyAuthenticity();
+        if (!authW.ok) return rejectUnauthentic(authW);
+
+        try {
+          const result = await confirmBankQrDeposit(wtx, payment, bankId, 'ipn');
+          logger.info(`[BankQr IPN ${bankId}] ✅ Depósito wallet ${result.ok ? 'acreditado' : 'no procesado'}`, {
+            wtxId:  wtx.wtxId,
+            reason: result.reason,
+          });
+        } catch (err) {
+          Sentry.captureException(err, {
+            tags:  { component: `bankQrIPN:${bankId}` },
+            extra: { wtxId: wtx.wtxId },
+          });
+        }
+        return res.status(200).json(OK);
+      }
+
       logger.warn(`[BankQr IPN ${bankId}] QR no encontrado en BD: ${payment.qrId}`);
       return res.status(200).json(OK);
     }
@@ -2775,6 +2862,9 @@ export function handleBankQrIPN(bankId) {
       await transaction.save().catch(() => {});
       return res.status(200).json(OK);
     }
+
+    const authTx = await verifyAuthenticity();
+    if (!authTx.ok) return rejectUnauthentic(authTx);
 
     // ── Confirmar payin ───────────────────────────────────────────────────────
     // Usar timestamp real del banco; fallback a now si el formato no parsea

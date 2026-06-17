@@ -4,6 +4,9 @@
  * Para agregar un banco nuevo:
  *   1. Crear src/services/bankQr/banks/{banco}QrService.js
  *      implementando: generateQR, cancelQR, getQRStatus, getPaidQRs, isAvailable
+ *      y (recomendado) verifyIpn(req) → autentica el IPN entrante antes de acreditar.
+ *      Si un banco no implementa verifyIpn, el handler de IPN debe rechazar por
+ *      seguridad (no acreditar sin verificación).
  *   2. Importar y registrar aquí con un bankId único (ej. 'bisa', 'bnb', 'union')
  *   3. Configurar las variables de entorno del banco nuevo
  *

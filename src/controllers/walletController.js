@@ -34,6 +34,23 @@ import Sentry           from '../services/sentry.js'
 import { sendEmail, EMAILS } from '../services/email.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
+import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
+
+// ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
+
+/**
+ * Lee el gate de payin automático por QR bancario para la carga de Wallet BOB.
+ * Por entorno (env): staging puede activarlo con mock mode; prod queda OFF hasta
+ * tener credenciales BEC reales registradas.
+ *
+ * @returns {{ enabled: boolean, bankId: string }}
+ */
+export function getWalletDepositBankQrConfig() {
+  return {
+    enabled: String(process.env.WALLET_DEPOSIT_BANKQR_ENABLED).toLowerCase() === 'true',
+    bankId:  process.env.WALLET_DEPOSIT_BANK_ID ?? 'bec',
+  }
+}
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
 
@@ -164,8 +181,10 @@ export async function getWalletTransactions(req, res) {
 // ─── FUNCIÓN 4: POST /api/v1/wallet/deposit/initiate ─────────────────────────
 
 /**
- * Inicia un depósito BOB: crea una WalletTransaction pending y
- * retorna las instrucciones bancarias para que el usuario transfiera.
+ * Inicia un depósito BOB. Crea una WalletTransaction en 'awaiting_proof' (aún NO
+ * es un depósito generado) y retorna las instrucciones de pago. El depósito pasa a
+ * 'pending' recién cuando: (manual) el usuario adjunta el comprobante, o (bankQr)
+ * el banco devuelve un QR válido. Solo entonces es acreditable / visible al admin.
  */
 export async function initiateDeposit(req, res) {
   try {
@@ -188,12 +207,106 @@ export async function initiateDeposit(req, res) {
       return res.status(400).json({ error: 'El monto máximo por depósito es Bs. 10.000.' })
     }
 
+    // ── Límite diario de depósito (mismo patrón que send/withdraw) ──────────
+    // Opt-in: default 0 = desactivado. El valor lo fija compliance vía env.
+    const DEPOSIT_LIMIT = parseFloat(process.env.WALLET_DAILY_DEPOSIT_LIMIT ?? '0')
+    if (DEPOSIT_LIMIT > 0) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const depAgg = await WalletTransaction.aggregate([
+        { $match: { userId: user._id, type: 'deposit', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ])
+      const depositedToday = depAgg[0]?.total ?? 0
+      if (depositedToday + amount > DEPOSIT_LIMIT) {
+        return res.status(400).json({
+          error: `Superas tu límite diario de depósito de Bs. ${DEPOSIT_LIMIT.toFixed(2)} (depositado hoy: Bs. ${depositedToday.toFixed(2)}).`,
+        })
+      }
+    }
+
     const wallet = await getOrCreateWallet(user._id)
     if (wallet.status !== 'active') {
       return res.status(403).json({ error: 'Tu wallet no está activa. Contacta a soporte.' })
     }
 
-    // Crear WalletTransaction pendiente
+    // ── Camino bankQr: QR bancario dinámico con confirmación automática ────────
+    const bankQrCfg = getWalletDepositBankQrConfig()
+    if (bankQrCfg.enabled) {
+      const BANK_QR_DUE_DAYS = Math.max(0, Number(process.env.BANK_QR_DUE_DAYS ?? 1))
+      const dueObj = new Date()
+      dueObj.setDate(dueObj.getDate() + BANK_QR_DUE_DAYS)
+      const yyyy = dueObj.getFullYear()
+      const mm   = String(dueObj.getMonth() + 1).padStart(2, '0')
+      const dd   = String(dueObj.getDate()).padStart(2, '0')
+      const dueDate = `${yyyy}-${mm}-${dd}`
+      const dueExpiresAt = new Date(dueObj)
+      dueExpiresAt.setHours(23, 59, 59, 999)
+
+      // Crear el registro en 'awaiting_proof' primero — su wtxId identifica el QR en
+      // el banco. NO es un depósito "generado" todavía: pasa a 'pending' SOLO si el
+      // banco devuelve un QR válido (respuesta correcta). Si la generación falla,
+      // queda 'failed' y nunca se considera un depósito real.
+      const wtx = await WalletTransaction.create({
+        walletId:      wallet._id,
+        userId:        user._id,
+        type:          'deposit',
+        amount,
+        balanceBefore: wallet.balance,
+        balanceAfter:  wallet.balance,  // se actualiza al confirmarse el pago
+        status:        'awaiting_proof',
+        currency:      'BOB',
+        description:   'Depósito BOB vía QR bancario',
+        reference:     null,
+        expiresAt:     dueExpiresAt,
+      })
+
+      let qr
+      try {
+        const svc = getBankQrService(bankQrCfg.bankId)
+        qr = await svc.generateQR({
+          transactionId: wtx.wtxId,
+          amount,
+          currency:      'BOB',
+          description:   `Alyto deposito ${wtx.wtxId}`.slice(0, 100),
+          dueDate,
+        })
+      } catch (err) {
+        await WalletTransaction.updateOne({ _id: wtx._id }, {
+          status:      'failed',
+          description: 'Error generando QR bancario',
+        }).catch(() => {})
+        Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'initiateDeposit:bankQr' } })
+        console.error('[Wallet] Error generando QR bancario:', err.message)
+        return res.status(502).json({ error: 'No se pudo generar el QR bancario. Intenta nuevamente en unos minutos.' })
+      }
+
+      // QR válido recibido → recién ahora el depósito existe como 'pending'
+      // (a la espera de la confirmación automática del banco vía IPN).
+      await WalletTransaction.updateOne({ _id: wtx._id }, {
+        status:    'pending',
+        reference: wtx.wtxId,
+        bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate },
+      })
+
+      return res.status(201).json({
+        wtxId:        wtx.wtxId,
+        method:       'bankQr',
+        amount,
+        currency:     'BOB',
+        paymentQR:    qr.qrImage,
+        bankQrId:     qr.qrId,
+        reference:    wtx.wtxId,
+        instructions: 'Escanea el QR con tu app bancaria. El saldo se acredita automáticamente al confirmarse el pago.',
+        expiresAt:    dueExpiresAt,
+      })
+    }
+
+    // ── Camino manual: transferencia bancaria + confirmación admin (legacy) ────
+    // Se crea en 'awaiting_proof': el depósito NO está "generado" todavía. Solo
+    // existe para entregarle al usuario la referencia que debe poner en la
+    // transferencia. Pasa a 'pending' (y entra a la cola admin) recién cuando el
+    // usuario adjunta el comprobante (uploadDepositProof). Por eso NO se notifica
+    // al admin acá — no hay nada que confirmar aún.
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
     const wtx = await WalletTransaction.create({
       walletId:      wallet._id,
@@ -202,19 +315,16 @@ export async function initiateDeposit(req, res) {
       amount,
       balanceBefore: wallet.balance,
       balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
-      status:        'pending',
-      description:   'Depósito pendiente de confirmación admin',
+      status:        'awaiting_proof',
+      description:   'Depósito iniciado — pendiente de comprobante',
       expiresAt,
     })
     // Usar wtxId como referencia para identificar la transferencia
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId })
 
-    // Notificar a admins — push + in-app
-    const fullName = `${user.firstName} ${user.lastName}`.trim();
-    notifyAdmins(NOTIFICATIONS.adminDepositRequest(amount, fullName)).catch(() => {});
-
     return res.status(201).json({
       wtxId:         wtx.wtxId,
+      method:        'manual',
       amount,
       currency:      'BOB',
       bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
@@ -572,6 +682,16 @@ export async function adminConfirmDeposit(req, res) {
       await session.abortTransaction()
       return res.status(400).json({ error: 'La transacción no es un depósito.' })
     }
+    // Los depósitos vía QR bancario se acreditan automáticamente (IPN del banco /
+    // job de reconciliación). Bloquear la confirmación manual evita doble crédito.
+    if (wtx.bankQr?.qrId) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Este depósito es automático (QR bancario); no se confirma manualmente.' })
+    }
+    if (wtx.status === 'awaiting_proof') {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'El depósito aún no tiene comprobante adjunto.' })
+    }
     if (wtx.status !== 'pending') {
       await session.abortTransaction()
       return res.status(400).json({ error: `El depósito ya fue procesado (status: ${wtx.status}).` })
@@ -630,6 +750,119 @@ export async function adminConfirmDeposit(req, res) {
   } finally {
     session.endSession()
   }
+}
+
+// ─── bankQr: confirmación automática de depósito BOB ──────────────────────────
+
+/**
+ * Acredita un depósito BOB pagado vía QR bancario (bankQr). Camino automático:
+ * lo invocan el IPN del banco, el job de reconciliación y la simulación admin.
+ *
+ * Atómico (mongoose session) + idempotente: el claim condicional por status
+ * 'pending' garantiza que IPN y job no acrediten dos veces el mismo pago.
+ *
+ * @param {object} wtx     — WalletTransaction (type='deposit', status='pending')
+ * @param {object} payment — objeto PaymentQR del banco (o simulado)
+ * @param {string} bankId  — 'bec' | ...
+ * @param {string} source  — 'ipn' | 'reconciliation_job' | 'sweep' | 'admin_simulate'
+ * @returns {Promise<{ ok: boolean, newBalance?: number, reason?: string }>}
+ */
+export async function confirmBankQrDeposit(wtx, payment, bankId, source) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const wallet = await WalletBOB.findById(wtx.walletId).session(session)
+    if (!wallet) {
+      await session.abortTransaction()
+      return { ok: false, reason: 'wallet_not_found' }
+    }
+
+    const parsed = payment?.paymentDate && payment?.paymentTime
+      ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
+      : new Date()
+    const paidAt = isNaN(parsed) ? new Date() : parsed
+
+    const prevBalance = wallet.balance
+    const newBalance  = prevBalance + wtx.amount
+
+    // Claim atómico — solo procede si la tx sigue pending (anti doble crédito)
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, type: 'deposit', status: 'pending' },
+      {
+        $set: {
+          status:           'completed',
+          balanceBefore:    prevBalance,
+          balanceAfter:     newBalance,
+          confirmedAt:      new Date(),
+          reference:        payment?.qrId ?? wtx.bankQr?.qrId,
+          'bankQr.paidAt':  paidAt,
+          'bankQr.payment': payment,
+          metadata:         { ...(wtx.metadata ?? {}), bankQrSource: source },
+        },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) {
+      await session.abortTransaction()
+      return { ok: false, reason: 'already_processed' }
+    }
+
+    await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: wtx.amount } }, { session })
+    await session.commitTransaction()
+
+    // Audit trail Stellar — fire and forget
+    fireAuditTrail(wtx.wtxId, 'deposit', wtx.amount, payment?.qrId ?? wtx.bankQr?.qrId)
+
+    // Notificar al usuario (email + push/in-app) — fire and forget
+    User.findById(wtx.userId).lean().then((u) => {
+      if (u?.email) {
+        sendEmail(...EMAILS.walletDepositConfirmed(u, {
+          amount:     wtx.amount,
+          currency:   'BOB',
+          newBalance,
+          wtxId:      wtx.wtxId,
+        })).catch(() => {})
+      }
+    }).catch(() => {})
+    notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
+
+    console.log(`[Wallet] ✅ Depósito bankQr acreditado (${source})`, { wtxId: wtx.wtxId, bankId, amount: wtx.amount })
+    return { ok: true, newBalance }
+
+  } catch (err) {
+    await session.abortTransaction().catch(() => {})
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'confirmBankQrDeposit' } })
+    console.error('[Wallet] Error en confirmBankQrDeposit:', err.message)
+    throw err
+  } finally {
+    session.endSession()
+  }
+}
+
+/**
+ * Marca un depósito bankQr vencido sin pago como failed.
+ * No hubo acreditación, así que no hay saldo que revertir.
+ *
+ * @param {object} wtx    — WalletTransaction pending
+ * @param {string} bankId
+ * @param {string} reason
+ * @returns {Promise<boolean>} true si se marcó (false si otra corrida la tomó)
+ */
+export async function failExpiredBankQrDeposit(wtx, bankId, reason) {
+  const upd = await WalletTransaction.updateOne(
+    { _id: wtx._id, type: 'deposit', status: 'pending' },
+    {
+      $set: {
+        status:      'failed',
+        description: `Depósito QR vencido: ${reason}`,
+        metadata:    { ...(wtx.metadata ?? {}), bankQrExpired: true, expireReason: reason, expiredAt: new Date() },
+      },
+    },
+  )
+  if (upd.modifiedCount > 0) {
+    console.log('[Wallet] ⏲️ Depósito bankQr vencido archivado', { wtxId: wtx.wtxId, bankId, reason })
+  }
+  return upd.modifiedCount > 0
 }
 
 // ─── FUNCIÓN 8 (ADMIN): GET /api/v1/admin/wallet ─────────────────────────────
@@ -691,18 +924,93 @@ export async function adminListWallets(req, res) {
  */
 export async function adminListPendingDeposits(req, res) {
   try {
-    const pending = await WalletTransaction.find({ type: 'deposit', status: 'pending' })
+    // Cola de confirmación MANUAL: solo depósitos 'pending' (con comprobante adjunto)
+    // y SIN bankQr (los QR bancarios se confirman solos vía IPN — no van a esta cola).
+    // Los 'awaiting_proof' (iniciados sin comprobante) quedan excluidos por el status.
+    const pending = await WalletTransaction.find({
+      type:   'deposit',
+      status: 'pending',
+      $or: [{ bankQr: { $exists: false } }, { 'bankQr.qrId': { $exists: false } }],
+    })
       .sort({ createdAt: -1 })
-      .populate('userId', 'firstName lastName email kycStatus')
+      .populate('userId', 'firstName lastName email kycStatus phone identityDocument.type')
       .lean()
 
-    return res.json({ deposits: pending, total: pending.length })
+    // Shape explícito y liviano: toda la info que el admin necesita SIN el blob
+    // base64 del comprobante (se obtiene aparte vía /deposits/:wtxId/comprobante).
+    const deposits = pending.map((d) => {
+      const u     = d.userId ?? {}
+      const proof = d.metadata?.paymentProof ?? null
+      return {
+        wtxId:       d.wtxId,
+        amount:      d.amount,
+        currency:    d.currency ?? 'BOB',
+        reference:   d.reference,
+        method:      'manual',
+        status:      d.status,
+        description: d.description,
+        createdAt:   d.createdAt,
+        expiresAt:   d.expiresAt,
+        user: {
+          id:           u._id,
+          name:         `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || '—',
+          email:        u.email ?? null,
+          phone:        u.phone ?? null,
+          documentType: u.identityDocument?.type ?? null,
+          kycStatus:    u.kycStatus ?? null,
+        },
+        comprobante: proof
+          ? { present: true, filename: proof.filename, mimetype: proof.mimetype,
+              size: proof.size, uploadedAt: proof.uploadedAt }
+          : { present: false },
+      }
+    })
+
+    return res.json({ deposits, total: deposits.length })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminListPendingDeposits' } })
     console.error('[Wallet] Error en adminListPendingDeposits:', err.message)
     return res.status(500).json({ error: 'Error al listar depósitos pendientes.' })
   }
+}
+
+// ─── ADMIN: GET /api/v1/admin/wallet/deposits/:wtxId/comprobante ───────────────
+
+/**
+ * Devuelve la imagen del comprobante (base64) de un depósito BOB manual, para que
+ * el admin la revise antes de confirmar. Espeja getTransactionComprobante pero
+ * sobre WalletTransaction.
+ */
+export async function adminGetDepositComprobante(req, res) {
+  const { wtxId } = req.params
+
+  let wtx
+  try {
+    wtx = await WalletTransaction.findOne({ wtxId, type: 'deposit' })
+      .select('wtxId metadata userId amount currency status')
+      .lean()
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminGetDepositComprobante' } })
+    return res.status(500).json({ error: 'Error interno del servidor.' })
+  }
+
+  if (!wtx) {
+    return res.status(404).json({ error: 'Depósito no encontrado.' })
+  }
+
+  const proof = wtx.metadata?.paymentProof
+  if (!proof?.data) {
+    return res.status(404).json({ error: 'Este depósito no tiene comprobante subido.' })
+  }
+
+  return res.status(200).json({
+    base64:     proof.data,
+    mimeType:   proof.mimetype,
+    filename:   proof.filename,
+    size:       proof.size,
+    uploadedAt: proof.uploadedAt,
+  })
 }
 
 // ─── FUNCIÓN 10 (ADMIN): PATCH /api/v1/admin/wallet/:userId/freeze ────────────
@@ -941,7 +1249,15 @@ export async function uploadDepositProof(req, res) {
     return res.status(404).json({ error: 'Depósito no encontrado.' })
   }
 
-  if (wtx.status !== 'pending') {
+  // Los depósitos vía QR bancario (bankQr) se confirman solos vía IPN — no se les
+  // adjunta comprobante manual.
+  if (wtx.bankQr?.qrId) {
+    return res.status(400).json({ error: 'Este depósito se confirma automáticamente; no requiere comprobante.' })
+  }
+
+  // Solo un depósito manual a la espera de comprobante puede recibirlo. Si ya está
+  // 'pending' (comprobante subido), 'completed', etc. → ya fue procesado.
+  if (wtx.status !== 'awaiting_proof') {
     return res.status(400).json({ error: 'Este depósito ya fue procesado.' })
   }
 
@@ -950,23 +1266,34 @@ export async function uploadDepositProof(req, res) {
   }
 
   const file = req.file
-  wtx.metadata = {
-    ...wtx.metadata,
-    paymentProof: {
-      data:       file.buffer.toString('base64'),
-      mimetype:   file.mimetype,
-      filename:   file.originalname,
-      size:       file.size,
-      uploadedAt: new Date(),
-    },
+  const paymentProof = {
+    data:       file.buffer.toString('base64'),
+    mimetype:   file.mimetype,
+    filename:   file.originalname,
+    size:       file.size,
+    uploadedAt: new Date(),
   }
 
+  // Transición atómica awaiting_proof → pending con el comprobante adjunto.
+  // El filtro condicional (status + sin comprobante previo) garantiza que dos
+  // uploads concurrentes no puedan pasar ambos los checks de arriba y pisarse el
+  // comprobante: solo el primero matchea el filtro, el segundo recibe null.
+  let updated
   try {
-    await wtx.save()
+    updated = await WalletTransaction.findOneAndUpdate(
+      { wtxId, userId, type: 'deposit', status: 'awaiting_proof', 'metadata.paymentProof': { $exists: false } },
+      { $set: { 'metadata.paymentProof': paymentProof, status: 'pending' } },
+      { new: true },
+    )
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'uploadDepositProof' } })
     console.error('[WalletDeposit] Error guardando comprobante:', err.message)
     return res.status(500).json({ error: 'Error guardando el comprobante.' })
+  }
+
+  // Otro request ganó la carrera (o el estado cambió entre el pre-check y el update).
+  if (!updated) {
+    return res.status(409).json({ error: 'Este depósito ya fue procesado o ya tiene un comprobante.' })
   }
 
   const user = await User.findById(userId).select('firstName lastName').lean()
@@ -1082,16 +1409,34 @@ export async function adminRejectWithdrawal(req, res) {
       return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
     }
 
+    // Saldo actual para el audit trail (el rechazo es neutro en balance: solo
+    // libera la reserva, no descuenta saldo). ASFI: toda op registra balances.
+    const walletBOB = await WalletBOB.findById(wtx.walletId).session(session)
+    const balNow    = walletBOB?.balance ?? wtx.balanceAfter ?? 0
+
+    // Guard atómico: transición pending → failed condicional (evita doble
+    // liberación de reserva en una carrera confirm/reject concurrente).
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'pending' },
+      {
+        status:        'failed',
+        balanceBefore: balNow,
+        balanceAfter:  balNow,
+        metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) {
+      await session.abortTransaction()
+      return res.status(409).json({ error: 'El retiro ya fue procesado.' })
+    }
+
     // Liberar la reserva sin descontar el saldo
     await WalletBOB.updateOne(
       { _id: wtx.walletId },
       { $inc: { balanceReserved: -wtx.amount } },
       { session },
     )
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:   'failed',
-      metadata: { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
-    }, { session })
 
     await session.commitTransaction()
 

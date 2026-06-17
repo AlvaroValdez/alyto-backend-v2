@@ -181,6 +181,34 @@ const userSchema = new Schema(
       type: Date,
     },
 
+    // ── Cumplimiento KYC (CDD/AML — requerido para reuso de KYC con Harbor/anchors) ──
+    /** Nacionalidad declarada (ISO 3166-1 alpha-2) — distinta de residenceCountry. */
+    nationality: {
+      type:      String,
+      uppercase: true,
+      trim:      true,
+      minlength: 2,
+      maxlength: 2,
+      default:   null,
+    },
+    /**
+     * Origen de fondos declarado por el usuario (elemento CDD que exigen ASFI y
+     * Harbor). Enum cerrado para normalizar el reporte de compliance.
+     */
+    sourceOfFunds: {
+      type: String,
+      enum: [
+        'salary_employment', 'business_income', 'investments', 'savings',
+        'inheritance_gift', 'property_sale', 'loan', 'other',
+      ],
+      default: null,
+    },
+    /** Momento en que el usuario completó el formulario de cumplimiento KYC. */
+    kycProfileCompletedAt: {
+      type:    Date,
+      default: null,
+    },
+
     // ── Estado KYC ──────────────────────────────────────────────────────────
     kycStatus: {
       type:    String,
@@ -204,6 +232,34 @@ const userSchema = new Schema(
     stripeVerificationSessionId: {
       type:    String,
       default: null,
+    },
+
+    // ── Verificación de email ────────────────────────────────────────────────
+    /** True una vez que el usuario confirma su email con el código de 6 dígitos. */
+    emailVerified: {
+      type:    Boolean,
+      default: false,
+    },
+    /** Hash SHA-256 del código de verificación vigente (nunca en texto plano). */
+    emailVerificationCode: {
+      type:   String,
+      select: false,
+    },
+    /** Expiración del código de verificación. */
+    emailVerificationExpires: {
+      type:   Date,
+      select: false,
+    },
+    /** Intentos fallidos del código vigente (bloqueo anti-brute-force). */
+    emailVerificationAttempts: {
+      type:    Number,
+      default: 0,
+      select:  false,
+    },
+    /** Último envío de código (cooldown de reenvío). */
+    emailVerificationLastSent: {
+      type:   Date,
+      select: false,
     },
 
     // ── Cuenta Stellar ──────────────────────────────────────────────────────

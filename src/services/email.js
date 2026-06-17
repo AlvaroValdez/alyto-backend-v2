@@ -316,6 +316,56 @@ export async function sendWelcomeEmail(user) {
   return sendRawEmail(user.email, subject, html);
 }
 
+/**
+ * Envía el código de verificación de email (6 dígitos). Usa SendGrid Dynamic
+ * Template si SENDGRID_TEMPLATE_EMAIL_VERIFY está configurado; si no, HTML inline.
+ *
+ * @param {object} user  — debe incluir email y firstName
+ * @param {string} code  — código de 6 dígitos en texto plano (solo para el email)
+ * @param {number} ttlMin — minutos de validez (para el copy)
+ */
+export async function sendVerificationCodeEmail(user, code, ttlMin = 15) {
+  if (process.env.SENDGRID_TEMPLATE_EMAIL_VERIFY) {
+    return sendEmail(user.email, process.env.SENDGRID_TEMPLATE_EMAIL_VERIFY, {
+      userName: user.firstName,
+      code,
+      ttlMinutes: ttlMin,
+      supportEmail: process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app',
+    });
+  }
+
+  const subject = `Tu código de verificación Alyto: ${code}`;
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;background:#F8FAFC;">
+      <div style="background:#0B1526;padding:32px 24px;text-align:center;">
+        <h1 style="color:#FFFFFF;margin:0;font-size:24px;letter-spacing:-0.5px;">Alyto</h1>
+      </div>
+      <div style="background:#FFFFFF;padding:32px 24px;color:#0F1B2E;">
+        <h2 style="margin:0 0 12px;font-size:22px;">Verifica tu email</h2>
+        <p style="margin:0 0 24px;font-size:15px;line-height:1.5;color:#3B4A63;">
+          Hola ${user.firstName}, usa este código para confirmar tu dirección de correo:
+        </p>
+        <div style="text-align:center;margin:0 0 24px;">
+          <span style="display:inline-block;background:#F0F2F7;border:1px solid #E2E8F0;border-radius:12px;
+                       padding:16px 28px;font-size:32px;font-weight:700;letter-spacing:10px;color:#0D1F3C;">
+            ${code}
+          </span>
+        </div>
+        <p style="margin:0 0 8px;font-size:14px;line-height:1.5;color:#3B4A63;">
+          El código vence en <strong>${ttlMin} minutos</strong>.
+        </p>
+        <p style="margin:0;font-size:13px;color:#64748B;">
+          Si no creaste una cuenta en Alyto, puedes ignorar este mensaje.
+        </p>
+      </div>
+      <div style="padding:16px 24px;text-align:center;font-size:12px;color:#94A3B8;">
+        Este email fue enviado a ${user.email}. © ${new Date().getFullYear()} Alyto.
+      </div>
+    </div>
+  `;
+  return sendRawEmail(user.email, subject, html);
+}
+
 // ─── Emails predefinidos ──────────────────────────────────────────────────────
 
 /**

@@ -21,12 +21,50 @@
  */
 
 import Transaction from '../models/Transaction.js';
+import WalletTransaction from '../models/WalletTransaction.js';
 import * as Sentry from '@sentry/node';
+
+/**
+ * Archiva depósitos de Wallet BOB iniciados pero nunca completados: quedaron en
+ * 'awaiting_proof' (sin comprobante manual ni QR bancario válido) y expiraron.
+ * Espeja la lógica de huérfanas de Transaction sobre WalletTransaction.
+ *
+ * Excluye bankQr con QR válido (esos los maneja reconcileBankQrPayments). Un
+ * 'awaiting_proof' SIN bankQr.qrId es un intento manual abandonado o un bankQr
+ * que nunca llegó a generar QR — en ambos casos, huérfano.
+ */
+async function cleanupOrphanWalletDeposits() {
+  const result = await WalletTransaction.updateMany(
+    {
+      type:          'deposit',
+      status:        'awaiting_proof',
+      expiresAt:     { $lt: new Date() },
+      'bankQr.qrId': { $exists: false },
+    },
+    {
+      $set: {
+        status:      'failed',
+        description: 'Depósito abandonado — expiró sin comprobante.',
+      },
+    },
+  );
+  if (result.modifiedCount > 0) {
+    console.info(`[Cleanup] ${result.modifiedCount} depósitos wallet huérfanos archivados`);
+  }
+  return result.modifiedCount;
+}
 
 export async function cleanupOrphanTransactions() {
   const startTime = Date.now();
 
   try {
+    // Sweep paralelo de depósitos wallet huérfanos (fire-and-forget, no bloquea
+    // el barrido principal de Transaction).
+    cleanupOrphanWalletDeposits().catch((err) => {
+      console.error('[Cleanup] Error en sweep de depósitos wallet:', err.message);
+      Sentry.captureException(err, { tags: { component: 'cleanupOrphanWalletDeposits' } });
+    });
+
     const result = await Transaction.updateMany(
       {
         // payin_pending: payin manual que subió comprobante pero expiró sin confirmar.

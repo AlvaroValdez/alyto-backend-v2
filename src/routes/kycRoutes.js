@@ -10,17 +10,34 @@
 
 import { Router }                                    from 'express';
 import { createKycSession, getKycStatus, getKycDebug, approveKycTest } from '../controllers/kycController.js';
-import { protect, requireAdmin }                      from '../middlewares/authMiddleware.js';
+import { protect, requireAdmin, requireEmailVerified } from '../middlewares/authMiddleware.js';
 import { kycSessionLimiter }                          from '../config/rateLimiters.js';
 
 const router = Router();
 
 /**
+ * Gate: la información de cumplimiento (CDD) debe estar completa antes de lanzar
+ * la biometría. Garantiza el orden del onboarding del lado del servidor:
+ *   verify-email → PATCH /user/kyc-profile → GET /kyc/session (Stripe Identity).
+ */
+function requireKycProfile(req, res, next) {
+  if (!req.user?.kycProfileCompletedAt) {
+    return res.status(403).json({
+      success: false,
+      message: 'Completa tu información de cumplimiento antes de la verificación biométrica.',
+      code:    'KYC_PROFILE_REQUIRED',
+    });
+  }
+  next();
+}
+
+/**
  * GET /api/v1/kyc/session
  * Crea una sesión biométrica de Stripe Identity.
- * Requiere JWT válido. Rate-limited: cada llamada crea una sesión en Stripe (costo).
+ * Requiere JWT válido + email verificado + info de cumplimiento completa.
+ * Rate-limited: cada llamada crea una sesión en Stripe (costo).
  */
-router.get('/session', protect, kycSessionLimiter, createKycSession);
+router.get('/session', protect, requireEmailVerified, requireKycProfile, kycSessionLimiter, createKycSession);
 
 /**
  * GET /api/v1/kyc/status

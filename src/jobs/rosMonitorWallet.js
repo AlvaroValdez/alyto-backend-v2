@@ -2,9 +2,10 @@
  * rosMonitorWallet.js — Monitoreo ROS/UIF sobre transferencias de WALLET (P4)
  *
  * El rosMonitor original solo vigila Transaction (cross-border). Este job cubre el
- * gap AML de las transferencias P2P de wallet (WalletTransaction type:'send', BOB y
- * USDC), aplicando las MISMAS 5 reglas heurísticas. Los montos USDC se convierten a
- * BOB-equivalente (tasa BOB/USDC) para unificar umbrales con el corredor.
+ * gap AML de las salidas de wallet: WalletTransaction type:'send' (P2P, BOB y USDC)
+ * + type:'bob_to_usdc' (conversión a cripto / layering), aplicando las MISMAS 5
+ * reglas heurísticas. Los montos USDC se convierten a BOB-equivalente (tasa
+ * BOB/USDC) para unificar umbrales con el corredor.
  *
  * Reglas: single_tx_high, daily_cumulative, high_frequency, new_account_volume,
  * velocity_spike. Umbrales por env (mismos que rosMonitor). Reusa ROSAlert con
@@ -47,7 +48,14 @@ async function getBobPerUsdc() {
   }
 }
 
-const SEND_MATCH = { type: 'send', status: 'completed' }
+// Tipos monitoreados: P2P out (send) + conversión BOB→cripto (bob_to_usdc,
+// señal clásica de layering). Ambos son salidas BOB-equivalentes, así que
+// comparten las reglas de agregación. La tx bob_to_usdc tiene currency:'BOB' y
+// amount = monto BOB, por lo que bobOf() la cuenta directo sin convertir tasa.
+// ⚠️ Los depósitos (inflow) NO se incluyen aquí: requieren una regla propia de
+// entrada y mezclarlos con las reglas de salida falsearía los acumulados.
+const MONITORED_TYPES = ['send', 'bob_to_usdc']
+const MONITORED_MATCH = { type: { $in: MONITORED_TYPES }, status: 'completed' }
 
 export async function rosMonitorWallet() {
   if (_isRunning) {
@@ -63,7 +71,7 @@ export async function rosMonitorWallet() {
   try {
     const rate = await getBobPerUsdc()
     const activeUserIds = await WalletTransaction.distinct('userId', {
-      ...SEND_MATCH,
+      ...MONITORED_MATCH,
       createdAt: { $gte: since24h },
     })
 
@@ -93,7 +101,7 @@ export async function rosMonitorWallet() {
 
 async function _analyzeUser(userId, now, since24h, t, rate, stats) {
   const txs24h = await WalletTransaction.find(
-    { userId, ...SEND_MATCH, createdAt: { $gte: since24h } },
+    { userId, ...MONITORED_MATCH, createdAt: { $gte: since24h } },
     'amount currency createdAt _id',
   ).lean()
   if (txs24h.length === 0) return
@@ -152,7 +160,7 @@ async function _analyzeUser(userId, now, since24h, t, rate, stats) {
   // Regla 5 — spike de velocidad vs promedio 30 días
   const since30d = new Date(now - WINDOW_30D_MS)
   const txs30d   = await WalletTransaction.find(
-    { userId, ...SEND_MATCH, createdAt: { $gte: since30d, $lt: since24h } },
+    { userId, ...MONITORED_MATCH, createdAt: { $gte: since30d, $lt: since24h } },
     'amount currency',
   ).lean()
   if (txs30d.length >= 5) {

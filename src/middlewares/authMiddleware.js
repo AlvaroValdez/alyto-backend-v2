@@ -87,7 +87,7 @@ export async function protect(req, res, next) {
     let user = getCachedUser(decoded.id);
     if (!user) {
       user = await User.findById(decoded.id)
-        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId tokenVersion deletedAt')
+        .select('_id email firstName lastName legalEntity role kycStatus kybStatus accountType isActive residenceCountry stellarAccount fcmTokens businessProfileId tokenVersion deletedAt emailVerified kycProfileCompletedAt')
         .lean();
       if (user) setCachedUser(decoded.id, user);
     }
@@ -211,6 +211,29 @@ export function requireKycApproved(req, res, next) {
       success: false,
       message: 'Debes verificar tu identidad antes de continuar.',
       code:    'KYC_REQUIRED',
+    });
+  }
+  next();
+}
+
+// ─── requireEmailVerified ─────────────────────────────────────────────────────
+
+/**
+ * Middleware que bloquea rutas hasta que el usuario verifique su email.
+ * Debe ejecutarse después de protect() — req.user debe estar disponible.
+ *
+ * Uso:
+ *   router.get('/kyc/session', protect, requireEmailVerified, createKycSession);
+ */
+export function requireEmailVerified(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'No autenticado' });
+  }
+  if (req.user.emailVerified !== true) {
+    return res.status(403).json({
+      success: false,
+      message: 'Debes verificar tu correo electrónico antes de continuar.',
+      code:    'EMAIL_VERIFICATION_REQUIRED',
     });
   }
   next();
