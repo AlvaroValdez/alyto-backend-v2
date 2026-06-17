@@ -1249,25 +1249,34 @@ export async function uploadDepositProof(req, res) {
   }
 
   const file = req.file
-  wtx.metadata = {
-    ...wtx.metadata,
-    paymentProof: {
-      data:       file.buffer.toString('base64'),
-      mimetype:   file.mimetype,
-      filename:   file.originalname,
-      size:       file.size,
-      uploadedAt: new Date(),
-    },
+  const paymentProof = {
+    data:       file.buffer.toString('base64'),
+    mimetype:   file.mimetype,
+    filename:   file.originalname,
+    size:       file.size,
+    uploadedAt: new Date(),
   }
-  // Comprobante adjunto → el depósito "se genera" y entra a la cola del admin.
-  wtx.status = 'pending'
 
+  // Transición atómica awaiting_proof → pending con el comprobante adjunto.
+  // El filtro condicional (status + sin comprobante previo) garantiza que dos
+  // uploads concurrentes no puedan pasar ambos los checks de arriba y pisarse el
+  // comprobante: solo el primero matchea el filtro, el segundo recibe null.
+  let updated
   try {
-    await wtx.save()
+    updated = await WalletTransaction.findOneAndUpdate(
+      { wtxId, userId, type: 'deposit', status: 'awaiting_proof', 'metadata.paymentProof': { $exists: false } },
+      { $set: { 'metadata.paymentProof': paymentProof, status: 'pending' } },
+      { new: true },
+    )
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'uploadDepositProof' } })
     console.error('[WalletDeposit] Error guardando comprobante:', err.message)
     return res.status(500).json({ error: 'Error guardando el comprobante.' })
+  }
+
+  // Otro request ganó la carrera (o el estado cambió entre el pre-check y el update).
+  if (!updated) {
+    return res.status(409).json({ error: 'Este depósito ya fue procesado o ya tiene un comprobante.' })
   }
 
   const user = await User.findById(userId).select('firstName lastName').lean()
