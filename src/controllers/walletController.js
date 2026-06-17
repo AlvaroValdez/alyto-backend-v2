@@ -207,6 +207,23 @@ export async function initiateDeposit(req, res) {
       return res.status(400).json({ error: 'El monto máximo por depósito es Bs. 10.000.' })
     }
 
+    // ── Límite diario de depósito (mismo patrón que send/withdraw) ──────────
+    // Opt-in: default 0 = desactivado. El valor lo fija compliance vía env.
+    const DEPOSIT_LIMIT = parseFloat(process.env.WALLET_DAILY_DEPOSIT_LIMIT ?? '0')
+    if (DEPOSIT_LIMIT > 0) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const depAgg = await WalletTransaction.aggregate([
+        { $match: { userId: user._id, type: 'deposit', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ])
+      const depositedToday = depAgg[0]?.total ?? 0
+      if (depositedToday + amount > DEPOSIT_LIMIT) {
+        return res.status(400).json({
+          error: `Superas tu límite diario de depósito de Bs. ${DEPOSIT_LIMIT.toFixed(2)} (depositado hoy: Bs. ${depositedToday.toFixed(2)}).`,
+        })
+      }
+    }
+
     const wallet = await getOrCreateWallet(user._id)
     if (wallet.status !== 'active') {
       return res.status(403).json({ error: 'Tu wallet no está activa. Contacta a soporte.' })
@@ -1392,16 +1409,34 @@ export async function adminRejectWithdrawal(req, res) {
       return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
     }
 
+    // Saldo actual para el audit trail (el rechazo es neutro en balance: solo
+    // libera la reserva, no descuenta saldo). ASFI: toda op registra balances.
+    const walletBOB = await WalletBOB.findById(wtx.walletId).session(session)
+    const balNow    = walletBOB?.balance ?? wtx.balanceAfter ?? 0
+
+    // Guard atómico: transición pending → failed condicional (evita doble
+    // liberación de reserva en una carrera confirm/reject concurrente).
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'pending' },
+      {
+        status:        'failed',
+        balanceBefore: balNow,
+        balanceAfter:  balNow,
+        metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) {
+      await session.abortTransaction()
+      return res.status(409).json({ error: 'El retiro ya fue procesado.' })
+    }
+
     // Liberar la reserva sin descontar el saldo
     await WalletBOB.updateOne(
       { _id: wtx.walletId },
       { $inc: { balanceReserved: -wtx.amount } },
       { session },
     )
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:   'failed',
-      metadata: { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
-    }, { session })
 
     await session.commitTransaction()
 
