@@ -411,6 +411,27 @@ export async function adminConfirmBOBtoUSDC(req, res) {
     const prevBalanceUSDC  = walletUSDC.balance
     const newBalanceUSDC   = prevBalanceUSDC + usdcAmount
 
+    // 0. Guard atómico: transición pending → completed condicional. Si un
+    // confirm/reject concurrente ganó la carrera, modifiedCount === 0 → abortamos
+    // limpio con 409 (no dependemos solo de la detección de write-conflict, que
+    // produciría un 500 opaco).
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'pending' },
+      {
+        status:        'completed',
+        balanceBefore: prevBalanceBOB,
+        balanceAfter:  newBalanceBOB,
+        confirmedBy:   admin._id,
+        confirmedAt:   now,
+        metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) {
+      await session.abortTransaction()
+      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
+    }
+
     // 1. Debitar BOB y liberar reserva
     await WalletBOB.updateOne({ _id: walletBOB._id }, {
       $inc: { balance: -bobAmount, balanceReserved: -bobAmount },
@@ -419,16 +440,6 @@ export async function adminConfirmBOBtoUSDC(req, res) {
     // 2. Acreditar USDC
     await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
       $inc: { balance: usdcAmount },
-    }, { session })
-
-    // 3. Actualizar WalletTransaction BOB a 'completed'
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:        'completed',
-      balanceBefore: prevBalanceBOB,
-      balanceAfter:  newBalanceBOB,
-      confirmedBy:   admin._id,
-      confirmedAt:   now,
-      metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
     }, { session })
 
     // 4. Crear WalletTransaction de crédito en WalletUSDC
@@ -554,20 +565,29 @@ export async function adminRejectBOBtoUSDC(req, res) {
 
     const now = new Date()
 
+    // 0. Guard atómico: transición pending → failed condicional. Evita doble
+    // liberación de reserva si un confirm/reject concurrente ya procesó la tx.
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'pending' },
+      {
+        status:   'failed',
+        metadata: {
+          ...(wtx.metadata ?? {}),
+          rejectReason: rejectReason ?? '',
+          rejectedBy:   admin._id,
+          rejectedAt:   now,
+        },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) {
+      await session.abortTransaction()
+      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
+    }
+
     // 1. Liberar reserva — devolver BOB al saldo disponible
     await WalletBOB.updateOne({ _id: walletBOB._id }, {
       $inc: { balanceReserved: -bobAmount },
-    }, { session })
-
-    // 2. Marcar WalletTransaction como failed (rechazada)
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:   'failed',
-      metadata: {
-        ...(wtx.metadata ?? {}),
-        rejectReason: rejectReason ?? '',
-        rejectedBy:   admin._id,
-        rejectedAt:   now,
-      },
     }, { session })
 
     await session.commitTransaction()
