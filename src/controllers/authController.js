@@ -17,7 +17,7 @@ import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
-import { sendEmail, EMAILS, sendWelcomeEmail } from '../services/email.js';
+import { sendEmail, EMAILS, sendWelcomeEmail, sendVerificationCodeEmail } from '../services/email.js';
 import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
@@ -110,6 +110,16 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+// ─── Verificación de email ────────────────────────────────────────────────────
+const EMAIL_CODE_TTL_MS      = 15 * 60 * 1000; // 15 min de validez del código
+const EMAIL_RESEND_COOLDOWN_MS = 60 * 1000;    // 60s entre reenvíos
+const EMAIL_MAX_ATTEMPTS      = 5;             // intentos fallidos antes de exigir reenvío
+
+/** Genera un código numérico de 6 dígitos criptográficamente seguro. */
+function generateEmailCode() {
+  return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+}
+
 // ─── registerUser ─────────────────────────────────────────────────────────────
 
 /**
@@ -174,6 +184,10 @@ export async function registerUser(req, res) {
     // ── Asignación automática de entidad legal ─────────────────────────────
     const legalEntity = resolveEntity(countryCode);
 
+    // ── Código de verificación de email (6 dígitos, hash en reposo) ─────────
+    const emailCode = generateEmailCode();
+    const nowTs     = new Date();
+
     // ── Creación del usuario ───────────────────────────────────────────────
     const user = await User.create({
       firstName:        (typeof firstName === 'string' && firstName.trim()) || 'Usuario',
@@ -183,6 +197,10 @@ export async function registerUser(req, res) {
       password:         passwordHash,
       legalEntity,
       kycStatus:        'pending',
+      emailVerified:    false,
+      emailVerificationCode:     hashToken(emailCode),
+      emailVerificationExpires:  new Date(nowTs.getTime() + EMAIL_CODE_TTL_MS),
+      emailVerificationLastSent: nowTs,
       residenceCountry: countryCode,
       preferences:      { currency: getDefaultCurrency(countryCode) },
       // Documento pendiente de verificación — se completa en el flujo KYC
@@ -206,6 +224,12 @@ export async function registerUser(req, res) {
 
     console.info(`[Auth] Registro exitoso — userId: ${user._id} entity: ${legalEntity}`);
 
+    // Código de verificación de email — fire-and-forget (no bloquea el registro).
+    setImmediate(() => {
+      sendVerificationCodeEmail(user, emailCode, EMAIL_CODE_TTL_MS / 60000)
+        .catch(err => console.error('[Auth] Error enviando código de verificación:', err.message));
+    });
+
     // Welcome email — fire-and-forget (no bloquear respuesta de registro).
     // sendWelcomeEmail usa SendGrid Dynamic Template si SENDGRID_TEMPLATE_WELCOME
     // está configurado; si no, envía HTML inline (fallback).
@@ -228,16 +252,107 @@ export async function registerUser(req, res) {
         email:       user.email,
         firstName:   user.firstName,
         lastName:    user.lastName,
-        legalEntity: user.legalEntity,
-        kycStatus:   user.kycStatus,
-        role:        user.role,
-        country:     user.residenceCountry,
+        legalEntity:   user.legalEntity,
+        kycStatus:     user.kycStatus,
+        emailVerified: user.emailVerified,
+        role:          user.role,
+        country:       user.residenceCountry,
       },
     });
 
   } catch (err) {
     console.error('[Auth] Error en registerUser:', err.message);
     return res.status(500).json({ error: 'Error al registrar usuario.' });
+  }
+}
+
+// ─── verifyEmail ──────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/auth/verify-email   (protegido)
+ * Body: { code }  — código de 6 dígitos enviado al email del usuario.
+ * Marca emailVerified=true si el código es correcto y vigente.
+ */
+export async function verifyEmail(req, res) {
+  try {
+    const { code } = req.body ?? {};
+    if (!code || !/^\d{6}$/.test(String(code).trim())) {
+      return res.status(400).json({ error: 'Ingresa el código de 6 dígitos.', code: 'INVALID_FORMAT' });
+    }
+
+    const user = await User.findById(req.user._id)
+      .select('+emailVerificationCode +emailVerificationExpires +emailVerificationAttempts');
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (user.emailVerified) return res.status(200).json({ emailVerified: true });
+
+    if (!user.emailVerificationCode || !user.emailVerificationExpires) {
+      return res.status(400).json({ error: 'No hay un código vigente. Solicita uno nuevo.', code: 'NO_CODE' });
+    }
+    if (user.emailVerificationExpires.getTime() < Date.now()) {
+      return res.status(400).json({ error: 'El código expiró. Solicita uno nuevo.', code: 'EXPIRED' });
+    }
+    if ((user.emailVerificationAttempts ?? 0) >= EMAIL_MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Demasiados intentos. Solicita un código nuevo.', code: 'TOO_MANY_ATTEMPTS' });
+    }
+
+    if (hashToken(String(code).trim()) !== user.emailVerificationCode) {
+      user.emailVerificationAttempts = (user.emailVerificationAttempts ?? 0) + 1;
+      await user.save();
+      const left = Math.max(0, EMAIL_MAX_ATTEMPTS - user.emailVerificationAttempts);
+      return res.status(400).json({ error: `Código incorrecto. Te quedan ${left} intentos.`, code: 'INVALID', attemptsLeft: left });
+    }
+
+    user.emailVerified             = true;
+    user.emailVerificationCode     = undefined;
+    user.emailVerificationExpires  = undefined;
+    user.emailVerificationAttempts = 0;
+    await user.save();
+    invalidateUserCache(user._id); // refrescar cache de protect()
+
+    console.info(`[Auth] Email verificado — userId: ${user._id}`);
+    return res.status(200).json({ emailVerified: true });
+  } catch (err) {
+    console.error('[Auth] Error en verifyEmail:', err.message);
+    return res.status(500).json({ error: 'Error al verificar el email.' });
+  }
+}
+
+// ─── resendVerification ─────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/auth/resend-verification   (protegido)
+ * Genera y reenvía un nuevo código de verificación, con cooldown de 60s.
+ */
+export async function resendVerification(req, res) {
+  try {
+    const user = await User.findById(req.user._id).select('+emailVerificationLastSent');
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (user.emailVerified) return res.status(200).json({ emailVerified: true });
+
+    if (user.emailVerificationLastSent) {
+      const elapsed = Date.now() - user.emailVerificationLastSent.getTime();
+      if (elapsed < EMAIL_RESEND_COOLDOWN_MS) {
+        const wait = Math.ceil((EMAIL_RESEND_COOLDOWN_MS - elapsed) / 1000);
+        return res.status(429).json({ error: `Espera ${wait}s antes de pedir otro código.`, retryAfter: wait });
+      }
+    }
+
+    const code = generateEmailCode();
+    user.emailVerificationCode     = hashToken(code);
+    user.emailVerificationExpires  = new Date(Date.now() + EMAIL_CODE_TTL_MS);
+    user.emailVerificationAttempts = 0;
+    user.emailVerificationLastSent = new Date();
+    await user.save();
+
+    setImmediate(() => {
+      sendVerificationCodeEmail(user, code, EMAIL_CODE_TTL_MS / 60000)
+        .catch(err => console.error('[Auth] Error reenviando código:', err.message));
+    });
+
+    return res.status(200).json({ ok: true, message: 'Código reenviado.' });
+  } catch (err) {
+    console.error('[Auth] Error en resendVerification:', err.message);
+    return res.status(500).json({ error: 'Error al reenviar el código.' });
   }
 }
 

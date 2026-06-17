@@ -14,11 +14,21 @@
 import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
+import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Regex para contraseña segura: ≥8 chars, 1 mayúscula, 1 número, 1 símbolo */
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+
+/** ISO 3166-1 alpha-2 (2 letras). */
+const ISO2_RE = /^[A-Za-z]{2}$/;
+
+/** Valores válidos de origen de fondos (espejo del enum del modelo User). */
+const SOURCE_OF_FUNDS_VALUES = new Set([
+  'salary_employment', 'business_income', 'investments', 'savings',
+  'inheritance_gift', 'property_sale', 'loan', 'other',
+]);
 
 /** Campos que el usuario tiene permitido actualizar en su perfil */
 const ALLOWED_UPDATE_FIELDS = new Set([
@@ -46,6 +56,13 @@ function buildProfileResponse(user) {
     entity:         user.legalEntity,
     kycStatus:      user.kycStatus,
     kycVerifiedAt:  user.kycApprovedAt ?? null,
+    // ── Estado de onboarding / cumplimiento (consumido por el frontend) ──
+    emailVerified:         user.emailVerified === true,
+    kycProfileCompleted:   !!user.kycProfileCompletedAt,
+    nationality:           user.nationality   ?? null,
+    sourceOfFunds:         user.sourceOfFunds ?? null,
+    dateOfBirth:           user.dateOfBirth   ?? null,
+    address:               user.address ?? null,
     createdAt:      user.createdAt,
     avatarUrl:      user.avatarUrl ?? null,
     fcmTokens:      (user.fcmTokens ?? []).length,
@@ -135,6 +152,93 @@ export async function updateProfile(req, res) {
   } catch (err) {
     console.error('[UserCtrl] updateProfile error:', err.message);
     return res.status(500).json({ error: 'Error interno al actualizar el perfil.' });
+  }
+}
+
+// ─── PATCH /kyc-profile (información de cumplimiento) ──────────────────────────
+
+/**
+ * updateKycProfile — recolecta los elementos CDD/AML que Stripe Identity NO
+ * provee y que Harbor/anchors requieren para reusar nuestro KYC:
+ *   dateOfBirth, nationality, residential address, sourceOfFunds (+ phone).
+ *
+ * Se llama ANTES de lanzar Stripe Identity. Setea kycProfileCompletedAt, que
+ * actúa como gate para crear la sesión biométrica.
+ *
+ * Body: { dateOfBirth, nationality, sourceOfFunds, address:{street,city,state,zip,country}, phone? }
+ */
+export async function updateKycProfile(req, res) {
+  try {
+    const b = req.body ?? {};
+    const errors = [];
+
+    // — Fecha de nacimiento (mayor de 18) —
+    let dob;
+    if (b.dateOfBirth === undefined || b.dateOfBirth === null || b.dateOfBirth === '') {
+      errors.push('La fecha de nacimiento es requerida.');
+    } else {
+      dob = new Date(b.dateOfBirth);
+      if (Number.isNaN(dob.getTime())) {
+        errors.push('Fecha de nacimiento inválida.');
+      } else {
+        const ageYears = (Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+        if (ageYears < 18)  errors.push('Debes ser mayor de 18 años para usar Alyto.');
+        if (ageYears > 120) errors.push('Fecha de nacimiento inválida.');
+      }
+    }
+
+    // — Nacionalidad (ISO2) —
+    const nationality = typeof b.nationality === 'string' ? b.nationality.trim().toUpperCase() : '';
+    if (!ISO2_RE.test(nationality)) errors.push('Selecciona tu nacionalidad.');
+
+    // — Origen de fondos —
+    const sourceOfFunds = typeof b.sourceOfFunds === 'string' ? b.sourceOfFunds.trim() : '';
+    if (!SOURCE_OF_FUNDS_VALUES.has(sourceOfFunds)) errors.push('Selecciona el origen de los fondos.');
+
+    // — Domicilio —
+    const a       = b.address ?? {};
+    const street  = typeof a.street  === 'string' ? a.street.trim()  : '';
+    const city    = typeof a.city    === 'string' ? a.city.trim()    : '';
+    const state   = typeof a.state   === 'string' ? a.state.trim()    : '';
+    const zip     = typeof a.zip     === 'string' ? a.zip.trim()      : '';
+    const country = typeof a.country === 'string' ? a.country.trim().toUpperCase() : '';
+    if (!street)              errors.push('La dirección (calle) es requerida.');
+    if (!city)                errors.push('La ciudad es requerida.');
+    if (!ISO2_RE.test(country)) errors.push('Selecciona el país de residencia.');
+
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors[0], errors });
+    }
+
+    // — Teléfono: requerido (Harbor). Puede venir aquí o ya estar en el perfil. —
+    const phone   = typeof b.phone === 'string' ? b.phone.trim() : '';
+    const current = await User.findById(req.user._id).select('phone').lean();
+    if (!phone && !current?.phone) {
+      return res.status(400).json({ error: 'El número de teléfono es requerido.' });
+    }
+
+    const $set = {
+      dateOfBirth:           dob,
+      nationality,
+      sourceOfFunds,
+      address:               { street, city, state, zip, country },
+      kycProfileCompletedAt: new Date(),
+    };
+    if (phone) $set.phone = phone;
+
+    const updated = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set },
+      { returnDocument: 'after', runValidators: true },
+    ).lean();
+
+    if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    invalidateUserCache(req.user._id); // refrescar el gate kycProfileCompletedAt en protect()
+
+    return res.status(200).json(buildProfileResponse(updated));
+  } catch (err) {
+    console.error('[UserCtrl] updateKycProfile error:', err.message);
+    return res.status(500).json({ error: 'Error al guardar la información de cumplimiento.' });
   }
 }
 

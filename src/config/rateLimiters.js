@@ -124,3 +124,13 @@ export const kycSessionLimiter = makeLimiter({
   maxPermissive: 60,
   message:       'Demasiadas solicitudes de verificación de identidad. Intenta más tarde.',
 });
+
+// ─── Limiter: Verificación de email (verify + resend) ─────────────────────────
+// Capa adicional a los controles por-usuario (5 intentos + cooldown 60s).
+
+export const emailVerifyLimiter = makeLimiter({
+  windowMs:      15 * 60 * 1000,
+  max:           15,
+  maxPermissive: 60,
+  message:       'Demasiados intentos de verificación de email. Intenta en unos minutos.',
+});

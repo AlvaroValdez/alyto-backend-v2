@@ -139,6 +139,11 @@ async function _approveKyc(session) {
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
 
+  // Extracción de datos verificados (DOB, documento, dirección) — best-effort,
+  // fire-and-forget. Enriquece/confirma lo que el usuario declaró en el form de
+  // cumplimiento con la fuente autoritativa (Stripe). NUNCA bloquea la aprobación.
+  _persistVerifiedOutputs(session, user._id).catch(() => {});
+
   notify(user._id, {
     title: '¡Identidad verificada! ✓',
     body:  'Tu identidad fue verificada exitosamente. Ya puedes empezar a usar Alyto.',
@@ -176,6 +181,53 @@ async function _approveKyc(session) {
   console.info(
     `[KYC Webhook] ✅ APROBADO — userId: ${user._id} | email: ${user.email} | entity: ${user.legalEntity} | prevStatus: ${prevStatus} → approved`
   );
+}
+
+/**
+ * Recupera los verified_outputs de la sesión de Stripe Identity y persiste los
+ * datos autoritativos (fecha de nacimiento verificada, número de documento real
+ * y, si falta, la dirección extraída del documento). Best-effort: tolera cualquier
+ * variación del shape de la API y nunca lanza.
+ */
+async function _persistVerifiedOutputs(session, userId) {
+  try {
+    const full = await getStripe().identity.verificationSessions.retrieve(
+      session.id, { expand: ['verified_outputs'] },
+    );
+    const vo = full?.verified_outputs;
+    if (!vo) return;
+
+    const $set = {};
+
+    // Fecha de nacimiento verificada (fuente autoritativa).
+    if (vo.dob && vo.dob.year) {
+      $set.dateOfBirth = new Date(Date.UTC(vo.dob.year, (vo.dob.month ?? 1) - 1, vo.dob.day ?? 1));
+    }
+    // Número de documento real (reemplaza el placeholder 'PENDING_VERIFICATION').
+    if (typeof vo.id_number === 'string' && vo.id_number.trim()) {
+      $set['identityDocument.number'] = vo.id_number.trim();
+    }
+    // Dirección del documento — solo como respaldo si el usuario no cargó una.
+    const current = await User.findById(userId).select('address').lean();
+    const hasAddr = current?.address && (current.address.street || current.address.city);
+    if (!hasAddr && vo.address && (vo.address.line1 || vo.address.city)) {
+      $set.address = {
+        street:  [vo.address.line1, vo.address.line2].filter(Boolean).join(' ').trim(),
+        city:    vo.address.city  ?? '',
+        state:   vo.address.state ?? '',
+        zip:     vo.address.postal_code ?? '',
+        country: (vo.address.country ?? '').toUpperCase(),
+      };
+    }
+
+    if (Object.keys($set).length > 0) {
+      await User.updateOne({ _id: userId }, { $set });
+      invalidateUserCache(userId);
+      console.info('[KYC Webhook] verified_outputs persistidos:', { userId: userId?.toString(), fields: Object.keys($set) });
+    }
+  } catch (err) {
+    console.warn('[KYC Webhook] No se pudieron extraer verified_outputs:', err.message);
+  }
 }
 
 async function _rejectKyc(session, errorCode) {
