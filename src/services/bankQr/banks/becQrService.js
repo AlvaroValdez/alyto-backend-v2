@@ -244,6 +244,63 @@ export async function getPaidQRs(date) {
   return data.paymentList ?? [];
 }
 
+/**
+ * Verifica la autenticidad de un IPN entrante de BEC ANTES de acreditar fondos.
+ *
+ * El endpoint /api/v1/ipn/bec es público (server-to-server, sin JWT), así que el
+ * body por sí solo NO es confiable para mover dinero. Dos capas de defensa:
+ *
+ *   Capa 1 — Firma HMAC-SHA256 sobre el raw body (opcional, gated por BEC_IPN_SECRET).
+ *     ⚠️ El esquema/header exacto del webhook BEC se confirma durante el onboarding
+ *     de producción del webhook. Cuando se conozca, setear BEC_IPN_SECRET (y ajustar
+ *     el header si BEC usa otro nombre). Mientras no esté configurado, esta capa se
+ *     omite y la autenticidad recae 100% en la Capa 2.
+ *
+ *   Capa 2 — Reconfirmación autoritativa contra el banco (getQRStatus) por el canal
+ *     SALIENTE autenticado con JWT. Nunca confiamos en el body: solo aceptamos si el
+ *     banco mismo reporta el QR como 'paid'. Un IPN forjado es inútil porque el
+ *     atacante no puede hacer que el banco diga 'paid' sin un pago real.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<{ ok: boolean, reason: string, payment?: object }>}
+ */
+export async function verifyIpn(req) {
+  const qrId = req.body?.payment?.qrId;
+  if (!qrId) return { ok: false, reason: 'no-qrId' };
+
+  // Mock/staging: no hay banco real emitiendo IPN. El flujo de prueba usa el botón
+  // admin "simular pago bancario", no este endpoint público. Aceptamos para no
+  // romper pruebas manuales de flujo en staging.
+  if (isMockMode()) return { ok: true, reason: 'mock' };
+
+  // ── Capa 1: firma HMAC (si BEC_IPN_SECRET está configurado) ──
+  const secret = process.env.BEC_IPN_SECRET;
+  if (secret) {
+    const provided = String(req.headers['x-bec-signature'] ?? req.headers['x-signature'] ?? '');
+    const expected = crypto.createHmac('sha256', secret)
+      .update(req.rawBody ?? '', 'utf8')
+      .digest('hex');
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return { ok: false, reason: 'bad-signature' };
+    }
+  }
+
+  // ── Capa 2: reconfirmación autoritativa con el banco ──
+  let statusInfo;
+  try {
+    statusInfo = await getQRStatus(qrId);
+  } catch (err) {
+    return { ok: false, reason: `bank-status-error:${err.message}` };
+  }
+  if (statusInfo.status !== 'paid') {
+    return { ok: false, reason: `bank-status-${statusInfo.status}` };
+  }
+
+  return { ok: true, reason: secret ? 'hmac+bank' : 'bank-confirmed', payment: statusInfo.payment };
+}
+
 /** Para tests de integración: verifica que nuestro cifrado sea compatible con el banco */
 export async function verifyCipher(plaintext) {
   const encrypted = encryptAes(plaintext);
