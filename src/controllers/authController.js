@@ -252,11 +252,12 @@ export async function registerUser(req, res) {
         email:       user.email,
         firstName:   user.firstName,
         lastName:    user.lastName,
-        legalEntity:   user.legalEntity,
-        kycStatus:     user.kycStatus,
-        emailVerified: user.emailVerified,
-        role:          user.role,
-        country:       user.residenceCountry,
+        legalEntity:         user.legalEntity,
+        kycStatus:           user.kycStatus,
+        emailVerified:       user.emailVerified,
+        kycProfileCompleted: false,
+        role:                user.role,
+        country:             user.residenceCountry,
       },
     });
 
@@ -371,10 +372,19 @@ export async function getMe(req, res) {
 
   // Leer kycStatus directo de la DB — el middleware tiene caché de 5 min
   // que puede quedar desactualizado justo cuando el KYC cambia a 'approved'.
-  let kycStatus = req.user.kycStatus;
+  // Incluye también el estado de onboarding (email + info de cumplimiento) que
+  // el router del frontend usa para enrutar verify-email → kyc-profile → KYC.
+  let kycStatus           = req.user.kycStatus;
+  let emailVerified       = req.user.emailVerified === true;
+  let kycProfileCompleted = !!req.user.kycProfileCompletedAt;
   try {
-    const fresh = await User.findById(_id).select('kycStatus kycApprovedAt').lean();
-    if (fresh) kycStatus = fresh.kycStatus;
+    const fresh = await User.findById(_id)
+      .select('kycStatus kycApprovedAt emailVerified kycProfileCompletedAt').lean();
+    if (fresh) {
+      kycStatus           = fresh.kycStatus;
+      emailVerified       = fresh.emailVerified === true;
+      kycProfileCompleted = !!fresh.kycProfileCompletedAt;
+    }
   } catch {
     // Si falla la query, devolver lo que tiene el middleware (mejor que nada)
   }
@@ -391,7 +401,7 @@ export async function getMe(req, res) {
   } catch { /* fallback a lo que tiene el middleware */ }
 
   return res.json({
-    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, kybStatus, accountType, role, country, avatarUrl: avatarUrl ?? null },
+    user: { id: _id, email, firstName, lastName, legalEntity, kycStatus, kybStatus, accountType, role, country, avatarUrl: avatarUrl ?? null, emailVerified, kycProfileCompleted },
   });
 }
 
@@ -472,12 +482,14 @@ export async function loginUser(req, res) {
         firstName:   user.firstName,
         lastName:    user.lastName,
         legalEntity: user.legalEntity,
-        kycStatus:   user.kycStatus,
-        kybStatus:   user.kybStatus,
-        accountType: user.accountType,
-        role:        user.role,
-        country:     user.country,
-        avatarUrl:   user.avatarUrl ?? null,
+        kycStatus:           user.kycStatus,
+        kybStatus:           user.kybStatus,
+        accountType:         user.accountType,
+        emailVerified:       user.emailVerified === true,
+        kycProfileCompleted: !!user.kycProfileCompletedAt,
+        role:                user.role,
+        country:             user.country,
+        avatarUrl:           user.avatarUrl ?? null,
       },
     };
 
