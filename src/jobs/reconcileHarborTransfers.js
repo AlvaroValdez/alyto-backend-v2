@@ -18,7 +18,8 @@ import Transaction         from '../models/Transaction.js';
 import TransactionConfig  from '../models/TransactionConfig.js';
 import { getTransferStatus, getCustomerUuid } from '../services/owlPayService.js';
 import { sendRawEmail }    from '../services/email.js';
-import { tryOwlPayV2 }    from '../controllers/ipnController.js';
+import { tryOwlPayV2, generateComprobanteOnCompletion } from '../controllers/ipnController.js';
+import { registerAuditTrail } from '../services/stellarService.js';
 import { mapHarborError } from '../utils/harborErrorMapper.js';
 
 // Edad mínima antes de reconciliar — evita race condition con webhook que
@@ -124,9 +125,35 @@ async function _reconcileHarborTransfers() {
         rawPayload: { previousStatus, harborStatus, polledAt: new Date() },
         receivedAt: new Date(),
       });
+
+      // Al completar vía reconcile (webhook perdido/rechazado) hay que replicar el
+      // post-proceso del webhook handleOwlPayIPN: audit trail Stellar + comprobante.
+      // Sin esto, las tx completadas por el poll quedaban SIN registro on-chain ni PDF.
+      if (alytoStatus === 'completed') {
+        try {
+          const stellarTxId = await registerAuditTrail(tx);
+          if (stellarTxId) {
+            tx.stellarTxId = stellarTxId;
+            tx.ipnLog.push({
+              provider:   'stellar',
+              eventType:  'stellar_audit_registered',
+              status:     'completed',
+              rawPayload: { stellarTxId, network: process.env.STELLAR_NETWORK ?? 'testnet', source: 'reconcile' },
+              receivedAt: new Date(),
+            });
+          }
+        } catch (auditErr) {
+          console.error(`[Reconcile] audit trail falló ${tx.alytoTransactionId}:`, auditErr.message);
+        }
+      }
+
       await tx.save();
       stats.reconciled++;
-      if (alytoStatus === 'completed') stats.completed++;
+      if (alytoStatus === 'completed') {
+        stats.completed++;
+        // PDF comprobante — fire-and-forget (idempotente, no bloquea el ciclo).
+        generateComprobanteOnCompletion(tx).catch(() => {});
+      }
       if (alytoStatus === 'failed')    stats.failed++;
     } catch (err) {
       stats.errors++;
