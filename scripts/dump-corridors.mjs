@@ -23,7 +23,7 @@ await mongoose.connect(URI)
 const db = mongoose.connection.db
 console.log(`DB: ${db.databaseName}`)
 
-const cs = await db.collection('transactionconfigs').find({})
+const cs = await db.collection('transaction_configs').find({})
   .sort({ legalEntity: 1, corridorId: 1 }).toArray()
 console.log(`TOTAL: ${cs.length}\n`)
 
