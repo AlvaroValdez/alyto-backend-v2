@@ -18,7 +18,7 @@ import Transaction         from '../models/Transaction.js';
 import TransactionConfig  from '../models/TransactionConfig.js';
 import { getTransferStatus, getCustomerUuid } from '../services/owlPayService.js';
 import { sendRawEmail }    from '../services/email.js';
-import { tryOwlPayV2, generateComprobanteOnCompletion } from '../controllers/ipnController.js';
+import { tryOwlPayV2, generateComprobanteOnCompletion, notifyTransactionCompleted, notifyTransactionFailed } from '../controllers/ipnController.js';
 import { registerAuditTrail } from '../services/stellarService.js';
 import { mapHarborError } from '../utils/harborErrorMapper.js';
 
@@ -88,8 +88,17 @@ async function _reconcileHarborTransfers() {
         tx.failureReason     = `[Reconcile] Transfer abandonado tras ${Math.floor(ageMs/86400000)}d sin completar (Harbor status: ${harborStatus})`;
         tx.userFailureReason = 'No pudimos confirmar la entrega de esta transferencia. Nuestro equipo está investigando.';
         tx.failureCategory   = 'STALE_PAYOUT';
+        tx.ipnLog.push({
+          provider:   'reconcile',
+          eventType:  'harbor_stale_giveup_failed',
+          status:     'failed',
+          rawPayload: { ageDays: Math.floor(ageMs/86400000), harborStatus, polledAt: new Date() },
+          receivedAt: new Date(),
+        });
         await tx.save();
         stats.expired++;
+        // Avisar al usuario + admin del fallo — paridad con el webhook.
+        notifyTransactionFailed(tx).catch(() => {});
         console.warn(`[Reconcile] ${tx.alytoTransactionId} marked failed (stale ${Math.floor(ageMs/3600000)}h)`);
         continue;
       }
@@ -153,8 +162,14 @@ async function _reconcileHarborTransfers() {
         stats.completed++;
         // PDF comprobante — fire-and-forget (idempotente, no bloquea el ciclo).
         generateComprobanteOnCompletion(tx).catch(() => {});
+        // Notificar al usuario (push + email + contacto) — paridad con el webhook.
+        notifyTransactionCompleted(tx).catch(() => {});
       }
-      if (alytoStatus === 'failed')    stats.failed++;
+      if (alytoStatus === 'failed') {
+        stats.failed++;
+        // Avisar al usuario + admin del fallo — paridad con el webhook.
+        notifyTransactionFailed(tx).catch(() => {});
+      }
     } catch (err) {
       stats.errors++;
       console.error(`[Reconcile] ${tx.alytoTransactionId} error:`, err.message);
