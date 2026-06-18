@@ -25,6 +25,7 @@ import {
   generateComprobanteOnCompletion,
   notifyAdminManualPayout,
 }                                         from '../controllers/ipnController.js';
+import { recordSent }                     from '../controllers/contactsController.js';
 import { notify, NOTIFICATIONS }         from '../services/notifications.js';
 import { sendEmail, EMAILS }             from '../services/email.js';
 import { sendRawEmail }                  from '../services/email.js';
@@ -80,6 +81,11 @@ async function finalizeVitaCompleted(transaction) {
   // Comprobante / factura — fire-and-forget
   generateComprobanteOnCompletion(transaction).catch(() => {});
 
+  // Registro de contacto (beneficiario frecuente) — paridad con el webhook
+  if (transaction.contactId) {
+    recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
+  }
+
   // Push notification
   notify(
     transaction.userId,
@@ -127,6 +133,12 @@ async function finalizeVitaFailed(transaction, reason) {
     transaction.userId,
     NOTIFICATIONS.paymentFailed(transaction.originalAmount, transaction.originCurrency),
   ).catch(() => {});
+
+  // Email al usuario — paridad con el webhook (antes el reconcile fallaba sin avisar por email)
+  try {
+    const user = await User.findById(transaction.userId).lean();
+    if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, transaction));
+  } catch { /* best-effort */ }
 
   logger.warn('[ReconcileVita] ❌ Tx marcada failed vía reconcile', {
     transactionId: transaction.alytoTransactionId,

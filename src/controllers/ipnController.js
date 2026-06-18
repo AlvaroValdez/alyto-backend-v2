@@ -739,6 +739,43 @@ export async function generateComprobanteOnCompletion(transaction) {
   }
 }
 
+/**
+ * Post-proceso de notificación al COMPLETAR una tx: push + email al usuario +
+ * registro de contacto. COMPARTIDO entre el webhook (handleOwlPayIPN) y el job
+ * reconcile, para que ambos paths hagan lo mismo (evita el drift que dejaba al
+ * reconcile completando SIN avisar al usuario). El audit trail Stellar + PDF se
+ * generan aparte, ANTES de llamar a esto. Best-effort: nunca lanza.
+ */
+export async function notifyTransactionCompleted(tx) {
+  if (tx.contactId) {
+    recordSent(tx.contactId, tx.destinationAmount, tx.destinationCurrency).catch(() => {});
+  }
+  try {
+    await notify(tx.userId, NOTIFICATIONS.paymentCompleted(
+      tx.originalAmount, tx.originCurrency, tx.destinationAmount, tx.destinationCurrency));
+  } catch (e) { console.error('[notifyTxCompleted] push:', e.message); }
+  try {
+    const user = await User.findById(tx.userId).lean();
+    if (user?.email) await sendEmail(...EMAILS.paymentCompleted(user, tx));
+  } catch (e) { console.error('[notifyTxCompleted] email:', e.message); }
+}
+
+/**
+ * Post-proceso de notificación al FALLAR una tx: alerta admin + push + email al
+ * usuario. COMPARTIDO webhook ↔ reconcile (el reconcile fallaba en silencio).
+ * Best-effort: nunca lanza.
+ */
+export async function notifyTransactionFailed(tx) {
+  notifyAdminManualPayout(tx).catch(() => {});
+  try {
+    await notify(tx.userId, NOTIFICATIONS.paymentFailed(tx.originalAmount, tx.originCurrency));
+  } catch (e) { console.error('[notifyTxFailed] push:', e.message); }
+  try {
+    const user = await User.findById(tx.userId).lean();
+    if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, tx));
+  } catch (e) { console.error('[notifyTxFailed] email:', e.message); }
+}
+
 export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   const entity = transaction.legalEntity;
 
@@ -1706,7 +1743,7 @@ export async function dispatchPayout(transaction) {
                 rawPayload: {
                   stellarTxId,
                   network:     process.env.STELLAR_NETWORK ?? 'testnet',
-                  explorerUrl: `https://stellar.expert/explorer/testnet/tx/${stellarTxId}`,
+                  explorerUrl: `https://stellar.expert/explorer/${process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'}/tx/${stellarTxId}`,
                 },
                 receivedAt: new Date(),
               });
