@@ -11,9 +11,17 @@
  */
 
 import QRCode from 'qrcode';
+import SRLConfig from '../models/SRLConfig.js';
 
 /**
  * Genera un código QR con los datos de transferencia bancaria de AV Finance SRL.
+ *
+ * La cuenta receptora se resuelve con la MISMA cadena que el email de payin para
+ * que editar `bankData` desde el admin sea single-source-of-truth (antes este QR
+ * leía sólo las env SRL_* y podía mostrar una cuenta distinta a la del email):
+ *   1) SRLConfig.bankData (editable desde el admin panel)
+ *   2) env SRL_* (fallback)
+ *   3) defaults hardcodeados
  *
  * @param {object} transaction — Documento Transaction de Mongoose (o plain object)
  * @param {number} transaction.originalAmount   — Monto en BOB
@@ -21,11 +29,19 @@ import QRCode from 'qrcode';
  * @returns {Promise<{ qrBase64: string, qrData: object }>}
  */
 export async function generatePaymentQR(transaction) {
+  let bankData = {};
+  try {
+    const cfg = await SRLConfig.findOne({ key: 'srl_bolivia' }).select('bankData').lean();
+    bankData = cfg?.bankData ?? {};
+  } catch (err) {
+    console.warn('[QR] No se pudo leer bankData de SRLConfig, usando env vars:', err.message);
+  }
+
   const qrData = {
-    banco:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
-    titular:    process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
-    cuenta:     process.env.SRL_ACCOUNT_NUMBER ?? '',
-    tipo:       process.env.SRL_ACCOUNT_TYPE   ?? 'Cuenta Corriente',
+    banco:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+    titular:    bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
+    cuenta:     bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
+    tipo:       bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
     moneda:     'BOB',
     monto:      transaction.originalAmount,
     referencia: transaction.alytoTransactionId,
