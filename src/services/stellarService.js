@@ -932,6 +932,21 @@ export async function getStellarUSDCBalance(publicKey) {
 }
 
 /**
+ * Balance XLM (nativo) de una cuenta Stellar — para mostrar las fees disponibles
+ * de la wallet de tesorería en el panel de Fondeo. Uso admin (no hot-path), sin
+ * caché. Devuelve 0 si la cuenta no existe o no tiene nativo.
+ *
+ * @param {string} publicKey
+ * @returns {Promise<number>} balance XLM
+ */
+export async function getStellarXLMBalance(publicKey) {
+  const key         = publicKey ?? process.env.STELLAR_MASTER_PUBLIC ?? _getSRLPublicKey();
+  const account     = await horizonServer.loadAccount(key);
+  const nativeEntry = account.balances.find((b) => b.asset_type === 'native');
+  return nativeEntry ? parseFloat(nativeEntry.balance) : 0;
+}
+
+/**
  * Returns true if the given Stellar address has a USDC trustline active.
  */
 export async function hasUSDCTrustline(address) {

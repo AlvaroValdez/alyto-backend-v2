@@ -15,7 +15,7 @@ import mongoose               from 'mongoose';
 import FundingRecord          from '../models/FundingRecord.js';
 import FundingIntent          from '../models/FundingIntent.js';
 import Transaction            from '../models/Transaction.js';
-import { getStellarUSDCBalance } from '../services/stellarService.js';
+import { getStellarUSDCBalance, getStellarXLMBalance } from '../services/stellarService.js';
 import { generateStellarPayQR }  from '../services/qrService.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
 import { ASSETS }             from '../config/stellar.js';
@@ -443,8 +443,11 @@ export async function getUSDCForecast(req, res) {
       ? process.env.STELLAR_SRL_PUBLIC_KEY
       : process.env.STELLAR_LLC_PUBLIC_KEY;
 
-    // Balance real en Stellar (cacheado 30s en stellarService)
-    const stellarBalance = await getStellarUSDCBalance(stellarPubKey);
+    // Balances reales en Stellar (USDC cacheado 30s; XLM para mostrar fees).
+    const [stellarBalance, xlmBalance] = await Promise.all([
+      getStellarUSDCBalance(stellarPubKey),
+      getStellarXLMBalance(stellarPubKey).catch(() => null),
+    ]);
 
     // Consultas paralelas: in-flight + pending_funding
     const [inflightAgg, pendingTxs] = await Promise.all([
@@ -497,6 +500,7 @@ export async function getUSDCForecast(req, res) {
       alertLevel,
       stellar: {
         balance:          parseFloat(stellarBalance.toFixed(4)),
+        xlmBalance:       xlmBalance === null ? null : parseFloat(xlmBalance.toFixed(4)),
         publicKey:        stellarPubKey,
         network:          (process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase() === 'mainnet' ? 'public' : 'testnet',
         stellarExpertUrl: `https://stellar.expert/explorer/${(process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase() === 'mainnet' ? 'public' : 'testnet'}/account/${stellarPubKey}`,
