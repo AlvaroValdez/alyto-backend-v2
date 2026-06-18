@@ -6,17 +6,19 @@
 // Uso:
 //   node scripts/inspect-last-user.mjs staging
 //   node scripts/inspect-last-user.mjs production
-//   node scripts/inspect-last-user.mjs production 3        # últimos 3
+//   node scripts/inspect-last-user.mjs production 3                      # últimos 3
+//   node scripts/inspect-last-user.mjs production arvaldez@avfinance.net  # por email
 import mongoose from 'mongoose'
 import * as dotenv from 'dotenv'
 dotenv.config()
 
 const PROD_URI = process.env.MONGODB_URI
 const TARGET   = process.argv[2]
-const LIMIT    = Number(process.argv[3] ?? 1)
+const EMAIL    = process.argv.slice(3).find(a => a.includes('@')) ?? null
+const LIMIT    = Number(process.argv.slice(3).find(a => /^\d+$/.test(a)) ?? 1)
 
 if (!TARGET || !['staging', 'production'].includes(TARGET)) {
-  console.error('❌ Uso: node scripts/inspect-last-user.mjs staging|production [N]')
+  console.error('❌ Uso: node scripts/inspect-last-user.mjs staging|production [N|email]')
   process.exit(1)
 }
 const URI = TARGET === 'staging'
@@ -25,25 +27,27 @@ const URI = TARGET === 'staging'
 
 await mongoose.connect(URI)
 const db = mongoose.connection.db
-console.log(`\n⚠️  ${TARGET.toUpperCase()} — DB: "${db.databaseName}"\n`)
+console.log(`\n⚠️  ${TARGET.toUpperCase()} — DB: "${db.databaseName}"  ${EMAIL ? `· filtro: ${EMAIL}` : `· últimos ${LIMIT}`}\n`)
 
-const users = await db.collection('users')
-  .find({}, {
-    projection: {
-      email: 1, firstName: 1, lastName: 1, legalEntity: 1, createdAt: 1,
-      kycStatus: 1, emailVerified: 1, kycProfileCompletedAt: 1,
-      nationality: 1, sourceOfFunds: 1, dateOfBirth: 1, address: 1, phone: 1,
-    },
-  })
-  .sort({ createdAt: -1 })
-  .limit(LIMIT)
-  .toArray()
+const projection = {
+  email: 1, firstName: 1, lastName: 1, legalEntity: 1, role: 1, createdAt: 1,
+  kycStatus: 1, emailVerified: 1, kycProfileCompletedAt: 1,
+  nationality: 1, sourceOfFunds: 1, dateOfBirth: 1, address: 1, phone: 1,
+  'stellarAccount.publicKey': 1, 'stellarAccount.activeTrustlines': 1,
+}
+
+const users = EMAIL
+  ? await db.collection('users').find({ email: EMAIL.toLowerCase() }, { projection }).toArray()
+  : await db.collection('users').find({}, { projection }).sort({ createdAt: -1 }).limit(LIMIT).toArray()
+
+if (users.length === 0) console.log(`(sin resultados${EMAIL ? ` para ${EMAIL}` : ''})`)
 
 for (const u of users) {
   console.log('──────────────────────────────────────────────')
   console.log(`email:                ${u.email}`)
   console.log(`nombre:               ${u.firstName ?? ''} ${u.lastName ?? ''}`)
   console.log(`legalEntity:          ${u.legalEntity}`)
+  console.log(`role:                 ${u.role ?? 'user'}`)
   console.log(`createdAt:            ${u.createdAt?.toISOString?.() ?? u.createdAt}`)
   console.log(`kycStatus:            ${u.kycStatus}`)
   console.log(`emailVerified:        ${u.emailVerified ?? '(ausente)'}`)
@@ -53,6 +57,8 @@ for (const u of users) {
   console.log(`dateOfBirth:          ${u.dateOfBirth ? new Date(u.dateOfBirth).toISOString().slice(0,10) : '(ausente)'}`)
   console.log(`phone:                ${u.phone ?? '(ausente)'}`)
   console.log(`address:              ${u.address ? JSON.stringify(u.address) : '(ausente)'}`)
+  console.log(`stellar publicKey:    ${u.stellarAccount?.publicKey ?? '(sin wallet custodial)'}`)
+  console.log(`activeTrustlines:     ${u.stellarAccount?.activeTrustlines ? JSON.stringify(u.stellarAccount.activeTrustlines) : '(ninguna)'}`)
 }
 console.log('──────────────────────────────────────────────')
 
