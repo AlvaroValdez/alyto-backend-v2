@@ -16,8 +16,11 @@ import bcrypt   from 'bcryptjs';
 import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
+import WalletBOB    from '../models/WalletBOB.js';
+import WalletUSDC   from '../models/WalletUSDC.js';
+import Transaction  from '../models/Transaction.js';
 import { getDefaultCurrency } from '../utils/entityMaps.js';
-import { sendEmail, EMAILS, sendWelcomeEmail, sendVerificationCodeEmail } from '../services/email.js';
+import { sendEmail, EMAILS, sendRawEmail, sendWelcomeEmail, sendVerificationCodeEmail } from '../services/email.js';
 import { notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 
@@ -706,5 +709,166 @@ export async function logoutUser(req, res) {
   } catch (err) {
     console.error('[Auth] Error en logoutUser:', err.message);
     return res.status(500).json({ error: 'Error al cerrar sesión.' });
+  }
+}
+
+// ─── deleteAccount ──────────────────────────────────────────────────────────────
+
+/**
+ * DELETE /api/v1/auth/account   (protegido)
+ *
+ * Eliminación de cuenta solicitada por el usuario — requisito duro de Google
+ * Play (apps con creación de cuenta deben ofrecer borrado in-app + URL web) y
+ * de GDPR / Ley 19.628 (CL).
+ *
+ * ⚠️ NO es un hard-delete. Alyto es un PSAV custodial (DS 5384, Cap. XI) sujeto a
+ * retención de registros AML/CFT. Por eso este flujo:
+ *   1. Re-autentica al usuario con su contraseña.
+ *   2. Bloquea si quedan FONDOS (BOB/USDC: disponible + reservado + congelado) o
+ *      TRANSACCIONES en curso — para no perder dinero del usuario.
+ *   3. Desactiva la cuenta, revoca todos los JWTs, borra tokens push y libera el
+ *      alias, y anonimiza la PII de contacto no regulatoria (teléfono, avatar).
+ *   4. RETIENE identidad/KYC/transacciones/ToS durante el plazo legal (la purga
+ *      final corre después de la retención → deletionStatus 'anonymized').
+ *
+ * Body: { password: string, confirm: true }
+ * Respuesta 200: { message, deletionStatus, retainedForCompliance: true }
+ */
+export async function deleteAccount(req, res) {
+  try {
+    const { password, confirm } = req.body ?? {};
+
+    if (confirm !== true) {
+      return res.status(400).json({
+        error: 'Debes confirmar explícitamente la eliminación (confirm: true).',
+        code:  'CONFIRM_REQUIRED',
+      });
+    }
+    if (typeof password !== 'string' || !password) {
+      return res.status(400).json({
+        error: 'Ingresa tu contraseña para confirmar la eliminación.',
+        code:  'PASSWORD_REQUIRED',
+      });
+    }
+
+    const userId = req.user?.id ?? req.user?._id;
+
+    // Los admins no pueden auto-eliminarse por este endpoint (evita lockout del
+    // backoffice). La baja de un admin la gestiona otro admin.
+    if (req.user?.role === 'admin') {
+      return res.status(403).json({
+        error: 'Las cuentas de administrador no pueden eliminarse desde aquí.',
+        code:  'ADMIN_FORBIDDEN',
+      });
+    }
+
+    // ── Re-autenticación con contraseña ──────────────────────────────────────
+    const user = await User.findById(userId).select('+password');
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+    if (user.deletionStatus === 'deletion_requested') {
+      return res.status(409).json({
+        message:        'Tu cuenta ya tiene una solicitud de eliminación en curso.',
+        deletionStatus: user.deletionStatus,
+      });
+    }
+
+    const passwordOk = user.password && await bcrypt.compare(password, user.password);
+    if (!passwordOk) {
+      return res.status(401).json({ error: 'Contraseña incorrecta.', code: 'INVALID_PASSWORD' });
+    }
+
+    // ── Guard 1: fondos remanentes (no perder dinero del usuario) ────────────
+    const EPS = 1e-6;
+    const [walletBob, walletUsdc] = await Promise.all([
+      WalletBOB.findOne({ userId }).lean(),
+      WalletUSDC.findOne({ userId }).lean(),
+    ]);
+    const bobTotal  = walletBob  ? (walletBob.balance  ?? 0) + (walletBob.balanceReserved  ?? 0) + (walletBob.balanceFrozen  ?? 0) : 0;
+    const usdcTotal = walletUsdc ? (walletUsdc.balance ?? 0) + (walletUsdc.balanceReserved ?? 0) + (walletUsdc.balanceFrozen ?? 0) : 0;
+    if (bobTotal > EPS || usdcTotal > EPS) {
+      return res.status(409).json({
+        error: 'Tienes saldo en tu wallet. Retira tus fondos antes de eliminar la cuenta.',
+        code:  'BALANCE_NOT_ZERO',
+        balances: { bob: bobTotal, usdc: usdcTotal },
+      });
+    }
+
+    // ── Guard 2: transacciones en curso ──────────────────────────────────────
+    const TERMINAL = ['completed', 'failed', 'refunded', 'cancelled'];
+    const inFlight = await Transaction.countDocuments({
+      userId,
+      archivedAt: null,
+      status:     { $nin: TERMINAL },
+    });
+    if (inFlight > 0) {
+      return res.status(409).json({
+        error: 'Tienes operaciones en curso. Espera a que finalicen o contacta a soporte antes de eliminar la cuenta.',
+        code:  'PENDING_TRANSACTIONS',
+        pending: inFlight,
+      });
+    }
+
+    // ── Baja con retención de cumplimiento ───────────────────────────────────
+    const releasedAlias = user.alytoAlias;
+    const fullName      = `${user.firstName} ${user.lastName}`.trim();
+    const contactEmail  = user.email;
+    const entity        = user.legalEntity;
+
+    user.deletionStatus      = 'deletion_requested';
+    user.deletionRequestedAt = new Date();
+    user.isActive            = false;
+    user.tokenVersion        = (user.tokenVersion ?? 0) + 1;   // revoca todos los JWTs
+    user.fcmTokens           = [];                              // corta el push
+    user.alytoAlias          = null;                            // libera el alias P2P
+    user.aliasUpdatedAt      = new Date();
+    // Anonimiza PII de contacto no regulatoria (identidad/KYC se RETIENEN).
+    user.phone               = undefined;
+    user.avatarUrl           = null;
+    if (user.preferences?.notifications) {
+      user.preferences.notifications.email = false;
+      user.preferences.notifications.push  = false;
+    }
+    await user.save();
+
+    invalidateUserCache(String(userId));
+
+    if (!IS_HEADER_MODE) {
+      const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
+      res.clearCookie(AUTH_COOKIE_NAME, clearOpts);
+    }
+
+    console.info(`[Auth] Eliminación de cuenta solicitada — userId: ${userId} entity: ${entity}`);
+
+    // Notificar a compliance/admins + confirmación al usuario — fire-and-forget.
+    notifyAdmins(NOTIFICATIONS.adminAccountDeletion(fullName, contactEmail, entity)).catch(() => {});
+    setImmediate(() => {
+      const supportEmail = process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app';
+      sendRawEmail(
+        contactEmail,
+        'Tu cuenta Alyto fue eliminada',
+        `
+          <div style="font-family:Inter,sans-serif;max-width:480px;margin:auto;padding:32px;background:#0F1628;color:#fff;border-radius:16px">
+            <h2 style="color:#C4CBD8;margin-bottom:8px">Cuenta eliminada</h2>
+            <p style="color:#8A96B8">Hola <strong style="color:#fff">${fullName}</strong>,</p>
+            <p style="color:#8A96B8">Confirmamos que tu cuenta Alyto fue desactivada y tus datos personales fueron eliminados.</p>
+            <p style="color:#8A96B8">Por obligación legal (prevención de lavado de activos y normativa ASFI/UIF), conservamos durante el plazo normativo ciertos registros de identidad y de tus operaciones. Estos datos no se usan para fines comerciales.</p>
+            <p style="color:#4E5A7A;font-size:13px;margin-top:16px">Si no solicitaste esto, contáctanos de inmediato en ${supportEmail}.</p>
+            <p style="color:#263050;font-size:11px;margin-top:24px">AV Finance LLC · SpA · SRL</p>
+          </div>
+        `,
+      ).catch(() => {});
+    });
+
+    return res.status(200).json({
+      message:               'Tu cuenta fue desactivada y se eliminaron tus datos personales. Algunos registros se conservan por obligación legal (AML/CFT) durante el plazo normativo.',
+      deletionStatus:        user.deletionStatus,
+      retainedForCompliance: true,
+      releasedAlias:         releasedAlias ?? null,
+    });
+
+  } catch (err) {
+    console.error('[Auth] Error en deleteAccount:', err.message);
+    return res.status(500).json({ error: 'Error al procesar la eliminación de la cuenta.' });
   }
 }
