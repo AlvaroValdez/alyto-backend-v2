@@ -23,8 +23,34 @@ import { sendEmail, EMAILS } from '../services/email.js';
 import { notifyAdmins, notify, NOTIFICATIONS } from '../services/notifications.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import User            from '../models/User.js';
+import { analyzeKyb, isKybAnalysisEnabled } from '../services/kybAnalysisService.js';
+import { broadcastToAdmins } from '../routes/adminSSE.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * AWS-4 — Dispara el análisis IA del expediente (fire-and-forget, no bloquea).
+ * Pre-rellena BusinessProfile.aiAnalysis (sugerencia NO autoritativa) y avisa al
+ * admin por SSE cuando termina. No-op si BEDROCK_KYB_ENABLED != true.
+ * @param {{ _id, businessId }} profile
+ * @param {object} business   datos declarados de la empresa
+ * @param {Array}  documents  [{ type, filename, data(base64), mimetype }]
+ */
+function runKybAiAnalysis(profile, business, documents) {
+  if (!isKybAnalysisEnabled()) return;
+  analyzeKyb({ business, documents })
+    .then(async (analysis) => {
+      if (!analysis) return;
+      await BusinessProfile.updateOne({ _id: profile._id }, { $set: { aiAnalysis: analysis } });
+      broadcastToAdmins('kyb_ai_analyzed', {
+        businessId:        profile.businessId,
+        riskScore:         analysis.riskScore,
+        recommendedAction: analysis.recommendedAction,
+        confidence:        analysis.confidence,
+      });
+    })
+    .catch(() => {});
+}
 
 /**
  * Convierte el Buffer de multer a base64.
@@ -184,6 +210,9 @@ export async function applyKYB(req, res) {
       { email: EMAILS.adminKybAlert(user, profile) },
     ).catch(() => {});
 
+    // AWS-4 — Pre-análisis IA del expediente (sugerencia para el admin).
+    runKybAiAnalysis(profile, businessData, documents);
+
     return res.status(201).json({
       businessId: profile.businessId,
       kybStatus:  profile.kybStatus,
@@ -338,6 +367,18 @@ export async function uploadKYBDocuments(req, res) {
       NOTIFICATIONS.adminKybSubmitted(profile.legalName ?? profile.tradeName ?? 'empresa', kybFullName),
       { email: EMAILS.adminKybAlert(freshUser, profile) },
     ).catch(() => {});
+
+    // AWS-4 — Re-analizar el expediente completo con los documentos nuevos.
+    // documents.data es select:false → re-consultar con su base64 para la IA.
+    if (isKybAnalysisEnabled()) {
+      BusinessProfile.findById(profile._id)
+        .select('+documents.data')
+        .lean()
+        .then((full) => {
+          if (full) runKybAiAnalysis(profile, full, full.documents);
+        })
+        .catch(() => {});
+    }
 
     console.info('[KYB] Documentos adicionales recibidos.', {
       userId:        user._id,

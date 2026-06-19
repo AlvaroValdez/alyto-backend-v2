@@ -23,6 +23,7 @@ import {
   registerFcmToken,
   verifyEmail,
   resendVerification,
+  deleteAccount,
 } from '../controllers/authController.js';
 import { protect } from '../middlewares/authMiddleware.js';
 import {
@@ -95,5 +96,14 @@ router.post('/logout', protect, logoutUser);
  * Body: { token: string }
  */
 router.post('/fcm-token', protect, registerFcmToken);
+
+/**
+ * DELETE /api/v1/auth/account
+ * Eliminación de cuenta solicitada por el usuario (requisito Google Play + GDPR).
+ * Re-autentica con contraseña, bloquea si hay saldo u operaciones en curso,
+ * desactiva la cuenta y anonimiza PII no regulatoria (KYC/tx retenidos por ley).
+ * Body: { password, confirm: true }
+ */
+router.delete('/account', protect, deleteAccount);
 
 export default router;

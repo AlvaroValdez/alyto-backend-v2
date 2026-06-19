@@ -443,6 +443,33 @@ const userSchema = new Schema(
       type:    Date,
       default: null,
     },
+
+    // ── Eliminación de cuenta (requisito Google Play + GDPR / Ley 19.628) ──────
+    /**
+     * Estado del ciclo de eliminación de cuenta solicitada por el usuario.
+     *
+     *   'active'              → cuenta normal
+     *   'deletion_requested'  → el usuario solicitó la baja; la cuenta queda
+     *                            desactivada (isActive=false) y los datos PII no
+     *                            regulatorios se anonimizan de inmediato, PERO los
+     *                            registros KYC/transaccionales se RETIENEN durante
+     *                            el plazo legal (ASFI/UIF) antes de purgarse.
+     *   'anonymized'          → purga final de PII tras cumplir la retención legal.
+     *
+     * ⚠️ NO es un hard-delete. El modelo PSAV custodial (DS 5384, Cap. XI) y la
+     * normativa AML/CFT exigen conservar la traza de cumplimiento. Google Play
+     * admite la retención de datos exigidos por ley siempre que se divulgue.
+     */
+    deletionStatus: {
+      type:    String,
+      enum:    ['active', 'deletion_requested', 'anonymized'],
+      default: 'active',
+    },
+    /** Momento en que el usuario solicitó la eliminación de la cuenta. */
+    deletionRequestedAt: {
+      type:    Date,
+      default: null,
+    },
   },
   {
     timestamps: true, // createdAt, updatedAt automáticos

@@ -186,6 +186,30 @@ const businessProfileSchema = new Schema(
     /** Razón de rechazo — enviada al usuario por email */
     kybRejectionReason: { type: String, trim: true, default: null },
 
+    // ── Análisis IA (AWS-4 Bedrock) ───────────────────────────────────────────
+    // SUGERENCIA para pre-evaluar el expediente. NO autoritativo — el admin
+    // decide en reviewKYBApplication. Solo visible en el panel admin. Poblado
+    // fire-and-forget tras apply/upload de documentos. Ver kybAnalysisService.js.
+    aiAnalysis: {
+      type: new Schema({
+        riskScore:         { type: Number, min: 0, max: 100 }, // 0=bajo, 100=alto
+        recommendedAction: { type: String, trim: true },       // approve | review | more_info | reject
+        summary:           { type: String, trim: true },       // resumen para el admin
+        flags:             { type: [String], default: undefined }, // banderas/alertas detectadas
+        missingDocuments:  { type: [String], default: undefined }, // docs faltantes sugeridos
+        documentChecks:    { type: [new Schema({
+          type:     { type: String, trim: true },   // tipo de documento evaluado
+          legible:  { type: Boolean },               // ¿se lee con claridad?
+          matches:  { type: Boolean },               // ¿coincide con los datos declarados?
+          note:     { type: String, trim: true },
+        }, { _id: false })], default: undefined },
+        confidence:        { type: Number, min: 0, max: 1 },   // 0..1
+        model:             { type: String, trim: true },       // ej. 'bedrock:sonnet'
+        analyzedAt:        { type: Date },
+      }, { _id: false }),
+      default: null,
+    },
+
     // ── Límites Operativos ───────────────────────────────────────────────────
     transactionLimits: {
       type:    transactionLimitsSchema,

@@ -54,6 +54,7 @@ import reclamosRoutes      from './routes/reclamosRoutes.js';
 import contactsRoutes      from './routes/contactsRoutes.js';
 import notificationRoutes  from './routes/notificationRoutes.js';
 import verificationRoutes  from './routes/verificationRoutes.js';
+import supportRoutes        from './routes/supportRoutes.js';          // AWS-4 — Agente IA soporte
 import { sentryContext }   from './middlewares/sentryContext.js';
 import { handleStripeWebhook }     from './webhooks/stripeWebhook.js';
 import { createQuoteSocketServer }  from './services/quoteSocket.js';
@@ -352,6 +353,7 @@ app.use('/api/v1/contacts',      contactsRoutes);       // Fase 33 — Agenda de
 app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificaciones
 app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
 app.use('/api/v1/stellar',       stellarRoutes);        // SEP-10/12/24/31 — Stellar Ecosystem Proposals
+app.use('/api/v1/support',       supportRoutes);        // AWS-4 — Agente IA de soporte (Bedrock)
 
 // stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
 // prod/staging). Single source of truth — sin archivos estáticos que se desincronicen.

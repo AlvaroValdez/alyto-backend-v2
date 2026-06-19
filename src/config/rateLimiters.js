@@ -134,3 +134,12 @@ export const emailVerifyLimiter = makeLimiter({
   maxPermissive: 60,
   message:       'Demasiados intentos de verificación de email. Intenta en unos minutos.',
 });
+
+// ─── Limiter: Agente IA de soporte (AWS-4 Bedrock — cada mensaje = costo) ──────
+
+export const supportChatLimiter = makeLimiter({
+  windowMs:      60 * 1000,
+  max:           10,
+  maxPermissive: 60,
+  message:       'Demasiados mensajes al asistente. Espera un momento e intenta de nuevo.',
+});

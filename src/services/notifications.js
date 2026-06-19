@@ -404,6 +404,14 @@ export const NOTIFICATIONS = {
     };
   },
 
+  adminAccountDeletion(userName, email, entity) {
+    return {
+      title: 'Solicitud de eliminación de cuenta',
+      body:  `${userName} (${email}) solicitó eliminar su cuenta en ${entity}. Datos retenidos por plazo legal ASFI/UIF.`,
+      data:  { type: 'admin_account_deletion' },
+    };
+  },
+
   adminNewTransaction(txId, amount, currency, corridor) {
     return {
       title: 'Nueva transferencia creada',
