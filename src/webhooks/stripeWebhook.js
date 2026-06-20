@@ -94,9 +94,7 @@ export async function handleStripeWebhook(req, res) {
         if (errorCode && HARD_REJECTION_CODES.has(errorCode)) {
           await _rejectKyc(session, errorCode);
         } else {
-          console.info(
-            `[KYC Webhook] Corrección recuperable — sessionId: ${session.id} | code: ${errorCode ?? 'unknown'}`
-          );
+          await _recoverKyc(session, errorCode);
         }
         break;
       }
@@ -228,6 +226,43 @@ async function _persistVerifiedOutputs(session, userId) {
   } catch (err) {
     console.warn('[KYC Webhook] No se pudieron extraer verified_outputs:', err.message);
   }
+}
+
+/**
+ * _recoverKyc — maneja un `requires_input` recuperable (abandoned, consent_declined,
+ * problemas de cámara/dispositivo, etc.). El usuario empezó pero no completó la
+ * biometría. Lo devolvemos a 'pending' para que el frontend muestre de nuevo el
+ * botón de verificación y pueda re-lanzar /kyc/session. Sin esto el usuario queda
+ * atascado en 'in_review' con polling infinito.
+ */
+async function _recoverKyc(session, errorCode) {
+  const user = await User.findOne({ stripeVerificationSessionId: session.id });
+
+  if (!user) {
+    console.warn(`[KYC Webhook] Usuario no encontrado para sessionId: ${session.id}`);
+    return;
+  }
+
+  // Si ya está resuelto (approved/rejected) o ya en pending, no tocar.
+  if (user.kycStatus !== 'in_review') {
+    console.info(`[KYC Webhook] Corrección recuperable ignorada — userId: ${user._id} | kycStatus actual: ${user.kycStatus} | code: ${errorCode ?? 'unknown'}`);
+    return;
+  }
+
+  const prevStatus = user.kycStatus;
+  user.kycStatus   = 'pending';
+  await user.save();
+  invalidateUserCache(user._id);
+
+  notify(user._id, {
+    title: 'Verificación incompleta',
+    body:  'No terminaste tu verificación de identidad. Puedes reintentarla cuando quieras desde la app.',
+    data:  { type: 'kyc_recoverable', errorCode: errorCode ?? null },
+  }).catch(() => {});
+
+  console.info(
+    `[KYC Webhook] ↩️ RECUPERABLE — userId: ${user._id} | email: ${user.email} | code: ${errorCode ?? 'unknown'} | prevStatus: ${prevStatus} → pending`
+  );
 }
 
 async function _rejectKyc(session, errorCode) {
