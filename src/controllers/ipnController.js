@@ -56,6 +56,7 @@ import {
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
+import { mapVitaError }       from '../utils/vitaErrorMapper.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
@@ -1648,6 +1649,14 @@ export async function dispatchPayout(transaction) {
           console.error(`[Alyto Payout] Fallback ${fallback} también falló:`, fallbackErr.message);
           transaction.status        = 'failed';
           transaction.failureReason = `Primary (${payoutMethod}): ${primaryError.message} | Fallback (${fallback}): ${fallbackErr.message}`;
+          // Mensaje accionable al usuario basado en el error primario (Vita).
+          if (payoutMethod === 'vitaWallet') {
+            const mapped = mapVitaError(primaryError);
+            transaction.userFailureReason = mapped.userMessage;
+            transaction.userFailureAction = mapped.userAction;
+            transaction.failureCategory   = mapped.category;
+            transaction.failureRetryable  = mapped.retryable;
+          }
           await appendIpnLog(transaction, 'payout_all_providers_failed', 'system', 'failed', {
             primaryProvider: payoutMethod, primaryError: primaryError.message,
             fallbackProvider: fallback,    fallbackError: fallbackErr.message,
@@ -1666,11 +1675,25 @@ export async function dispatchPayout(transaction) {
           return;
         }
       } else {
-        // Sin fallback — marcar como fallido
-        transaction.status        = 'failed';
-        transaction.failureReason = `${payoutMethod} falló: ${primaryError.message}`;
+        // Sin fallback — mapear el error a mensajes accionables (admin + usuario)
+        const mapped = (payoutMethod === 'vitaWallet')
+          ? mapVitaError(primaryError)
+          : {
+              category:     'PAYOUT_FAILED',
+              adminMessage: `${payoutMethod} falló: ${primaryError.message}`,
+              userMessage:  'No pudimos completar tu transferencia.',
+              userAction:   'Verifica los datos del beneficiario o contacta a soporte.',
+              retryable:    true,
+            };
+
+        transaction.status            = 'failed';
+        transaction.failureReason     = mapped.adminMessage;    // técnico, ledger admin
+        transaction.userFailureReason = mapped.userMessage;     // claro, app usuario
+        transaction.userFailureAction = mapped.userAction;      // qué hacer
+        transaction.failureCategory   = mapped.category;        // analytics/UI
+        transaction.failureRetryable  = mapped.retryable;       // FE muestra "Reintentar"
         await appendIpnLog(transaction, 'payout_dispatch_failed', payoutMethod, 'failed', {
-          error: primaryError.message,
+          category: mapped.category, error: primaryError.message,
         });
         try {
           await notify(transaction.userId,
