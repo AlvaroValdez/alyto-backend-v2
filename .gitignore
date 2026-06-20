@@ -45,3 +45,6 @@ skills-lock.json
 !.claude/**
 corredores-router-alyto.pdf
 corredores-*-alyto.pdf
+
+# Claude Code harness lock
+.claude/scheduled_tasks.lock
