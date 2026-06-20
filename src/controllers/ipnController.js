@@ -273,6 +273,34 @@ function normalizeNameForVita(str) {
   return (str ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Campos "compactos" de instrumento de pago que NUNCA llevan espacios internos:
+// números de cuenta, códigos de banco, documentos, IBAN, CLABE, CBU/CCI, etc.
+// Vita (y otros proveedores) rechazan el valor si trae espacios — ej.
+// `account_bank: "Solo se permiten números / the value does not match the required format"`.
+// El usuario suele tipear "1234 5678" o pegar con espacios; aquí los removemos.
+const COMPACT_BENEFICIARY_FIELDS = new Set([
+  'account_bank', 'account_number', 'bank_code', 'beneficiary_document_number',
+  'document_number', 'routing_number', 'sort_code', 'swift', 'swift_code',
+  'iban', 'mx_clabe', 'clabe', 'cbu', 'cci', 'interbank_code', 'card_number',
+]);
+
+const stripWhitespace = (v) => (v == null ? v : String(v).replace(/\s+/g, ''));
+
+// Backstop server-side: elimina TODO espacio en blanco de los campos compactos.
+// NO toca otros caracteres (preserva alias/alfanuméricos válidos como bank_code
+// 'CO001' o un CBU-alias). Garantiza la corrección sin importar el cliente
+// (web, app Android desactualizada, integración API) — el front sanea para UX,
+// esto sanea por contrato.
+function sanitizeCompactFields(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  for (const key of Object.keys(obj)) {
+    if (COMPACT_BENEFICIARY_FIELDS.has(key) && typeof obj[key] === 'string') {
+      obj[key] = stripWhitespace(obj[key]);
+    }
+  }
+  return obj;
+}
+
 function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
   const dynamicFields = {};
   if (ben.dynamicFields instanceof Map) {
@@ -280,6 +308,10 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
   } else if (ben.dynamicFields && typeof ben.dynamicFields === 'object') {
     Object.assign(dynamicFields, ben.dynamicFields);
   }
+
+  // Sanea espacios en campos compactos (account_bank, bank_code, etc.) antes de
+  // construir cualquier payload. Cubre la ruta dinámica y el spread legacy.
+  sanitizeCompactFields(dynamicFields);
 
   const isDynamicFormat = Boolean(
     dynamicFields.beneficiary_first_name ??
@@ -318,10 +350,10 @@ function buildBeneficiaryPayloads(ben, amount, currency, transaction) {
       beneficiary_email:           ben.email      ?? '',
       beneficiary_address:         ben.address    ?? '',
       beneficiary_document_type:   ben.documentType   ?? 'dni',
-      beneficiary_document_number: ben.documentNumber ?? '',
+      beneficiary_document_number: stripWhitespace(ben.documentNumber ?? ''),
       purpose:                     'ISSAVG',
-      ...(ben.bankCode    ? { bank_code:         ben.bankCode    } : {}),
-      ...(ben.accountBank ? { account_bank:       ben.accountBank } : {}),
+      ...(ben.bankCode    ? { bank_code:         stripWhitespace(ben.bankCode)    } : {}),
+      ...(ben.accountBank ? { account_bank:       stripWhitespace(ben.accountBank) } : {}),
       ...(ben.accountType ? { account_type_bank:  ben.accountType } : {}),
       fc_customer_type: 'natural',
       fc_legal_name:    `${firstName} ${lastName}`.trim(),
