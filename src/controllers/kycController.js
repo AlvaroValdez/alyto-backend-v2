@@ -175,9 +175,20 @@ export async function getKycStatus(req, res) {
             console.info(`[KYC Status] ❌ Auto-rechazado por polling — userId: ${user._id} | code: ${errorCode}`);
             return res.json({ kycStatus: 'rejected', kycApprovedAt: null });
           }
+
+          // Error recuperable (abandoned, consent_declined, device, etc.): el usuario
+          // empezó pero no terminó la biometría. Sin esto quedaría en 'in_review' y el
+          // frontend haría polling infinito. Lo devolvemos a 'pending' para que pueda
+          // re-lanzar /kyc/session y reintentar con una sesión nueva.
+          if (user.kycStatus !== 'pending') {
+            await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
+            invalidateUserCache(user._id);
+            console.info(`[KYC Status] ↩️ Sesión recuperable (${errorCode ?? 'unknown'}) — reset a 'pending' para reintento — userId: ${user._id}`);
+          }
+          return res.json({ kycStatus: 'pending', kycApprovedAt: null });
         }
 
-        // session.status === 'processing' o error recuperable → seguir esperando
+        // session.status === 'processing' → seguir esperando
       } catch (stripeErr) {
         // Si Stripe falla, devolvemos el estado de DB sin bloquear al usuario
         console.warn(`[KYC Status] No se pudo consultar Stripe: ${stripeErr.message}`);
