@@ -171,23 +171,23 @@ if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
   process.exit(1);
 }
 
-// Rutas de anchor SEP que DEBEN ser CORS-ABIERTAS para interoperar con wallets
-// externas (demo-wallet.stellar.org, Lobstr, Vibrant, reviewers SCF). La spec
-// SEP-1/10/12/24/31 exige `Access-Control-Allow-Origin: *` en el stellar.toml y en
-// los endpoints del anchor. Estos endpoints NO usan cookies — la auth es por
-// Bearer token / SEP-10 — así que el wildcard sin credentials es correcto y seguro.
-// (Sin esto, el navegador de cualquier wallet recibía 500 por la allowlist estricta.)
-const isPublicAnchorPath = (path) =>
-  path === '/.well-known/stellar.toml' ||
-  path.startsWith('/api/v1/stellar/');
-
-const PUBLIC_CORS = {
-  origin:         '*',
-  credentials:    false,
+// Rutas de anchor SEP que deben interoperar con wallets externas
+// (demo-wallet.stellar.org, Lobstr, Vibrant, reviewers SCF) Y con la propia app
+// logueada. Tienen CORS DUAL (decidido por Origin), porque conviven dos clientes:
+//   - Wallet externa  → auth Bearer/SEP-10, SIN cookies → `ACAO: *`, credentials:false
+//     (spec SEP-1/10/12/24/31; un Origin desconocido NUNCA debe dar 500).
+//   - App propia (alyto.app) → manda `credentials: 'include'` (cookie) → el navegador
+//     EXIGE `ACAO: <origin exacto>` + `Allow-Credentials: true` (el wildcard lo bloquea
+//     → "Failed to fetch"). Por eso, si el Origin está en la allowlist, reflejamos.
+const ANCHOR_CORS_BASE = {
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
   exposedHeaders: ['Content-Disposition', 'Content-Type'],
 };
+
+const isPublicAnchorPath = (path) =>
+  path === '/.well-known/stellar.toml' ||
+  path.startsWith('/api/v1/stellar/');
 
 const STRICT_CORS = {
   origin(origin, callback) {
@@ -202,14 +202,19 @@ const STRICT_CORS = {
     return callback(new Error(`CORS: origen no permitido (${origin})`));
   },
   credentials:    true,
-  methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
-  exposedHeaders: ['Content-Disposition', 'Content-Type'],
+  ...ANCHOR_CORS_BASE,
 };
 
-// Delegate: wildcard para el anchor SEP, allowlist estricta + credentials para el resto.
+// Delegate: rutas de anchor con CORS dual; resto de la app con allowlist estricta.
 app.use(cors((req, callback) => {
-  callback(null, isPublicAnchorPath(req.path) ? PUBLIC_CORS : STRICT_CORS);
+  if (!isPublicAnchorPath(req.path)) return callback(null, STRICT_CORS);
+  const origin = req.header('Origin');
+  if (origin && allowedOrigins.includes(origin)) {
+    // App propia con cookies → reflejar el origin exacto + credentials.
+    return callback(null, { origin: true, credentials: true, ...ANCHOR_CORS_BASE });
+  }
+  // Wallet externa (Bearer, sin cookies) o sin Origin → wildcard, sin credentials.
+  return callback(null, { origin: '*', credentials: false, ...ANCHOR_CORS_BASE });
 }));
 
 // Rate limiting general — protege todas las rutas contra DDoS/brute-force

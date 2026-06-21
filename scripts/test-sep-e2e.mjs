@@ -81,6 +81,25 @@ async function testSep1() {
   record('SEP-1', 'toml CORS-abierto para wallets externas', corsOk,
     corsOk ? `ACAO=${acao}` : `HTTP ${corsRes.status} ACAO=${acao ?? '(ausente)'}`);
 
+  // CORS dual: la app propia (alyto.app) manda `credentials: include` (cookie). El
+  // anchor DEBE reflejar el Origin exacto + Allow-Credentials para ese origen, o el
+  // navegador bloquea con "Failed to fetch" (wildcard + credentials está prohibido).
+  // Preflight OPTIONS sobre un endpoint del anchor con el Origin de la app.
+  const appOrigin = process.env.APP_ORIGIN ?? new URL(TOML_URL).origin;
+  const pf = await fetch(`${ANCHOR_BASE}/anchor/transactions/deposit`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: appOrigin,
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'authorization,content-type',
+    },
+  });
+  const pfAcao = pf.headers.get('access-control-allow-origin');
+  const pfCreds = pf.headers.get('access-control-allow-credentials');
+  const pfOk = pfAcao === appOrigin && pfCreds === 'true';
+  record('SEP-1', 'anchor refleja Origin de la app + credentials (in-app)', pfOk,
+    pfOk ? `ACAO=${pfAcao} creds=${pfCreds}` : `ACAO=${pfAcao ?? '(ausente)'} creds=${pfCreds ?? '(ausente)'} (app="${appOrigin}")`);
+
   // extrae el WEB_AUTH_ENDPOINT real declarado (para coherencia con ANCHOR_BASE)
   const wae = toml.match(/WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/)?.[1];
   const signingKey = toml.match(/SIGNING_KEY\s*=\s*"([^"]+)"/)?.[1];
