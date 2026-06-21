@@ -148,7 +148,21 @@ export async function createTransaction({ body, user }) {
     );
   }
 
-  // Calcular quote usando la firma canónica de quoteCalculator
+  // Guard de negocio Alyto ANTES del cálculo de quote (fail-fast):
+  // SEP-31 como receiving anchor exige que el sender sea una entidad vinculada
+  // (con userId Alyto). Una wallet externa / sending anchor sin cuenta vinculada
+  // debe recibir un 400 limpio — no debe llegar al cálculo de tasa ni golpear las
+  // APIs de Vita/Harbor. Mover este check arriba evita un 500 espurio.
+  if (!user._id) {
+    throw Object.assign(new Error('SEP-31 requiere una cuenta Alyto vinculada (sending anchor sin userId)'), { status: 400 });
+  }
+
+  // Calcular quote usando la firma canónica de quoteCalculator.
+  // providerRate = tasa USDC→moneda destino del proveedor real del corredor
+  // (Vita getPrices / Harbor getHarborQuote), resuelta como en paymentController.
+  // ⚠️ Pendiente: cablear resolveProviderRate(corridor) para el path de sending
+  // anchors vinculados. Hoy SEP-31 no tiene integraciones de sender en vivo, así
+  // que este path solo se alcanza con un userId vinculado (no productivo aún).
   const rateDoc   = await ExchangeRate.findOne({ pair: 'BOB/USDT' }).lean();
   const bobPerUsdc = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE) ?? 9.31;
 
@@ -156,6 +170,7 @@ export async function createTransaction({ body, user }) {
     amount:      usdAmount,
     corridor,
     bobPerUsdc,
+    providerRate: bobPerUsdc, // placeholder coherente para destino BOB; ver TODO arriba
     accountType: 'personal',
   });
 
@@ -167,10 +182,6 @@ export async function createTransaction({ body, user }) {
   // Dirección de depósito USDC (cuenta Stellar SRL donde el anchor envía el USDC)
   const instructionAddress = process.env.STELLAR_SRL_PUBLIC_KEY;
   const instructionMemo    = transactionId;
-
-  if (!user._id) {
-    throw Object.assign(new Error('SEP-31 requiere una cuenta Alyto vinculada (sending anchor sin userId)'), { status: 400 });
-  }
 
   // Crear Transaction en MongoDB (campos conformes al schema Transaction)
   const tx = await Transaction.create({
