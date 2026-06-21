@@ -171,7 +171,25 @@ if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
   process.exit(1);
 }
 
-app.use(cors({
+// Rutas de anchor SEP que DEBEN ser CORS-ABIERTAS para interoperar con wallets
+// externas (demo-wallet.stellar.org, Lobstr, Vibrant, reviewers SCF). La spec
+// SEP-1/10/12/24/31 exige `Access-Control-Allow-Origin: *` en el stellar.toml y en
+// los endpoints del anchor. Estos endpoints NO usan cookies — la auth es por
+// Bearer token / SEP-10 — así que el wildcard sin credentials es correcto y seguro.
+// (Sin esto, el navegador de cualquier wallet recibía 500 por la allowlist estricta.)
+const isPublicAnchorPath = (path) =>
+  path === '/.well-known/stellar.toml' ||
+  path.startsWith('/api/v1/stellar/');
+
+const PUBLIC_CORS = {
+  origin:         '*',
+  credentials:    false,
+  methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
+  exposedHeaders: ['Content-Disposition', 'Content-Type'],
+};
+
+const STRICT_CORS = {
   origin(origin, callback) {
     // Requests sin Origin (curl, health checks, server-to-server, apps nativas): permitidos.
     if (!origin) return callback(null, true);
@@ -187,6 +205,11 @@ app.use(cors({
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
   exposedHeaders: ['Content-Disposition', 'Content-Type'],
+};
+
+// Delegate: wildcard para el anchor SEP, allowlist estricta + credentials para el resto.
+app.use(cors((req, callback) => {
+  callback(null, isPublicAnchorPath(req.path) ? PUBLIC_CORS : STRICT_CORS);
 }));
 
 // Rate limiting general — protege todas las rutas contra DDoS/brute-force

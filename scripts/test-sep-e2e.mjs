@@ -71,6 +71,16 @@ async function testSep1() {
   const isMainnet = /Public Global Stellar Network/.test(toml);
   record('SEP-1', 'NETWORK_PASSPHRASE = mainnet', isMainnet, isMainnet ? 'Public Global' : 'NO es mainnet');
 
+  // CORS: el toml DEBE ser accesible cross-origin desde el navegador de una wallet
+  // externa (demo-wallet, Lobstr, reviewer SCF). Sin `Access-Control-Allow-Origin`,
+  // el browser bloquea el fetch y reporta "TOML not found" → anchor inutilizable.
+  // (curl sin Origin no lo detecta; por eso enviamos Origin explícito.)
+  const corsRes = await fetch(TOML_URL, { headers: { Origin: 'https://demo-wallet.stellar.org' } });
+  const acao = corsRes.headers.get('access-control-allow-origin');
+  const corsOk = corsRes.status === 200 && (acao === '*' || acao === 'https://demo-wallet.stellar.org');
+  record('SEP-1', 'toml CORS-abierto para wallets externas', corsOk,
+    corsOk ? `ACAO=${acao}` : `HTTP ${corsRes.status} ACAO=${acao ?? '(ausente)'}`);
+
   // extrae el WEB_AUTH_ENDPOINT real declarado (para coherencia con ANCHOR_BASE)
   const wae = toml.match(/WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/)?.[1];
   const signingKey = toml.match(/SIGNING_KEY\s*=\s*"([^"]+)"/)?.[1];
