@@ -11,6 +11,7 @@
  */
 
 import * as Sentry      from '@sentry/node'
+import mongoose         from 'mongoose'
 import Reclamo          from '../models/Reclamo.js'
 import Transaction      from '../models/Transaction.js'
 import User             from '../models/User.js'
@@ -43,12 +44,21 @@ export async function crearReclamo(req, res) {
       return res.status(400).json({ error: 'descripcion supera 1000 caracteres.' })
     }
 
-    // Verificar que la transacción (si se proporciona) pertenece al usuario
-    if (transactionId) {
-      const tx = await Transaction.findOne({ _id: transactionId, userId }).lean()
-      if (!tx) {
-        return res.status(400).json({ error: 'transactionId no válido o no pertenece al usuario.' })
+    // El ID de transacción es texto libre OPCIONAL. Intentamos resolverlo a una
+    // Transaction real del usuario (por ID humano alytoTransactionId, o por _id si
+    // es un ObjectId válido), pero NUNCA bloqueamos el reclamo si no coincide:
+    // guardamos lo que el usuario escribió en transactionRef.
+    const transactionRef = typeof transactionId === 'string' && transactionId.trim()
+      ? transactionId.trim()
+      : null
+    let linkedTransactionId = null
+    if (transactionRef) {
+      let tx = await Transaction.findOne({ alytoTransactionId: transactionRef, userId })
+        .select('_id').lean()
+      if (!tx && mongoose.isValidObjectId(transactionRef)) {
+        tx = await Transaction.findOne({ _id: transactionRef, userId }).select('_id').lean()
       }
+      if (tx) linkedTransactionId = tx._id
     }
 
     // ── Documentos adjuntos → base64 ─────────────────────────────────────────
@@ -62,7 +72,8 @@ export async function crearReclamo(req, res) {
     // ── Crear reclamo ────────────────────────────────────────────────────────
     const reclamo = await Reclamo.create({
       userId,
-      transactionId:  transactionId ?? null,
+      transactionId:  linkedTransactionId,
+      transactionRef,
       tipo,
       descripcion:    descripcion.trim(),
       montoReclamado: montoReclamado ? Number(montoReclamado) : null,

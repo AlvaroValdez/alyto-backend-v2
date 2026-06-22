@@ -34,6 +34,12 @@ const reclamoSchema = new mongoose.Schema({
     ref:     'Transaction',
     default: null,
   },
+  /** Referencia de transacción tal cual la escribió el usuario (texto libre, opcional).
+   *  Puede o no resolver a una Transaction real — nunca debe bloquear el reclamo. */
+  transactionRef: {
+    type:    String,
+    default: null,
+  },
   tipo: {
     type:     String,
     enum:     ['cobro_indebido', 'transferencia_no_recibida', 'demora', 'error_monto', 'cuenta_bloqueada', 'otro'],
