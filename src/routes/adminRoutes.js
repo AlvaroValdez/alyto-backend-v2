@@ -150,6 +150,17 @@ const qrUpload = multer({
   },
 });
 
+// multer para el comprobante de retiro que sube el admin (imagen o PDF)
+const proofUpload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 5 * 1024 * 1024, files: 1 },  // 5 MB máx.
+  fileFilter(_req, file, cb) {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error(`Tipo no permitido: ${file.mimetype}. Use PNG, JPG, WebP o PDF.`));
+  },
+});
+
 // ─── Usuarios ─────────────────────────────────────────────────────────────────
 
 /**
@@ -467,7 +478,7 @@ router.get('/srl-config', getSRLConfig);
  * Content-Type: multipart/form-data
  *
  * Campos:
- *   label  {string}  — Nombre visible al usuario ("Tigo Money", "Banco Bisa QR", etc.)
+ *   label  {string}  — Nombre visible al usuario ("Tigo Money", "Banco Económico QR", etc.)
  *   qr     {File}    — Imagen PNG/JPG del QR (máx. 2 MB)
  *
  * El QR activo se incluye automáticamente en las instrucciones de todos los
@@ -597,11 +608,11 @@ router.post('/wallet/deposit/confirm',   adminConfirmDeposit);
 
 /**
  * GET  /api/v1/admin/wallet/withdrawals/pending  — Lista retiros pendientes BOB
- * POST /api/v1/admin/wallet/withdrawal/confirm   — Confirma retiro (transfiere)
+ * POST /api/v1/admin/wallet/withdrawal/confirm   — Confirma retiro (transfiere) + comprobante opcional (multipart 'comprobante')
  * POST /api/v1/admin/wallet/withdrawal/reject    — Rechaza retiro (libera reserva)
  */
 router.get('/wallet/withdrawals/pending',  adminListPendingWithdrawals);
-router.post('/wallet/withdrawal/confirm',  adminConfirmWithdrawal);
+router.post('/wallet/withdrawal/confirm',  proofUpload.single('comprobante'), adminConfirmWithdrawal);
 router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
 
 /**

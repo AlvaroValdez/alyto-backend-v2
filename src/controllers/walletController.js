@@ -161,8 +161,25 @@ export async function getWalletTransactions(req, res) {
       WalletTransaction.countDocuments(filter),
     ])
 
+    // Quitamos los blobs base64 pesados (comprobante de retiro, QR bancario,
+    // comprobante de depósito) del listado; quedan como flags de presencia. La
+    // imagen se obtiene aparte vía /transactions/:wtxId/comprobante.
+    const lightTransactions = transactions.map((t) => {
+      const m = t.metadata ?? {}
+      const meta = { ...m }
+      if (m.withdrawalProof?.data) {
+        meta.withdrawalProof = {
+          present: true, filename: m.withdrawalProof.filename,
+          mimetype: m.withdrawalProof.mimetype, uploadedAt: m.withdrawalProof.uploadedAt,
+        }
+      }
+      if (m.bankQrImage?.data)  meta.bankQrImage  = { present: true, filename: m.bankQrImage.filename,  mimetype: m.bankQrImage.mimetype }
+      if (m.paymentProof?.data) meta.paymentProof = { present: true, filename: m.paymentProof.filename, mimetype: m.paymentProof.mimetype }
+      return { ...t, metadata: meta, hasComprobante: !!m.withdrawalProof?.data }
+    })
+
     return res.json({
-      transactions,
+      transactions: lightTransactions,
       pagination: {
         page,
         limit,
@@ -175,6 +192,46 @@ export async function getWalletTransactions(req, res) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'getWalletTransactions' } })
     console.error('[Wallet] Error en getWalletTransactions:', err.message)
     return res.status(500).json({ error: 'Error al obtener historial de movimientos.' })
+  }
+}
+
+// ─── GET /api/v1/wallet/transactions/:wtxId/comprobante ───────────────────────
+
+/**
+ * Devuelve el comprobante (base64) que el admin subió al procesar un retiro BOB
+ * del usuario, para que lo vea en su perfil como respaldo de la transferencia.
+ * Solo accesible al dueño de la transacción.
+ */
+export async function getWithdrawalComprobante(req, res) {
+  try {
+    const user      = req.user
+    const { wtxId } = req.params
+
+    const wtx = await WalletTransaction.findOne({ wtxId, userId: user._id, type: 'withdrawal' })
+      .select('wtxId metadata')
+      .lean()
+
+    if (!wtx) {
+      return res.status(404).json({ error: 'Retiro no encontrado.' })
+    }
+
+    const proof = wtx.metadata?.withdrawalProof
+    if (!proof?.data) {
+      return res.status(404).json({ error: 'Este retiro aún no tiene comprobante disponible.' })
+    }
+
+    return res.status(200).json({
+      base64:     proof.data,
+      mimeType:   proof.mimetype,
+      filename:   proof.filename,
+      size:       proof.size,
+      uploadedAt: proof.uploadedAt,
+    })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'getWithdrawalComprobante' } })
+    console.error('[Wallet] Error en getWithdrawalComprobante:', err.message)
+    return res.status(500).json({ error: 'Error al obtener el comprobante del retiro.' })
   }
 }
 
@@ -327,7 +384,7 @@ export async function initiateDeposit(req, res) {
       method:        'manual',
       amount,
       currency:      'BOB',
-      bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Bisa',
+      bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Económico',
       accountHolder: process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
       accountNumber: process.env.SRL_ACCOUNT_NUMBER ?? '',
       accountType:   process.env.SRL_ACCOUNT_TYPE   ?? 'Cuenta Corriente',
@@ -517,14 +574,28 @@ export async function requestWithdrawal(req, res) {
     const user = req.user
     const { amount: rawAmount, bankName, accountNumber, accountHolder, accountType } = req.body
     const amount = Number(rawAmount)
+    // Dos métodos de retiro (mismas dos pestañas que la carga): 'bank' = el usuario
+    // declara su cuenta bancaria; 'qr' = el usuario adjunta el QR de SU cuenta y el
+    // admin lo escanea para transferirle. El QR ya contiene la cuenta destino.
+    const method = req.body.method === 'qr' ? 'qr' : 'bank'
 
     if (user.legalEntity !== 'SRL') {
       await session.abortTransaction()
       return res.status(403).json({ error: 'La wallet BOB es exclusiva para usuarios Bolivia (SRL).' })
     }
-    if (!amount || !bankName || !accountNumber || !accountHolder || !accountType) {
+    if (!amount || isNaN(amount)) {
       await session.abortTransaction()
-      return res.status(400).json({ error: 'amount, bankName, accountNumber, accountHolder y accountType son requeridos.' })
+      return res.status(400).json({ error: 'El campo amount es requerido.' })
+    }
+    if (method === 'bank') {
+      if (!bankName || !accountNumber || !accountHolder || !accountType) {
+        await session.abortTransaction()
+        return res.status(400).json({ error: 'Para retiro a cuenta bancaria: bankName, accountNumber, accountHolder y accountType son requeridos.' })
+      }
+    } else if (!req.file) {
+      // method === 'qr' → exige la imagen del QR de la cuenta del usuario
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'Adjunta el QR de tu cuenta bancaria para el retiro vía QR.' })
     }
     if (amount < 100) {
       await session.abortTransaction()
@@ -602,8 +673,16 @@ export async function requestWithdrawal(req, res) {
       balanceBefore: wallet.balance,
       balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
       status:        'pending',
-      description:   `Retiro a ${bankName} — ${accountHolder}`,
-      metadata:      { bankName, accountNumber, accountHolder, accountType },
+      description:   method === 'qr'
+        ? 'Retiro vía QR bancario'
+        : `Retiro a ${bankName} — ${accountHolder}`,
+      metadata:      {
+        method,
+        ...(bankName      ? { bankName }      : {}),
+        ...(accountNumber ? { accountNumber } : {}),
+        ...(accountHolder ? { accountHolder } : {}),
+        ...(accountType   ? { accountType }   : {}),
+      },
       expiresAt:     new Date(Date.now() + 72 * 60 * 60 * 1000),  // 72h para retiros
     }], { session })
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
@@ -1353,6 +1432,16 @@ export async function adminConfirmWithdrawal(req, res) {
     const prevBalance = wallet.balance
     const newBalance  = prevBalance - wtx.amount
 
+    // Comprobante de la transferencia subido por el admin (opcional pero recomendado):
+    // queda guardado para que el usuario lo vea en su perfil como respaldo del retiro.
+    const withdrawalProof = req.file ? {
+      data:       req.file.buffer.toString('base64'),
+      mimetype:   req.file.mimetype,
+      filename:   req.file.originalname,
+      size:       req.file.size,
+      uploadedAt: new Date(),
+    } : null
+
     // Descontar del saldo real y liberar reserva
     await WalletBOB.updateOne(
       { _id: wallet._id },
@@ -1366,7 +1455,12 @@ export async function adminConfirmWithdrawal(req, res) {
       confirmedBy:   admin._id,
       confirmedAt:   new Date(),
       reference:     bankReference,
-      metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
+      metadata:      {
+        ...(wtx.metadata ?? {}),
+        bankReference,
+        note: note ?? '',
+        ...(withdrawalProof ? { withdrawalProof } : {}),
+      },
     }, { session })
 
     await session.commitTransaction()

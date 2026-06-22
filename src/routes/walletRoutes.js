@@ -24,6 +24,7 @@ import { walletOpsLimiter } from '../config/rateLimiters.js'
 import {
   getWalletBalance,
   getWalletTransactions,
+  getWithdrawalComprobante,
   initiateDeposit,
   getDepositQRImages,
   uploadDepositProof,
@@ -78,6 +79,7 @@ const router = Router()
 
 router.get('/balance',           protect, requireKycApproved, getWalletBalance)
 router.get('/transactions',      protect, requireKycApproved, getWalletTransactions)
+router.get('/transactions/:wtxId/comprobante', protect, requireKycApproved, getWithdrawalComprobante)
 router.get('/deposit/qr-images',             protect, requireKycApproved, getDepositQRImages)
 router.post('/deposit/initiate',             protect, requireKycApproved, walletOpsLimiter, checkSanctions, idempotencyCheck, initiateDeposit)
 router.post('/deposit/:wtxId/comprobante',   protect, requireKycApproved, walletOpsLimiter, uploadComprobante.single('comprobante'), idempotencyCheck, uploadDepositProof)
