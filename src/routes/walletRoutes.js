@@ -60,6 +60,7 @@ import {
   getUSDCBalance,
   getDepositInstructions,
   requestBOBtoUSDC,
+  requestUSDCtoBOB,
   getUSDCTransactions,
   getUSDCRate,
   getUSDCTransferQuote,
@@ -102,6 +103,7 @@ router.get('/usdc/transactions',          protect, requireKycApproved, getUSDCTr
 router.get('/usdc/transfer-quote',        protect, requireKycApproved, getUSDCTransferQuote)
 router.post('/usdc/send',                 protect, requireKycApproved, walletOpsLimiter, checkSanctions, idempotencyCheck, sendUSDC)
 router.post('/usdc/convert-bob',          protect, requireKycApproved, walletOpsLimiter, checkSanctions, idempotencyCheck, requestBOBtoUSDC)
+router.post('/usdc/convert-to-bob',       protect, requireKycApproved, walletOpsLimiter, checkSanctions, idempotencyCheck, requestUSDCtoBOB)
 
 // ─── Alias Alyto (@usuario) — P2P USDC P1 ────────────────────────────────────
 router.get('/alias/available', protect, checkAliasAvailable)

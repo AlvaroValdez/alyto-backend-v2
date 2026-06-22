@@ -152,6 +152,30 @@ export async function getBOBUSDCRateDetailed() {
 }
 
 /**
+ * Tasa USDC→BOB (lado VENTA) para la conversión inversa del usuario en la wallet.
+ * Alyto COMPRA el USDC del usuario, así que paga MENOS BOB por USDC que el mercado
+ * (market × (1 − spread%)) — el spread queda a favor de Alyto, simétrico a
+ * getBOBUSDCRate (que cobra de más al comprar USDC). Ledger-only: NO mueve on-chain.
+ *
+ * @returns {Promise<number>} Tasa BOB por 1 USDC (≤ mercado × (1 − spread%))
+ */
+export async function getUSDCBOBRate() {
+  return (await getUSDCBOBRateDetailed()).bobPerUsdc;
+}
+
+/**
+ * Igual que getUSDCBOBRate pero con desglose para la UI.
+ * @returns {Promise<{ bobPerUsdc, marketRate, spreadPct, source }>}
+ */
+export async function getUSDCBOBRateDetailed() {
+  const marketRate = await getBOBRate();
+  const spreadPct  = USDC_CONVERT_SPREAD_PCT;
+  // Lado venta: market × (1 − spread%). Piso de seguridad: nunca negativo/cero.
+  const bobPerUsdc = round6(Math.max(marketRate * (1 - spreadPct / 100), marketRate * 0.5));
+  return { bobPerUsdc, marketRate, spreadPct, source: 'binance_p2p-spread' };
+}
+
+/**
  * Resuelve la tasa BOB/USDC para COTIZAR al usuario (corredores SRL Bolivia).
  *
  * Fuente única para los 4 sitios de quote (REST calculateBOBQuote, REST getQuote

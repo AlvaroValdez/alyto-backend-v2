@@ -403,6 +403,24 @@ export const NOTIFICATIONS = {
     };
   },
 
+  // ── Conversión USDC → BOB (inversa, in-wallet) ────────────────────────────
+
+  conversionToBobConfirmed(usdcAmount, bobAmount) {
+    return {
+      title: 'Conversión a BOB acreditada ✓',
+      body:  `Convertiste ${Number(usdcAmount).toFixed(6)} USDC → Bs. ${Number(bobAmount).toFixed(2)} en tu wallet.`,
+      data:  { type: 'usdc_to_bob_confirmed' },
+    };
+  },
+
+  conversionToBobRejected(usdcAmount, reason) {
+    return {
+      title: 'Conversión a BOB no procesada',
+      body:  `Tu conversión de ${Number(usdcAmount).toFixed(6)} USDC a BOB no pudo completarse${reason ? `: ${reason}` : '.'}. El USDC sigue en tu wallet.`,
+      data:  { type: 'usdc_to_bob_rejected' },
+    };
+  },
+
   // ── Admin — Alertas de movimientos de usuarios ────────────────────────────
 
   adminNewUser(userName, email, entity) {
@@ -450,6 +468,14 @@ export const NOTIFICATIONS = {
       title: 'Conversión BOB→USDC pendiente',
       body:  `${userName} solicitó convertir Bs. ${Number(bobAmount).toFixed(2)} → ${Number(usdcAmount).toFixed(6)} USDC.`,
       data:  { type: 'admin_conversion_request' },
+    };
+  },
+
+  adminUsdcToBobRequest(usdcAmount, bobAmount, userName) {
+    return {
+      title: 'Conversión USDC→BOB pendiente',
+      body:  `${userName} solicitó convertir ${Number(usdcAmount).toFixed(6)} USDC → Bs. ${Number(bobAmount).toFixed(2)}.`,
+      data:  { type: 'admin_usdc_to_bob_request' },
     };
   },
 

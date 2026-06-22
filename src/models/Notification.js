@@ -41,6 +41,9 @@ const notificationSchema = new mongoose.Schema(
         'p2p_received',
         'conversion_confirmed',
         'conversion_rejected',
+        'usdc_deposit_received',
+        'usdc_to_bob_confirmed',
+        'usdc_to_bob_rejected',
         'qr_payment',
         'kyc',
         // KYB (cuenta Business) — transiciones de estado notificadas al usuario
@@ -57,6 +60,7 @@ const notificationSchema = new mongoose.Schema(
         'admin_deposit_request',
         'admin_withdrawal_request',
         'admin_conversion_request',
+        'admin_usdc_to_bob_request',
         'admin_kyb_submitted',
         'admin_payment_proof',
         'admin_p2p_transfer',

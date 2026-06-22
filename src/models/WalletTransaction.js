@@ -37,7 +37,7 @@ const walletTransactionSchema = new mongoose.Schema({
   type: {
     type:     String,
     enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze',
-               'bob_to_usdc', 'usdc_deposit'],
+               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit'],
     required: true,
   },
   /**

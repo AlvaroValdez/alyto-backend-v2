@@ -110,6 +110,9 @@ import {
   adminListPendingConversions,
   adminConfirmBOBtoUSDC,
   adminRejectBOBtoUSDC,
+  adminListPendingUSDCtoBOB,
+  adminConfirmUSDCtoBOB,
+  adminRejectUSDCtoBOB,
 } from '../controllers/walletUSDCController.js';
 import {
   adminListarReclamos,
@@ -635,6 +638,16 @@ router.post('/wallet/usdc/conversions/confirm', adminConfirmBOBtoUSDC);
  * Body: { wtxId, rejectReason? }
  */
 router.post('/wallet/usdc/conversions/reject', adminRejectBOBtoUSDC);
+
+/**
+ * Conversión inversa USDC→BOB (Fase 1 — in-wallet, ledger-only, BEC-ready).
+ * GET    /api/v1/admin/wallet/bob/conversions/pending  — lista pendientes
+ * POST   /api/v1/admin/wallet/bob/conversions/confirm  — debita USDC, acredita BOB (Body: { wtxId, note? })
+ * POST   /api/v1/admin/wallet/bob/conversions/reject   — libera USDC reservado (Body: { wtxId, rejectReason? })
+ */
+router.get ('/wallet/bob/conversions/pending', adminListPendingUSDCtoBOB);
+router.post('/wallet/bob/conversions/confirm', adminConfirmUSDCtoBOB);
+router.post('/wallet/bob/conversions/reject',  adminRejectUSDCtoBOB);
 
 // ─── PRILI — Reclamos ASFI (Fase 27) ─────────────────────────────────────────
 
