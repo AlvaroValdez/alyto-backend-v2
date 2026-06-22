@@ -38,7 +38,7 @@ export async function generatePaymentQR(transaction) {
   }
 
   const qrData = {
-    banco:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+    banco:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
     titular:    bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
     cuenta:     bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
     tipo:       bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',

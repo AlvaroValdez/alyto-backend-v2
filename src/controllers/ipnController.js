@@ -2809,7 +2809,7 @@ export async function handleOwlPayIPN(req, res) {
  *   }
  * }
  *
- * @param {string} bankId — 'bec' | 'bisa' | ...
+ * @param {string} bankId — 'bec' | 'bnb' | ...
  */
 export function handleBankQrIPN(bankId) {
   return async function (req, res) {

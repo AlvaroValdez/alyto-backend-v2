@@ -130,7 +130,7 @@ const walletTransactionSchema = new mongoose.Schema({
    */
   bankQr: {
     type: new mongoose.Schema({
-      bankId:  { type: String, trim: true },              // 'bec' | 'bisa' | ...
+      bankId:  { type: String, trim: true },              // 'bec' | 'bnb' | ...
       qrId:    { type: String, trim: true },              // ID único del QR en el banco
       dueDate: { type: String },                          // 'yyyy-MM-dd' (vencimiento)
       paidAt:  { type: Date },                            // timestamp de confirmación

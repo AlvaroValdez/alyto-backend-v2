@@ -48,7 +48,7 @@ function imageMediaType(mimetype) {
   return null; // PDFs y otros no soportados por la visión de Claude vía Bedrock InvokeModel
 }
 
-const PARSE_PROMPT = `Eres un asistente que extrae datos de comprobantes bancarios bolivianos (transferencias, depósitos QR, Banco Bisa / BNB / otros).
+const PARSE_PROMPT = `Eres un asistente que extrae datos de comprobantes bancarios bolivianos (transferencias, depósitos QR, Banco Económico / BNB / otros).
 Analiza la imagen del comprobante y devuelve EXCLUSIVAMENTE un objeto JSON válido, sin texto adicional, con esta forma:
 {
   "amount": number|null,        // monto en BOB (solo el número, sin símbolo)

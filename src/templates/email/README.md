@@ -30,7 +30,7 @@ Archivos HTML listos para subir como Dynamic Templates en SendGrid.
 {{destinationAmount}}  — monto que recibirá el beneficiario
 {{destinationCurrency}}
 {{destinationCountry}}
-{{bankName}}           — banco AV Finance SRL (Banco Bisa)
+{{bankName}}           — banco AV Finance SRL (Banco Económico)
 {{accountHolder}}      — "AV Finance SRL"
 {{accountNumber}}      — número de cuenta SRL
 {{accountType}}        — tipo de cuenta

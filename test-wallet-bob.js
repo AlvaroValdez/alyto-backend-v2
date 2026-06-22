@@ -156,7 +156,7 @@ const steps = [
       token: state.adminToken,
       body:  {
         wtxId:         state.wtxId,
-        bankReference: 'TEST-BISA-001',
+        bankReference: 'TEST-BANECO-001',
         note:          'Smoke test fase 25',
       },
     });

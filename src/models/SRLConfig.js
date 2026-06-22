@@ -7,7 +7,7 @@
  * Almacena los códigos QR de pago que el admin sube desde el backoffice.
  * Cada QR corresponde a una billetera/banco boliviano diferente:
  *   - Tigo Money       → QR de la app Tigo
- *   - Banco Bisa       → QR institucional del banco
+ *   - Banco Económico   → QR institucional del banco
  *   - SimpliCity       → QR Multicash/SimpliCity
  *   - QR P2P Bolivia   → QR genérico interoperable
  *
@@ -33,7 +33,7 @@ const qrImageSchema = new Schema(
       type:    String,
       default: () => crypto.randomBytes(4).toString('hex'),
     },
-    /** Etiqueta visible al usuario — ej. "Tigo Money", "Banco Bisa QR" */
+    /** Etiqueta visible al usuario — ej. "Tigo Money", "Banco Económico QR" */
     label: {
       type:     String,
       required: true,

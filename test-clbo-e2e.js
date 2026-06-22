@@ -182,7 +182,7 @@ const steps = [
         beneficiaryData: {
           beneficiary_first_name: 'Juan',
           beneficiary_last_name:  'Mamani',
-          bank_name:              'Banco Bisa',
+          bank_name:              'Banco Económico',
           account_number:         '1234567890',
           account_type:           'Cuenta Corriente',
           id_number:              '12345678',

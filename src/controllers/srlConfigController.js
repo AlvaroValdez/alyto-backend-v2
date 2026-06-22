@@ -55,7 +55,7 @@ export async function getSRLConfig(req, res) {
  *
  * Content-Type: multipart/form-data
  * Campos:
- *   label  {string}  — Nombre del método de pago (ej. "Tigo Money", "Banco Bisa QR")
+ *   label  {string}  — Nombre del método de pago (ej. "Tigo Money", "Banco Económico QR")
  *   qr     {File}    — Imagen PNG/JPG del QR (máx. 2 MB)
  *
  * El QR se almacena como base64 en MongoDB y se devuelve en las instrucciones
@@ -69,7 +69,7 @@ export async function uploadSRLQR(req, res) {
     if (!label?.trim()) {
       return res.status(400).json({
         error:   'Campo label requerido.',
-        message: 'Indica el nombre del método de pago (ej. "Tigo Money", "Banco Bisa QR").',
+        message: 'Indica el nombre del método de pago (ej. "Tigo Money", "Banco Económico QR").',
       });
     }
 

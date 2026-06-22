@@ -510,7 +510,7 @@ const transactionSchema = new Schema(
      */
     bankQr: {
       type: new Schema({
-        bankId:  { type: String, trim: true },  // 'bec' | 'bisa' | ...
+        bankId:  { type: String, trim: true },  // 'bec' | 'bnb' | ...
         qrId:    { type: String, trim: true },  // ID único del QR en el banco
         dueDate: { type: Date },                // Fecha de vencimiento del QR
         paidAt:  { type: Date },                // Timestamp de confirmación del banco

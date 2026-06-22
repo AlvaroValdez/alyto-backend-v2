@@ -89,7 +89,7 @@ const corridors = [
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             'BO→ES via vita_sent (VITA_SENT_ONLY_COUNTRIES). Payin manual Banco Bisa.',
+    adminNotes:             'BO→ES via vita_sent (VITA_SENT_ONLY_COUNTRIES). Payin manual Banco Económico.',
   },
 
   // ── SRL: Bolivia → Polonia ────────────────────────────────────────────────
@@ -113,7 +113,7 @@ const corridors = [
     legalEntity:            'SRL',
     routingScenario:        'C',
     isActive:               true,
-    adminNotes:             'BO→PL via vita_sent (VITA_SENT_ONLY_COUNTRIES). Payin manual Banco Bisa.',
+    adminNotes:             'BO→PL via vita_sent (VITA_SENT_ONLY_COUNTRIES). Payin manual Banco Económico.',
   },
 ]
 

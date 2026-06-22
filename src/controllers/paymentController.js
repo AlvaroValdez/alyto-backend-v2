@@ -1325,7 +1325,7 @@ export async function initCrossBorderPayment(req, res) {
     }
 
     manualPaymentInstructions = {
-      bankName:      dbBankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+      bankName:      dbBankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
       accountHolder: dbBankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
       accountNumber: dbBankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
       accountType:   dbBankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
@@ -1540,7 +1540,7 @@ export async function initCrossBorderPayment(req, res) {
       console.error('[CrossBorder] Error generando QR:', qrErr.message);
     }
 
-    // Obtener QR estáticos configurados por el admin (Tigo Money, Banco Bisa, etc.)
+    // Obtener QR estáticos configurados por el admin (Tigo Money, Banco Económico, etc.)
     try {
       const srlConfig = await SRLConfig.getActive();
       paymentQRStatic = (srlConfig.qrImages ?? []).map(q => ({
@@ -1596,7 +1596,7 @@ export async function initCrossBorderPayment(req, res) {
       exchangeRate:        getDisplayRate(transaction) || quotedExchangeRate || null,
       // QR dinámico: codifica datos bancarios para apps de homebanking
       paymentQR,
-      // QR estáticos: imágenes subidas por el admin (Tigo Money, Banco Bisa, etc.)
+      // QR estáticos: imágenes subidas por el admin (Tigo Money, Banco Económico, etc.)
       // Array de { label, imageBase64 } — mostrar cada uno con su etiqueta
       paymentQRStatic,
     });
@@ -2896,7 +2896,7 @@ export async function getTransactionQR(req, res) {
     }
   }
 
-  // Incluir QR estáticos del admin (Tigo Money, Banco Bisa, etc.)
+  // Incluir QR estáticos del admin (Tigo Money, Banco Económico, etc.)
   let paymentQRStatic = [];
   try {
     const srlConfig = await SRLConfig.getActive();
@@ -2949,7 +2949,7 @@ export async function getSRLPayinInstructions(req, res) {
   }
 
   return res.status(200).json({
-    bankName:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Bisa',
+    bankName:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
     accountHolder: bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
     accountNumber: bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
     accountType:   bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',

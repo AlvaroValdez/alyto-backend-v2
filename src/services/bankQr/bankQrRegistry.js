@@ -7,7 +7,7 @@
  *      y (recomendado) verifyIpn(req) → autentica el IPN entrante antes de acreditar.
  *      Si un banco no implementa verifyIpn, el handler de IPN debe rechazar por
  *      seguridad (no acreditar sin verificación).
- *   2. Importar y registrar aquí con un bankId único (ej. 'bisa', 'bnb', 'union')
+ *   2. Importar y registrar aquí con un bankId único (ej. 'bnb', 'union')
  *   3. Configurar las variables de entorno del banco nuevo
  *
  * El bankId se guarda en Transaction.bankQr.bankId para identificar qué banco
@@ -19,7 +19,7 @@ import * as becQrService from './banks/becQrService.js';
 /** @type {Map<string, IBankQrService>} */
 const REGISTRY = new Map([
   ['bec', becQrService],   // Banco Económico Bolivia
-  // ['bisa', bisaQrService],  // Banco Bisa (futuro)
+  // ['bnb', bnbQrService],  // Banco Nacional de Bolivia (futuro)
   // ['bnb',  bnbQrService],   // Banco Nacional de Bolivia (futuro)
 ]);
 

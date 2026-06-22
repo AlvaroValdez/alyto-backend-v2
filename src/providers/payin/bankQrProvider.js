@@ -8,14 +8,14 @@
  * Las instancias pre-construidas (becQrProvider) son las que van al providerRegistry.
  *
  * Patrón para agregar banco nuevo al registry:
- *   export const bisaQrProvider = createBankQrProvider('bisa');
+ *   export const bnbQrProvider = createBankQrProvider('bnb');
  *   // + registrar en providerRegistry.js
  */
 
 import { getBankQrService } from '../../services/bankQr/bankQrRegistry.js';
 
 /**
- * @param {string} bankId — ID del banco ('bec', 'bisa', ...)
+ * @param {string} bankId — ID del banco ('bec', 'bnb', ...)
  */
 export function createBankQrProvider(bankId) {
   return {

@@ -245,7 +245,7 @@ const transactionConfigSchema = new Schema(
 
     /**
      * Configuración específica de QR bancario (solo payinMethod: 'bankQr').
-     * bankId identifica el proveedor en bankQrRegistry (ej. 'bec', 'bisa').
+     * bankId identifica el proveedor en bankQrRegistry (ej. 'bec', 'bnb').
      * Al agregar un banco nuevo: registrar el service + poner aquí su bankId.
      */
     bankQrConfig: {
