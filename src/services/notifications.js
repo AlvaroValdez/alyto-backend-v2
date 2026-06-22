@@ -328,6 +328,15 @@ export const NOTIFICATIONS = {
     };
   },
 
+  // Depósito USDC on-chain recibido (SEP-24 / Stellar) — acreditado en la wallet.
+  usdcDepositReceived(amount) {
+    return {
+      title: 'USDC recibido ✓',
+      body:  `Recibiste ${Number(amount).toFixed(2)} USDC en tu wallet Alyto. El depósito fue acreditado.`,
+      data:  { type: 'usdc_deposit_received', amount: String(amount) },
+    };
+  },
+
   withdrawalRequested(amount) {
     return {
       title: 'Retiro en proceso',

@@ -33,7 +33,7 @@ import SystemConfig             from '../models/SystemConfig.js'
 import WalletUSDC               from '../models/WalletUSDC.js'
 import WalletTransaction        from '../models/WalletTransaction.js'
 import Transaction              from '../models/Transaction.js'
-import { sendPushNotification } from '../services/notifications.js'
+import { notify, NOTIFICATIONS } from '../services/notifications.js'
 
 const LEGACY_CURSOR_KEY = 'stellar:srl:cursor'                  // dirección SRL compartida (memo)
 const cursorKeyFor      = (addr) => `stellar:deposit:cursor:${addr}`
@@ -283,10 +283,8 @@ async function _processPayment(record, address, opts, stats) {
     txHash:      record.transaction_hash,
   })
 
-  // Push notification — fire-and-forget
-  sendPushNotification(wallet.userId, {
-    title: '💰 USDC recibido',
-    body:  `Recibiste ${amount.toFixed(2)} USDC en tu wallet Alyto.`,
-    data:  { type: 'usdc_deposit', amount: String(amount) },
-  }).catch(() => {})
+  // Notificación in-app PERSISTENTE (campanita) + push FCM — fire-and-forget.
+  // Mensaje de éxito al recepcionar los activos, visible en el centro de
+  // notificaciones aunque la pantalla de depósito esté cerrada o el push no llegue.
+  notify(wallet.userId, NOTIFICATIONS.usdcDepositReceived(amount)).catch(() => {})
 }
