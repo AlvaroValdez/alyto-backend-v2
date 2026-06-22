@@ -6,7 +6,9 @@
 // dudas de los usuarios sobre Alyto (cómo cargar la wallet, estados de
 // transacción genéricos, KYC, P2P, etc.) en lenguaje natural.
 //
-// Modelo: Sonnet (BEDROCK_MODEL_SMART) — conversacional, requiere razonamiento.
+// Modelo: BEDROCK_MODEL_SUPPORT (fallback BEDROCK_MODEL_SMART). Tarea acotada
+// (wallet, envíos cross-border, smart saving) → right-sizing a un modelo simple
+// (ej. Haiku 3.5) sin afectar el KYB que comparte BEDROCK_MODEL_SMART.
 //
 // ── Dos modos de operación ──────────────────────────────────────────────────
 //   A) Prompt Management (RECOMENDADO): el system prompt vive en la consola de
@@ -28,7 +30,13 @@ import * as Sentry from '@sentry/node';
 
 const ENABLED        = process.env.BEDROCK_SUPPORT_ENABLED === 'true';
 const REGION         = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
-const MODEL_SMART    = process.env.BEDROCK_MODEL_SMART || 'anthropic.claude-sonnet-4-6-20251001-v1:0';
+// Modelo del agente de soporte. Tarea acotada (wallet, envíos cross-border, smart
+// saving) → right-sizing a un modelo simple (ej. Haiku 3.5) sin afectar el KYB, que
+// comparte BEDROCK_MODEL_SMART y puede querer un modelo más fuerte. Var dedicada con
+// fallback a BEDROCK_MODEL_SMART y luego al default.
+const MODEL_SUPPORT  = process.env.BEDROCK_MODEL_SUPPORT
+  || process.env.BEDROCK_MODEL_SMART
+  || 'anthropic.claude-sonnet-4-6-20251001-v1:0';
 // ARN del prompt en Bedrock Prompt Management. Si está → modo A (gestionado).
 const PROMPT_ARN     = process.env.BEDROCK_SUPPORT_PROMPT_ARN || '';
 // Guardrail opcional de Bedrock (filtros de contenido / PII).
@@ -146,7 +154,7 @@ export async function askSupport({ userMessage, history = [], userContext = {} }
         .replace('{{SUPPORT_EMAIL}}', process.env.SUPPORT_EMAIL || 'soporte@alyto.app')
         .replace('{{SUPPORT_WHATSAPP}}', process.env.SUPPORT_WHATSAPP || '');
       command = new _converseCmd({
-        modelId: MODEL_SMART,
+        modelId: MODEL_SUPPORT,
         system: [
           { text: systemText },
           { text: `Contexto del usuario actual:\n${buildContextText(userContext)}` },
