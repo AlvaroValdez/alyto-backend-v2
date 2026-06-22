@@ -28,6 +28,7 @@
 
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
+import WalletUSDC        from '../models/WalletUSDC.js';
 import { calculateQuote } from './quoteCalculator.js';
 import { logger }         from '../utils/logger.js';
 import { ASSETS }         from '../config/stellar.js';
@@ -106,9 +107,24 @@ export async function initiateDeposit({ body, user }) {
   }
   const amt = amount ? parseFloat(amount) : 0;
 
-  // Dirección a la que el usuario debe enviar el USDC
-  const depositAddress = process.env.STELLAR_SRL_PUBLIC_KEY;
-  const depositMemo    = transactionId;
+  // Camino A (Fase 40): el depósito custodial va a la dirección Stellar PROPIA del
+  // usuario (SIN memo), NO a la tesorería SRL compartida. Reutiliza los helpers
+  // canónicos del flujo wallet para mantener consistencia con monitorUSDCDeposits,
+  // que acredita por dirección custodial. (Antes apuntaba a STELLAR_SRL_PUBLIC_KEY
+  // + memo `ALY-D-…`, que el monitor ignoraba como fondeo de tesorería → el
+  // depósito nunca se acreditaba y la tx quedaba colgada en sep24_deposit_pending.)
+  const { ensureCustodialDepositAddress, getOrCreateWalletUSDC } =
+    await import('../controllers/walletUSDCController.js');
+  const wallet = await getOrCreateWalletUSDC(userId);
+  const { publicKey: depositAddress, usdcTrustline } = await ensureCustodialDepositAddress(userId);
+  if (!depositAddress) {
+    throw Object.assign(new Error('No se pudo provisionar la dirección custodial del usuario'), { status: 500 });
+  }
+  // Sincronizar la dirección de la WalletUSDC (lazy-migración legacy → custodial)
+  // para que el monitor matchee por `stellarAddress`.
+  if (wallet.stellarAddress !== depositAddress || wallet.stellarMemo) {
+    await WalletUSDC.updateOne({ _id: wallet._id }, { stellarAddress: depositAddress, stellarMemo: null });
+  }
 
   // Crear registro de transacción en MongoDB (campos conformes al schema Transaction)
   const tx = await Transaction.create({
@@ -125,25 +141,26 @@ export async function initiateDeposit({ body, user }) {
     digitalAssetAmount:  amt,
     sep24Type:           'deposit',
     instructionAddress:  depositAddress,
-    instructionMemo:     depositMemo,
+    instructionMemo:     null,             // modelo custodial: sin memo
     expiresAt:           new Date(Date.now() + 60 * 60 * 1000), // 1 hora
   });
 
   // URL del widget interactivo (frontend Alyto)
   const interactiveUrl = `${FRONTEND_URL}/sep24/deposit?transaction_id=${transactionId}&lang=${lang}`;
 
-  logger.info('[sep24] Deposit initiated', { transactionId, userId, depositAddress });
+  logger.info('[sep24] Deposit initiated', { transactionId, userId, depositAddress, usdcTrustline });
 
   return {
     type:           'interactive_customer_info_needed',
     url:            interactiveUrl,
     id:             transactionId,
-    // Instrucciones de depósito (el cliente debe enviar USDC a esta dirección)
+    // Camino A: dirección custodial exclusiva del usuario, SIN memo.
     instruction:    {
       stellar_account: depositAddress,
-      memo_type:       'text',
-      memo:            depositMemo,
+      memo_type:       'none',
+      memo:            null,
     },
+    ready:           usdcTrustline,   // si false, la trustline USDC aún se está estableciendo
   };
 }
 

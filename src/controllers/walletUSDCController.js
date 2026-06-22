@@ -54,7 +54,7 @@ async function calcUsdcP2pFee(amount, accountType) {
 
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
 
-async function getOrCreateWalletUSDC(userId, session) {
+export async function getOrCreateWalletUSDC(userId, session) {
   const opts = session ? { session } : {}
   let wallet = await WalletUSDC.findOne({ userId }, null, opts)
   if (!wallet) {
@@ -85,7 +85,7 @@ async function getOrCreateWalletUSDC(userId, session) {
  * transaccional — provisionUserKeypair hace llamadas a Horizon (fund + trustline).
  * @returns {Promise<{publicKey: string, usdcTrustline: boolean}>}
  */
-async function ensureCustodialDepositAddress(userId) {
+export async function ensureCustodialDepositAddress(userId) {
   let owner     = await User.findById(userId, 'stellarAccount.publicKey stellarAccount.activeTrustlines').lean()
   let publicKey = owner?.stellarAccount?.publicKey ?? null
 

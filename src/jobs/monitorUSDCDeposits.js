@@ -32,6 +32,7 @@ import { horizonServer, ASSETS } from '../config/stellar.js'
 import SystemConfig             from '../models/SystemConfig.js'
 import WalletUSDC               from '../models/WalletUSDC.js'
 import WalletTransaction        from '../models/WalletTransaction.js'
+import Transaction              from '../models/Transaction.js'
 import { sendPushNotification } from '../services/notifications.js'
 
 const LEGACY_CURSOR_KEY = 'stellar:srl:cursor'                  // dirección SRL compartida (memo)
@@ -238,6 +239,39 @@ async function _processPayment(record, address, opts, stats) {
   }
 
   stats.credited++
+
+  // Reconciliación SEP-24 (Camino A): si el usuario tiene un depósito SEP-24
+  // pendiente (custodial, sin memo), marcarlo como completado con el crédito
+  // recibido para que el polling del cliente refleje el estado. Best-effort: la
+  // acreditación de la WalletUSDC de arriba ya es autoritativa; esto solo refleja
+  // el estado en la Transaction SEP-24. Solo aplica en modo custodial (los SEP-24
+  // deposit usan la dirección custodial del usuario, sin memo).
+  if (opts.mode === 'custodial') {
+    try {
+      const sep24Tx = await Transaction.findOneAndUpdate(
+        { userId: wallet.userId, sep24Type: 'deposit', status: 'sep24_deposit_pending' },
+        {
+          $set: {
+            status:             'completed',
+            stellarTxId:        record.transaction_hash,
+            digitalAssetAmount: amount,
+            statusMessage:      `Depósito USDC recibido (${amount} USDC)`,
+          },
+        },
+        { sort: { createdAt: 1 }, returnDocument: 'after' },   // el más antiguo pendiente
+      )
+      if (sep24Tx) {
+        console.info('[USDC Monitor] Depósito SEP-24 reconciliado → completed:', {
+          alytoTransactionId: sep24Tx.alytoTransactionId,
+          userId:             wallet.userId.toString(),
+          amount,
+        })
+      }
+    } catch (err) {
+      console.error('[USDC Monitor] Error reconciliando depósito SEP-24:', err.message)
+      Sentry.captureException(err, { tags: { job: 'monitorUSDCDeposits', step: 'sep24-reconcile' } })
+    }
+  }
 
   console.info('[USDC Monitor] Depósito USDC acreditado:', {
     userId:      wallet.userId.toString(),
