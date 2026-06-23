@@ -463,6 +463,14 @@ export const NOTIFICATIONS = {
     };
   },
 
+  adminDisbursementStuck(amount, wtxId) {
+    return {
+      title: 'Dispersión sin confirmar',
+      body:  `El retiro ${wtxId} (Bs. ${Number(amount).toFixed(2)}) fue enviado al banco pero no llegó la confirmación. Verificar en BANECO y liquidar.`,
+      data:  { type: 'admin_disbursement_stuck', wtxId },
+    };
+  },
+
   adminConversionRequest(bobAmount, usdcAmount, userName) {
     return {
       title: 'Conversión BOB→USDC pendiente',

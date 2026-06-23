@@ -738,6 +738,12 @@ async function startServer() {
       setInterval(reconcileBankQrPayments, 30 * 60 * 1000);            // cada 30 min
       console.info('[Server] Reconcile BankQR payments programado cada 30 min');
 
+      // Red de seguridad de dispersión BANECO (§9) — alerta retiros 'dispatched' sin confirmar
+      const { reconcileBecDisbursements } = await import('./jobs/reconcileBecDisbursements.js');
+      setTimeout(reconcileBecDisbursements, 7 * 60 * 1000);            // primera corrida 7 min post-start
+      setInterval(reconcileBecDisbursements, 30 * 60 * 1000);          // cada 30 min
+      console.info('[Server] Reconcile BEC disbursements programado cada 30 min');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
