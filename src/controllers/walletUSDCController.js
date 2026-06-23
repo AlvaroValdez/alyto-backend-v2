@@ -631,15 +631,24 @@ async function getUSDCtoBOBRate() {
 }
 
 /**
- * Hook de liquidez BOB — BEC-ready. Fase 1: la liquidez BOB la respalda
- * operativamente el admin (reservas en banco), por eso devuelve ok=true. Cuando
- * BANECO exponga balance/dispersión, esta función consultará el ledger de
- * tesorería BOB (BOBFundingRecord, "en-banco manda") y bloqueará el confirm si no
- * hay BOB suficiente — sin tocar el resto del flujo. Ese es el único punto que
- * cambia el día que se automatice BANECO.
+ * Hook de liquidez BOB — BEC-ready. Por defecto la liquidez BOB la respalda
+ * operativamente el admin (reservas en banco) → ok=true, source='manual'.
+ *
+ * Cuando WALLET_BANECO_LIQUIDITY_CHECK=true, consulta el saldo disponible real de la
+ * cuenta de tesorería BANECO (queryMovements §8) y bloquea si no alcanza. La consulta
+ * es defensiva: si el banco no responde, NO bloquea (cae a 'manual') — la liquidez es
+ * un guard, no debe tumbar el flujo por un error transitorio del banco.
  */
-async function checkBOBLiquidity(_bobAmount) {
-  return { ok: true, available: null, source: 'manual' }
+async function checkBOBLiquidity(bobAmount) {
+  if (process.env.WALLET_BANECO_LIQUIDITY_CHECK !== 'true') {
+    return { ok: true, available: null, source: 'manual' }
+  }
+  const { tryGetAvailableBalance } = await import('../services/bank/becAccountService.js')
+  const { available, ok } = await tryGetAvailableBalance()
+  if (!ok || available == null) {
+    return { ok: true, available: null, source: 'bank-unavailable' }  // fail-open: no bloquear por error del banco
+  }
+  return { ok: available >= bobAmount, available, source: 'bank' }
 }
 
 /**

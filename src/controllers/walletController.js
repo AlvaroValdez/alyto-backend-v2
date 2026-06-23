@@ -1552,6 +1552,210 @@ export async function adminRejectWithdrawal(req, res) {
   }
 }
 
+// ─── DISPERSIÓN BANCARIA BANECO (§9 Planillas de pagos) ──────────────────────
+// Automatiza el retiro BOB → cuenta del usuario vía el servicio de dispersión.
+// Disparo admin-triggered (checkpoint humano). El saldo sigue reservado hasta que
+// el banco confirme por webhook (notifyStatus → settleDispatchedWithdrawal).
+
+/**
+ * POST /api/v1/admin/wallet/withdrawal/dispatch
+ * Admin dispara la dispersión de un retiro 'pending' (solo method='bank').
+ * Body: { wtxId, bankCode?, amlSource?, amlDestination?, beneficiaryDocId? }
+ */
+export async function adminDispatchWithdrawal(req, res) {
+  try {
+    const admin = req.user
+    const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId } = req.body
+    if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
+    const wtx = await WalletTransaction.findOne({ wtxId })
+    if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
+      return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
+    }
+
+    const meta = wtx.metadata ?? {}
+    if (meta.method !== 'bank') {
+      return res.status(400).json({ error: 'La dispersión automática solo aplica a retiros a cuenta bancaria (method=bank). Los retiros vía QR se procesan manualmente.' })
+    }
+    const destBankCode = bankCode ?? meta.bankCode
+    if (!destBankCode) {
+      return res.status(400).json({ error: 'bankCode (código ASFI de la entidad financiera destino) es requerido para dispersar.' })
+    }
+
+    // Pre-check de liquidez en BANECO (gated). Solo bloquea si la consulta responde
+    // y el saldo es insuficiente; un error del banco no bloquea (fail-open).
+    if (process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true') {
+      const { tryGetAvailableBalance } = await import('../services/bank/becAccountService.js')
+      const { available, ok } = await tryGetAvailableBalance()
+      if (ok && available != null && available < wtx.amount) {
+        return res.status(409).json({ error: `Liquidez BOB insuficiente en BANECO. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
+      }
+    }
+
+    // Guard atómico pending → dispatched ANTES de llamar al banco — previene
+    // doble dispersión si dos admins disparan a la vez.
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'pending' },
+      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, dispatchedBy: admin._id, dispatchedAt: new Date() } },
+    )
+    if (claim.modifiedCount === 0) return res.status(409).json({ error: 'El retiro ya fue procesado.' })
+
+    const user = await User.findById(wtx.userId).lean()
+    const { transfer } = await import('../services/bank/becDisbursementService.js')
+
+    let result
+    try {
+      result = await transfer({
+        batchId:       wtx.wtxId,
+        batchDetailId: wtx.wtxId,
+        amount:        wtx.amount,
+        currency:      'BOB',
+        description:   `Retiro Alyto ${wtx.wtxId}`,
+        beneficiary: {
+          accountCode: meta.accountNumber,
+          bankCode:    destBankCode,
+          name:        meta.accountHolder,
+          accountType: meta.accountType,
+          ...(beneficiaryDocId ? { docId: beneficiaryDocId } : {}),
+          ...(user?.email ? { email: user.email } : {}),
+        },
+        amlData: {
+          source:      amlSource ?? 'Conversión de activos virtuales en billetera Alyto (PSAV)',
+          destination: amlDestination ?? `Retiro a cuenta bancaria del titular ${meta.accountHolder ?? ''}`.trim(),
+        },
+      })
+    } catch (err) {
+      // Revertir a pending para permitir reintento — no se movió dinero.
+      await WalletTransaction.updateOne({ _id: wtx._id, status: 'dispatched' }, { status: 'pending' }).catch(() => {})
+      Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })
+      console.error('[Wallet] Error dispersando retiro:', err.message)
+      return res.status(502).json({ error: `Error al dispersar el retiro en el banco: ${err.message}` })
+    }
+
+    await WalletTransaction.updateOne(
+      { _id: wtx._id },
+      { $set: { 'metadata.bankBatchId': result.bankBatchId, 'metadata.dispatchMock': !!result._mock } },
+    )
+
+    notify(wtx.userId, {
+      title: 'Retiro en proceso',
+      body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue enviado al banco y se acreditará en breve.`,
+      type:  'wallet',
+    }).catch(() => {})
+
+    return res.json({ wtxId, status: 'dispatched', bankBatchId: result.bankBatchId, mock: !!result._mock })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })
+    console.error('[Wallet] Error en adminDispatchWithdrawal:', err.message)
+    return res.status(500).json({ error: 'Error al dispersar el retiro.' })
+  }
+}
+
+/**
+ * Liquida un retiro 'dispatched' según la confirmación del banco (§9.2 notifyStatus).
+ * Idempotente y atómico. Lo invoca el handler de IPN y el job de reconciliación.
+ *
+ *   accepted=true  → debita saldo + libera reserva + status completed
+ *   accepted=false → libera reserva (sin debitar) + status failed
+ *
+ * @param {string} wtxId
+ * @param {{ accepted: boolean, bankReference?: string, reason?: string }} outcome
+ * @returns {Promise<{ ok: boolean, status?: string, reason?: string }>}
+ */
+export async function settleDispatchedWithdrawal(wtxId, { accepted, bankReference, reason } = {}) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+    if (!wtx || wtx.type !== 'withdrawal') { await session.abortTransaction(); return { ok: false, reason: 'not-found' } }
+    if (wtx.status === 'completed' || wtx.status === 'failed') {
+      await session.abortTransaction(); return { ok: true, reason: 'already-settled', status: wtx.status }
+    }
+    if (wtx.status !== 'dispatched') { await session.abortTransaction(); return { ok: false, reason: `bad-status-${wtx.status}` } }
+
+    const wallet      = await WalletBOB.findById(wtx.walletId).session(session)
+    const prevBalance = wallet?.balance ?? wtx.balanceAfter ?? 0
+
+    if (accepted) {
+      const newBalance = prevBalance - wtx.amount
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'dispatched' },
+        {
+          status:        'completed',
+          balanceBefore: prevBalance,
+          balanceAfter:  newBalance,
+          confirmedAt:   new Date(),
+          reference:     bankReference ?? wtx.reference,
+          metadata:      { ...(wtx.metadata ?? {}), bankReference: bankReference ?? wtx.metadata?.bankReference, settledVia: 'baneco-notifyStatus' },
+        },
+        { session },
+      )
+      if (claim.modifiedCount === 0) { await session.abortTransaction(); return { ok: true, reason: 'race' } }
+      await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } }, { session })
+      await session.commitTransaction()
+      notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
+        title: 'Retiro procesado',
+        body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
+        type:  'wallet',
+      }).catch(() => {})
+      return { ok: true, status: 'completed' }
+    }
+
+    // Rechazado por el banco: liberar reserva, no debitar.
+    const claim = await WalletTransaction.updateOne(
+      { _id: wtx._id, status: 'dispatched' },
+      {
+        status:        'failed',
+        balanceBefore: prevBalance,
+        balanceAfter:  prevBalance,
+        metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? 'Rechazado por el banco', settledVia: 'baneco-notifyStatus' },
+      },
+      { session },
+    )
+    if (claim.modifiedCount === 0) { await session.abortTransaction(); return { ok: true, reason: 'race' } }
+    await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balanceReserved: -wtx.amount } }, { session })
+    await session.commitTransaction()
+    notify(wtx.userId, {
+      title: 'Retiro rechazado',
+      body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} no pudo procesarse en el banco. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
+      type:  'wallet',
+    }).catch(() => {})
+    return { ok: true, status: 'failed' }
+
+  } catch (err) {
+    await session.abortTransaction()
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'settleDispatchedWithdrawal' } })
+    console.error('[Wallet] Error en settleDispatchedWithdrawal:', err.message)
+    return { ok: false, reason: err.message }
+  } finally {
+    session.endSession()
+  }
+}
+
+/**
+ * POST /api/v1/admin/wallet/withdrawal/simulate-settle  (solo staging/mock)
+ * Simula la confirmación del banco para probar el flujo de dispersión end-to-end
+ * sin un webhook real. Bloqueado si la dispersión real está habilitada con banco real.
+ * Body: { wtxId, accepted?, bankReference?, reason? }
+ */
+export async function adminSimulateWithdrawalSettlement(req, res) {
+  const disbursementLive = process.env.WALLET_BANECO_DISBURSEMENT_ENABLED === 'true'
+    && process.env.BEC_MOCK_ENABLED !== 'true'
+  if (disbursementLive) {
+    return res.status(403).json({ error: 'Simulación deshabilitada: la dispersión real está activa. La confirmación llega por el webhook del banco.' })
+  }
+  const { wtxId, accepted = true, bankReference, reason } = req.body
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+  const result = await settleDispatchedWithdrawal(wtxId, {
+    accepted: accepted !== false,
+    bankReference: bankReference ?? `SIM-${Date.now()}`,
+    reason,
+  })
+  if (!result.ok) return res.status(409).json({ error: `No se pudo liquidar: ${result.reason}` })
+  return res.json({ wtxId, ...result })
+}
+
 // ─── FUNCIÓN 15: GET /api/v1/wallet/balance-history ──────────────────────────
 
 /**

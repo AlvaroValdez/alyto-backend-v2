@@ -79,7 +79,10 @@ const walletTransactionSchema = new mongoose.Schema({
     // 'awaiting_proof' = depósito iniciado sin comprobante (manual) o sin QR válido
     // (bankQr) — NO acreditable ni visible en la cola admin hasta que se adjunte el
     // comprobante o el banco devuelva un QR válido. Pasa a 'pending' recién entonces.
-    enum:    ['awaiting_proof', 'pending', 'completed', 'failed', 'reversed'],
+    // 'dispatched' = retiro enviado a dispersión bancaria (BANECO §9 Planillas) y a la
+    // espera de la confirmación notifyStatus (ACEP→completed / RECH→failed). El saldo
+    // sigue reservado hasta que el banco confirme.
+    enum:    ['awaiting_proof', 'pending', 'dispatched', 'completed', 'failed', 'reversed'],
     default: 'pending',
   },
   /** Referencia bancaria o wtxId usado como concepto de transferencia */

@@ -28,7 +28,7 @@ import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import User              from '../models/User.js';
-import { confirmBankQrDeposit } from './walletController.js';
+import { confirmBankQrDeposit, settleDispatchedWithdrawal } from './walletController.js';
 import { getBankQrService }     from '../services/bankQr/bankQrRegistry.js';
 import {
   createPayout,
@@ -3002,4 +3002,75 @@ export function handleBankQrIPN(bankId) {
 
     return res.status(200).json(OK);
   };
+}
+
+// ─── handleBecDisbursementIPN ─────────────────────────────────────────────────
+
+/**
+ * IPN de confirmación de estado de dispersión bancaria (BANECO §9.2 notifyStatus).
+ *
+ * El banco hace POST a POST /api/v1/ipn/bec-disbursement por cada pago del detalle
+ * de la planilla, con su estado final. Liquidamos el retiro asociado:
+ *   ACEP → completa el retiro (debita saldo + libera reserva)
+ *   RECH → rechaza el retiro (libera reserva, no debita)
+ *
+ * Payload §9.2 (notifyStatus): {
+ *   bankBatchId, batchId, batchDetailId, status ('ACEP'|'RECH'),
+ *   descriptionStatus, transactionIdDebit, transactionIdCredit
+ * }
+ * Mapeamos por batchDetailId/batchId == wtxId (lo enviamos como ID externo).
+ *
+ * Responde 200 { responseCode: 0 } siempre, para evitar reintentos del banco ante
+ * errores internos nuestros (el job reconcileBecDisbursements es la red de seguridad).
+ */
+export async function handleBecDisbursementIPN(req, res) {
+  const OK = { responseCode: 0, message: '' };
+  const b  = req.body ?? {};
+  const wtxId = b.batchDetailId ?? b.batchId;
+
+  logger.info('[BEC Disbursement IPN] Confirmación recibida', {
+    wtxId, status: b.status, bankBatchId: b.bankBatchId,
+  });
+
+  if (!wtxId || !b.status) {
+    logger.warn('[BEC Disbursement IPN] Payload sin batchDetailId/status', { body: b });
+    return res.status(200).json(OK);
+  }
+
+  // ── Gate de autenticidad (HMAC opcional + validación estructural) ──
+  let verifyNotifyStatus, mapNotifyStatus;
+  try {
+    ({ verifyNotifyStatus, mapNotifyStatus } = await import('../services/bank/becDisbursementService.js'));
+  } catch (err) {
+    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' } });
+    return res.status(200).json(OK);
+  }
+
+  const auth = verifyNotifyStatus(req);
+  if (!auth.ok) {
+    logger.warn('[BEC Disbursement IPN] No autenticado — ignorando', { wtxId, reason: auth.reason });
+    Sentry.captureMessage(`BEC Disbursement IPN rejected: ${auth.reason}`, {
+      level: 'warning', extra: { wtxId, status: b.status },
+    });
+    return res.status(200).json(OK);
+  }
+
+  const outcome = mapNotifyStatus(b.status);
+  if (outcome === 'unknown') {
+    logger.warn(`[BEC Disbursement IPN] Status desconocido: ${b.status}`, { wtxId });
+    return res.status(200).json(OK);
+  }
+
+  try {
+    const result = await settleDispatchedWithdrawal(wtxId, {
+      accepted:      outcome === 'accepted',
+      bankReference: b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
+      reason:        b.descriptionStatus,
+    });
+    logger.info(`[BEC Disbursement IPN] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
+  } catch (err) {
+    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' }, extra: { wtxId } });
+  }
+
+  return res.status(200).json(OK);
 }

@@ -105,6 +105,8 @@ import {
   adminListPendingWithdrawals,
   adminConfirmWithdrawal,
   adminRejectWithdrawal,
+  adminDispatchWithdrawal,
+  adminSimulateWithdrawalSettlement,
 } from '../controllers/walletController.js';
 import {
   adminListPendingConversions,
@@ -610,10 +612,14 @@ router.post('/wallet/deposit/confirm',   adminConfirmDeposit);
  * GET  /api/v1/admin/wallet/withdrawals/pending  — Lista retiros pendientes BOB
  * POST /api/v1/admin/wallet/withdrawal/confirm   — Confirma retiro (transfiere) + comprobante opcional (multipart 'comprobante')
  * POST /api/v1/admin/wallet/withdrawal/reject    — Rechaza retiro (libera reserva)
+ * POST /api/v1/admin/wallet/withdrawal/dispatch  — Dispersa retiro vía BANECO (§9 Planillas) → estado 'dispatched'
+ * POST /api/v1/admin/wallet/withdrawal/simulate-settle — (staging/mock) simula la confirmación del banco
  */
 router.get('/wallet/withdrawals/pending',  adminListPendingWithdrawals);
 router.post('/wallet/withdrawal/confirm',  proofUpload.single('comprobante'), adminConfirmWithdrawal);
 router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
+router.post('/wallet/withdrawal/dispatch', adminDispatchWithdrawal);
+router.post('/wallet/withdrawal/simulate-settle', adminSimulateWithdrawalSettlement);
 
 /**
  * PATCH /api/v1/admin/wallet/:userId/freeze

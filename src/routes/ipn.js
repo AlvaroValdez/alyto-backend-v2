@@ -21,7 +21,7 @@
  */
 
 import { Router }                               from 'express';
-import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN } from '../controllers/ipnController.js';
+import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN, handleBecDisbursementIPN } from '../controllers/ipnController.js';
 
 const router = Router();
 
@@ -128,5 +128,16 @@ router.post('/owlpay', captureRawBody, handleOwlPayIPN);
  * Para agregar otro banco: duplicar las dos líneas con el bankId correspondiente.
  */
 router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
+
+/**
+ * POST /api/v1/ipn/bec-disbursement
+ *
+ * IPN de confirmación de estado de dispersión BANECO (§9.2 notifyStatus).
+ * El banco hace POST aquí por cada pago del detalle de una planilla (ACEP/RECH).
+ * Liquida el retiro asociado (debita+completa o libera+rechaza).
+ *
+ * Registrar esta URL como `notifyStatus` en el onboarding del webhook con BANECO.
+ */
+router.post('/bec-disbursement', captureRawBody, handleBecDisbursementIPN);
 
 export default router;
