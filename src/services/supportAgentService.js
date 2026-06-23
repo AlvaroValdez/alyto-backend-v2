@@ -34,9 +34,14 @@ const REGION         = process.env.BEDROCK_REGION || process.env.AWS_REGION || '
 // saving) → right-sizing a un modelo simple (ej. Haiku 3.5) sin afectar el KYB, que
 // comparte BEDROCK_MODEL_SMART y puede querer un modelo más fuerte. Var dedicada con
 // fallback a BEDROCK_MODEL_SMART y luego al default.
+// ⚠️ Default = inference profile us.* REAL y vigente. Claude 3.5 Haiku y los ids
+// "pelados" (sin prefijo us.) NO son invocables on-demand / están EOL en la cuenta
+// (verificado contra Bedrock 2026-06-23). Soporte usa Haiku 4.5: ya suscrito en la
+// cuenta, barato y suficiente para la tarea acotada. Siempre setear BEDROCK_MODEL_SUPPORT
+// con el id de TU consola; este default es solo el último recurso.
 const MODEL_SUPPORT  = process.env.BEDROCK_MODEL_SUPPORT
   || process.env.BEDROCK_MODEL_SMART
-  || 'anthropic.claude-sonnet-4-6-20251001-v1:0';
+  || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 // ARN del prompt en Bedrock Prompt Management. Si está → modo A (gestionado).
 const PROMPT_ARN     = process.env.BEDROCK_SUPPORT_PROMPT_ARN || '';
 // Guardrail opcional de Bedrock (filtros de contenido / PII).
