@@ -1389,7 +1389,9 @@ export async function uploadDepositProof(req, res) {
 
 export async function adminListPendingWithdrawals(req, res) {
   try {
-    const pending = await WalletTransaction.find({ type: 'withdrawal', status: 'pending' })
+    // Incluye 'dispatched' (enviado a dispersión BANECO, a la espera de notifyStatus)
+    // para que el admin pueda dar seguimiento / liquidar manualmente desde la misma lista.
+    const pending = await WalletTransaction.find({ type: 'withdrawal', status: { $in: ['pending', 'dispatched'] } })
       .sort({ createdAt: -1 })
       .populate('userId', 'firstName lastName email kycStatus legalEntity')
       .lean()
