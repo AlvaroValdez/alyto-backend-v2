@@ -253,19 +253,37 @@ export async function getTreasuryCoverage(req, res) {
     const ratio = (treasury, liability) =>
       (treasury == null || liability == null || liability === 0) ? null : Number((treasury / liability).toFixed(4));
 
+    // Estado de solvencia explícito por activo. 'undercollateralized' = la tesorería
+    // NO alcanza a cubrir el pasivo a usuarios → alerta dura (compromiso dual-ledger
+    // ASFI). 'unknown' = no pudimos leer la tesorería (banco/Stellar caído) → NO afirmar
+    // que está cubierto. 'no_liability' = no hay saldo de usuarios que cubrir.
+    const solvency = (treasuryAvail, liabBalance) => {
+      if (treasuryAvail == null) return 'unknown';
+      if (liabBalance === 0)     return 'no_liability';
+      return treasuryAvail >= liabBalance ? 'covered' : 'undercollateralized';
+    };
+
+    const bobStatus  = solvency(bobTreasury.available,  bobLiab.balance);
+    const usdcStatus = solvency(usdcTreasury.available, usdcLiab.balance);
+    const undercollateralized = [bobStatus, usdcStatus].filter(s => s === 'undercollateralized');
+
     return res.json({
       entity,
+      // Bandera de alerta agregada para que el FE (y futuros jobs/notifs) reaccionen.
+      alert: undercollateralized.length > 0,
       bob: {
         treasury:    bobTreasury,
         liabilities: bobLiab,
         coverageRatio: ratio(bobTreasury.available, bobLiab.balance),
         surplus:       bobTreasury.available != null ? Number((bobTreasury.available - bobLiab.balance).toFixed(2)) : null,
+        status:        bobStatus,
       },
       usdc: {
         treasury:    usdcTreasury,
         liabilities: usdcLiab,
         coverageRatio: ratio(usdcTreasury.available, usdcLiab.balance),
         surplus:       usdcTreasury.available != null ? Number((usdcTreasury.available - usdcLiab.balance).toFixed(6)) : null,
+        status:        usdcStatus,
       },
       checkedAt: new Date().toISOString(),
     });
