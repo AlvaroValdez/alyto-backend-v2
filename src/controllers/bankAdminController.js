@@ -237,34 +237,51 @@ export async function getTreasuryCoverage(req, res) {
       }
     }
 
-    // Tesorería USDC: saldo on-chain de la wallet Stellar de la entidad (best-effort).
-    let usdcTreasury = { available: null, source: 'unavailable' };
+    // Tesorería USDC: el respaldo TOTAL = tesorería disponible (saldo on-chain − payouts
+    // en vuelo, respalda las conversiones) + custodia (USDC en las cuentas custodiales de
+    // los usuarios, respalda los depósitos — modelo Fase 40). Comparar SOLO la tesorería
+    // contra Σ WalletUSDC sería incorrecto: ignoraría el respaldo custodial de los
+    // depósitos → falso déficit.
+    let usdcTreasury = { available: null, source: 'unavailable', partial: true };
     try {
-      const { getStellarUSDCBalance } = await import('../services/stellarService.js');
-      const pubKey = entity === 'LLC' ? process.env.STELLAR_LLC_PUBLIC_KEY : process.env.STELLAR_SRL_PUBLIC_KEY;
-      if (pubKey) {
-        const usdc = await getStellarUSDCBalance(pubKey);
-        usdcTreasury = { available: usdc, source: 'stellar', publicKey: pubKey };
-      }
+      const { getUSDCAvailableNow, getCustodialUSDCBacking } = await import('../services/treasuryLiquidity.js');
+      const [treas, cust] = await Promise.all([
+        getUSDCAvailableNow(entity),
+        getCustodialUSDCBacking(),
+      ]);
+      const total = treas.available == null ? null : Number((treas.available + cust.sum).toFixed(6));
+      usdcTreasury = {
+        available:         total,             // respaldo total disponible para saldos USDC
+        treasuryAvailable: treas.available,   // respalda conversiones (tesorería − en vuelo)
+        treasuryOnchain:   treas.treasury,
+        inflight:          treas.inflight,
+        custodial:         cust.sum,          // respalda depósitos
+        custodialAccounts: cust.addresses,
+        partial:           cust.partial,
+        source:            'stellar+custodial',
+      };
     } catch (e) {
-      usdcTreasury = { available: null, source: 'stellar-error', error: e.message };
+      usdcTreasury = { available: null, source: 'stellar-error', error: e.message, partial: true };
     }
 
     const ratio = (treasury, liability) =>
       (treasury == null || liability == null || liability === 0) ? null : Number((treasury / liability).toFixed(4));
 
-    // Estado de solvencia explícito por activo. 'undercollateralized' = la tesorería
-    // NO alcanza a cubrir el pasivo a usuarios → alerta dura (compromiso dual-ledger
-    // ASFI). 'unknown' = no pudimos leer la tesorería (banco/Stellar caído) → NO afirmar
-    // que está cubierto. 'no_liability' = no hay saldo de usuarios que cubrir.
-    const solvency = (treasuryAvail, liabBalance) => {
-      if (treasuryAvail == null) return 'unknown';
-      if (liabBalance === 0)     return 'no_liability';
-      return treasuryAvail >= liabBalance ? 'covered' : 'undercollateralized';
+    // Estado de solvencia explícito por activo. 'undercollateralized' = el respaldo NO
+    // alcanza a cubrir el pasivo a usuarios → alerta dura (compromiso dual-ledger ASFI).
+    // 'unknown' = no se pudo leer el respaldo (banco/Stellar caído o lectura custodial
+    // parcial) → NO afirmar cubierto NI déficit. 'no_liability' = no hay saldo que cubrir.
+    const solvency = (avail, liabBalance) => {
+      if (avail == null) return 'unknown';
+      if (liabBalance === 0) return 'no_liability';
+      return avail >= liabBalance ? 'covered' : 'undercollateralized';
     };
 
-    const bobStatus  = solvency(bobTreasury.available,  bobLiab.balance);
-    const usdcStatus = solvency(usdcTreasury.available, usdcLiab.balance);
+    const bobStatus = solvency(bobTreasury.available, bobLiab.balance);
+    // USDC: además 'unknown' si el respaldo custodial vino incompleto (partial).
+    const usdcStatus = (usdcLiab.balance > 0 && usdcTreasury.partial && usdcTreasury.available != null)
+      ? 'unknown'
+      : solvency(usdcTreasury.available, usdcLiab.balance);
     const undercollateralized = [bobStatus, usdcStatus].filter(s => s === 'undercollateralized');
 
     return res.json({

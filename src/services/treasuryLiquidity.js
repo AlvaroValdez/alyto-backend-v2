@@ -15,6 +15,7 @@
  */
 
 import Transaction from '../models/Transaction.js';
+import WalletUSDC from '../models/WalletUSDC.js';
 import { getStellarUSDCBalance } from './stellarService.js';
 
 const INFLIGHT_STATUSES = ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'];
@@ -42,4 +43,55 @@ export async function getUSDCAvailableNow(entity = 'SRL') {
   return { available: Math.max(0, treasury - inflight), treasury, inflight };
 }
 
-export default { getUSDCAvailableNow };
+// ── Respaldo custodial (Fase 40) ────────────────────────────────────────────────
+
+let _custodialCache = null;
+const CUSTODIAL_TTL_MS = Number(process.env.USDC_CUSTODIAL_CACHE_MS ?? 60_000);
+
+/**
+ * Suma el USDC on-chain en TODAS las direcciones custodiales activas. Es el respaldo de
+ * los saldos USDC DEPOSITADOS por usuarios (modelo Fase 40: los depósitos caen en la
+ * cuenta custodial propia de cada usuario, NO en la tesorería). Necesario para medir la
+ * solvencia USDC sin falsos negativos.
+ *
+ * O(N) cuentas → cacheado (TTL `USDC_CUSTODIAL_CACHE_MS`, default 60s; `getStellarUSDCBalance`
+ * además cachea 30s por cuenta). Lectura por-cuenta defensiva:
+ *   - cuenta sin fondear (404) → 0 (getStellarUSDCBalance ya lo maneja), NO es falla.
+ *   - error de red → cuenta como falla → `partial: true` para que el caller NO afirme
+ *     sub-colateralización con respaldo incompleto.
+ *
+ * @returns {Promise<{ sum:number, partial:boolean, addresses:number, failures:number }>}
+ */
+export async function getCustodialUSDCBacking({ fresh = false } = {}) {
+  if (!fresh && _custodialCache && Date.now() - _custodialCache.at < CUSTODIAL_TTL_MS) {
+    return _custodialCache;
+  }
+
+  const srlShared = process.env.STELLAR_SRL_PUBLIC_KEY ?? null;
+  const addresses = await WalletUSDC.distinct('stellarAddress', {
+    stellarAddress: { $nin: [null, '', srlShared] },
+    status:         'active',
+  });
+
+  let sum = 0;
+  let failures = 0;
+  for (const addr of addresses) {
+    try {
+      sum += await getStellarUSDCBalance(addr); // 404 → 0 dentro de la función
+    } catch {
+      failures += 1; // error de red → respaldo parcial
+    }
+  }
+
+  const result = {
+    sum:       Number(sum.toFixed(7)),
+    partial:   failures > 0,
+    addresses: addresses.length,
+    failures,
+    at:        Date.now(),
+  };
+  _custodialCache = result;
+  return result;
+}
+
+export default { getUSDCAvailableNow, getCustodialUSDCBacking };

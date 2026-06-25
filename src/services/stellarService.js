@@ -878,10 +878,14 @@ export async function unfreezeUserTrustline(stellarPublicKey, assetCode = 'USDC'
 
 // ─── 9. USDC Balance + Trustline Check — para pre-flight Harbor sends ────────
 
-let _srlBalanceCache = { value: null, expiresAt: 0 };
+// Cache de saldo USDC POR cuenta (keyed por publicKey). Antes era una sola variable
+// global → devolvía el saldo de UNA cuenta para CUALQUIER otra dentro de la ventana de
+// 30s (bug: getFundingBalance itera entidades; el coverage suma direcciones custodiales).
+const _usdcBalanceCache = new Map(); // resolvedKey → { value, expiresAt }
+const USDC_BALANCE_TTL_MS = 30_000;
 
 export function __resetSRLBalanceCacheForTest() {
-  _srlBalanceCache = { value: null, expiresAt: 0 };
+  _usdcBalanceCache.clear();
 }
 
 /**
@@ -897,37 +901,37 @@ export function __resetSRLBalanceCacheForTest() {
  * Result is cached for 30 seconds to avoid hammering Horizon.
  */
 export async function getStellarUSDCBalance(publicKey) {
-  if (Date.now() < _srlBalanceCache.expiresAt && _srlBalanceCache.value !== null) {
-    return _srlBalanceCache.value;
-  }
-
   const key = publicKey
     ?? process.env.STELLAR_MASTER_PUBLIC
     ?? _getSRLPublicKey();
 
-  const account = await horizonServer.loadAccount(key);
+  const cached = _usdcBalanceCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+
+  let account;
+  try {
+    account = await horizonServer.loadAccount(key);
+  } catch (err) {
+    // Cuenta aún no creada/fondeada → 0 USDC (correcto). Solo tragamos el 404; los
+    // errores de red se propagan para que el caller NO asuma un 0 falso.
+    if (err?.response?.status === 404 || err?.name === 'NotFoundError') {
+      _usdcBalanceCache.set(key, { value: 0, expiresAt: Date.now() + USDC_BALANCE_TTL_MS });
+      return 0;
+    }
+    throw err;
+  }
 
   // Issuer derivado de la red (config) — el MISMO que se usa al enviar (getUSDCAsset).
   // Nunca contar "cualquier issuer": en mainnet podrían coexistir USDC de otro issuer.
   const usdcCode   = ASSETS.USDC.getCode();
   const usdcIssuer = ASSETS.USDC.getIssuer();
 
-  console.log('[Stellar] Balances on account:', account.balances.map((b) => ({
-    code:    b.asset_code,
-    issuer:  b.asset_issuer?.slice(0, 8),
-    balance: b.balance,
-  })));
-
   const usdcEntry = account.balances.find(
     (b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer,
   );
-
   const balance = usdcEntry ? parseFloat(usdcEntry.balance) : 0;
 
-  console.log('[Stellar] USDC balance:', balance,
-    usdcIssuer ? `(issuer: ${usdcIssuer.slice(0, 8)})` : '(any issuer)');
-
-  _srlBalanceCache = { value: balance, expiresAt: Date.now() + 30_000 };
+  _usdcBalanceCache.set(key, { value: balance, expiresAt: Date.now() + USDC_BALANCE_TTL_MS });
   return balance;
 }
 
@@ -1064,7 +1068,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
 
       const result = await horizonServer.submitTransaction(tx);
 
-      _srlBalanceCache = { value: null, expiresAt: 0 };
+      _usdcBalanceCache.clear();
 
       console.log('[Stellar] USDC sent to Harbor:', result.hash, '| tx:', transactionId);
       return { hash: result.hash, ledger: result.ledger, successful: result.successful, existing: false };
