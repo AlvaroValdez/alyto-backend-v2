@@ -96,6 +96,13 @@ import {
   updateSpAConfig,
 } from '../controllers/spaConfigController.js';
 import {
+  listBanks,
+  getBankBalance,
+  getBankMovements,
+  getTreasuryCoverage,
+  getUserWalletSummary,
+} from '../controllers/bankAdminController.js';
+import {
   adminListWallets,
   adminListPendingDeposits,
   adminGetDepositComprobante,
@@ -366,6 +373,21 @@ router.get('/funding/balance', getFundingBalance);
  * Responde: { alertLevel, stellar, committed, availableNow, pendingFunding, gap, fundingNeeded, recommendation }
  */
 router.get('/funding/forecast', getUSDCForecast);
+
+/**
+ * ── Monitoreo bancario (bank-agnostic, Fase 1 read-only) ──────────────────────
+ * GET /api/v1/admin/banks                        — registro de cuentas bancarias
+ * GET /api/v1/admin/banks/:code/balance          — saldo en vivo (§8, cacheado; ?fresh=1)
+ * GET /api/v1/admin/banks/:code/movements        — extracto normalizado (?from&to yyyy-MM-dd)
+ * GET /api/v1/admin/treasury/coverage            — tesorería vs pasivo a usuarios (BOB+USDC)
+ * GET /api/v1/admin/users/:userId/wallet-summary — saldos + movimientos del usuario
+ * Las rutas específicas van ANTES de las que tienen :code para no colisionar.
+ */
+router.get('/banks/:code/balance',   getBankBalance);
+router.get('/banks/:code/movements', getBankMovements);
+router.get('/banks',                 listBanks);
+router.get('/treasury/coverage',     getTreasuryCoverage);
+router.get('/users/:userId/wallet-summary', getUserWalletSummary);
 
 /**
  * Fondeo de tesorería — Intents (Camino A, H3).
