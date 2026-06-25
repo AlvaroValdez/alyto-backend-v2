@@ -405,6 +405,32 @@ export async function adminConfirmBOBtoUSDC(req, res) {
       return res.status(404).json({ error: 'WalletUSDC no encontrada.' })
     }
 
+    // 0a. Guard de liquidez de tesorería — prevención de sub-colateralización.
+    // La conversión BOB→USDC acredita USDC respaldado por la TESORERÍA (el usuario paga
+    // BOB; el USDC sale del pool de tesorería, no de una cuenta custodial). No acreditar
+    // más de lo que la tesorería puede respaldar: saldo on-chain − en vuelo ≥ monto.
+    // Gated por USDC_CONVERT_LIQUIDITY_GUARD (activo salvo ='false'). Fail-open ante un
+    // error de lectura on-chain (Horizon caído NO debe tumbar la confirmación), pero un
+    // déficit confirmado SÍ la bloquea.
+    if (process.env.USDC_CONVERT_LIQUIDITY_GUARD !== 'false') {
+      try {
+        const { getUSDCAvailableNow } = await import('../services/treasuryLiquidity.js')
+        const { available } = await getUSDCAvailableNow('SRL')
+        if (available != null && available < usdcAmount) {
+          await session.abortTransaction()
+          return res.status(409).json({
+            error: `Liquidez de tesorería USDC insuficiente para respaldar la conversión. Disponible: ${available.toFixed(2)} USDC · requerido: ${usdcAmount.toFixed(2)} USDC. Fondea la tesorería antes de confirmar.`,
+            code:      'INSUFFICIENT_TREASURY_USDC',
+            available: Number(available.toFixed(6)),
+            required:  usdcAmount,
+          })
+        }
+      } catch (guardErr) {
+        // fail-open: un error transitorio de lectura on-chain no debe bloquear la confirmación.
+        console.warn('[WalletUSDC] guard liquidez tesorería fail-open:', guardErr.message)
+      }
+    }
+
     const now              = new Date()
     const prevBalanceBOB   = walletBOB.balance
     const newBalanceBOB    = prevBalanceBOB - bobAmount
