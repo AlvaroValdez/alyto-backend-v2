@@ -222,6 +222,40 @@ export async function getDepositInstructions(req, res) {
   }
 }
 
+// ─── Auto-conversión (Fase 39) — helpers ─────────────────────────────────────
+// La auto-conversión reutiliza los confirm de admin ya probados (atómicos, con guards
+// de liquidez) ejecutándolos en proceso con un res "capturado", en vez de duplicar la
+// transacción. Si el confirm falla (p. ej. liquidez insuficiente), la conversión queda
+// en 'pending' (cola admin) — degradación segura.
+
+/** res falso que captura statusCode/body para invocar un controller en proceso. */
+function captureRes() {
+  const out = { statusCode: 200, body: null }
+  const res = {
+    status(c) { out.statusCode = c; return res },
+    json(b)   { out.body = b;       return res },
+  }
+  return { res, out }
+}
+
+/** ¿La conversión BOB→USDC califica para auto (sin admin)? Gated + umbral + sin flag AML. */
+function isBOBtoUSDCAutoEligible(user, bobAmount) {
+  if (process.env.USDC_AUTO_CONVERT_ENABLED !== 'true') return false
+  if (user.sanctionsFlag) return false
+  const max = Number(process.env.USDC_AUTO_CONVERT_MAX_BOB ?? 0)
+  return max > 0 && bobAmount <= max
+}
+
+/** ¿La conversión USDC→BOB califica para auto? Gated + umbral + sin flag AML.
+ *  (USDC→BOB recibe el activo escaso y acredita BOB ledger → sin riesgo de
+ *   sub-colateralización; el guard de liquidez BOB corre igual dentro del confirm.) */
+function isUSDCtoBOBAutoEligible(user, usdcAmount) {
+  if (process.env.USDC_TO_BOB_AUTO_ENABLED !== 'true') return false
+  if (user.sanctionsFlag) return false
+  const max = Number(process.env.USDC_TO_BOB_AUTO_MAX_USDC ?? 0)
+  return max > 0 && usdcAmount <= max
+}
+
 // ─── FUNCIÓN 3: POST /api/v1/wallet/usdc/convert-bob ─────────────────────────
 
 /**
@@ -322,6 +356,23 @@ export async function requestBOBtoUSDC(req, res) {
     }], { session })
 
     await session.commitTransaction()
+
+    // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard de
+    // liquidez de tesorería). Si la tesorería no alcanza, el confirm devuelve 409 → la
+    // conversión queda 'pending' (cola admin) automáticamente.
+    if (isBOBtoUSDCAutoEligible(user, amount)) {
+      const { res: capRes, out } = captureRes()
+      await adminConfirmBOBtoUSDC({ user: { _id: null }, body: { wtxId: wtx.wtxId, note: 'auto' } }, capRes)
+      if (out.statusCode === 200 && out.body && !out.body.error) {
+        return res.status(201).json({
+          ...out.body,
+          bobAmount: amount, usdcAmount, bobPerUsdc,
+          status: 'completed', auto: true,
+          message: 'Conversión completada al instante.',
+        })
+      }
+      // No se pudo auto-confirmar (p. ej. liquidez) → degradar a cola admin (pending).
+    }
 
     // Notificar a admins — push + in-app
     const fullName = `${user.firstName} ${user.lastName}`.trim();
@@ -775,6 +826,22 @@ export async function requestUSDCtoBOB(req, res) {
     }], { session })
 
     await session.commitTransaction()
+
+    // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard
+    // checkBOBLiquidity). Si falla, queda 'pending' (cola admin).
+    if (isUSDCtoBOBAutoEligible(user, amount)) {
+      const { res: capRes, out } = captureRes()
+      await adminConfirmUSDCtoBOB({ user: { _id: null }, body: { wtxId: wtx.wtxId, note: 'auto' } }, capRes)
+      if (out.statusCode === 200 && out.body && !out.body.error) {
+        return res.status(201).json({
+          ...out.body,
+          usdcAmount: amount, bobAmount, bobPerUsdc,
+          status: 'completed', auto: true,
+          message: 'Conversión completada al instante.',
+        })
+      }
+      // No se pudo auto-confirmar → degradar a cola admin (pending).
+    }
 
     const fullName = `${user.firstName} ${user.lastName}`.trim()
     notifyAdmins(NOTIFICATIONS.adminUsdcToBobRequest(amount, bobAmount, fullName)).catch(() => {})
