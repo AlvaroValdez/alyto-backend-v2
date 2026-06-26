@@ -1179,21 +1179,23 @@ export async function getUSDCTransactions(req, res) {
  */
 export async function getUSDCRate(req, res) {
   try {
-    const { getBOBUSDCRateDetailed } = await import('../services/exchangeRateService.js')
+    const { getBOBUSDCRateDetailed, getUSDCBOBRateDetailed } = await import('../services/exchangeRateService.js')
 
-    // Tasa derivada de mercado × (1 + spread%); el override admin solo sube el piso.
+    // Compra (BOB→USDC): mercado × (1 + spread%). Venta (USDC→BOB): mercado × (1 − spread%).
     const detail = await getBOBUSDCRateDetailed()
+    const sell   = await getUSDCBOBRateDetailed().catch(() => null)
 
     // `rate` es alias de `bobPerUsdc` por compatibilidad con clientes que leen
     // cualquiera de las dos claves (evita "Cargando tasa..." si el frontend
-    // desplegado aún espera `rate`).
+    // desplegado aún espera `rate`). `sellBobPerUsdc` es la tasa USDC→BOB (swap unificado).
     return res.json({
-      bobPerUsdc: detail.bobPerUsdc,
-      rate:       detail.bobPerUsdc,
-      source:     detail.source,
-      marketRate: detail.marketRate,
-      spreadPct:  detail.spreadPct,
-      updatedAt:  new Date().toISOString(),
+      bobPerUsdc:     detail.bobPerUsdc,
+      rate:           detail.bobPerUsdc,
+      sellBobPerUsdc: sell?.bobPerUsdc ?? null,
+      source:         detail.source,
+      marketRate:     detail.marketRate,
+      spreadPct:      detail.spreadPct,
+      updatedAt:      new Date().toISOString(),
     })
 
   } catch (err) {
