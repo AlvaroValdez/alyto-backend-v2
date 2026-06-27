@@ -33,14 +33,30 @@ const EDITABLE = [
   'usdcP2pMaxDaily',
   'businessUsdcP2pMaxPerTx',
   'businessUsdcP2pMaxDaily',
+  'convertBuySpreadPct',
+  'convertSellSpreadPct',
 ]
+
+// Campos que admiten null = "usar el default de entorno" (no fijar valor).
+const NULLABLE = ['usdcP2pFeeMax', 'convertBuySpreadPct', 'convertSellSpreadPct']
 
 // ─── GET /api/v1/admin/wallet-fees ───────────────────────────────────────────
 
 export async function getWalletFeeConfig(req, res) {
   try {
     const cfg = await WalletFeeConfig.getSingleton()
-    return res.json(cfg)
+    // Spreads efectivos (cuando el campo es null, manda el default de entorno) —
+    // para que el admin vea qué % está realmente activo.
+    const { resolveConvertSpreadPct } = await import('../services/exchangeRateService.js')
+    const [effBuy, effSell] = await Promise.all([
+      resolveConvertSpreadPct('buy'),
+      resolveConvertSpreadPct('sell'),
+    ])
+    return res.json({
+      ...cfg.toObject(),
+      effectiveConvertBuySpreadPct:  effBuy,
+      effectiveConvertSellSpreadPct: effSell,
+    })
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletFeeController', fn: 'getWalletFeeConfig' } })
     return res.status(500).json({ error: 'Error al obtener la configuración de comisiones.' })
@@ -58,8 +74,8 @@ export async function updateWalletFeeConfig(req, res) {
         update[key] = Boolean(req.body[key])
         continue
       }
-      // usdcP2pFeeMax admite null (sin techo)
-      if (key === 'usdcP2pFeeMax' && (req.body[key] === null || req.body[key] === '')) {
+      // Campos nullable (null/'' = usar default de entorno / sin techo)
+      if (NULLABLE.includes(key) && (req.body[key] === null || req.body[key] === '')) {
         update[key] = null
         continue
       }

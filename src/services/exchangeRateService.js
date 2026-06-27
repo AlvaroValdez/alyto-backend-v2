@@ -36,9 +36,36 @@ const FX_REQUOTE_THRESHOLD_PCT   = parseFloat(process.env.FX_REQUOTE_THRESHOLD_P
 // la tasa de mercado × (1 + spread%) para que nunca quede por debajo del costo de
 // fondeo. Por defecto reusa FX_BUFFER_PCT. El override admin BOB-USDC solo puede
 // SUBIR la tasa por encima de este piso, nunca bajarla bajo costo.
+// Spread compartido de entorno (legacy / fallback). Las direcciones buy/sell pueden
+// tener spreads INDEPENDIENTES: por env (USDC_CONVERT_BUY/SELL_SPREAD_PCT) o, con
+// prioridad, por el admin (WalletFeeConfig.convertBuy/SellSpreadPct).
 const USDC_CONVERT_SPREAD_PCT    = parseFloat(process.env.USDC_CONVERT_SPREAD_PCT ?? process.env.FX_BUFFER_PCT ?? '2');
 
 const round6 = n => Math.round(n * 1e6) / 1e6;
+
+/**
+ * Resuelve el % de spread de conversión para una dirección, en runtime.
+ * Prioridad: WalletFeeConfig (admin) → env por dirección → env compartido → 2.
+ * Nunca lanza: ante error de DB cae al default de entorno.
+ * @param {'buy'|'sell'} kind  buy = BOB→USDC · sell = USDC→BOB
+ * @returns {Promise<number>} spread en % (ej. 2 = 2%)
+ */
+export async function resolveConvertSpreadPct(kind) {
+  const envDir    = kind === 'buy'
+    ? process.env.USDC_CONVERT_BUY_SPREAD_PCT
+    : process.env.USDC_CONVERT_SELL_SPREAD_PCT;
+  const envValue  = parseFloat(envDir ?? '');
+  const envFallback = Number.isFinite(envValue) ? envValue : USDC_CONVERT_SPREAD_PCT;
+
+  try {
+    const WalletFeeConfig = (await import('../models/WalletFeeConfig.js')).default;
+    const cfg = await WalletFeeConfig.getSingleton();
+    const dbVal = kind === 'buy' ? cfg.convertBuySpreadPct : cfg.convertSellSpreadPct;
+    if (dbVal != null && Number.isFinite(dbVal)) return dbVal;
+  } catch (_) { /* sin DB → env */ }
+
+  return envFallback;
+}
 
 /**
  * Obtiene la tasa BOB/USD de mercado (BOB por 1 USD).
@@ -122,7 +149,7 @@ export async function getBOBUSDCRate() {
  */
 export async function getBOBUSDCRateDetailed() {
   const marketRate  = await getBOBRate();
-  const spreadPct   = USDC_CONVERT_SPREAD_PCT;
+  const spreadPct   = await resolveConvertSpreadPct('buy');
   const derivedRate = round6(marketRate * (1 + spreadPct / 100));
 
   let override = null;
@@ -169,7 +196,7 @@ export async function getUSDCBOBRate() {
  */
 export async function getUSDCBOBRateDetailed() {
   const marketRate = await getBOBRate();
-  const spreadPct  = USDC_CONVERT_SPREAD_PCT;
+  const spreadPct  = await resolveConvertSpreadPct('sell');
   // Lado venta: market × (1 − spread%). Piso de seguridad: nunca negativo/cero.
   const bobPerUsdc = round6(Math.max(marketRate * (1 - spreadPct / 100), marketRate * 0.5));
   return { bobPerUsdc, marketRate, spreadPct, source: 'binance_p2p-spread' };

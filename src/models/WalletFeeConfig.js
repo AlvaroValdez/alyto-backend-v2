@@ -43,6 +43,15 @@ const walletFeeConfigSchema = new mongoose.Schema({
   /** Máximo acumulado diario (business). */
   businessUsdcP2pMaxDaily:  { type: Number, default: 10000, min: 0 },
 
+  // ── Spreads de conversión (swap BOB↔USDC) ────────────────────────────────────
+  // Spreads INDEPENDIENTES por dirección. null = usar el default de entorno
+  // (USDC_CONVERT_BUY/SELL_SPREAD_PCT → USDC_CONVERT_SPREAD_PCT → FX_BUFFER_PCT → 2).
+  // Un valor numérico fijado por admin GANA sobre el entorno.
+  /** % spread compra: BOB→USDC. Tasa = mercado × (1 + %). */
+  convertBuySpreadPct:      { type: Number, default: null, min: 0 },
+  /** % spread venta: USDC→BOB. Tasa = mercado × (1 − %). */
+  convertSellSpreadPct:     { type: Number, default: null, min: 0 },
+
   // ── Revenue acumulada (ledger interno) ───────────────────────────────────────
   /** USDC total acumulado por comisiones P2P (cuenta de revenue interna). */
   revenueAccruedUsdc:       { type: Number, default: 0, min: 0 },

@@ -13,6 +13,7 @@
 
 import ExchangeRate           from '../models/ExchangeRate.js';
 import { fetchBOBUSDTRate }   from '../services/binanceP2PService.js';
+import { resolveConvertSpreadPct } from '../services/exchangeRateService.js';
 
 const round6 = n => Math.round(n * 1e6) / 1e6;
 
@@ -58,7 +59,8 @@ export async function refreshExchangeRates() {
       console.log('[RefreshRates] BOB-USDC tiene override manual (', existing.rate,
         ') — no se sobreescribe');
     } else {
-      const spreadPct     = parseFloat(process.env.USDC_CONVERT_SPREAD_PCT ?? process.env.FX_BUFFER_PCT ?? '2');
+      // Lado compra (BOB→USDC) — mismo spread que getBOBUSDCRateDetailed (admin/env).
+      const spreadPct     = await resolveConvertSpreadPct('buy');
       const derivedBOBUSDC = round6(rate * (1 + spreadPct / 100));
 
       const result = await ExchangeRate.findOneAndUpdate(
