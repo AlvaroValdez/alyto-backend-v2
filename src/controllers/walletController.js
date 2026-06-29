@@ -1130,6 +1130,59 @@ export async function adminGetWithdrawalComprobante(req, res) {
   })
 }
 
+// ─── (ADMIN): POST /api/v1/admin/wallet/withdrawals/:wtxId/comprobante ────────
+
+/**
+ * Adjunta (o reemplaza) el comprobante de la transferencia a un retiro YA existente,
+ * sin importar su estado. Pensado para retiros completados ANTES de que el comprobante
+ * fuera obligatorio: permite a soporte cerrar el respaldo ASFI de forma retroactiva.
+ * No modifica saldos ni estado — solo agrega el documento + traza de quién lo adjuntó.
+ */
+export async function adminAttachWithdrawalComprobante(req, res) {
+  try {
+    const admin     = req.user
+    const { wtxId } = req.params
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'El comprobante (archivo) es obligatorio.' })
+    }
+
+    const wtx = await WalletTransaction.findOne({ wtxId, type: 'withdrawal' })
+    if (!wtx) {
+      return res.status(404).json({ error: 'Retiro no encontrado.' })
+    }
+
+    const withdrawalProof = {
+      data:       req.file.buffer.toString('base64'),
+      mimetype:   req.file.mimetype,
+      filename:   req.file.originalname,
+      size:       req.file.size,
+      uploadedAt: new Date(),
+    }
+
+    await WalletTransaction.updateOne({ _id: wtx._id }, {
+      $set: {
+        'metadata.withdrawalProof': withdrawalProof,
+        'metadata.proofAttachedBy': admin._id,
+        'metadata.proofAttachedAt': new Date(),
+      },
+    })
+
+    return res.json({
+      ok:         true,
+      wtxId,
+      filename:   withdrawalProof.filename,
+      size:       withdrawalProof.size,
+      uploadedAt: withdrawalProof.uploadedAt,
+    })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminAttachWithdrawalComprobante' } })
+    console.error('[Wallet] Error en adminAttachWithdrawalComprobante:', err.message)
+    return res.status(500).json({ error: 'Error al adjuntar el comprobante.' })
+  }
+}
+
 // ─── (ADMIN): GET /api/v1/admin/wallet/withdrawals/trace ─────────────────────
 
 /**
@@ -1574,6 +1627,84 @@ export async function adminListPendingWithdrawals(req, res) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminListPendingWithdrawals' } })
     console.error('[Wallet] Error en adminListPendingWithdrawals:', err.message)
     return res.status(500).json({ error: 'Error al listar retiros pendientes.' })
+  }
+}
+
+// ─── FUNCIÓN 12B (ADMIN): GET /api/v1/admin/wallet/withdrawals ────────────────
+
+/**
+ * Listado global paginado de TODOS los retiros (cualquier estado), con filtros.
+ * Para que el admin vea el historial completo de retiros, no solo los pendientes.
+ *
+ * Query params (todos opcionales):
+ *   status   — filtra por estado (awaiting_proof|pending|dispatched|completed|failed|reversed)
+ *   currency — BOB | USDC
+ *   from     — fecha ISO (createdAt >= from)
+ *   to       — fecha ISO (createdAt <= to)
+ *   page     — página (1-based, default 1)
+ *   limit    — tamaño de página (default 25, máx 100)
+ */
+export async function adminListAllWithdrawals(req, res) {
+  try {
+    const page  = Math.max(1, parseInt(req.query.page, 10) || 1)
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25))
+    const skip  = (page - 1) * limit
+
+    const filter = { type: 'withdrawal' }
+    if (req.query.status)   filter.status   = req.query.status
+    if (req.query.currency) filter.currency = req.query.currency
+
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {}
+      if (req.query.from) {
+        const d = new Date(req.query.from)
+        if (!isNaN(d)) filter.createdAt.$gte = d
+      }
+      if (req.query.to) {
+        const d = new Date(req.query.to)
+        if (!isNaN(d)) filter.createdAt.$lte = d
+      }
+      if (!Object.keys(filter.createdAt).length) delete filter.createdAt
+    }
+
+    const [rows, total] = await Promise.all([
+      WalletTransaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('userId', 'firstName lastName email alytoAlias kycStatus legalEntity')
+        .lean(),
+      WalletTransaction.countDocuments(filter),
+    ])
+
+    // Aligerar la respuesta: el comprobante (base64) no viaja en el listado;
+    // se descarga on-demand vía /wallet/withdrawals/:wtxId/comprobante.
+    const stellarNet = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'
+    const withdrawals = rows.map((w) => {
+      const m = w.metadata ?? {}
+      const proof = m.withdrawalProof
+      const { withdrawalProof, ...metaLite } = m
+      return {
+        ...w,
+        metadata: metaLite,
+        comprobanteDisponible: !!proof?.data,
+        stellarExplorerUrl: w.stellarTxId
+          ? `https://stellar.expert/explorer/${stellarNet}/tx/${w.stellarTxId}`
+          : null,
+      }
+    })
+
+    return res.json({
+      withdrawals,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminListAllWithdrawals' } })
+    console.error('[Wallet] Error en adminListAllWithdrawals:', err.message)
+    return res.status(500).json({ error: 'Error al listar retiros.' })
   }
 }
 

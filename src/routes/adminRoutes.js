@@ -110,12 +110,14 @@ import {
   adminFreezeWallet,
   adminUnfreezeWallet,
   adminListPendingWithdrawals,
+  adminListAllWithdrawals,
   adminConfirmWithdrawal,
   adminRejectWithdrawal,
   adminDispatchWithdrawal,
   adminSimulateWithdrawalSettlement,
   adminTraceUserWithdrawals,
   adminGetWithdrawalComprobante,
+  adminAttachWithdrawalComprobante,
 } from '../controllers/walletController.js';
 import {
   adminListPendingConversions,
@@ -640,9 +642,13 @@ router.post('/wallet/deposit/confirm',   adminConfirmDeposit);
  * POST /api/v1/admin/wallet/withdrawal/simulate-settle — (staging/mock) simula la confirmación del banco
  */
 router.get('/wallet/withdrawals/pending',  adminListPendingWithdrawals);
+// Listado global de TODOS los retiros (cualquier estado) con filtros + paginación.
+router.get('/wallet/withdrawals',          adminListAllWithdrawals);
 // Trazabilidad de retiros por usuario (soporte). Rutas literales ANTES de :wtxId.
 router.get('/wallet/withdrawals/trace',    adminTraceUserWithdrawals);
 router.get('/wallet/withdrawals/:wtxId/comprobante', adminGetWithdrawalComprobante);
+// Adjuntar comprobante retroactivo a un retiro ya existente (respaldo ASFI tardío).
+router.post('/wallet/withdrawals/:wtxId/comprobante', proofUpload.single('comprobante'), adminAttachWithdrawalComprobante);
 router.post('/wallet/withdrawal/confirm',  proofUpload.single('comprobante'), adminConfirmWithdrawal);
 router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
 router.post('/wallet/withdrawal/dispatch', adminDispatchWithdrawal);
