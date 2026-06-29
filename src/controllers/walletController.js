@@ -1092,6 +1092,179 @@ export async function adminGetDepositComprobante(req, res) {
   })
 }
 
+// ─── (ADMIN): GET /api/v1/admin/wallet/withdrawals/:wtxId/comprobante ─────────
+
+/**
+ * Devuelve el comprobante (base64) que el admin subió al procesar un retiro BOB.
+ * Versión admin de getWithdrawalComprobante (sin restricción de dueño) — para que
+ * soporte pueda mostrar el respaldo de la transferencia al responder al usuario.
+ */
+export async function adminGetWithdrawalComprobante(req, res) {
+  const { wtxId } = req.params
+
+  let wtx
+  try {
+    wtx = await WalletTransaction.findOne({ wtxId, type: 'withdrawal' })
+      .select('wtxId metadata userId amount currency status')
+      .lean()
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminGetWithdrawalComprobante' } })
+    return res.status(500).json({ error: 'Error interno del servidor.' })
+  }
+
+  if (!wtx) {
+    return res.status(404).json({ error: 'Retiro no encontrado.' })
+  }
+
+  const proof = wtx.metadata?.withdrawalProof
+  if (!proof?.data) {
+    return res.status(404).json({ error: 'Este retiro aún no tiene comprobante subido.' })
+  }
+
+  return res.status(200).json({
+    base64:     proof.data,
+    mimeType:   proof.mimetype,
+    filename:   proof.filename,
+    size:       proof.size,
+    uploadedAt: proof.uploadedAt,
+  })
+}
+
+// ─── (ADMIN): GET /api/v1/admin/wallet/withdrawals/trace ─────────────────────
+
+/**
+ * Trazabilidad completa de los retiros de un usuario — para que soporte responda
+ * de forma óptima. Busca por email, userId, wtxId, alias o nombre, y devuelve cada
+ * retiro enriquecido: montos, horas (solicitado/confirmado), estado, banco destino,
+ * admin que dispersó/confirmó, disponibilidad de comprobante y audit trail Stellar.
+ *
+ * Query: ?query=<email|userId|wtxId|alias|nombre>  [&status=<estado>]
+ */
+export async function adminTraceUserWithdrawals(req, res) {
+  try {
+    const raw = (req.query.query ?? '').toString().trim()
+    if (!raw) {
+      return res.status(400).json({ error: 'Parámetro "query" requerido (email, userId, wtxId, alias o nombre).' })
+    }
+
+    // 1) Resolver el/los usuario(s) objetivo según el tipo de búsqueda.
+    let userIds = []
+    let matchedBy = null
+
+    if (/^WTX-/i.test(raw)) {
+      // Búsqueda directa por wtxId → resolvemos el userId de esa transacción.
+      const one = await WalletTransaction.findOne({ wtxId: raw, type: 'withdrawal' }).select('userId').lean()
+      if (one) { userIds = [one.userId]; matchedBy = 'wtxId' }
+    } else if (mongoose.isValidObjectId(raw)) {
+      userIds = [new mongoose.Types.ObjectId(raw)]; matchedBy = 'userId'
+    } else if (raw.includes('@')) {
+      const u = await User.findOne({ email: raw.toLowerCase() }).select('_id').lean()
+      if (u) { userIds = [u._id]; matchedBy = 'email' }
+    } else {
+      // Nombre, apellido o alias (parcial, case-insensitive).
+      const rx = new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      const users = await User.find({
+        $or: [{ firstName: rx }, { lastName: rx }, { alytoAlias: rx }],
+      }).select('_id').limit(25).lean()
+      userIds = users.map(u => u._id); matchedBy = 'name'
+    }
+
+    if (!userIds.length) {
+      return res.status(404).json({ error: 'No se encontró ningún usuario para esa búsqueda.', query: raw })
+    }
+
+    // 2) Traer los retiros (opcionalmente filtrados por estado).
+    const filter = { userId: { $in: userIds }, type: 'withdrawal' }
+    if (req.query.status) filter.status = req.query.status
+
+    const [withdrawals, users] = await Promise.all([
+      WalletTransaction.find(filter).sort({ createdAt: -1 }).lean(),
+      User.find({ _id: { $in: userIds } }).select('firstName lastName email alytoAlias legalEntity').lean(),
+    ])
+
+    // 3) Resolver nombres de admins (confirmedBy / dispatchedBy) en un solo query.
+    const adminIds = new Set()
+    for (const w of withdrawals) {
+      if (w.confirmedBy)            adminIds.add(String(w.confirmedBy))
+      if (w.metadata?.dispatchedBy) adminIds.add(String(w.metadata.dispatchedBy))
+    }
+    const admins = adminIds.size
+      ? await User.find({ _id: { $in: [...adminIds] } }).select('firstName lastName email').lean()
+      : []
+    const adminMap = new Map(admins.map(a => [String(a._id), a]))
+    const userMap  = new Map(users.map(u => [String(u._id), u]))
+
+    const stellarNet = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'
+
+    // 4) Enriquecer cada retiro con todo lo necesario para responder al usuario.
+    const trace = withdrawals.map((w) => {
+      const m     = w.metadata ?? {}
+      const proof = m.withdrawalProof
+      const owner = userMap.get(String(w.userId))
+      const adminConfirm  = w.confirmedBy ? adminMap.get(String(w.confirmedBy)) : null
+      const adminDispatch = m.dispatchedBy ? adminMap.get(String(m.dispatchedBy)) : null
+      const adminName = a => (a ? `${a.firstName ?? ''} ${a.lastName ?? ''}`.trim() || a.email : null)
+
+      return {
+        wtxId:    w.wtxId,
+        usuario:  owner ? { nombre: `${owner.firstName ?? ''} ${owner.lastName ?? ''}`.trim(), email: owner.email, alias: owner.alytoAlias ?? null, userId: String(w.userId) } : { userId: String(w.userId) },
+        monto:    w.amount,
+        moneda:   w.currency,
+        estado:   w.status,
+        balanceBefore: w.balanceBefore,
+        balanceAfter:  w.balanceAfter,
+        tiempos: {
+          solicitado:  w.createdAt,
+          confirmado:  w.confirmedAt ?? null,
+          dispersado:  m.dispatchedAt ?? null,
+          actualizado: w.updatedAt,
+          expira:      w.expiresAt ?? null,
+        },
+        destino: {
+          metodo:        m.method ?? null,
+          banco:         m.bankName ?? null,
+          numeroCuenta:  m.accountNumber ?? null,
+          titular:       m.accountHolder ?? null,
+          tipoCuenta:    m.accountType ?? null,
+          referenciaBancaria: m.bankReference ?? w.reference ?? null,
+          nota:          m.note ?? null,
+          rechazo:       m.rejectReason ?? null,
+        },
+        procesadoPor: {
+          confirmadoPor: adminName(adminConfirm),
+          dispersadoPor: adminName(adminDispatch),
+          via:           m.settledVia ?? null,
+        },
+        comprobante: proof?.data
+          ? { disponible: true, filename: proof.filename, mimetype: proof.mimetype, size: proof.size, uploadedAt: proof.uploadedAt, url: `/api/v1/admin/wallet/withdrawals/${w.wtxId}/comprobante` }
+          : { disponible: false },
+        stellar: w.stellarTxId
+          ? { txId: w.stellarTxId, explorerUrl: `https://stellar.expert/explorer/${stellarNet}/tx/${w.stellarTxId}` }
+          : { txId: null, explorerUrl: null, nota: 'Sin audit trail on-chain.' },
+      }
+    })
+
+    const totalRetirado = trace.filter(t => t.estado === 'completed').reduce((s, t) => s + t.monto, 0)
+
+    return res.json({
+      matchedBy,
+      query:   raw,
+      usuarios: users.map(u => ({ userId: String(u._id), nombre: `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim(), email: u.email, alias: u.alytoAlias ?? null })),
+      resumen: {
+        totalRetiros:     trace.length,
+        totalRetiradoBOB: Number(totalRetirado.toFixed(2)),
+        porEstado:        trace.reduce((acc, t) => { acc[t.estado] = (acc[t.estado] ?? 0) + 1; return acc }, {}),
+      },
+      retiros: trace,
+    })
+
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminTraceUserWithdrawals' } })
+    console.error('[Wallet] Error en adminTraceUserWithdrawals:', err.message)
+    return res.status(500).json({ error: 'Error al obtener la trazabilidad de retiros.' })
+  }
+}
+
 // ─── FUNCIÓN 10 (ADMIN): PATCH /api/v1/admin/wallet/:userId/freeze ────────────
 
 /**
@@ -1419,6 +1592,13 @@ export async function adminConfirmWithdrawal(req, res) {
       return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
     }
 
+    // El comprobante de la transferencia es OBLIGATORIO: queda como respaldo ASFI y
+    // lo ve el usuario en su perfil. Sin él no se puede confirmar el retiro.
+    if (!req.file) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'El comprobante de la transferencia es obligatorio para confirmar el retiro.' })
+    }
+
     const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
     if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
       await session.abortTransaction()
@@ -1466,6 +1646,11 @@ export async function adminConfirmWithdrawal(req, res) {
     }, { session })
 
     await session.commitTransaction()
+
+    // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). El retiro también
+    // debe registrarse on-chain igual que send/deposit; antes faltaba esta llamada
+    // y por eso los retiros quedaban con stellarTxId = null.
+    fireAuditTrail(wtxId, 'withdrawal', wtx.amount, bankReference)
 
     notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
       title:   'Retiro procesado',
@@ -1696,6 +1881,9 @@ export async function settleDispatchedWithdrawal(wtxId, { accepted, bankReferenc
       if (claim.modifiedCount === 0) { await session.abortTransaction(); return { ok: true, reason: 'race' } }
       await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } }, { session })
       await session.commitTransaction()
+      // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). Mismo registro
+      // on-chain que send/deposit; faltaba en el cierre vía dispersión BANECO.
+      fireAuditTrail(wtx.wtxId, 'withdrawal', wtx.amount, bankReference ?? wtx.reference)
       notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
         title: 'Retiro procesado',
         body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
