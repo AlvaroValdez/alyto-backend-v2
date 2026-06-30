@@ -33,6 +33,9 @@ import {
 } from '../services/bankQr/bankQrRegistry.js';
 import { dispatchPayout } from '../controllers/ipnController.js';
 import { confirmBankQrDeposit, failExpiredBankQrDeposit } from '../controllers/walletController.js';
+import User from '../models/User.js';
+import { notify, NOTIFICATIONS } from '../services/notifications.js';
+import { sendEmail, EMAILS } from '../services/email.js';
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
 
@@ -68,6 +71,9 @@ async function confirmBankQrTx(tx, payment, bankId, source) {
     receivedAt: new Date(),
   });
   await tx.save();
+
+  // Notificar al usuario que su pago fue recibido (igual que el flujo manual).
+  notify(tx.userId, NOTIFICATIONS.payinConfirmed(tx.originalAmount, tx.originCurrency)).catch(() => {})
 
   logger.info(`[reconcileBankQr] ✅ Tx confirmada (${source})`, {
     bankId,
@@ -108,6 +114,21 @@ async function failExpiredBankQrTx(tx, bankId, reason) {
     qrId:               tx.bankQr?.qrId,
     alytoTransactionId: tx.alytoTransactionId,
   });
+
+  // Notificar al usuario el fallo (push + in-app + email). Sin esto el usuario
+  // nunca se entera de que su transferencia falló (gap: el payout sí notifica,
+  // el fallo de payin bankQr no lo hacía). Fire-and-forget: no romper el barrido.
+  try {
+    await notify(tx.userId, NOTIFICATIONS.paymentFailed(tx.originalAmount, tx.originCurrency));
+  } catch (e) {
+    logger.error('[reconcileBankQr] notify fallo payin bankQr', { alytoTransactionId: tx.alytoTransactionId, error: e.message });
+  }
+  try {
+    const user = await User.findById(tx.userId).lean();
+    if (user?.email) await sendEmail(...EMAILS.paymentFailed(user, tx));
+  } catch (e) {
+    logger.error('[reconcileBankQr] email fallo payin bankQr', { alytoTransactionId: tx.alytoTransactionId, error: e.message });
+  }
 }
 
 // ── FASE A — confirmar pagos por lista paidQR (ayer + hoy) ─────────────────────

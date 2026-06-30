@@ -2978,6 +2978,9 @@ export function handleBankQrIPN(bankId) {
       });
       await transaction.save();
 
+      // Notificar al usuario que su pago fue recibido (igual que el flujo manual).
+      notify(transaction.userId, NOTIFICATIONS.payinConfirmed(transaction.originalAmount, transaction.originCurrency)).catch(() => {})
+
       logger.info(`[BankQr IPN ${bankId}] ✅ Payin confirmado`, {
         alytoTransactionId: transaction.alytoTransactionId,
         amount:             receivedAmount,
