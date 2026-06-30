@@ -1257,6 +1257,74 @@ export async function getSwapRevenue(req, res) {
   }
 }
 
+// ─── ADMIN: GET /api/v1/admin/wallet/conversions ──────────────────────────────
+
+/**
+ * Historial global y paginado de TODAS las conversiones swap (BOB↔USDC), en
+ * cualquier estado y ambas direcciones. Para el dashboard de Swaps.
+ *
+ * Query opcional:
+ *   direction — 'buy' (bob_to_usdc) | 'sell' (usdc_to_bob)
+ *   status    — pending | completed | failed
+ *   from, to  — rango ISO sobre createdAt
+ *   page, limit (default 25, máx 100)
+ */
+export async function adminListAllConversions(req, res) {
+  try {
+    const page  = Math.max(1, parseInt(req.query.page, 10) || 1)
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25))
+    const skip  = (page - 1) * limit
+
+    const filter = { type: { $in: ['bob_to_usdc', 'usdc_to_bob'] } }
+    if (req.query.direction === 'buy')  filter.type = 'bob_to_usdc'
+    if (req.query.direction === 'sell') filter.type = 'usdc_to_bob'
+    if (req.query.status) filter.status = req.query.status
+
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {}
+      if (req.query.from) { const d = new Date(req.query.from); if (!isNaN(d)) filter.createdAt.$gte = d }
+      if (req.query.to)   { const d = new Date(req.query.to);   if (!isNaN(d)) filter.createdAt.$lte = d }
+      if (!Object.keys(filter.createdAt).length) delete filter.createdAt
+    }
+
+    const [rows, total] = await Promise.all([
+      WalletTransaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('userId', 'firstName lastName email alytoAlias')
+        .lean(),
+      WalletTransaction.countDocuments(filter),
+    ])
+
+    const conversions = rows.map((w) => {
+      const m = w.metadata ?? {}
+      const direction = w.type === 'bob_to_usdc' ? 'buy' : 'sell'
+      return {
+        wtxId:      w.wtxId,
+        direction,
+        status:     w.status,
+        usuario:    w.userId
+          ? { nombre: `${w.userId.firstName ?? ''} ${w.userId.lastName ?? ''}`.trim(), email: w.userId.email, alias: w.userId.alytoAlias ?? null }
+          : null,
+        bobAmount:  m.bobAmount  ?? (direction === 'buy' ? w.amount : undefined),
+        usdcAmount: m.usdcAmount ?? (direction === 'sell' ? w.amount : undefined),
+        bobPerUsdc: m.bobPerUsdc ?? null,
+        marketRate: m.marketRate ?? null,
+        spreadPct:  m.spreadPct ?? null,
+        createdAt:  w.createdAt,
+        confirmedAt: w.confirmedAt ?? null,
+      }
+    })
+
+    return res.json({ conversions, total, page, limit, totalPages: Math.ceil(total / limit) || 1 })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminListAllConversions' } })
+    console.error('[WalletUSDC] Error en adminListAllConversions:', err.message)
+    return res.status(500).json({ error: 'Error al listar conversiones.' })
+  }
+}
+
 // ─── FUNCIÓN 7: GET /api/v1/wallet/usdc/transactions ─────────────────────────
 
 /**
