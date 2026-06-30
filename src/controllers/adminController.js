@@ -32,7 +32,7 @@ import {
   getCryptoPrices,
   VITA_SENT_ONLY_COUNTRIES,
 }                         from '../services/vitaWalletService.js';
-import { getBOBRate }     from '../services/exchangeRateService.js';
+import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1167,10 +1167,14 @@ export async function getCorridorAnalytics(req, res) {
 
 // ─── getGlobalAnalytics ───────────────────────────────────────────────────────
 
+const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
 /**
  * GET /api/v1/admin/analytics
  *
  * Analytics global: volumen total, revenue, desglose por entidad y corredor.
+ * Las fees se guardan en moneda origen (BOB/CLP/USD); aquí se normalizan a USD
+ * (tasas live) para un total coherente, y se expone el desglose por moneda.
  * Query params: startDate, endDate (ISO)
  */
 export async function getGlobalAnalytics(req, res) {
@@ -1195,73 +1199,51 @@ export async function getGlobalAnalytics(req, res) {
     }
   }
 
+  // Expresiones reutilizables.
+  // Ganancia = SOLO fees explícitas de Alyto (spread + fijo + retención).
+  // payinFee/payoutFee son costos de proveedor (pass-through) → NO son ganancia.
+  // El margen del buffer FX NO se cuenta como ganancia (decisión de producto).
+  const revenueExpr = {
+    $add: [
+      { $ifNull: ['$fees.alytoCSpread',   0] },
+      { $ifNull: ['$fees.fixedFee',        0] },
+      { $ifNull: ['$fees.profitRetention', 0] },
+    ],
+  };
+  // Moneda de los montos: feeCurrency de la tx, fallback a originCurrency, fallback USD.
+  const currencyExpr = { $ifNull: ['$fees.feeCurrency', { $ifNull: ['$originCurrency', 'USD'] }] };
+
   try {
-    const [globalResult, byEntityResult, byCorridorResult] = await Promise.all([
+    const [byCurrencyResult, byEntityResult, byCorridorResult, countsResult] = await Promise.all([
 
-      // ── Global totals ────────────────────────────────────────────────────
+      // ── Volumen + ganancia agrupados POR MONEDA (para normalizar a USD) ────
       Transaction.aggregate([
         { $match: dateFilter },
-        {
-          $group: {
-            _id:                  null,
-            totalTransactions:    { $sum: 1 },
-            completedTransactions:{ $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-            failedTransactions:   { $sum: { $cond: [{ $eq: ['$status', 'failed'] },    1, 0] } },
-            totalVolumeCLP:       { $sum: '$originalAmount' },
-            totalRevenueCLP: {
-              $sum: {
-                $add: [
-                  { $ifNull: ['$fees.alytoCSpread',   0] },
-                  { $ifNull: ['$fees.fixedFee',        0] },
-                  { $ifNull: ['$fees.profitRetention', 0] },
-                ],
-              },
-            },
-          },
-        },
+        { $group: { _id: currencyExpr, volume: { $sum: '$originalAmount' }, revenue: { $sum: revenueExpr }, transactions: { $sum: 1 } } },
       ]),
 
-      // ── By entity ────────────────────────────────────────────────────────
+      // ── By entity (entidad + moneda; cada entidad suele ser una sola moneda) ─
       Transaction.aggregate([
         { $match: dateFilter },
-        {
-          $group: {
-            _id:          '$legalEntity',
-            transactions: { $sum: 1 },
-            volume:       { $sum: '$originalAmount' },
-            revenue: {
-              $sum: {
-                $add: [
-                  { $ifNull: ['$fees.alytoCSpread',   0] },
-                  { $ifNull: ['$fees.fixedFee',        0] },
-                  { $ifNull: ['$fees.profitRetention', 0] },
-                ],
-              },
-            },
-          },
-        },
+        { $group: { _id: { entity: '$legalEntity', currency: currencyExpr }, transactions: { $sum: 1 }, volume: { $sum: '$originalAmount' }, revenue: { $sum: revenueExpr } } },
       ]),
 
-      // ── By corridor ──────────────────────────────────────────────────────
+      // ── By corridor (un corredor = una moneda) ────────────────────────────
       Transaction.aggregate([
         { $match: dateFilter },
-        {
-          $group: {
-            _id:          '$corridorId',
-            transactions: { $sum: 1 },
-            volume:       { $sum: '$originalAmount' },
-            revenue: {
-              $sum: {
-                $add: [
-                  { $ifNull: ['$fees.alytoCSpread',   0] },
-                  { $ifNull: ['$fees.fixedFee',        0] },
-                  { $ifNull: ['$fees.profitRetention', 0] },
-                ],
-              },
-            },
-          },
-        },
+        { $group: { _id: '$corridorId', currency: { $first: currencyExpr }, transactions: { $sum: 1 }, volume: { $sum: '$originalAmount' }, revenue: { $sum: revenueExpr } } },
         { $sort: { volume: -1 } },
+      ]),
+
+      // ── Conteos globales (independientes de moneda) ───────────────────────
+      Transaction.aggregate([
+        { $match: dateFilter },
+        { $group: {
+          _id: null,
+          totalTransactions:     { $sum: 1 },
+          completedTransactions: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          failedTransactions:    { $sum: { $cond: [{ $eq: ['$status', 'failed'] },    1, 0] } },
+        } },
       ]),
     ]);
 
@@ -1280,49 +1262,97 @@ export async function getGlobalAnalytics(req, res) {
       corridorSlugMap[doc._id.toString()] = doc.corridorId;
     }
 
-    // ── Construir respuesta ───────────────────────────────────────────────
-    const g = globalResult[0] ?? {
-      totalTransactions: 0, completedTransactions: 0, failedTransactions: 0,
-      totalVolumeCLP: 0, totalRevenueCLP: 0,
+    // ── Normalización a USD por moneda (tasas live) ───────────────────────
+    // Cachear la conversión por moneda para no repetir lookups.
+    const usdCache = new Map();
+    const toUsd = async (amount, currency) => {
+      if (!amount) return 0;
+      const cur = currency ?? 'USD';
+      if (!usdCache.has(cur)) usdCache.set(cur, await convertOriginToUSD(1, cur));
+      return amount * usdCache.get(cur);
     };
 
-    const avgRevenuePct = g.totalVolumeCLP > 0
-      ? parseFloat(((g.totalRevenueCLP / g.totalVolumeCLP) * 100).toFixed(2))
+    // Desglose por moneda + totales USD.
+    const byCurrency = [];
+    let totalVolumeUsd = 0;
+    let totalRevenueUsd = 0;
+    for (const row of byCurrencyResult) {
+      const currency  = row._id ?? 'USD';
+      const volumeUsd  = await toUsd(row.volume,  currency);
+      const revenueUsd = await toUsd(row.revenue, currency);
+      totalVolumeUsd  += volumeUsd;
+      totalRevenueUsd += revenueUsd;
+      byCurrency.push({
+        currency,
+        volume:     round2(row.volume),
+        revenue:    round2(row.revenue),
+        volumeUsd:  round2(volumeUsd),
+        revenueUsd: round2(revenueUsd),
+        transactions: row.transactions,
+      });
+    }
+    byCurrency.sort((a, b) => b.volumeUsd - a.volumeUsd);
+
+    totalVolumeUsd  = round2(totalVolumeUsd);
+    totalRevenueUsd = round2(totalRevenueUsd);
+    const c = countsResult[0] ?? { totalTransactions: 0, completedTransactions: 0, failedTransactions: 0 };
+    const avgRevenuePct = totalVolumeUsd > 0
+      ? parseFloat(((totalRevenueUsd / totalVolumeUsd) * 100).toFixed(2))
       : 0;
 
-    // Construir mapa por entidad
+    // ── Por entidad (suma en USD + moneda nativa) ─────────────────────────
     const byEntity = { SpA: null, LLC: null, SRL: null };
     for (const row of byEntityResult) {
-      if (row._id) byEntity[row._id] = {
-        transactions: row.transactions,
-        volume:       row.volume,
-        revenue:      row.revenue,
-      };
+      const entity   = row._id?.entity;
+      const currency = row._id?.currency ?? 'USD';
+      if (!entity) continue;
+      const volumeUsd  = await toUsd(row.volume,  currency);
+      const revenueUsd = await toUsd(row.revenue, currency);
+      if (!byEntity[entity]) byEntity[entity] = { transactions: 0, volume: 0, revenue: 0, volumeUsd: 0, revenueUsd: 0, currency };
+      byEntity[entity].transactions += row.transactions;
+      byEntity[entity].volume       += round2(row.volume);
+      byEntity[entity].revenue      += round2(row.revenue);
+      byEntity[entity].volumeUsd    += volumeUsd;
+      byEntity[entity].revenueUsd   += revenueUsd;
     }
     for (const entity of ['SpA', 'LLC', 'SRL']) {
-      if (!byEntity[entity]) byEntity[entity] = { transactions: 0, volume: 0, revenue: 0 };
+      if (!byEntity[entity]) byEntity[entity] = { transactions: 0, volume: 0, revenue: 0, volumeUsd: 0, revenueUsd: 0, currency: null };
+      else { byEntity[entity].volumeUsd = round2(byEntity[entity].volumeUsd); byEntity[entity].revenueUsd = round2(byEntity[entity].revenueUsd); }
     }
 
-    const byCorridor = byCorridorResult.map(row => ({
-      corridorId:      corridorSlugMap[row._id?.toString()] ?? row._id?.toString() ?? 'unknown',
-      transactions:    row.transactions,
-      volume:          row.volume,
-      revenue:         row.revenue,
-      revenuePercent:  row.volume > 0
-        ? parseFloat(((row.revenue / row.volume) * 100).toFixed(2))
-        : 0,
-    }));
+    // ── Por corredor (moneda nativa + USD) ────────────────────────────────
+    const byCorridor = [];
+    for (const row of byCorridorResult) {
+      const currency   = row.currency ?? 'USD';
+      const revenueUsd = await toUsd(row.revenue, currency);
+      const volumeUsd  = await toUsd(row.volume,  currency);
+      byCorridor.push({
+        corridorId:     corridorSlugMap[row._id?.toString()] ?? row._id?.toString() ?? 'unknown',
+        currency,
+        transactions:   row.transactions,
+        volume:         round2(row.volume),
+        revenue:        round2(row.revenue),
+        volumeUsd:      round2(volumeUsd),
+        revenueUsd:     round2(revenueUsd),
+        revenuePercent: row.volume > 0 ? parseFloat(((row.revenue / row.volume) * 100).toFixed(2)) : 0,
+      });
+    }
 
     return res.json({
       period: { startDate: startDate ?? null, endDate: endDate ?? null },
+      currency: 'USD',   // moneda de los totales normalizados
       global: {
-        totalTransactions:     g.totalTransactions,
-        completedTransactions: g.completedTransactions,
-        failedTransactions:    g.failedTransactions,
-        totalVolumeCLP:        g.totalVolumeCLP,
-        totalRevenueCLP:       g.totalRevenueCLP,
+        totalTransactions:     c.totalTransactions,
+        completedTransactions: c.completedTransactions,
+        failedTransactions:    c.failedTransactions,
+        totalVolumeUsd,
+        totalRevenueUsd,
         avgRevenuePercent:     avgRevenuePct,
+        // Alias retro-compat (ahora en USD, ya NO mezcla monedas):
+        totalVolumeCLP:        totalVolumeUsd,
+        totalRevenueCLP:       totalRevenueUsd,
       },
+      byCurrency,
       byEntity,
       byCorridor,
       topCorridors: byCorridor.slice(0, 3),

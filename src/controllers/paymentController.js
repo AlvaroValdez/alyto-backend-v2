@@ -1930,7 +1930,9 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     }
 
     const alytoProfitUSDC = round2(
-      (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
+      // Ganancia = solo fees de Alyto (spread + fijo + retención). payinFee es
+      // pass-through del proveedor de payin → NO es ganancia.
+      (quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
       / bobPerUsdc,
     );
     const quoteExpiresAt = selected.quoteExpiresAt
@@ -2375,7 +2377,9 @@ export async function getQuote(req, res) {
     });
 
     const alytoProfitUSDC = round2(
-      (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
+      // Ganancia = solo fees de Alyto (spread + fijo + retención). payinFee es
+      // pass-through del proveedor de payin → NO es ganancia.
+      (quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
       / bobPerUsdc,
     );
 
