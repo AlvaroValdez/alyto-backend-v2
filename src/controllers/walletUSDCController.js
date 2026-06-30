@@ -52,6 +52,31 @@ async function calcUsdcP2pFee(amount, accountType) {
   return feeFromConfig(cfg, amount, accountType)
 }
 
+// ─── Helper: ganancia por spread de conversión (swap revenue) ─────────────────
+
+/**
+ * Calcula la ganancia en BOB que deja una conversión por el spread aplicado:
+ *   - buy  (BOB→USDC): usdcAmount × (tasaAplicada − tasaMercado)
+ *   - sell (USDC→BOB): usdcAmount × (tasaMercado − tasaAplicada)
+ * Ambas direcciones realizan el margen en BOB. Usa la tasa de mercado bloqueada
+ * al solicitar (metadata.marketRate). Si no está disponible (conversiones viejas),
+ * devuelve null → no se acumula nada (evita estimaciones imprecisas).
+ *
+ * @param {'buy'|'sell'} direction
+ * @param {object} meta  metadata de la WalletTransaction de la solicitud
+ * @returns {{ swapRevenueBob:number, marketRate:number, appliedRate:number }|null}
+ */
+function computeSwapRevenue(direction, meta = {}) {
+  const usdcAmount  = Number(meta.usdcAmount)
+  const marketRate  = Number(meta.marketRate)
+  const appliedRate = Number(meta.bobPerUsdc)
+  if (!usdcAmount || !marketRate || !appliedRate) return null
+
+  const diff = direction === 'buy' ? (appliedRate - marketRate) : (marketRate - appliedRate)
+  const swapRevenueBob = Math.max(0, Math.round(usdcAmount * diff * 100) / 100)
+  return { swapRevenueBob, marketRate, appliedRate }
+}
+
 // ─── Helper: obtener o crear WalletUSDC ──────────────────────────────────────
 
 export async function getOrCreateWalletUSDC(userId, session) {
@@ -124,8 +149,10 @@ async function getBOBtoUSDCRate() {
   // Tasa del corredor USDC: derivada de mercado × (1 + spread%) para no quedar
   // bajo costo de fondeo. El override admin BOB-USDC solo sube el piso (ver
   // getBOBUSDCRate). getBOBRate (Vita/quotes) no aplica este spread.
-  const { getBOBUSDCRate } = await import('../services/exchangeRateService.js')
-  return getBOBUSDCRate()
+  // Devuelve el desglose { bobPerUsdc, marketRate, spreadPct, ... } para poder
+  // registrar la ganancia por spread (swap revenue) al confirmar la conversión.
+  const { getBOBUSDCRateDetailed } = await import('../services/exchangeRateService.js')
+  return getBOBUSDCRateDetailed()
 }
 
 // ─── FUNCIÓN 1: GET /api/v1/wallet/usdc/balance ───────────────────────────────
@@ -306,8 +333,9 @@ export async function requestBOBtoUSDC(req, res) {
       return res.status(403).json({ error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
     }
 
-    // Obtener tasa de cambio BOB/USDC
-    const bobPerUsdc  = await getBOBtoUSDCRate()
+    // Obtener tasa de cambio BOB/USDC (con desglose para registrar la ganancia por spread)
+    const rate        = await getBOBtoUSDCRate()
+    const bobPerUsdc  = rate.bobPerUsdc
     const usdcAmount  = parseFloat((amount / bobPerUsdc).toFixed(6))
 
     // Obtener o crear WalletUSDC (por si es la primera vez)
@@ -350,6 +378,8 @@ export async function requestBOBtoUSDC(req, res) {
         bobAmount:   amount,
         usdcAmount,
         bobPerUsdc,
+        marketRate:  rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
+        spreadPct:   rate.spreadPct,
         walletUSDCId: walletUSDC._id.toString(),
         walletBOBId:  walletBOB._id.toString(),
       },
@@ -519,6 +549,9 @@ export async function adminConfirmBOBtoUSDC(req, res) {
       $inc: { balance: usdcAmount },
     }, { session })
 
+    // 3b. Ganancia por spread (swap revenue) — buy (BOB→USDC). En BOB.
+    const swap = computeSwapRevenue('buy', wtx.metadata)
+
     // 4. Crear WalletTransaction de crédito en WalletUSDC
     const [wtxUSDC] = await WalletTransaction.create([{
       walletId:      walletUSDC._id,
@@ -537,8 +570,24 @@ export async function adminConfirmBOBtoUSDC(req, res) {
         sourceBOBWtxId: wtxId,
         bobAmount,
         bobPerUsdc:     wtx.metadata?.bobPerUsdc,
+        ...(swap ? {
+          kind:           'swap_revenue',
+          swapDirection:  'buy',
+          swapRevenueBob: swap.swapRevenueBob,
+          marketRate:     swap.marketRate,
+          appliedRate:    swap.appliedRate,
+        } : {}),
       },
     }], { session })
+
+    // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
+    if (swap && swap.swapRevenueBob > 0) {
+      await WalletFeeConfig.updateOne(
+        { _id: 'singleton' },
+        { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
+        { session, upsert: true },
+      )
+    }
 
     await session.commitTransaction()
 
@@ -701,10 +750,11 @@ export async function adminRejectBOBtoUSDC(req, res) {
 // en la WalletBOB del usuario (usable para SendMoney/QR). Ver docs/ análisis
 // USDC→BOB: Modelo A + pedido de dispersión BANECO para el off-ramp Nivel 2.
 
-/** Tasa de venta USDC→BOB (market × (1 − spread%)) — margen a favor de Alyto. */
+/** Tasa de venta USDC→BOB (market × (1 − spread%)) — margen a favor de Alyto.
+ *  Devuelve el desglose { bobPerUsdc, marketRate, spreadPct } para registrar la ganancia. */
 async function getUSDCtoBOBRate() {
-  const { getUSDCBOBRate } = await import('../services/exchangeRateService.js')
-  return getUSDCBOBRate()
+  const { getUSDCBOBRateDetailed } = await import('../services/exchangeRateService.js')
+  return getUSDCBOBRateDetailed()
 }
 
 /**
@@ -773,8 +823,9 @@ export async function requestUSDCtoBOB(req, res) {
       return res.status(403).json({ error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
     }
 
-    // Tasa de venta + monto BOB resultante
-    const bobPerUsdc = await getUSDCtoBOBRate()
+    // Tasa de venta + monto BOB resultante (con desglose para registrar la ganancia por spread)
+    const rate       = await getUSDCtoBOBRate()
+    const bobPerUsdc = rate.bobPerUsdc
     const bobAmount  = parseFloat((amount * bobPerUsdc).toFixed(2))
 
     // Wallet BOB destino — crear si el usuario aún no tiene
@@ -820,6 +871,8 @@ export async function requestUSDCtoBOB(req, res) {
         usdcAmount:   amount,
         bobAmount,
         bobPerUsdc,
+        marketRate:   rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
+        spreadPct:    rate.spreadPct,
         walletUSDCId: walletUSDC._id.toString(),
         walletBOBId:  walletBOB._id.toString(),
       },
@@ -961,6 +1014,9 @@ export async function adminConfirmUSDCtoBOB(req, res) {
       $inc: { balance: bobAmount },
     }, { session })
 
+    // 2b. Ganancia por spread (swap revenue) — sell (USDC→BOB). En BOB.
+    const swap = computeSwapRevenue('sell', wtx.metadata)
+
     // 3. Crear WalletTransaction de crédito en WalletBOB
     const [wtxBOB] = await WalletTransaction.create([{
       walletId:      walletBOB._id,
@@ -979,8 +1035,24 @@ export async function adminConfirmUSDCtoBOB(req, res) {
         sourceUSDCWtxId: wtxId,
         usdcAmount,
         bobPerUsdc:      wtx.metadata?.bobPerUsdc,
+        ...(swap ? {
+          kind:           'swap_revenue',
+          swapDirection:  'sell',
+          swapRevenueBob: swap.swapRevenueBob,
+          marketRate:     swap.marketRate,
+          appliedRate:    swap.appliedRate,
+        } : {}),
       },
     }], { session })
+
+    // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
+    if (swap && swap.swapRevenueBob > 0) {
+      await WalletFeeConfig.updateOne(
+        { _id: 'singleton' },
+        { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
+        { session, upsert: true },
+      )
+    }
 
     await session.commitTransaction()
 
@@ -1116,6 +1188,72 @@ export async function adminListPendingUSDCtoBOB(req, res) {
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminListPendingUSDCtoBOB' } })
     console.error('[WalletUSDC] Error en adminListPendingUSDCtoBOB:', err.message)
     return res.status(500).json({ error: 'Error al listar conversiones pendientes.' })
+  }
+}
+
+// ─── ADMIN: GET /api/v1/admin/wallet/swap-revenue ─────────────────────────────
+
+/**
+ * Reporte de ganancias por spread de conversiones swap (BOB↔USDC).
+ * Devuelve el acumulado (WalletFeeConfig.swapRevenueAccruedBob) + verificación
+ * cruzada contra la suma de WalletTransaction (metadata.kind:'swap_revenue'),
+ * desglose por dirección (buy/sell) y conteo de conversiones.
+ *
+ * Query opcional: from, to (ISO) — filtran el desglose por rango de fechas.
+ * El acumulado del config es global (no se filtra por fecha).
+ */
+export async function getSwapRevenue(req, res) {
+  try {
+    const cfg = await WalletFeeConfig.getSingleton()
+
+    const match = { 'metadata.kind': 'swap_revenue' }
+    if (req.query.from || req.query.to) {
+      match.createdAt = {}
+      if (req.query.from) { const d = new Date(req.query.from); if (!isNaN(d)) match.createdAt.$gte = d }
+      if (req.query.to)   { const d = new Date(req.query.to);   if (!isNaN(d)) match.createdAt.$lte = d }
+      if (!Object.keys(match.createdAt).length) delete match.createdAt
+    }
+
+    const byDir = await WalletTransaction.aggregate([
+      { $match: match },
+      { $group: {
+        _id:   '$metadata.swapDirection',
+        total: { $sum: '$metadata.swapRevenueBob' },
+        count: { $sum: 1 },
+      } },
+    ])
+
+    const buy  = byDir.find(d => d._id === 'buy')  ?? { total: 0, count: 0 }
+    const sell = byDir.find(d => d._id === 'sell') ?? { total: 0, count: 0 }
+    const totalFromTx = (buy.total ?? 0) + (sell.total ?? 0)
+    const totalCount  = (buy.count ?? 0) + (sell.count ?? 0)
+
+    const accrued = cfg.swapRevenueAccruedBob ?? 0
+    // La verificación cruzada solo aplica sin filtro de fecha (el acumulado es global).
+    const ranged = !!match.createdAt
+
+    return res.json({
+      currency:              'BOB',
+      swapRevenueAccruedBob: parseFloat(accrued.toFixed(2)),
+      byDirection: {
+        buy:  { revenueBob: parseFloat((buy.total ?? 0).toFixed(2)),  conversions: buy.count ?? 0 },
+        sell: { revenueBob: parseFloat((sell.total ?? 0).toFixed(2)), conversions: sell.count ?? 0 },
+      },
+      totals: {
+        revenueBob:  parseFloat(totalFromTx.toFixed(2)),
+        conversions: totalCount,
+      },
+      verification: ranged ? null : {
+        sumSwapTransactions: parseFloat(totalFromTx.toFixed(2)),
+        count:               totalCount,
+        matches:             Math.abs(accrued - totalFromTx) < 0.01,
+      },
+      ...(ranged ? { range: { from: req.query.from ?? null, to: req.query.to ?? null } } : {}),
+    })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'getSwapRevenue' } })
+    console.error('[WalletUSDC] Error en getSwapRevenue:', err.message)
+    return res.status(500).json({ error: 'Error al obtener la ganancia de swaps.' })
   }
 }
 

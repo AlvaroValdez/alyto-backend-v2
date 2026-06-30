@@ -55,6 +55,8 @@ const walletFeeConfigSchema = new mongoose.Schema({
   // ── Revenue acumulada (ledger interno) ───────────────────────────────────────
   /** USDC total acumulado por comisiones P2P (cuenta de revenue interna). */
   revenueAccruedUsdc:       { type: Number, default: 0, min: 0 },
+  /** BOB total acumulado por el spread de conversiones swap (BOB↔USDC). */
+  swapRevenueAccruedBob:    { type: Number, default: 0, min: 0 },
 
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { timestamps: true, collection: 'wallet_fee_configs' })

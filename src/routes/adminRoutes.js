@@ -126,6 +126,7 @@ import {
   adminListPendingUSDCtoBOB,
   adminConfirmUSDCtoBOB,
   adminRejectUSDCtoBOB,
+  getSwapRevenue,
 } from '../controllers/walletUSDCController.js';
 import {
   adminListarReclamos,
@@ -698,6 +699,9 @@ router.post('/wallet/usdc/conversions/reject', adminRejectBOBtoUSDC);
 router.get ('/wallet/bob/conversions/pending', adminListPendingUSDCtoBOB);
 router.post('/wallet/bob/conversions/confirm', adminConfirmUSDCtoBOB);
 router.post('/wallet/bob/conversions/reject',  adminRejectUSDCtoBOB);
+
+// Ganancia por spread de conversiones swap (BOB↔USDC) — acumulado + desglose.
+router.get ('/wallet/swap-revenue', getSwapRevenue);
 
 // ─── PRILI — Reclamos ASFI (Fase 27) ─────────────────────────────────────────
 
