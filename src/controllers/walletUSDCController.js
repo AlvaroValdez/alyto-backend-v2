@@ -1257,6 +1257,34 @@ export async function getSwapRevenue(req, res) {
   }
 }
 
+// ─── ADMIN: POST /api/v1/admin/wallet/swap-revenue/resync ─────────────────────
+
+/**
+ * Resincroniza el acumulador WalletFeeConfig.swapRevenueAccruedBob con la suma real
+ * de las transacciones swap_revenue (fuente de verdad). Necesario cuando se borran
+ * transacciones (p. ej. limpieza de datos de prueba) y el contador global queda
+ * desfasado → "Desajuste" en la verificación.
+ */
+export async function resyncSwapRevenue(req, res) {
+  try {
+    const agg = await WalletTransaction.aggregate([
+      { $match: { 'metadata.kind': 'swap_revenue' } },
+      { $group: { _id: null, total: { $sum: '$metadata.swapRevenueBob' } } },
+    ])
+    const total = Math.round((agg[0]?.total ?? 0) * 100) / 100
+    await WalletFeeConfig.updateOne(
+      { _id: 'singleton' },
+      { $set: { swapRevenueAccruedBob: total } },
+      { upsert: true },
+    )
+    return res.json({ swapRevenueAccruedBob: total, resynced: true })
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'resyncSwapRevenue' } })
+    console.error('[WalletUSDC] Error en resyncSwapRevenue:', err.message)
+    return res.status(500).json({ error: 'Error al resincronizar la ganancia de swaps.' })
+  }
+}
+
 // ─── ADMIN: GET /api/v1/admin/wallet/conversions ──────────────────────────────
 
 /**
@@ -1300,6 +1328,9 @@ export async function adminListAllConversions(req, res) {
     const conversions = rows.map((w) => {
       const m = w.metadata ?? {}
       const direction = w.type === 'bob_to_usdc' ? 'buy' : 'sell'
+      // Ganancia por spread: solo realizada en conversiones completadas. Se calcula
+      // desde la tasa de mercado bloqueada en la solicitud (null en conversiones viejas).
+      const swap = w.status === 'completed' ? computeSwapRevenue(direction, m) : null
       return {
         wtxId:      w.wtxId,
         direction,
@@ -1312,6 +1343,7 @@ export async function adminListAllConversions(req, res) {
         bobPerUsdc: m.bobPerUsdc ?? null,
         marketRate: m.marketRate ?? null,
         spreadPct:  m.spreadPct ?? null,
+        swapRevenueBob: swap ? swap.swapRevenueBob : null,   // ganancia por spread (solo si completada)
         createdAt:  w.createdAt,
         confirmedAt: w.confirmedAt ?? null,
       }

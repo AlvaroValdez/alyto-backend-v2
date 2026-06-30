@@ -127,6 +127,7 @@ import {
   adminConfirmUSDCtoBOB,
   adminRejectUSDCtoBOB,
   getSwapRevenue,
+  resyncSwapRevenue,
   adminListAllConversions,
 } from '../controllers/walletUSDCController.js';
 import {
@@ -703,6 +704,8 @@ router.post('/wallet/bob/conversions/reject',  adminRejectUSDCtoBOB);
 
 // Ganancia por spread de conversiones swap (BOB↔USDC) — acumulado + desglose.
 router.get ('/wallet/swap-revenue', getSwapRevenue);
+// Resincroniza el acumulador de ganancia con la suma real de transacciones.
+router.post('/wallet/swap-revenue/resync', resyncSwapRevenue);
 // Historial global de conversiones swap (ambas direcciones, cualquier estado).
 router.get ('/wallet/conversions', adminListAllConversions);
 
