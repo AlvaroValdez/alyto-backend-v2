@@ -633,6 +633,38 @@ async function startServer() {
 
     await seedDevUser();
 
+    // ── Guard: proveedores de pago apuntando a sandbox/stage en PRODUCCIÓN ──
+    // Los defaults de owlPayService (harbor-sandbox) y vitaWalletService (api.stage)
+    // son deliberadamente sandbox — seguros en dev/staging, catastróficos si llegan
+    // a prod real (payouts contra entornos de prueba).
+    // ⚠️ Discriminador de entorno: Render staging TAMBIÉN corre NODE_ENV=production
+    // (render.yaml) y usa sandbox a propósito. El VPS de producción es el ÚNICO
+    // entorno con AWS Secrets Manager (AWS_SECRETS_NAME) — ese es el gate fatal.
+    // Mismo criterio que ALLOWED_ORIGINS vacío y fallo de Secrets Manager en prod.
+    // Escape hatch consciente: ALYTO_ALLOW_SANDBOX_PROVIDERS=true (solo diagnóstico).
+    if (process.env.NODE_ENV === 'production') {
+      const providerUrls = [
+        ['OWLPAY_BASE_URL/OWLPAY_API_URL',
+          process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL ?? 'https://harbor-sandbox.owlpay.com/api (default)'],
+        ['VITA_API_URL',
+          process.env.VITA_API_URL ?? 'https://api.stage.vitawallet.io (default)'],
+      ];
+      const sandboxed = providerUrls.filter(([, url]) => /sandbox|\.stage\./i.test(url));
+      const isRealProd = !!process.env.AWS_SECRETS_NAME; // solo el VPS prod carga Secrets Manager
+
+      if (sandboxed.length > 0) {
+        for (const [name, url] of sandboxed) {
+          console.error(`[ProviderGuard] ⚠️ ${name} apunta a sandbox/stage con NODE_ENV=production: ${url}`);
+        }
+        if (isRealProd && process.env.ALYTO_ALLOW_SANDBOX_PROVIDERS !== 'true') {
+          console.error('[ProviderGuard] FATAL — entorno de producción real (AWS_SECRETS_NAME presente) ' +
+            'con proveedores sandbox. Corrige las env vars o setea ALYTO_ALLOW_SANDBOX_PROVIDERS=true ' +
+            'si es deliberado (solo diagnóstico). Abortando.');
+          process.exit(1);
+        }
+      }
+    }
+
     // Capturar el servidor HTTP para montar el WebSocket sobre él
     const httpServer = app.listen(PORT, () => {
       console.info(`[Alyto Server] Escuchando en http://0.0.0.0:${PORT}`);

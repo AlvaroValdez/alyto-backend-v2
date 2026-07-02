@@ -85,6 +85,12 @@ function checkEnvVars() {
       test: v => v && v.includes('api.vitawallet.io') && !v.includes('stage'),
       hint: 'Debe contener "api.vitawallet.io" sin "stage" (entorno de producción)',
     },
+    // OwlPay Harbor producción (mismo criterio que Vita: URL sin sandbox)
+    {
+      name: 'OWLPAY_BASE_URL',
+      test: v => !!v && /owlpay\.com/.test(v) && !/sandbox/i.test(v),
+      hint: 'Debe apuntar a harbor.owlpay.com sin "sandbox" (entorno de producción)',
+    },
     { name: 'VITA_LOGIN',                test: v => !!v, hint: 'x-login de autenticación Vita' },
     { name: 'VITA_TRANS_KEY',            test: v => !!v, hint: 'x-trans-key de autenticación Vita' },
     { name: 'VITA_SECRET',               test: v => !!v, hint: 'Clave HMAC-SHA256 de Vita' },
