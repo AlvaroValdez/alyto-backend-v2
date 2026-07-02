@@ -6,7 +6,14 @@
  *
  * Comportamiento:
  *   - Hit confirmado  → 403 SANCTIONS_HIT (bloquea la operación)
- *   - Error de servicio → deja pasar + registra en Sentry (no bloquear flujo)
+ *   - Error de servicio:
+ *       · PRODUCCIÓN → 503 SCREENING_UNAVAILABLE (FAIL-CLOSED, endurecido 2026-07).
+ *         Un screening que "deja pasar ante error" permitiría evadir el control AML
+ *         provocando el error. La SanctionsList vive en el mismo MongoDB que las
+ *         transacciones: si el screening falla, la operación tampoco habría podido
+ *         persistirse — el costo de disponibilidad es casi nulo. El cliente puede
+ *         reintentar (503 = transitorio).
+ *       · DEV/TEST → deja pasar + registra en Sentry (no fricciona desarrollo)
  *
  * Uso:
  *   router.post('/crossborder', protect, checkSanctions, initCrossBorderPayment)
@@ -15,6 +22,16 @@
 import * as Sentry from '@sentry/node'
 import { screenUser } from '../services/sanctionsService.js'
 import User from '../models/User.js'
+
+const SCREENING_UNAVAILABLE_RESPONSE = {
+  error:   'Servicio temporalmente no disponible.',
+  message: 'No pudimos completar la verificación de seguridad. Intenta nuevamente en unos minutos.',
+  code:    'SCREENING_UNAVAILABLE',
+}
+
+function isFailClosed() {
+  return process.env.NODE_ENV === 'production'
+}
 
 export async function checkSanctions(req, res, next) {
   try {
@@ -35,6 +52,16 @@ export async function checkSanctions(req, res, next) {
       documentNumber,
     })
 
+    // screenUser traga errores internamente y devuelve { isClean:true, error } —
+    // ese "clean" NO es un screening real. En producción: fail-closed.
+    if (result.error && isFailClosed()) {
+      console.error('[Sanctions] Screening falló (interno) — FAIL-CLOSED en producción:', {
+        userId: user._id?.toString(),
+        error:  result.error,
+      })
+      return res.status(503).json(SCREENING_UNAVAILABLE_RESPONSE)
+    }
+
     if (!result.isClean) {
       console.warn('[Sanctions] ⛔ Usuario bloqueado por lista de sanciones:', {
         userId: user._id?.toString(),
@@ -53,10 +80,14 @@ export async function checkSanctions(req, res, next) {
     next()
 
   } catch (err) {
-    // Error inesperado en el middleware: no bloquear flujo, pero SÍ reportar —
-    // un fallo sostenido del screening AML debe ser visible (audit 2026-06-11).
+    // Error inesperado en el middleware — siempre reportar (audit 2026-06-11).
     console.error('[Sanctions] Error en middleware checkSanctions:', err.message)
     Sentry.captureException(err, { tags: { middleware: 'checkSanctions' } })
+
+    // PRODUCCIÓN → FAIL-CLOSED (503 retryable). DEV/TEST → fail-open.
+    if (isFailClosed()) {
+      return res.status(503).json(SCREENING_UNAVAILABLE_RESPONSE)
+    }
     next()
   }
 }
