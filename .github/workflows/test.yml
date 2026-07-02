@@ -1,0 +1,42 @@
+# CI — Suite Jest (unit + integración + e2e)
+#
+# La suite es autocontenida: mongodb-memory-server (sin DB externa) + mocks de
+# proveedores (Vita/OwlPay/Stellar) + supertest. No requiere secretos — los
+# tests definen sus propias env vars en tests/setup.env.js.
+#
+# Añadido 2026-07: la suite existía pero ningún workflow la ejecutaba (solo
+# keepalive.yml), por lo que se pudrió sin que nadie lo notara. Este workflow
+# la convierte en gate de push/PR a main.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22          # mismo runtime que el Dockerfile (node:22-slim)
+          cache: npm
+
+      # mongodb-memory-server descarga el binario de MongoDB en el primer run —
+      # cachearlo ahorra ~30-60s por ejecución
+      - name: Cache MongoDB binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}
+
+      - run: npm ci
+
+      - run: npm test
