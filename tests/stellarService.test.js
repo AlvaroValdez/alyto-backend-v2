@@ -67,6 +67,8 @@ await jest.unstable_mockModule('@stellar/stellar-sdk', () => {
       this.issuer = issuer;
     }
     get asset_type() { return 'credit_alphanum4'; }
+    getCode()   { return this.code; }
+    getIssuer() { return this.issuer; }
   }
 
   const Memo    = { text: jest.fn((t) => ({ type: 'text', value: t })) };
@@ -83,7 +85,14 @@ await jest.unstable_mockModule('@stellar/stellar-sdk', () => {
     Server: MockHorizonServer,
   };
 
-  return { Horizon, Keypair, TransactionBuilder, Asset, Memo, Operation, Networks };
+  // StrKey — usado por sendUSDCToHarbor para validar la public key destino.
+  // En tests aceptamos cualquier string que parezca una public key Stellar (G...).
+  const StrKey = {
+    isValidEd25519PublicKey: (k) => typeof k === 'string' && k.startsWith('G') && k.length >= 10,
+    isValidEd25519SecretSeed: (k) => typeof k === 'string' && k.startsWith('S'),
+  };
+
+  return { Horizon, Keypair, TransactionBuilder, Asset, Memo, Operation, Networks, StrKey };
 });
 
 // Also mock models and utilities so service can import without DB

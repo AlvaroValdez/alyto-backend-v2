@@ -40,6 +40,12 @@ function buildSortedBodyLocal(body = null) {
 }
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
+// Patrón: importar el módulo REAL y hacer spread + override — así el mock no se
+// desactualiza cuando el módulo real agrega exports nuevos.
+
+const actualVita    = await import('../../src/services/vitaWalletService.js');
+const actualOwlPay  = await import('../../src/services/owlPayService.js');
+const actualStellar = await import('../../src/services/stellarService.js');
 
 const mockCreatePayout      = jest.fn();
 const mockCreateQuote       = jest.fn();
@@ -49,6 +55,7 @@ const mockSendUSDCToHarbor  = jest.fn();
 const mockGetStellarBalance = jest.fn();
 
 await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
+  ...actualOwlPay,
   verifyWebhookSignature: (rawPayloadBuffer, harborSignatureHeader) => {
     // Real implementation — matches owlPayService.verifyWebhookSignature
     // signed_payload = "<timestamp>.<rawBody>" per Harbor docs
@@ -100,6 +107,7 @@ await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
 }));
 
 await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => ({
+  ...actualVita,
   getPrices:             jest.fn(),
   generateVitaSignature: (xDate, body) => {
     // Reimplementar con las mismas vars de entorno para que el mock sea coherente
@@ -118,10 +126,10 @@ await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => 
   getWallets:               jest.fn(),
   getDeposits:              jest.fn(),
   getCryptoPrices:          jest.fn(),
-  VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
+  ...actualStellar,
   executeWeb3Transit:             jest.fn().mockResolvedValue({ txid: 'mock_stellar_txid' }),
   buildFeeBumpTransaction:        jest.fn(),
   buildInnerTransaction:          jest.fn(),
@@ -379,6 +387,14 @@ async function createOwlPayTransaction(corridorDoc, overrides = {}) {
       accountNumber:  '6228480402564890018',
       bankCode:       'CCB',
       country:        'CN',
+      // buildOwlPayBeneficiary exige el address completo (street/city/postal_code)
+      // para construir beneficiary_address — Harbor lo requiere para CN.
+      dynamicFields: {
+        street:         'No. 100 Century Avenue',
+        city:           'Shanghai',
+        state_province: 'Shanghai',
+        postal_code:    '200120',
+      },
     },
     paymentLegs: [
       { stage: 'payin', provider: 'manual', status: 'completed', externalId: `manual_${Date.now()}` },
@@ -412,11 +428,15 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     mockCreateQuote.mockResolvedValue({ id: 'quote_test_001', expires_at: new Date(Date.now() + 300_000).toISOString() });
     mockGetRequirements.mockResolvedValue({ data: { fields: [] } });
     mockCreateTransfer.mockResolvedValue({
-      id:                  'transfer_test_001',
-      status:              'pending',
-      instruction_address: 'GBTEST123STELLAR',
-      instruction_memo:    'ALY-C-TEST',
-      usdc_amount:         100,
+      id:     'transfer_test_001',
+      status: 'pending',
+      // Harbor v2 devuelve las instrucciones de fondeo bajo transfer_instructions
+      transfer_instructions: {
+        instruction_address: 'GBTEST123STELLAR',
+        instruction_memo:    'ALY-C-TEST',
+        chain:               'stellar',
+      },
+      usdc_amount: 100,
     });
 
     const tx = await createOwlPayTransaction(owlCorr);
@@ -454,11 +474,15 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     mockCreateQuote.mockResolvedValue({ id: 'quote_auto_001', expires_at: new Date(Date.now() + 300_000).toISOString() });
     mockGetRequirements.mockResolvedValue({ data: { fields: [] } });
     mockCreateTransfer.mockResolvedValue({
-      id:                  'transfer_auto_001',
-      status:              'pending',
-      instruction_address: 'GBTEST456STELLAR',
-      instruction_memo:    'ALY-C-AUTO',
-      usdc_amount:         100,
+      id:     'transfer_auto_001',
+      status: 'pending',
+      // Harbor v2 devuelve las instrucciones de fondeo bajo transfer_instructions
+      transfer_instructions: {
+        instruction_address: 'GBTEST456STELLAR',
+        instruction_memo:    'ALY-C-AUTO',
+        chain:               'stellar',
+      },
+      usdc_amount: 100,
     });
     mockSendUSDCToHarbor.mockResolvedValue({
       hash:     'abc123stellar',
@@ -540,16 +564,31 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
 
 describe('POST /api/v1/ipn/fintoc — cross-border', () => {
 
-  test('200 — evento desconocido ignorado (no falla)', async () => {
+  test('400 — petición sin firma rechazada; 200 — evento desconocido firmado se ignora', async () => {
     const body    = { type: 'payment_intent.created', data: { id: 'pi_test' } };
     const rawBody = JSON.stringify(body);
 
-    const res = await request(app)
+    // Sin header fintoc-signature → el handler rechaza con 400 (hardening).
+    const resNoSig = await request(app)
       .post('/api/v1/ipn/fintoc')
       .set('content-type', 'application/json')
       .send(rawBody);
+    expect(resNoSig.status).toBe(400);
 
-    // Fintoc IPN handler siempre devuelve 200 para evitar reintentos
+    // Con firma HMAC válida (handleFintocIPN espera HMAC-SHA256 del rawBody,
+    // header 'fintoc-signature' en hex plano o con prefijo sha256=) el evento
+    // desconocido se ignora sin fallar (200 para evitar reintentos).
+    const sig = crypto
+      .createHmac('sha256', process.env.FINTOC_WEBHOOK_SECRET)
+      .update(rawBody)
+      .digest('hex');
+
+    const res = await request(app)
+      .post('/api/v1/ipn/fintoc')
+      .set('fintoc-signature', `sha256=${sig}`)
+      .set('content-type', 'application/json')
+      .send(rawBody);
+
     expect(res.status).toBe(200);
   });
 

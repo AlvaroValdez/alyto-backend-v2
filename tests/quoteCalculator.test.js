@@ -27,7 +27,7 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
         profitRetentionPercent: 1,
       },
       bobPerUsdc: 9.31,
-      vitaRate:   4201.32,
+      providerRate: 4201.32,
     });
 
     expect(result.totalDeducted).toBeCloseTo(17.70, 2);
@@ -50,7 +50,7 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
         profitRetentionPercent: 1,
       },
       bobPerUsdc: 9.31,
-      vitaRate:   4201.32,
+      providerRate: 4201.32,
     });
 
     expect(result.destinationAmount).toBeGreaterThan(0);
@@ -72,7 +72,7 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
         profitRetentionPercent: 1,
       },
       bobPerUsdc: 9.31,
-      vitaRate:   4201.32,
+      providerRate: 4201.32,
     });
 
     expect(result.destinationAmount).toBeGreaterThan(0);
@@ -89,22 +89,22 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
         profitRetentionPercent: 1,
       },
       bobPerUsdc: 9.31,
-      vitaRate:   4200,
+      providerRate: 4200,
     });
     expect(result.fees.vitaRateMarkup).toBe(0);
   });
 
-  // ── Extra: destinationAmount uses raw vitaRate (no shave) ──────────────────
-  it('No rate-markup shave: destAmount must equal usdcTransit × vitaRate − payoutFeeInDest', () => {
-    const amount     = 1000;
-    const bobPerUsdc = 9.31;
-    const vitaRate   = 4200;
-    const corridor   = { alytoCSpread: 2, fixedFee: 5, profitRetentionPercent: 1, payoutFeeFixed: 0 };
+  // ── Extra: destinationAmount uses raw providerRate (no shave) ──────────────
+  it('No rate-markup shave: destAmount must equal usdcTransit × providerRate − payoutFeeInDest', () => {
+    const amount       = 1000;
+    const bobPerUsdc   = 9.31;
+    const providerRate = 4200;
+    const corridor     = { alytoCSpread: 2, fixedFee: 5, profitRetentionPercent: 1, payoutFeeFixed: 0 };
 
-    const result = calculateQuote({ amount, corridor, bobPerUsdc, vitaRate });
+    const result = calculateQuote({ amount, corridor, bobPerUsdc, providerRate });
 
     const round2           = n => Math.round(n * 100) / 100;
-    const expectedDestFromRaw = round2(result.digitalAssetAmount * vitaRate);
+    const expectedDestFromRaw = round2(result.digitalAssetAmount * providerRate);
     expect(result.destinationAmount).toBeCloseTo(expectedDestFromRaw, 2);
   });
 
@@ -113,22 +113,22 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
     const corridor = { alytoCSpread: 2, fixedFee: 5, profitRetentionPercent: 1, payoutFeeFixed: 0 };
 
     it('rejects zero or negative amount', () => {
-      expect(() => calculateQuote({ amount: 0,   corridor, bobPerUsdc: 9.31, vitaRate: 4200 })).toThrow();
-      expect(() => calculateQuote({ amount: -10, corridor, bobPerUsdc: 9.31, vitaRate: 4200 })).toThrow();
+      expect(() => calculateQuote({ amount: 0,   corridor, bobPerUsdc: 9.31, providerRate: 4200 })).toThrow();
+      expect(() => calculateQuote({ amount: -10, corridor, bobPerUsdc: 9.31, providerRate: 4200 })).toThrow();
     });
 
     it('rejects missing corridor', () => {
-      expect(() => calculateQuote({ amount: 100, corridor: null, bobPerUsdc: 9.31, vitaRate: 4200 })).toThrow();
+      expect(() => calculateQuote({ amount: 100, corridor: null, bobPerUsdc: 9.31, providerRate: 4200 })).toThrow();
     });
 
     it('rejects missing or non-positive bobPerUsdc', () => {
-      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 0,    vitaRate: 4200 })).toThrow();
-      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: null, vitaRate: 4200 })).toThrow();
+      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 0,    providerRate: 4200 })).toThrow();
+      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: null, providerRate: 4200 })).toThrow();
     });
 
-    it('rejects missing or non-positive vitaRate', () => {
-      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 9.31, vitaRate: 0    })).toThrow();
-      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 9.31, vitaRate: null })).toThrow();
+    it('rejects missing or non-positive providerRate', () => {
+      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 9.31, providerRate: 0    })).toThrow();
+      expect(() => calculateQuote({ amount: 100, corridor, bobPerUsdc: 9.31, providerRate: null })).toThrow();
     });
   });
 
@@ -138,7 +138,7 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
       amount: 635,
       corridor: { alytoCSpread: 2, fixedFee: 5, profitRetentionPercent: 1 },
       bobPerUsdc: 9.31,
-      vitaRate:   4201.32,
+      providerRate: 4201.32,
     });
     expect(result.conversionRate).toEqual({
       fromCurrency:    'BOB',

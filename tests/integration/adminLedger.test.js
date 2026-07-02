@@ -18,8 +18,15 @@ import {
 import { createAdminUser, createSpAUser } from '../helpers/auth.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
+// Patrón: importar el módulo REAL y hacer spread + override — así el mock no se
+// desactualiza cuando el módulo real agrega exports nuevos.
+
+const actualVita    = await import('../../src/services/vitaWalletService.js');
+const actualOwlPay  = await import('../../src/services/owlPayService.js');
+const actualStellar = await import('../../src/services/stellarService.js');
 
 await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => ({
+  ...actualVita,
   getPrices:                jest.fn(),
   generateVitaSignature:    jest.fn().mockReturnValue('mock_sig'),
   createPayout:             jest.fn(),
@@ -31,10 +38,10 @@ await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => 
   getWallets:               jest.fn(),
   getDeposits:              jest.fn(),
   getCryptoPrices:          jest.fn(),
-  VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
 await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
+  ...actualOwlPay,
   verifyOwlPayWebhookSignature:   jest.fn().mockResolvedValue(true),
   verifyWebhookSignature:         jest.fn().mockReturnValue(true),
   getOwlPayApiKey:                jest.fn().mockReturnValue('test_key'),
@@ -57,6 +64,7 @@ await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
 }));
 
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
+  ...actualStellar,
   executeWeb3Transit:             jest.fn(),
   registerAuditTrail:             jest.fn().mockResolvedValue(null),
   getAuditTrail:                  jest.fn().mockResolvedValue(null),
@@ -125,9 +133,12 @@ describe('GET /api/v1/admin/transactions', () => {
     await createTestTransaction(corridor, user);
     await createTestTransaction(corridor, user, { status: 'completed' });
 
+    // tab=all: sin él, el Ledger aplica el tab por defecto 'actionable'
+    // (payin_pending CON comprobante) y ocultaría estas transacciones.
     const res = await request(app)
       .get('/api/v1/admin/transactions')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .query({ tab: 'all' });
 
     expect(res.status).toBe(200);
     expect(res.body.transactions).toBeInstanceOf(Array);
@@ -213,7 +224,7 @@ describe('GET /api/v1/admin/transactions', () => {
     const res = await request(app)
       .get('/api/v1/admin/transactions')
       .set('Authorization', `Bearer ${token}`)
-      .query({ page: 2, limit: 3 });
+      .query({ page: 2, limit: 3, tab: 'all' });
 
     expect(res.status).toBe(200);
     expect(res.body.transactions.length).toBe(2);   // 5 total, 3 en pág 1 → 2 en pág 2

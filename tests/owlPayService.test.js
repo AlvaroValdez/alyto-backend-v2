@@ -78,13 +78,22 @@ describe('createQuote', () => {
     expect(url).toContain('/v2/transfers/quotes');
     expect(opts.method).toBe('POST');
 
+    // Contrato Harbor v2 real: body anidado source/destination + on_behalf_of
+    // (siempre el UUID de AV Finance LLC — MSA 30/03/2026).
     const body = JSON.parse(opts.body);
-    expect(body.source_amount).toBe(100);
-    expect(body.destination_country).toBe('CN');
-    expect(body.destination_currency).toBe('CNY');
-    expect(body.source_currency).toBe('USD');
-    expect(body.customer_uuid).toBe('cust-uuid-001');
-    expect(body.source_chain).toBe('stellar');
+    expect(body.source).toMatchObject({
+      type:    'business',
+      chain:   'stellar',
+      country: 'US',
+      asset:   'USDC',
+      amount:  '100.00',        // Number(source_amount).toFixed(2)
+    });
+    expect(body.destination).toMatchObject({
+      type:    'individual',
+      country: 'CN',
+      asset:   'CNY',
+    });
+    expect(body.on_behalf_of).toBe('cust-uuid-001');
   });
 
   test('throws if source_amount is zero', async () => {
@@ -151,42 +160,76 @@ describe('createTransfer', () => {
     if (global.fetch) global.fetch.mockReset();
   });
 
+  // Contrato actual (Harbor Transfer v2): quote_id + on_behalf_of (UUID LLC) +
+  // application_transfer_uuid (idempotencia, reemplaza external_reference) +
+  // source_address (wallet Stellar SRL) + beneficiary_info + payout_instrument.
+  const validParams = {
+    quote_id:                  'q-abc',
+    on_behalf_of:              'cust-uuid-001',
+    application_transfer_uuid: 'ALY-C-1234-NANO',
+    source_address:            'GA7BUSWQTESTSRLPUBLICKEY',
+    beneficiary_info: {
+      beneficiary_name:    'John Doe',
+      beneficiary_address: {
+        street: 'Av. Siempre Viva 123', city: 'Shanghai',
+        state_province: 'Shanghai', postal_code: '200120', country: 'CN',
+      },
+    },
+    payout_instrument: { account_number: '123456', swift_code: 'CCBKCNBJ' },
+  };
+
   test('sends correct payload shape', async () => {
     mockFetchOk({ uuid: 't-123', status: 'pending' });
 
-    await createTransfer({
-      quote_id:           'q-abc',
-      beneficiary:        { name: 'John Doe', account: '123456' },
-      external_reference: 'ALY-C-1234-NANO',
-    });
+    await createTransfer(validParams);
 
     const [url, opts] = global.fetch.mock.calls[0];
     expect(url).toContain('/v2/transfers');
     expect(opts.method).toBe('POST');
+
     const body = JSON.parse(opts.body);
     expect(body.quote_id).toBe('q-abc');
-    expect(body.external_reference).toBe('ALY-C-1234-NANO');
+    expect(body.on_behalf_of).toBe('cust-uuid-001');
+    expect(body.application_transfer_uuid).toBe('ALY-C-1234-NANO');
+    expect(body.source).toEqual({
+      payment_instrument: { address: 'GA7BUSWQTESTSRLPUBLICKEY' },
+    });
+    expect(body.destination).toMatchObject({
+      beneficiary_info:  validParams.beneficiary_info,
+      payout_instrument: validParams.payout_instrument,
+      transfer_purpose:  'FAMILY_MAINTENANCE',   // default
+      is_self_transfer:  false,                  // default
+    });
   });
 
   test('throws if quote_id is missing', async () => {
-    await expect(createTransfer({
-      beneficiary:        {},
-      external_reference: 'ref',
-    })).rejects.toThrow('quote_id required');
+    const { quote_id, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('quote_id required');
   });
 
-  test('throws if beneficiary is missing', async () => {
-    await expect(createTransfer({
-      quote_id:           'q-1',
-      external_reference: 'ref',
-    })).rejects.toThrow('beneficiary required');
+  test('throws if on_behalf_of is missing', async () => {
+    const { on_behalf_of, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('on_behalf_of required');
   });
 
-  test('throws if external_reference is missing', async () => {
-    await expect(createTransfer({
-      quote_id:    'q-1',
-      beneficiary: {},
-    })).rejects.toThrow('external_reference required');
+  test('throws if application_transfer_uuid is missing', async () => {
+    const { application_transfer_uuid, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('application_transfer_uuid required');
+  });
+
+  test('throws if source_address is missing', async () => {
+    const { source_address, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('source_address required');
+  });
+
+  test('throws if beneficiary_info is missing', async () => {
+    const { beneficiary_info, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('beneficiary_info required');
+  });
+
+  test('throws if payout_instrument is missing', async () => {
+    const { payout_instrument, ...rest } = validParams;
+    await expect(createTransfer(rest)).rejects.toThrow('payout_instrument required');
   });
 });
 
@@ -213,25 +256,40 @@ describe('verifyWebhookSignature', () => {
   const secret  = 'test-webhook-secret';
   const payload = Buffer.from('{"event":"transfer.completed"}');
 
-  function makeSignature(buf) {
-    return crypto.createHmac('sha256', secret).update(buf).digest('hex');
+  // Formato real del header harbor-signature: "t=<unix_ts>,v1=<hmac_hex>"
+  // signed_payload = "<timestamp>.<rawBody>". Tolerancia anti-replay: 60s.
+  function makeHeader(buf, ts = Math.floor(Date.now() / 1000)) {
+    const sig = crypto
+      .createHmac('sha256', secret)
+      .update(`${ts}.${buf.toString('utf8')}`)
+      .digest('hex');
+    return `t=${ts},v1=${sig}`;
   }
 
   test('returns true for valid signature', () => {
-    const sig    = makeSignature(payload);
-    expect(verifyWebhookSignature(payload, sig)).toBe(true);
+    expect(verifyWebhookSignature(payload, makeHeader(payload))).toBe(true);
   });
 
   test('returns false for tampered signature', () => {
-    const sig    = makeSignature(payload);
-    const tampered = sig.slice(0, -2) + 'ff';
+    const header   = makeHeader(payload);
+    const tampered = header.slice(0, -2) + 'ff';
     expect(verifyWebhookSignature(payload, tampered)).toBe(false);
+  });
+
+  test('returns false when timestamp is outside the 60s anti-replay window', () => {
+    const staleTs = Math.floor(Date.now() / 1000) - 120;   // 2 min atrás
+    expect(verifyWebhookSignature(payload, makeHeader(payload, staleTs))).toBe(false);
+  });
+
+  test('returns false for legacy header without t=/v1= format', () => {
+    const bareHmac = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+    expect(verifyWebhookSignature(payload, bareHmac)).toBe(false);
   });
 
   test('returns false when OWLPAY_WEBHOOK_SECRET is missing', () => {
     const original = process.env.OWLPAY_WEBHOOK_SECRET;
     delete process.env.OWLPAY_WEBHOOK_SECRET;
-    expect(verifyWebhookSignature(payload, makeSignature(payload))).toBe(false);
+    expect(verifyWebhookSignature(payload, makeHeader(payload))).toBe(false);
     process.env.OWLPAY_WEBHOOK_SECRET = original;
   });
 
@@ -241,40 +299,54 @@ describe('verifyWebhookSignature', () => {
   });
 
   test('returns false when buffer lengths differ (padding attack)', () => {
-    const shortSig = 'aabb';
-    expect(verifyWebhookSignature(payload, shortSig)).toBe(false);
+    const ts = Math.floor(Date.now() / 1000);
+    expect(verifyWebhookSignature(payload, `t=${ts},v1=aabb`)).toBe(false);
   });
 });
 
 // ─── Timeout / AbortController ────────────────────────────────────────────────
 
 describe('owlPayRequest timeout', () => {
+  // Fake timers: el timeout real de createQuote es 10s — avanzamos el reloj
+  // en lugar de esperar, para que la suite no tarde 20s.
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   test('aborts with OWLPAY_TIMEOUT when fetch never resolves', async () => {
+    jest.useFakeTimers();
     mockFetchHang();
 
-    const start = Date.now();
-    await expect(
-      createQuote({
-        source_amount:        100,
-        destination_country:  'CN',
-        destination_currency: 'CNY',
-        customer_uuid:        'cust-001',
-      }),
-    ).rejects.toMatchObject({ code: 'OWLPAY_TIMEOUT', isTransient: true });
+    const promise = createQuote({
+      source_amount:        100,
+      destination_country:  'CN',
+      destination_currency: 'CNY',
+      customer_uuid:        'cust-001',
+    });
+    const assertion = expect(promise).rejects.toMatchObject({
+      code:        'OWLPAY_TIMEOUT',
+      isTransient: true,
+    });
 
-    expect(Date.now() - start).toBeLessThan(15000);
-  }, 20000);
+    await jest.advanceTimersByTimeAsync(10_001);
+    await assertion;
+  });
 
   test('timeout error message includes endpoint', async () => {
+    jest.useFakeTimers();
     mockFetchHang();
 
-    await expect(
-      createQuote({
-        source_amount:        50,
-        destination_country:  'NG',
-        destination_currency: 'NGN',
-        customer_uuid:        'cust-001',
-      }),
-    ).rejects.toThrow(/OwlPay API timeout after \d+ms for POST \/v2\/transfers\/quotes/);
-  }, 20000);
+    const promise = createQuote({
+      source_amount:        50,
+      destination_country:  'NG',
+      destination_currency: 'NGN',
+      customer_uuid:        'cust-001',
+    });
+    const assertion = expect(promise).rejects.toThrow(
+      /OwlPay API timeout after \d+ms for POST \/v2\/transfers\/quotes/,
+    );
+
+    await jest.advanceTimersByTimeAsync(10_001);
+    await assertion;
+  });
 });

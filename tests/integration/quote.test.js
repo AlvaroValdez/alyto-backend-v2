@@ -12,10 +12,17 @@ import { createSpAUser } from '../helpers/auth.js';
 import { mockVitaPricesResponse } from '../helpers/vitaMock.js';
 
 // ─── Mock de vitaWalletService (debe ir antes de importar server.js) ──────────
+// Patrón: se importa el módulo REAL y se hace spread + override — así el mock
+// nunca queda desactualizado cuando el módulo real agrega exports nuevos.
+
+const actualVita    = await import('../../src/services/vitaWalletService.js');
+const actualOwlPay  = await import('../../src/services/owlPayService.js');
+const actualStellar = await import('../../src/services/stellarService.js');
 
 const mockGetPrices = jest.fn();
 
 await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => ({
+  ...actualVita,
   getPrices:                mockGetPrices,
   generateVitaSignature:    jest.fn().mockReturnValue('mock_signature'),
   createPayout:             jest.fn(),
@@ -27,10 +34,10 @@ await jest.unstable_mockModule('../../src/services/vitaWalletService.js', () => 
   getWallets:               jest.fn(),
   getDeposits:              jest.fn(),
   getCryptoPrices:          jest.fn(),
-  VITA_SENT_ONLY_COUNTRIES: new Set(['GT', 'SV', 'ES', 'PL']),
 }));
 
 await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
+  ...actualOwlPay,
   verifyOwlPayWebhookSignature:   jest.fn().mockResolvedValue(true),
   verifyWebhookSignature:         jest.fn().mockReturnValue(true),
   getOwlPayApiKey:                jest.fn().mockReturnValue('test_key'),
@@ -54,6 +61,7 @@ await jest.unstable_mockModule('../../src/services/owlPayService.js', () => ({
 
 // Mock de stellarService para evitar conexiones reales a Stellar
 await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
+  ...actualStellar,
   executeWeb3Transit:             jest.fn().mockResolvedValue({ txid: 'mock_txid' }),
   registerAuditTrail:             jest.fn().mockResolvedValue(null),
   getAuditTrail:                  jest.fn().mockResolvedValue(null),
@@ -246,8 +254,9 @@ describe('GET /api/v1/payments/quote', () => {
     expect(fees.alytoCSpread).toBe(1500);
     // fixedFee = 500
     expect(fees.fixedFee).toBe(500);
-    // payoutFee = vitaFixedCost(200) > payoutFeeFixed(0) → 200
-    expect(fees.payoutFee).toBe(200);
+    // payoutFee reportado = 0: el fixed_cost de Vita (200) ya viene descontado
+    // de destinationAmount (está en moneda destino, no en origen)
+    expect(fees.payoutFee).toBe(0);
 
     // amountAfterFees = 100000 - 1500 - 500 = 98000
     // destinationAmount = (98000 × 4.5) - 200 = 441000 - 200 = 440800

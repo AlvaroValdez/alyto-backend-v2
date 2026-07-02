@@ -11,6 +11,11 @@
 // Asegurar NODE_ENV=test
 process.env.NODE_ENV = 'test';
 
+// ⚠️ La suite debe ser AUTOCONTENIDA: jamás cargar secretos reales de AWS.
+// Sin esto, un .env local con AWS_SECRETS_NAME hace que importar server.js
+// inyecte los secretos de producción en el entorno de test.
+delete process.env.AWS_SECRETS_NAME;
+
 // JWT
 process.env.JWT_SECRET = 'alyto_test_jwt_secret_do_not_use_in_prod';
 
@@ -22,9 +27,10 @@ process.env.VITA_API_URL     = 'http://localhost:19999';    // Puerto inválido 
 process.env.VITA_BUSINESS_WALLET_UUID = 'test-uuid-1234-5678-9000';
 process.env.VITA_NOTIFY_URL  = 'http://localhost:19999/api/v1/ipn/vita';
 
-// Fintoc (ausente → activa el mock de desarrollo automáticamente)
-// FINTOC_SECRET_KEY deliberadamente no configurado — fintocService.js
-// activa IS_DEV=true cuando NODE_ENV !== 'production', retornando mock
+// Fintoc — fintocService NO tiene modo mock interno: createWidgetLink siempre
+// llama a la API real. Las suites que ejercitan el payin Fintoc DEBEN mockear
+// fintocService (jest.unstable_mockModule). FINTOC_SECRET_KEY deliberadamente
+// sin configurar para que cualquier llamada real no mockeada falle rápido.
 process.env.FINTOC_WEBHOOK_SECRET = 'test_fintoc_webhook_secret';
 
 // Stellar (mock — no realizará transacciones reales)

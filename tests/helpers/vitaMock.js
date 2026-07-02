@@ -31,6 +31,8 @@ export function mockVitaPricesResponse(overrides = {}) {
             co: 4.5,      // 1 CLP ≈ 4.5 COP
             pe: 0.0042,
             ar: 1.2,
+            us: 0.001035, // 1 CLP ≈ 0.001035 USD — extractVitaPricing lo usa
+                          // para derivar la tasa CL→BO vía BOB_USD_RATE
             ...((overrides.clp_sell) ?? {}),
           },
           usd_sell: {
@@ -39,11 +41,15 @@ export function mockVitaPricesResponse(overrides = {}) {
             pe: 3.8,
             ...((overrides.usd_sell) ?? {}),
           },
+          // extractVitaPricing lee attributes.fixed_cost[countryKey] (moneda destino)
+          fixed_cost: {
+            bo: 0,
+            co: 200,
+            pe: 0,
+            ...((overrides.fixed_cost) ?? {}),
+          },
         },
       },
-      bo: { fixed_cost: 0 },
-      co: { fixed_cost: 200 },
-      pe: { fixed_cost: 0 },
     },
     vita_sent:   {},
     valid_until: overrides.valid_until ?? validUntil,
