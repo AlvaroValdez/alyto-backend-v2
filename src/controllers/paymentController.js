@@ -98,7 +98,10 @@ export async function initiateFintocPayin(req, res) {
   // userId SIEMPRE del JWT — el body permitía crear payins atribuidos a
   // usuarios arbitrarios (IDOR, audit 2026-06-11).
   const userId = req.user?._id;
-  const { amount } = req.body;
+  // contactId (beneficiario de la agenda) es opcional y proviene del body.
+  // Fix: antes NO se destructuraba → al construir la Transaction se lanzaba
+  // ReferenceError y el catch la tragaba (la tx nunca se persistía).
+  const { amount, contactId } = req.body;
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
   if (!userId || !amount) {
@@ -2249,7 +2252,10 @@ export async function getQuote(req, res) {
       destinationAmount:      destinationBOB,
       exchangeRate:           clpPerBob,
       exchangeRateDisplay:    (() => {
-        const r = getDisplayRate(transaction);
+        // Fix: esto es una COTIZACIÓN — no existe `transaction` en este scope
+        // (antes referenciaba una variable no declarada → ReferenceError → 500).
+        // Se calcula la tasa efectiva (incluye fees) con los montos ya resueltos.
+        const r = getDisplayRate({ originalAmount: amount, destinationAmount: destinationBOB });
         return r > 0 ? `1 BOB = ${(1 / r).toFixed(2)} CLP` : '—';
       })(),
       payinMethod:            'manual',

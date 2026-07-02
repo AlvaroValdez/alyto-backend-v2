@@ -7,7 +7,7 @@
 
 import '../setup.env.js';
 import { jest } from '@jest/globals';
-import { connectTestDb, disconnectTestDb, clearCollections, seedCorridorClCo } from '../helpers/db.js';
+import { connectTestDb, disconnectTestDb, clearCollections, seedCorridorClCo, seedCorridor } from '../helpers/db.js';
 import { createSpAUser } from '../helpers/auth.js';
 import { mockVitaPricesResponse } from '../helpers/vitaMock.js';
 
@@ -137,6 +137,39 @@ describe('GET /api/v1/payments/quote', () => {
 
     // Vita fue llamada una vez
     expect(mockGetPrices).toHaveBeenCalledTimes(1);
+  });
+
+  test('200 — cotización CL→BO (anchorBolivia) NO revienta con 500 (regresión Bug B)', async () => {
+    // Regresión Bug B (fix 2026-07-02): la rama CL→BO de getQuote referenciaba una
+    // variable `transaction` inexistente al construir exchangeRateDisplay →
+    // ReferenceError → 500 en TODA cotización CL→BO. Debe devolver 200 con el
+    // display de tasa correctamente formateado.
+    const { token } = await createSpAUser();
+    await seedCorridor();   // corredor CL→BO (payoutMethod anchorBolivia) activo
+
+    // El corredor CL→BO exige un SpAConfig activo con clpPerBob + accountNumber.
+    const { default: SpAConfig } = await import('../../src/models/SpAConfig.js');
+    await SpAConfig.create({
+      isActive:      true,
+      clpPerBob:     99.55,
+      accountNumber: '000-1234567-8',
+      bankName:      'Banco de Chile',
+      minAmountCLP:  10000,
+      maxAmountCLP:  5000000,
+    });
+
+    const res = await request(app)
+      .get('/api/v1/payments/quote')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ originCountry: 'CL', destinationCountry: 'BO', originAmount: 100000 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.destinationCountry).toBe('BO');
+    expect(res.body.destinationCurrency).toBe('BOB');
+    expect(res.body.payoutMethod).toBe('anchorBolivia');
+    expect(res.body.destinationAmount).toBeGreaterThan(0);
+    // exchangeRateDisplay debe estar bien formado (antes lanzaba ReferenceError).
+    expect(res.body.exchangeRateDisplay).toMatch(/^1 BOB = [\d.]+ CLP$/);
   });
 
   test('404 — corredor no existe para el par de países', async () => {

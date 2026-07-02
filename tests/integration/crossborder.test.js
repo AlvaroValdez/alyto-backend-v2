@@ -151,12 +151,19 @@ describe('POST /api/v1/payments/payin/fintoc', () => {
     expect(res.body.payinUrl).toBeTruthy();
     expect(res.body.status).toBe('payin_pending');
 
-    // NOTA (bug conocido en src, no testeable desde aquí): la persistencia de la
-    // Transaction dentro de initiateFintocPayin falla silenciosamente por un
-    // ReferenceError (`contactId` no está definido en ese scope) — el catch la
-    // traga y `alytoTransactionId` llega undefined en la respuesta. Cuando se
-    // corrija en src/controllers/paymentController.js, restaurar aquí las
-    // aserciones de BD (status payin_pending, originalAmount, legalEntity SpA).
+    // Regresión Bug A (fix 2026-07-02): antes, `contactId` no declarado en el scope
+    // provocaba un ReferenceError al construir la Transaction → el catch la tragaba
+    // y la tx NUNCA se persistía (alytoTransactionId llegaba undefined). Ahora la
+    // persistencia debe ocurrir y el id debe volver en la respuesta.
+    expect(res.body.alytoTransactionId).toBeTruthy();
+
+    const persisted = await Transaction.findOne({ alytoTransactionId: res.body.alytoTransactionId }).lean();
+    expect(persisted).toBeTruthy();
+    expect(persisted.status).toBe('payin_pending');
+    expect(persisted.legalEntity).toBe('SpA');
+    expect(persisted.operationType).toBe('payin');
+    expect(persisted.originalAmount).toBe(150000);
+    expect(persisted.originCurrency).toBe('CLP');
   });
 
   test('401 — sin token JWT', async () => {
