@@ -271,7 +271,14 @@ export async function verifyIpn(req) {
   // Mock/staging: no hay banco real emitiendo IPN. El flujo de prueba usa el botón
   // admin "simular pago bancario", no este endpoint público. Aceptamos para no
   // romper pruebas manuales de flujo en staging.
-  if (isMockMode()) return { ok: true, reason: 'mock' };
+  // ⚠️ NUNCA en producción: un BEC_MOCK_ENABLED=true olvidado en prod convertiría
+  // este endpoint público en acreditación sin verificación (endurecido 2026-07).
+  if (isMockMode()) {
+    if (process.env.NODE_ENV === 'production') {
+      return { ok: false, reason: 'mock-mode-forbidden-in-prod' };
+    }
+    return { ok: true, reason: 'mock' };
+  }
 
   // ── Capa 1: firma HMAC (si BEC_IPN_SECRET está configurado) ──
   const secret = process.env.BEC_IPN_SECRET;

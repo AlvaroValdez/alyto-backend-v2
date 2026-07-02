@@ -150,7 +150,10 @@ export async function transfer(p) {
  *
  *   Capa 1 — Firma HMAC-SHA256 sobre el raw body (gated por BEC_DISBURSEMENT_IPN_SECRET).
  *     ⚠️ El header/esquema exacto se confirma en el onboarding del webhook con BANECO.
- *   Capa 2 — Validación estructural mínima (bankBatchId/batchDetailId/status presentes).
+ *     ⚠️ En PRODUCCIÓN el secret es OBLIGATORIO: sin él este verify es fail-closed
+ *     (rechaza todo IPN) y la liquidación queda en manos del job reconcile.
+ *   Capa 2 — Validación estructural mínima (bankBatchId/batchDetailId/status presentes),
+ *     solo aceptada como autenticación en entornos NO productivos (mock/staging).
  *     (BEC no documenta un GET de estado de planilla; la red de seguridad es el job
  *      reconcileBecDisbursements + conciliación por movimientos.)
  *
@@ -173,8 +176,18 @@ export function verifyNotifyStatus(req) {
     return { ok: true, reason: 'hmac' };
   }
 
-  // Mock/staging o sin secret configurado: aceptamos estructuralmente (el flujo de
-  // prueba en staging usa el simulador admin, no este endpoint público).
+  // Sin secret configurado:
+  //   PRODUCCIÓN → FAIL-CLOSED. A diferencia del QR (que reconfirma contra el banco
+  //   con getQRStatus), aquí NO hay canal autoritativo de reconfirmación — aceptar
+  //   solo por estructura permitiría a un atacante marcar retiros como acreditados.
+  //   El job reconcileBecDisbursements sigue siendo la vía de liquidación (más lenta
+  //   pero segura). Endurecido 2026-07 (mismo criterio que Fintoc en audit 2026-06-11).
+  if (process.env.NODE_ENV === 'production') {
+    return { ok: false, reason: 'no-secret-prod-fail-closed' };
+  }
+
+  // Mock/staging: aceptamos estructuralmente (el flujo de prueba usa el simulador
+  // admin, no este endpoint público).
   return { ok: true, reason: isMockMode() ? 'mock' : 'structural-no-secret' };
 }
 
