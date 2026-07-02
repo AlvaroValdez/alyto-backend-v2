@@ -76,9 +76,10 @@ export async function buildChallenge(accountId) {
   const nowSeconds   = Math.floor(Date.now() / 1000);
 
   // Construir la transacción challenge
-  // SEP-10 spec: usamos sequence = 0 (la tx no consume sequence real del ledger)
-  // Account requiere string para sequence — usamos '0'
-  const account = new Account(sourceKeypair.publicKey(), '0');
+  // SEP-10 spec: la tx del challenge DEBE tener sequence = 0 (nunca ejecutable).
+  // TransactionBuilder incrementa la sequence de la Account al construir, así que
+  // partimos de '-1' para que la transacción resultante quede con sequence 0.
+  const account = new Account(sourceKeypair.publicKey(), '-1');
 
   const tx = new TransactionBuilder(account, {
     fee:               '100',
@@ -118,9 +119,14 @@ export async function buildChallenge(accountId) {
  * Validaciones SEP-10:
  *   1. La transacción es válida XDR
  *   2. El network passphrase coincide
- *   3. La transacción está firmada por la cuenta del cliente (accountId)
- *   4. La transacción no ha expirado (timebounds)
- *   5. La fuente de la operación manage_data es el accountId del cliente
+ *   3. El source de la transacción es el SIGNING_KEY del servidor
+ *   4. El sequence number es 0 (la tx nunca es ejecutable en el ledger)
+ *   5. Timebounds presentes y vigentes (challenge no expirado)
+ *   6. La primera operación es manage_data con nombre `<home_domain> auth`
+ *      y su source es el accountId del cliente
+ *   7. La transacción conserva la firma del SERVIDOR (SIGNING_KEY) — garantiza
+ *      que el challenge fue emitido por nosotros y no fabricado por el cliente
+ *   8. La transacción está firmada por la cuenta del cliente (accountId)
  *
  * @param {string} transactionXdr - XDR en base64, firmado por el cliente
  * @returns {Promise<{token: string, userId?: string}>}
@@ -133,18 +139,38 @@ export async function verifyChallenge(transactionXdr) {
     throw Object.assign(new Error('Invalid transaction XDR'), { status: 400 });
   }
 
-  // 1. Verificar timebounds
-  const now = Math.floor(Date.now() / 1000);
-  if (tx.timeBounds) {
-    if (now < Number(tx.timeBounds.minTime) || now > Number(tx.timeBounds.maxTime)) {
-      throw Object.assign(new Error('Challenge has expired'), { status: 400 });
-    }
+  const serverKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_SRL_SECRET_KEY'));
+
+  // 1. El source de la tx debe ser el SIGNING_KEY del servidor (spec SEP-10):
+  //    rechaza challenges fabricados con otra cuenta como emisor
+  if (tx.source !== serverKeypair.publicKey()) {
+    throw Object.assign(new Error('Challenge not issued by this server'), { status: 400 });
   }
 
-  // 2. Extraer el accountId del cliente (source de la primera manage_data op)
+  // 2. Sequence 0 obligatorio — la tx del challenge jamás debe ser ejecutable on-chain
+  if (String(tx.sequence) !== '0') {
+    throw Object.assign(new Error('Challenge sequence number must be 0'), { status: 400 });
+  }
+
+  // 3. Timebounds obligatorios y vigentes
+  const now = Math.floor(Date.now() / 1000);
+  if (!tx.timeBounds) {
+    throw Object.assign(new Error('Challenge is missing timebounds'), { status: 400 });
+  }
+  if (now < Number(tx.timeBounds.minTime) || now > Number(tx.timeBounds.maxTime)) {
+    throw Object.assign(new Error('Challenge has expired'), { status: 400 });
+  }
+
+  // 4. Extraer el accountId del cliente (source de la primera manage_data op)
+  //    y validar el nombre de la operación contra nuestro home_domain
   const firstOp = tx.operations[0];
-  if (firstOp.type !== 'manageData') {
+  if (!firstOp || firstOp.type !== 'manageData') {
     throw Object.assign(new Error('Invalid challenge operation'), { status: 400 });
+  }
+
+  const homeDomain = process.env.HOME_DOMAIN ?? 'alyto.app';
+  if (firstOp.name !== `${homeDomain} auth`) {
+    throw Object.assign(new Error('Challenge home domain mismatch'), { status: 400 });
   }
 
   const clientAccountId = firstOp.source;
@@ -152,9 +178,22 @@ export async function verifyChallenge(transactionXdr) {
     throw Object.assign(new Error('Cannot determine client account from challenge'), { status: 400 });
   }
 
-  // 3. Verificar que el cliente firmó la transacción
+  const txHash = tx.hash();
+
+  // 5. Verificar la firma del SERVIDOR: el challenge debe conservar la firma
+  //    con la que lo emitimos en buildChallenge. Sin este check, un atacante
+  //    podría construir su propio "challenge" con datos arbitrarios y firmarlo
+  //    solo con su llave.
+  const serverSigned = tx.signatures.some(sig => {
+    try { return serverKeypair.verify(txHash, sig.signature()); }
+    catch { return false; }
+  });
+  if (!serverSigned) {
+    throw Object.assign(new Error('Challenge not signed by server'), { status: 400 });
+  }
+
+  // 6. Verificar que el cliente firmó la transacción
   const clientKeypair    = Keypair.fromPublicKey(clientAccountId);
-  const txHash           = tx.hash();
   const clientSignatures = tx.signatures.filter(sig => {
     try { return clientKeypair.verify(txHash, sig.signature()); }
     catch { return false; }
@@ -164,7 +203,7 @@ export async function verifyChallenge(transactionXdr) {
     throw Object.assign(new Error('Transaction not signed by the claimed account'), { status: 400 });
   }
 
-  // 4. Buscar el usuario por publicKey en MongoDB
+  // 7. Buscar el usuario por publicKey en MongoDB
   const user = await User.findOne({ 'stellarAccount.publicKey': clientAccountId });
 
   if (!user) {
@@ -179,7 +218,7 @@ export async function verifyChallenge(transactionXdr) {
     return { token };
   }
 
-  // 5. Emitir JWT Alyto completo para usuario registrado
+  // 8. Emitir JWT Alyto completo para usuario registrado
   const token = jwt.sign(
     {
       id:             user._id,
