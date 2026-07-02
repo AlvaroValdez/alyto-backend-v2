@@ -15,6 +15,7 @@
  */
 
 import User from '../models/User.js';
+import BusinessProfile from '../models/BusinessProfile.js';
 import { logger } from '../utils/logger.js';
 
 // ─── Mapeo de estados ────────────────────────────────────────────────────────
@@ -96,7 +97,13 @@ export async function getCustomer({ accountId, id }) {
 
   // Si está aprobado, retornar los campos provistos
   if (isApproved) {
-    response.provided_fields = buildProvidedFields(user, isBusiness);
+    // Business: el estado real de organization_* vive en BusinessProfile (KYB)
+    const businessProfile = isBusiness
+      ? await BusinessProfile.findOne({ userId: user._id })
+          .select('legalName taxId kybStatus')
+          .lean()
+      : null;
+    response.provided_fields = buildProvidedFields(user, isBusiness, businessProfile);
   } else {
     // Si no está aprobado, indicar qué campos faltan
     response.fields = buildMissingFields(user, isBusiness);
@@ -184,7 +191,16 @@ export async function deleteCustomer({ id, accountId }) {
 
 // ─── Helpers privados ────────────────────────────────────────────────────────
 
-function buildProvidedFields(user, isBusiness) {
+// Estado KYB Alyto (BusinessProfile) → estado de campo SEP-12
+const KYB_FIELD_STATUS_MAP = {
+  pending:      'PROCESSING',
+  under_review: 'PROCESSING',
+  approved:     'ACCEPTED',
+  rejected:     'REJECTED',
+  more_info:    'NEEDS_INFO',
+};
+
+function buildProvidedFields(user, isBusiness, businessProfile = null) {
   const fields = {
     first_name:    { status: user.firstName     ? 'ACCEPTED' : 'NEEDS_INFO' },
     last_name:     { status: user.lastName      ? 'ACCEPTED' : 'NEEDS_INFO' },
@@ -196,8 +212,15 @@ function buildProvidedFields(user, isBusiness) {
   };
 
   if (isBusiness) {
-    fields.organization_name   = { status: 'PROCESSING' }; // KYB en Alyto es manual
-    fields.organization_tax_id = { status: 'PROCESSING' };
+    // Estado real desde BusinessProfile (KYB manual): el campo se considera
+    // provisto si existe el dato Y el KYB lo respalda. Sin perfil → NEEDS_INFO.
+    const kybStatus = KYB_FIELD_STATUS_MAP[businessProfile?.kybStatus] ?? 'NEEDS_INFO';
+    fields.organization_name = {
+      status: businessProfile?.legalName ? kybStatus : 'NEEDS_INFO',
+    };
+    fields.organization_tax_id = {
+      status: businessProfile?.taxId ? kybStatus : 'NEEDS_INFO',
+    };
   }
 
   return fields;
