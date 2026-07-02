@@ -5,7 +5,9 @@
  * constantes de red. El resto de los servicios importa desde aquí —
  * nunca instancian Horizon.Server directamente.
  *
- * Red activa: TESTNET (cambiar STELLAR_NETWORK=mainnet para producción)
+ * Red activa: la decide STELLAR_NETWORK por entorno —
+ *   Producción (VPS):  STELLAR_NETWORK=mainnet  (activo desde 2026-05-30, hito H3)
+ *   Staging (Render):  testnet (default si la variable no está definida)
  *
  * Assets soportados:
  *   ✅ USDC  — Circle (GA5ZSEJYB37...) — activo

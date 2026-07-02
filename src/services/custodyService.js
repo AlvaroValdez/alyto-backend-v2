@@ -8,15 +8,18 @@
  *
  * Modelo custodial:
  *   - Alyto genera el keypair en servidor
- *   - La secretKey se almacena EXCLUSIVAMENTE en AWS KMS (nunca en MongoDB)
- *   - Solo se almacena la publicKey en MongoDB (User.stellarAccount.publicKey)
+ *   - La secretKey se CIFRA con AWS KMS y SOLO el ciphertext se persiste en MongoDB
+ *     (User.stellarAccount.secretKeyCiphertext, select:false). La master key de
+ *     cifrado vive exclusivamente en KMS y nunca sale de AWS — sin ella el
+ *     ciphertext es inservible. La secretKey en claro NUNCA se persiste.
+ *   - MongoDB también almacena la publicKey (User.stellarAccount.publicKey)
  *   - El usuario opera sin gestionar llaves (UX simplificado para retail Bolivia)
  *
  * Obligaciones regulatorias cumplidas (Cap. XI, Sec. 4, Art. 2°):
  *   a) Registros completos, precisos e individualizados de transacciones
  *   b) Identificación y monitoreo de movimientos (reportes de control)
  *
- * ⚠️  La secretKey JAMÁS aparece en logs, MongoDB, ni variables de entorno por usuario.
+ * ⚠️  La secretKey EN CLARO jamás aparece en logs, MongoDB, ni variables de entorno.
  */
 
 import {
