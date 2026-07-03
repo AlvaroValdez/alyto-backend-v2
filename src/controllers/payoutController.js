@@ -20,6 +20,7 @@ import Transaction from '../models/Transaction.js';
 import User        from '../models/User.js';
 import { generateOfficialReceipt } from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
+import { resolveClientDocument } from '../utils/clientDocument.js';
 import { autoGenerateBusinessInvoice } from './businessInvoiceController.js';
 import { uploadBuffer } from '../services/storageService.js';
 
@@ -187,6 +188,15 @@ export async function processBoliviaManualPayout(req, res) {
   const comisionServicio  = transaction.feeBreakdown?.alytoFee ?? 0;
   const totalLiquidado    = transaction.originalAmount - comisionServicio;
 
+  // Documento del cliente (fuente única — evita el placeholder crudo y
+  // unifica el fallback 'En verificación' con el otro generador).
+  const clientDoc = resolveClientDocument(user);
+  if (clientDoc.ciPending) {
+    console.warn('[Comprobante] CI del cliente aún no capturado — se emite "En verificación":', {
+      numeroComprobante, userId: user._id.toString(),
+    });
+  }
+
   const comprobanteDTO = {
     // Sección 1 — Cabecera
     numeroComprobante,
@@ -194,8 +204,8 @@ export async function processBoliviaManualPayout(req, res) {
     // Sección 2 — KYC
     nombreCliente:      user.companyName
                           ?? `${user.firstName} ${user.lastName}`,
-    nitOci:             user.taxId ?? user.identityDocument?.number ?? 'NO REGISTRADO',
-    tipoDocumento:      user.taxId ? 'NIT' : 'CI',
+    nitOci:             clientDoc.nitOci,
+    tipoDocumento:      clientDoc.tipoDocumento,
     codigoClienteAlyto: user._id.toString(),
 
     // Sección 3 — Trazabilidad Web3 ← campos críticos del TXID

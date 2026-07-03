@@ -140,7 +140,7 @@ export async function registerUser(req, res) {
   try {
     const {
       email, password, country, firstName, lastName, phone,
-      termsAccepted, termsAcceptedAt, termsVersion,
+      termsAccepted, termsAcceptedAt, termsVersion, documentNumber,
     } = req.body;
 
     // ── Validación de campos obligatorios ──────────────────────────────────
@@ -206,10 +206,13 @@ export async function registerUser(req, res) {
       emailVerificationLastSent: nowTs,
       residenceCountry: countryCode,
       preferences:      { currency: getDefaultCurrency(countryCode) },
-      // Documento pendiente de verificación — se completa en el flujo KYC
+      // Documento del cliente: si el onboarding ya lo declara, se guarda; si no,
+      // queda 'PENDING_VERIFICATION' hasta capturarse en el flujo KYC.
       identityDocument: {
         type:           ENTITY_DEFAULT_DOC[legalEntity],
-        number:         'PENDING_VERIFICATION',
+        number:         (typeof documentNumber === 'string' && documentNumber.trim().length >= 4)
+                          ? documentNumber.trim()
+                          : 'PENDING_VERIFICATION',
         issuingCountry: countryCode,
       },
       // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI

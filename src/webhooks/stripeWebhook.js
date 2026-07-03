@@ -24,6 +24,7 @@ import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { notify }       from '../services/notifications.js';
 import { screenUser }   from '../services/sanctionsService.js';
 import { provisionUserKeypair } from '../services/custodyService.js';
+import { isRealDocumentNumber } from '../utils/clientDocument.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -196,17 +197,21 @@ async function _persistVerifiedOutputs(session, userId) {
     if (!vo) return;
 
     const $set = {};
+    const current = await User.findById(userId).select('address identityDocument.number').lean();
 
     // Fecha de nacimiento verificada (fuente autoritativa).
     if (vo.dob && vo.dob.year) {
       $set.dateOfBirth = new Date(Date.UTC(vo.dob.year, (vo.dob.month ?? 1) - 1, vo.dob.day ?? 1));
     }
-    // Número de documento real (reemplaza el placeholder 'PENDING_VERIFICATION').
-    if (typeof vo.id_number === 'string' && vo.id_number.trim()) {
+    // Número de documento: usar el de Stripe SOLO si el usuario no declaró uno real
+    // en el KYC (no pisar el CI declarado). Reemplaza el placeholder 'PENDING_VERIFICATION'.
+    if (
+      typeof vo.id_number === 'string' && vo.id_number.trim() &&
+      !isRealDocumentNumber(current?.identityDocument?.number)
+    ) {
       $set['identityDocument.number'] = vo.id_number.trim();
     }
     // Dirección del documento — solo como respaldo si el usuario no cargó una.
-    const current = await User.findById(userId).select('address').lean();
     const hasAddr = current?.address && (current.address.street || current.address.city);
     if (!hasAddr && vo.address && (vo.address.line1 || vo.address.city)) {
       $set.address = {

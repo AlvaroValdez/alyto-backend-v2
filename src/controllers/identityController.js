@@ -51,7 +51,29 @@ export async function createVerificationSession(req, res) {
       });
     }
 
-    console.log(`[Identity] KYC session created: userId=${userId} entity=${user.legalEntity}`);
+    // ── Captura del número de documento declarado (CI/RUT/NIT) ───────────────
+    // ASFI: el Comprobante Oficial debe listar el documento del cliente. Stripe
+    // Identity verifica el documento biométricamente pero NO devuelve el número
+    // de forma confiable, así que lo capturamos declarado aquí (flujo KYC).
+    // Gated: KYC_REQUIRE_DOCUMENT_NUMBER=true lo vuelve obligatorio (reversible).
+    const rawDoc     = typeof req.body?.documentNumber === 'string' ? req.body.documentNumber.trim() : '';
+    const requireDoc = process.env.KYC_REQUIRE_DOCUMENT_NUMBER === 'true';
+
+    if (rawDoc && (rawDoc.length < 4 || rawDoc.length > 30)) {
+      return res.status(400).json({
+        success: false,
+        message: 'El número de documento debe tener entre 4 y 30 caracteres.',
+      });
+    }
+    if (requireDoc && !rawDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Debes ingresar tu número de documento (CI) antes de iniciar la verificación.',
+        code:    'DOCUMENT_NUMBER_REQUIRED',
+      });
+    }
+
+    console.log(`[Identity] KYC session created: userId=${userId} entity=${user.legalEntity} doc=${rawDoc ? 'provided' : 'none'}`);
 
     // Crear sesión en Stripe — configurada para biometría completa
     const session = await getStripe().identity.verificationSessions.create({
@@ -76,11 +98,14 @@ export async function createVerificationSession(req, res) {
 
     // Persistir el ID de sesión en el documento del usuario
     // kycStatus → 'in_review' hasta que el webhook confirme el resultado
-    await User.findByIdAndUpdate(userId, {
+    const kycUpdate = {
       stripeVerificationSessionId: session.id,
       kycStatus:                   'in_review',
       kycProvider:                 'stripe_identity',
-    });
+    };
+    // Guardar el número de documento declarado (reemplaza 'PENDING_VERIFICATION').
+    if (rawDoc) kycUpdate['identityDocument.number'] = rawDoc;
+    await User.findByIdAndUpdate(userId, kycUpdate);
 
     console.info(
       `[Identity] Sesión creada — userId: ${userId} | sessionId: ${session.id} | entity: ${user.legalEntity}`

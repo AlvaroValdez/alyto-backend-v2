@@ -57,6 +57,7 @@ import {
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
 import { mapVitaError }       from '../utils/vitaErrorMapper.js';
+import { resolveClientDocument } from '../utils/clientDocument.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
@@ -697,14 +698,18 @@ async function generateSrlComprobante(transaction) {
         ? Number((netBOB / digital).toFixed(6))
         : 0);
 
+    const clientDoc = resolveClientDocument(user);
+    if (clientDoc.ciPending) {
+      logger.warn('[Comprobante] CI del cliente aún no capturado — se emite "En verificación"', {
+        numeroComprobante, userId: user._id.toString(),
+      });
+    }
+
     const dto = {
       numeroComprobante,
       nombreCliente:      user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
-      nitOci:             user.taxId
-        ?? (user.identityDocument?.number && !/pending|verification/i.test(user.identityDocument.number)
-            ? user.identityDocument.number : null)
-        ?? 'NO REGISTRADO',
-      tipoDocumento:      user.taxId ? 'NIT' : 'CI',
+      nitOci:             clientDoc.nitOci,
+      tipoDocumento:      clientDoc.tipoDocumento,
       codigoClienteAlyto: user._id.toString(),
       fechaHora:          (transaction.createdAt ?? new Date()).toISOString(),
       tipoOperacion:      'Liquidación de Activo Digital',
