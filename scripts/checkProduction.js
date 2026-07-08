@@ -146,6 +146,41 @@ function checkEnvVars() {
       test: v => !!v && v.startsWith('https://'),
       hint: 'Debe usar HTTPS (no HTTP) en producción',
     },
+
+    // BANECO (BEC) — bankQr payin production
+    // Credenciales entregadas por Marcelo (Banco Económico) en el correo de
+    // producción. BEC_PASSWORD y BEC_ACCOUNT_CREDIT son bloqueantes; sin ellos
+    // el flujo de QR real cae a mock.
+    {
+      name: 'BEC_BASE_URL',
+      test: v => !!v && v.includes('apimkt.baneco.com.bo') && !v.includes('apimktdesa'),
+      hint: 'Debe apuntar a apimkt.baneco.com.bo (producción). "apimktdesa" es desarrollo.',
+    },
+    {
+      name: 'BEC_USERNAME',
+      test: v => !!v,
+      hint: 'Usuario BEC entregado por Marcelo (ej. Axxxxxxxxx).',
+    },
+    {
+      name: 'BEC_PASSWORD',
+      test: v => !!v,
+      hint: 'Contraseña BEC — PENDIENTE de recibir de Marcelo si aún no llegó.',
+    },
+    {
+      name: 'BEC_AES_KEY',
+      test: v => !!v && Buffer.from(v, 'utf8').length === 32,
+      hint: 'Llave de encriptación BEC — debe medir 32 bytes UTF-8 (AES-256).',
+    },
+    {
+      name: 'BEC_ACCOUNT_CREDIT',
+      test: v => !!v,
+      hint: 'Cuenta bancaria que recibe cobros QR — PENDIENTE si aún no llegó.',
+    },
+    {
+      name: 'BEC_MOCK_ENABLED',
+      test: v => v !== 'true',
+      hint: 'Debe estar en "false" o ausente en producción. "true" bypasea al banco.',
+    },
   ]
 
   let passed = 0

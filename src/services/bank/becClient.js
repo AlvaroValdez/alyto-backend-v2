@@ -23,8 +23,10 @@ import crypto from 'crypto';
 import { logger } from '../../utils/logger.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
+// Nota: BEC_BASE_URL puede venir con o sin '/' final según cómo lo envíe el
+// banco. Normalizamos aquí para no generar `//api/...` en los fetches.
 const cfg = {
-  baseUrl:  () => process.env.BEC_BASE_URL ?? 'https://apimktdesa.baneco.com.bo/ApiGateway',
+  baseUrl:  () => (process.env.BEC_BASE_URL ?? 'https://apimktdesa.baneco.com.bo/ApiGateway').replace(/\/+$/, ''),
   username: () => process.env.BEC_USERNAME,
   password: () => process.env.BEC_PASSWORD,
   aesKey:   () => process.env.BEC_AES_KEY,
