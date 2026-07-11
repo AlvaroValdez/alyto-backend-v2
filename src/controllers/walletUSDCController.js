@@ -267,20 +267,28 @@ function captureRes() {
 
 /** ¿La conversión BOB→USDC califica para auto (sin admin)? Gated + umbral + sin flag AML. */
 function isBOBtoUSDCAutoEligible(user, bobAmount) {
-  if (process.env.USDC_AUTO_CONVERT_ENABLED !== 'true') return false
-  if (user.sanctionsFlag) return false
-  const max = Number(process.env.USDC_AUTO_CONVERT_MAX_BOB ?? 0)
-  return max > 0 && bobAmount <= max
+  // ASFI demo (2026-07): modo MANUAL forzado — toda conversión pasa por
+  // confirmación admin (checkpoint humano). Para reactivar el auto-convert
+  // gateado por env, restaurar el cuerpo original:
+  //   if (process.env.USDC_AUTO_CONVERT_ENABLED !== 'true') return false
+  //   if (user.sanctionsFlag) return false
+  //   const max = Number(process.env.USDC_AUTO_CONVERT_MAX_BOB ?? 0)
+  //   return max > 0 && bobAmount <= max
+  return false
 }
 
 /** ¿La conversión USDC→BOB califica para auto? Gated + umbral + sin flag AML.
  *  (USDC→BOB recibe el activo escaso y acredita BOB ledger → sin riesgo de
  *   sub-colateralización; el guard de liquidez BOB corre igual dentro del confirm.) */
 function isUSDCtoBOBAutoEligible(user, usdcAmount) {
-  if (process.env.USDC_TO_BOB_AUTO_ENABLED !== 'true') return false
-  if (user.sanctionsFlag) return false
-  const max = Number(process.env.USDC_TO_BOB_AUTO_MAX_USDC ?? 0)
-  return max > 0 && usdcAmount <= max
+  // ASFI demo (2026-07): modo MANUAL forzado — toda conversión pasa por
+  // confirmación admin (checkpoint humano). Para reactivar el auto-convert
+  // gateado por env, restaurar el cuerpo original:
+  //   if (process.env.USDC_TO_BOB_AUTO_ENABLED !== 'true') return false
+  //   if (user.sanctionsFlag) return false
+  //   const max = Number(process.env.USDC_TO_BOB_AUTO_MAX_USDC ?? 0)
+  //   return max > 0 && usdcAmount <= max
+  return false
 }
 
 // ─── FUNCIÓN 3: POST /api/v1/wallet/usdc/convert-bob ─────────────────────────
