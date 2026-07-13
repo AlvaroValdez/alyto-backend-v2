@@ -465,6 +465,13 @@ Sentry.setupExpressErrorHandler(app);
 
 // Manejador de errores global — evita que Express crashee el proceso
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  // Rechazo CORS (origen fuera de ALLOWED_ORIGINS): 403 esperado, no 500 ni Sentry.
+  // El navegador igual lo reporta como fallo de red (sin ACAO), pero el server
+  // deja de registrar falsos "Error interno" (ej. app nativa con Origin
+  // https://localhost no incluido en la allowlist del entorno).
+  if (typeof err.message === 'string' && err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: err.message });
+  }
   console.error('[Alyto Server] Error no manejado:', err.message);
   // Capturar en Sentry solo errores 5xx (los 4xx son esperados y filtrados en sentry.js)
   if (!err.status || err.status >= 500) {
@@ -662,6 +669,28 @@ async function startServer() {
             'si es deliberado (solo diagnóstico). Abortando.');
           process.exit(1);
         }
+      }
+
+      // ── Guard: base de datos cruzada entre ambientes ─────────────────────
+      // Prod real escribiendo en la BD de staging (o viceversa) mezcla datos
+      // regulados con datos de prueba: las tx "de prod" aparecen en staging.
+      // Mismo discriminador que arriba: solo el VPS prod carga Secrets Manager.
+      // Escape hatch consciente: ALYTO_ALLOW_CROSS_DB=true (solo diagnóstico).
+      const mongoUri     = process.env.MONGODB_URI ?? '';
+      const isStagingDb  = /staging/i.test(mongoUri);
+      const allowCrossDb = process.env.ALYTO_ALLOW_CROSS_DB === 'true';
+      if (isRealProd && isStagingDb && !allowCrossDb) {
+        console.error('[DbGuard] FATAL — producción real (AWS_SECRETS_NAME presente) con MONGODB_URI ' +
+          'apuntando a una base de STAGING. Corrige MONGODB_URI (debe ser alyto-v2) o setea ' +
+          'ALYTO_ALLOW_CROSS_DB=true si es deliberado (solo diagnóstico). Abortando.');
+        process.exit(1);
+      }
+      // Render staging (RENDER=true, sin Secrets Manager) debe usar SIEMPRE la BD staging.
+      if (!isRealProd && process.env.RENDER && mongoUri && !isStagingDb && !allowCrossDb) {
+        console.error('[DbGuard] FATAL — staging (Render) con MONGODB_URI apuntando a una base que ' +
+          'NO es de staging. Corrige MONGODB_URI (debe ser alyto-v2-staging) o setea ' +
+          'ALYTO_ALLOW_CROSS_DB=true si es deliberado. Abortando.');
+        process.exit(1);
       }
     }
 
