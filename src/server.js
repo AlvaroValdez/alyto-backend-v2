@@ -692,6 +692,25 @@ async function startServer() {
           'ALYTO_ALLOW_CROSS_DB=true si es deliberado. Abortando.');
         process.exit(1);
       }
+
+      // ── Guard: orígenes CORS cruzados entre ambientes ────────────────────
+      // Prod NUNCA debe aceptar orígenes de staging (staging.alyto.app,
+      // *.onrender.com) ni staging aceptar el origen de prod (alyto.app):
+      // permitirlo deja que un frontend opere contra el backend del otro
+      // ambiente. Los orígenes de app nativa (https://localhost,
+      // capacitor://localhost) son válidos en ambos y no cuentan como cruce.
+      const allowCrossOrigins = process.env.ALYTO_ALLOW_CROSS_ORIGINS === 'true';
+      const crossOrigins = isRealProd
+        ? allowedOrigins.filter(o => /staging\.alyto\.app|onrender\.com/i.test(o))
+        : (process.env.RENDER
+            ? allowedOrigins.filter(o => /^https:\/\/(www\.)?alyto\.app$/i.test(o))
+            : []);
+      if (crossOrigins.length > 0 && !allowCrossOrigins) {
+        console.error(`[OriginGuard] FATAL — ALLOWED_ORIGINS mezcla ambientes: ${crossOrigins.join(', ')}. ` +
+          'Cada entorno declara SOLO sus propios orígenes (prod: alyto.app; staging: staging.alyto.app / ' +
+          'onrender.com; app nativa: https://localhost). Escape hatch: ALYTO_ALLOW_CROSS_ORIGINS=true. Abortando.');
+        process.exit(1);
+      }
     }
 
     // Capturar el servidor HTTP para montar el WebSocket sobre él
