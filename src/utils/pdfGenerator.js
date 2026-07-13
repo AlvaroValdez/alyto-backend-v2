@@ -324,7 +324,7 @@ function buildPDF(data, qrBuffer) {
       .fillColor(COLOR_GRAY)
       .text(
         `Comprobante N° ${data.numeroComprobante}  ·  `
-        + `Emitido: ${new Date(data.fechaHora).toLocaleDateString('es-BO')}  ·  `
+        + `Emitido: ${new Date(data.fechaHora).toLocaleDateString('es-BO', { timeZone: 'America/La_Paz' })}  ·  `
         + `AV Finance SRL  ·  NIT: ${nit}`,
         marginL,
         doc.y,

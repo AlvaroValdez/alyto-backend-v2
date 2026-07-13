@@ -288,7 +288,7 @@ function buildBusinessPDF(data) {
     const nit = cleanEnvValue(process.env.AV_FINANCE_NIT) ?? 'En trámite ante el SIN';
     doc.font('Helvetica').fontSize(7).fillColor(COLOR_GRAY)
       .text(
-        `Comprobante N° ${data.invoiceNumber}  ·  Emitido: ${new Date(data.fechaHora).toLocaleDateString('es-BO')}  ·  AV Finance SRL  ·  NIT: ${nit}`,
+        `Comprobante N° ${data.invoiceNumber}  ·  Emitido: ${new Date(data.fechaHora).toLocaleDateString('es-BO', { timeZone: 'America/La_Paz' })}  ·  AV Finance SRL  ·  NIT: ${nit}`,
         marginL, doc.y, { align: 'center', width: contentW },
       );
 

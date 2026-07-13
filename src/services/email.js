@@ -57,13 +57,15 @@ function formatDate(date) {
   const d = date instanceof Date ? date : new Date(date);
   if (isNaN(d.getTime())) return String(date);
 
-  const datePart = new Intl.DateTimeFormat('es-CL', {
+  const datePart = new Intl.DateTimeFormat('es-BO', {
+    timeZone: 'America/La_Paz',   // servidor en UTC → forzar hora Bolivia
     day:   'numeric',
     month: 'long',
     year:  'numeric',
   }).format(d);
 
-  const timePart = new Intl.DateTimeFormat('es-CL', {
+  const timePart = new Intl.DateTimeFormat('es-BO', {
+    timeZone: 'America/La_Paz',
     hour:   '2-digit',
     minute: '2-digit',
     hour12: false,
