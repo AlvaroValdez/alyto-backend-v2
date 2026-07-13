@@ -16,7 +16,7 @@
  *   registerLimiter       → POST /auth/register        strict: 5/h      | permissive: 30/h
  *   forgotPasswordLimiter → POST /auth/forgot-password strict: 3/h      | permissive: 20/h
  *   resetPasswordLimiter  → POST /auth/reset-password  strict: 5/h      | permissive: 30/h
- *   generalLimiter        → todas las rutas            strict: 200/15min | permissive: 1000/15min
+ *   generalLimiter        → todas las rutas            strict: 2000/15min | permissive: 6000/15min
  *   paymentsLimiter       → /api/v1/payments/*         strict: 20/min   | permissive: 100/min
  */
 
@@ -60,10 +60,16 @@ function makeLimiter({ windowMs, max, maxPermissive, message }) {
 
 // ─── Limiter: General ─────────────────────────────────────────────────────────
 
+// ⚠️ Backstop anti-DDoS por IP para TODAS las rutas — debe ser holgado.
+// La app hace polling cada 5s (estado de pago en Step5, saldo en Wallet) +
+// cotización: un solo usuario activo genera ~40-50 req/min. El valor anterior
+// (200/15min ≈ 13/min) le pegaba a usuarios legítimos ("Demasiadas solicitudes").
+// La protección fina de endpoints sensibles la dan los limiters específicos
+// (login, payments, wallet). Aquí solo frenamos abuso masivo.
 export const generalLimiter = makeLimiter({
   windowMs:      15 * 60 * 1000,
-  max:           200,
-  maxPermissive: 1000,
+  max:           2000,
+  maxPermissive: 6000,
   message:       'Demasiadas solicitudes. Intenta de nuevo más tarde.',
 });
 
