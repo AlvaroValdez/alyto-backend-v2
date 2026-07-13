@@ -2795,6 +2795,61 @@ export async function getTransactionStatus(req, res) {
   });
 }
 
+// ─── GET /api/v1/payments/:transactionId/status/stream (SSE) ──────────────────
+
+/**
+ * Server-Sent Events del estado de una transacción. Reemplaza el polling HTTP
+ * cada 5s del frontend: una sola conexión larga; el servidor vigila el estado
+ * (chequeo liviano a Mongo cada 4s) y empuja `event: status` SOLO cuando cambia.
+ * Cierra al llegar a un estado terminal. Auth por query token (EventSource no
+ * puede mandar header Authorization) — resuelto por el middleware de la ruta.
+ */
+export async function streamTransactionStatus(req, res) {
+  const { transactionId } = req.params;
+  const userId = req.user._id;
+
+  res.writeHead(200, {
+    'Content-Type':      'text/event-stream',
+    'Cache-Control':     'no-cache, no-transform',
+    'Connection':        'keep-alive',
+    'X-Accel-Buffering': 'no', // evita buffering en nginx/proxy
+  });
+  res.write('event: connected\ndata: {}\n\n');
+
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired']);
+  const POLL_MS  = 4000;
+  let lastStatus = null;
+  let closed     = false;
+
+  const end = () => { closed = true; clearInterval(timer); try { res.end(); } catch { /* noop */ } };
+
+  const tick = async () => {
+    if (closed) return;
+    try {
+      const tx = await Transaction.findOne(
+        { alytoTransactionId: transactionId, userId },
+      ).select('status updatedAt').lean();
+
+      if (!tx) { res.write(`event: error\ndata: ${JSON.stringify({ error: 'not_found' })}\n\n`); return end(); }
+
+      if (tx.status !== lastStatus) {
+        lastStatus = tx.status;
+        res.write(`event: status\ndata: ${JSON.stringify({ status: tx.status, updatedAt: tx.updatedAt })}\n\n`);
+        if (TERMINAL.has(tx.status)) return end();
+      } else {
+        res.write(': ping\n\n'); // comentario SSE = keepalive
+      }
+    } catch (err) {
+      console.warn('[SSE status] error:', err.message);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'server' })}\n\n`);
+    }
+  };
+
+  const timer = setInterval(tick, POLL_MS);
+  req.on('close', () => { closed = true; clearInterval(timer); });
+  tick();
+}
+
 // ─── GET /api/v1/payments/:transactionId/audit ────────────────────────────────
 
 /**

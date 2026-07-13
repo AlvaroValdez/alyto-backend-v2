@@ -19,6 +19,7 @@ import {
   fintocWebhook,
   getQuote,
   getTransactionStatus,
+  streamTransactionStatus,
   getTransactionHistory,
   getWithdrawalRulesController,
   initCrossBorderPayment,
@@ -288,5 +289,20 @@ router.get('/:transactionId/audit', protect, getTransactionAudit);
  *   500 — Error interno del servidor
  */
 router.get('/:transactionId/status', protect, getTransactionStatus);
+
+/**
+ * GET /api/v1/payments/:transactionId/status/stream  (SSE)
+ * Estado en tiempo real vía Server-Sent Events (reemplaza el polling cada 5s).
+ * Auth: EventSource no puede mandar header Authorization → se acepta el token
+ * por query (?token=), que este shim traslada al header antes de `protect`.
+ * Mismo patrón que el WebSocket de cotización.
+ */
+function sseTokenAuth(req, res, next) {
+  if (!req.headers.authorization && req.query.token) {
+    req.headers.authorization = `Bearer ${req.query.token}`;
+  }
+  return protect(req, res, next);
+}
+router.get('/:transactionId/status/stream', sseTokenAuth, streamTransactionStatus);
 
 export default router;
