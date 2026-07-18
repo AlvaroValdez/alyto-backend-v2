@@ -67,7 +67,7 @@ ${accounts}
 ORG_NAME = "AV Finance SRL"
 ORG_DBA = "Alyto"
 ORG_URL = "https://${homeDomain}"
-ORG_LOGO = "https://${homeDomain}/logo.png"
+ORG_LOGO = "https://${homeDomain}/assets/LogoAlyto.png"
 ORG_DESCRIPTION = "Empresa de Tecnología Financiera (ETF) — Proveedor de Servicios de Activos Virtuales (PSAV). Pagos transfronterizos y custodia de activos digitales sobre Stellar Network. DS 5384 (07/05/2025) — ASFI Bolivia."
 ORG_PHYSICAL_ADDRESS = "La Paz, Bolivia"
 ORG_SUPPORT_EMAIL = "${process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app'}"

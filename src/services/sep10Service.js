@@ -45,6 +45,21 @@ import User                 from '../models/User.js';
 const CHALLENGE_TTL_SECONDS = 900; // 15 minutos — tiempo para que el cliente firme
 const TOKEN_EXPIRES_IN      = '24h';
 
+/**
+ * Resuelve el web_auth_domain (SEP-10): el host del WEB_AUTH_ENDPOINT publicado
+ * en el stellar.toml. Se deriva de STELLAR_ANCHOR_BASE_URL (ej. https://api.alyto.app
+ * → 'api.alyto.app'); si no está seteado, cae a `api.<homeDomain>`, coherente con
+ * el default de stellarTomlController.
+ */
+function resolveWebAuthDomain(homeDomain) {
+  const baseUrl = process.env.STELLAR_ANCHOR_BASE_URL ?? `https://api.${homeDomain}`;
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return `api.${homeDomain}`;
+  }
+}
+
 // ─── Challenge ───────────────────────────────────────────────────────────────
 
 /**
@@ -73,6 +88,12 @@ export async function buildChallenge(accountId) {
   const nonce = crypto.randomBytes(48).toString('base64');
 
   const homeDomain   = process.env.HOME_DOMAIN ?? 'alyto.app';
+  // web_auth_domain (SEP-10): DEBE ser el host del WEB_AUTH_ENDPOINT, NO el home
+  // domain. El toml se sirve en alyto.app pero el endpoint de auth vive en
+  // api.alyto.app; las wallets externas (SDF SDK readChallengeTx) derivan el
+  // webAuthDomain esperado del WEB_AUTH_ENDPOINT y rechazan el challenge si no
+  // coincide ("'web_auth_domain' operation value does not match ..."). Ver toml.
+  const webAuthDomain = resolveWebAuthDomain(homeDomain);
   const nowSeconds   = Math.floor(Date.now() / 1000);
 
   // Construir la transacción challenge
@@ -95,10 +116,10 @@ export async function buildChallenge(accountId) {
       value:  Buffer.from(nonce),
       source: accountId,        // la cuenta del CLIENTE es source de esta operación
     }))
-    // Operación 2 (opcional SEP-10): web_auth_domain
+    // Operación 2 (opcional SEP-10): web_auth_domain = host del WEB_AUTH_ENDPOINT
     .addOperation(Operation.manageData({
       name:   'web_auth_domain',
-      value:  Buffer.from(homeDomain),
+      value:  Buffer.from(webAuthDomain),
       source: sourceKeypair.publicKey(),
     }))
     .build();
@@ -176,6 +197,19 @@ export async function verifyChallenge(transactionXdr) {
   const clientAccountId = firstOp.source;
   if (!clientAccountId || !StrKey.isValidEd25519PublicKey(clientAccountId)) {
     throw Object.assign(new Error('Cannot determine client account from challenge'), { status: 400 });
+  }
+
+  // 4b. Si hay operación web_auth_domain, su valor debe ser nuestro host de auth
+  //     (mismo check que hacen las wallets externas — rechaza challenges cuyo
+  //     web_auth_domain fue alterado para apuntar a otro servidor).
+  const webAuthOp = tx.operations.find(
+    op => op.type === 'manageData' && op.name === 'web_auth_domain',
+  );
+  if (webAuthOp) {
+    const expectedWebAuthDomain = resolveWebAuthDomain(homeDomain);
+    if ((webAuthOp.value?.toString() ?? '') !== expectedWebAuthDomain) {
+      throw Object.assign(new Error('Challenge web_auth_domain mismatch'), { status: 400 });
+    }
   }
 
   const txHash = tx.hash();
