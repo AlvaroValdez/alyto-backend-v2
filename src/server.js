@@ -43,6 +43,7 @@ import institutionalRoutes from './routes/institutionalRoutes.js';
 import userRoutes          from './routes/userRoutes.js';
 import identityRoutes      from './routes/identityRoutes.js';
 import adminRoutes         from './routes/adminRoutes.js';
+import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmin (feature-gated)
 import regionalRoutes      from './routes/regionalRoutes.js';
 import ipnRoutes           from './routes/ipn.js';
 import internalJobsRoutes  from './routes/internalJobsRoutes.js';
@@ -382,6 +383,14 @@ app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificacio
 app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
 app.use('/api/v1/stellar',       stellarRoutes);        // SEP-10/12/24/31 — Stellar Ecosystem Proposals
 app.use('/api/v1/support',       supportRoutes);        // AWS-4 — Agente IA de soporte (Bedrock)
+
+// AnchorAdmin — panel interno de administración del Stellar Anchor. Feature-gated
+// (ANCHOR_ADMIN_ENABLED) para rollback inmediato. Fase 1: observabilidad de solo
+// lectura (listener, tesorería, reconciliación, solvencia).
+if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
+  app.use('/api/v1/admin/anchor', anchorAdminRoutes);
+  console.info('[Alyto Server] AnchorAdmin habilitado → /api/v1/admin/anchor');
+}
 
 // stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
 // prod/staging). Single source of truth — sin archivos estáticos que se desincronicen.

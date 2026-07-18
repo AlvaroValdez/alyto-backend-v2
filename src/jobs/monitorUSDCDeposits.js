@@ -38,6 +38,7 @@ import { notify, NOTIFICATIONS } from '../services/notifications.js'
 const LEGACY_CURSOR_KEY = 'stellar:srl:cursor'                  // dirección SRL compartida (memo)
 const cursorKeyFor      = (addr) => `stellar:deposit:cursor:${addr}`
 const POLL_LIMIT        = 50     // operaciones por página Horizon (máximo permitido)
+export const HEARTBEAT_KEY = 'stellar:monitor:heartbeat'       // latido del listener (AnchorAdmin 4.2)
 
 let _isRunning = false
 
@@ -89,6 +90,16 @@ export async function monitorUSDCDeposits() {
 
     if (stats.credited > 0 || stats.errors > 0) {
       console.info('[USDC Monitor] Ciclo completado:', stats)
+    }
+
+    // Heartbeat de latido para AnchorAdmin (módulo 4.2): registra que el listener
+    // completó un ciclo. getListenerStatus compara este timestamp contra el
+    // intervalo esperado para detectar si el monitor murió sin que nadie lo note.
+    // Best-effort — un fallo aquí no debe abortar el ciclo ya completado.
+    try {
+      await SystemConfig.setValue(HEARTBEAT_KEY, { at: Date.now(), stats })
+    } catch (hbErr) {
+      console.error('[USDC Monitor] No se pudo escribir heartbeat:', hbErr.message)
     }
 
   } catch (err) {
