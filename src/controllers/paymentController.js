@@ -642,13 +642,18 @@ export async function getWithdrawalRulesController(req, res) {
     if (corridorIdParam) {
       corridor = await TransactionConfig.findOne({ corridorId: corridorIdParam, isActive: true }).lean();
     }
+    // Destinos multi-corredor (EU: bo-eu-srl owlPay + bo-es vitaWallet): sin
+    // corridorId el findOne era no determinista. sort por payoutMethod asc
+    // ('owlPay' < 'vitaWallet') prefiere Harbor — proveedor primario del
+    // auto-router EU y el formulario que guardan los contactos.
     if (!corridor) {
       const query = { destinationCountry: countryCode, isActive: true };
       if (legalEntity) query.legalEntity = legalEntity;
-      corridor = await TransactionConfig.findOne(query).lean();
+      corridor = await TransactionConfig.findOne(query).sort({ payoutMethod: 1 }).lean();
     }
     if (!corridor && legalEntity) {
-      corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true }).lean();
+      corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true })
+        .sort({ payoutMethod: 1 }).lean();
     }
   } catch (err) {
     console.warn('[Alyto WithdrawalRules] Error resolviendo corredor:', err.message);

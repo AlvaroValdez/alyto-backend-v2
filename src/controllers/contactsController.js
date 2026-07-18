@@ -6,7 +6,11 @@ export async function listContacts(req, res) {
   try {
     const { country } = req.query
     const filter = { userId: req.user._id }
-    if (country) filter.destinationCountry = country
+    // 'EU' incluye contactos legacy guardados con 'ES' — el corredor bo-es
+    // migró a destinationCountry='EU' (SEPA cubre España).
+    if (country) {
+      filter.destinationCountry = country === 'EU' ? { $in: ['EU', 'ES'] } : country
+    }
 
     const contacts = await Contact.find(filter)
       .sort({ isFavorite: -1, lastSentAt: -1, createdAt: -1 })
