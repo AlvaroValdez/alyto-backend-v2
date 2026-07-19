@@ -12,6 +12,7 @@
  *   GET /treasury        — 4.3 tesorería on-chain (SRL + channel account)
  *   GET /reconciliation  — 4.4 reconciliación dual ledger (mongo vs Stellar)
  *   GET /solvency        — 4.5 reservas vs pasivos (prueba de solvencia)
+ *   GET /audit           — registro de acciones sensibles del admin (panel auditable, §5)
  */
 
 import { Router }     from 'express'
@@ -22,6 +23,7 @@ import {
   handleTreasuryStatus,
   handleReconciliation,
   handleSolvency,
+  handleAuditLog,
 } from '../controllers/anchorAdminController.js'
 
 const router = Router()
@@ -33,5 +35,6 @@ router.get('/listener',       handleListenerStatus)
 router.get('/treasury',       handleTreasuryStatus)
 router.get('/reconciliation', handleReconciliation)
 router.get('/solvency',       handleSolvency)
+router.get('/audit',          handleAuditLog)
 
 export default router

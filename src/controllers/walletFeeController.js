@@ -18,6 +18,7 @@ import Sentry                 from '../services/sentry.js'
 import { sendCustodialUSDC }  from '../services/custodyService.js'
 import { horizonServer, ASSETS } from '../config/stellar.js'
 import { logger }             from '../utils/logger.js'
+import { recordAdminAction }  from '../services/adminAuditService.js'
 
 const EDITABLE = [
   'usdcP2pEnabled',
@@ -91,8 +92,29 @@ export async function updateWalletFeeConfig(req, res) {
     }
     update.updatedBy = req.user._id
 
+    // Capturar el valor anterior SOLO de los campos que cambian — para el audit.
+    const prev = await WalletFeeConfig.getSingleton()
+    const changedKeys = Object.keys(update).filter(k => k !== 'updatedBy')
+    const before = {}
+    for (const k of changedKeys) before[k] = prev?.[k] ?? null
+    const after = {}
+    for (const k of changedKeys) after[k] = update[k]
+
     await WalletFeeConfig.updateOne({ _id: 'singleton' }, { $set: update }, { upsert: true })
     const cfg = await WalletFeeConfig.getSingleton()
+
+    // Auditoría de acción sensible (spec §4.12: quién cambió qué comisión, cuándo,
+    // valor anterior y nuevo). No bloquea la respuesta si el audit falla.
+    recordAdminAction({
+      req,
+      action:     'fee.update',
+      targetType: 'WalletFeeConfig',
+      targetId:   'singleton',
+      before,
+      after,
+      metadata:   { changedFields: changedKeys },
+    }).catch(() => {})
+
     return res.json(cfg)
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletFeeController', fn: 'updateWalletFeeConfig' } })

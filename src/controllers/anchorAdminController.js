@@ -11,6 +11,7 @@ import {
   reconcileDualLedger,
   getSolvencySnapshot,
 } from '../services/anchorAdminService.js'
+import { listAuditLogs } from '../services/adminAuditService.js'
 import { logger } from '../utils/logger.js'
 
 /** GET /api/v1/admin/anchor/listener — 4.2 estado del listener de Horizon */
@@ -51,5 +52,17 @@ export async function handleSolvency(req, res) {
   } catch (err) {
     logger.error('[anchorAdmin] solvency error', { err: err.message })
     return res.status(500).json({ error: 'No se pudo calcular la solvencia.' })
+  }
+}
+
+/** GET /api/v1/admin/anchor/audit — registro de acciones sensibles del admin (el panel auditable) */
+export async function handleAuditLog(req, res) {
+  try {
+    const { action, actorId, targetType, targetId, from, to, page, limit } = req.query
+    const result = await listAuditLogs({ action, actorId, targetType, targetId, from, to, page, limit })
+    return res.status(200).json(result)
+  } catch (err) {
+    logger.error('[anchorAdmin] audit log error', { err: err.message })
+    return res.status(500).json({ error: 'No se pudo obtener el registro de auditoría.' })
   }
 }
