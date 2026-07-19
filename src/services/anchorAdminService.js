@@ -26,6 +26,8 @@ import {
 } from '../services/stellarService.js'
 import SystemConfig from '../models/SystemConfig.js'
 import WalletUSDC   from '../models/WalletUSDC.js'
+import WalletBOB    from '../models/WalletBOB.js'
+import User         from '../models/User.js'
 import { HEARTBEAT_KEY } from '../jobs/monitorUSDCDeposits.js'
 
 // ─── Parámetros configurables ─────────────────────────────────────────────────
@@ -423,4 +425,52 @@ export async function getSolvencySnapshot({ limit = 2000 } = {}) {
     // Si hubo errores de fetch, la reserva está subestimada → advertir.
     reliable: reserveFetchErrors === 0,
   }
+}
+
+/**
+ * 4.7 — Congelamientos ACTIVOS. Lista las wallets actualmente congeladas (BOB y
+ * USDC) con los datos del usuario y del congelamiento (quién, cuándo, motivo).
+ * El histórico de congelamientos/descongelamientos vive en el audit log
+ * (GET /admin/anchor/audit?action=wallet.freeze).
+ */
+export async function getFrozenWallets() {
+  const [bobFrozen, usdcFrozen] = await Promise.all([
+    WalletBOB.find({ status: 'frozen' }).select('userId balanceFrozen frozenReason frozenAt frozenBy').lean(),
+    WalletUSDC.find({ status: 'frozen' }).select('userId balanceFrozen frozenReason frozenAt frozenBy').lean(),
+  ])
+
+  // Agrupar por usuario (un usuario puede tener BOB y USDC congelados).
+  const byUser = new Map()
+  const put = (row, ledger) => {
+    const uid = String(row.userId)
+    if (!byUser.has(uid)) {
+      byUser.set(uid, {
+        userId:       uid,
+        frozenReason: row.frozenReason ?? null,
+        frozenAt:     row.frozenAt ?? null,
+        frozenBy:     row.frozenBy ? String(row.frozenBy) : null,
+        ledgers:      {},
+      })
+    }
+    byUser.get(uid).ledgers[ledger] = { balanceFrozen: row.balanceFrozen ?? 0 }
+  }
+  bobFrozen.forEach(r => put(r, 'BOB'))
+  usdcFrozen.forEach(r => put(r, 'USDC'))
+
+  // Enriquecer con datos del usuario (sin exponer nada sensible).
+  const userIds = [...byUser.keys()]
+  const users = await User.find({ _id: { $in: userIds } })
+    .select('_id email firstName lastName legalEntity')
+    .lean()
+  const userMap = new Map(users.map(u => [String(u._id), u]))
+
+  const frozen = [...byUser.values()].map(row => {
+    const u = userMap.get(row.userId)
+    return {
+      ...row,
+      user: u ? { email: u.email, name: `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim(), legalEntity: u.legalEntity } : null,
+    }
+  }).sort((a, b) => new Date(b.frozenAt ?? 0) - new Date(a.frozenAt ?? 0))
+
+  return { count: frozen.length, frozen }
 }

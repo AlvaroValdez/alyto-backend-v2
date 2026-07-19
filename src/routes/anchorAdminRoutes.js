@@ -23,6 +23,7 @@ import {
   handleTreasuryStatus,
   handleReconciliation,
   handleSolvency,
+  handleFrozenWallets,
   handleAuditLog,
 } from '../controllers/anchorAdminController.js'
 
@@ -35,6 +36,7 @@ router.get('/listener',       handleListenerStatus)
 router.get('/treasury',       handleTreasuryStatus)
 router.get('/reconciliation', handleReconciliation)
 router.get('/solvency',       handleSolvency)
+router.get('/frozen',         handleFrozenWallets)
 router.get('/audit',          handleAuditLog)
 
 export default router

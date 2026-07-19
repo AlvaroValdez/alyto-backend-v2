@@ -10,6 +10,7 @@ import {
   getTreasuryStatus,
   reconcileDualLedger,
   getSolvencySnapshot,
+  getFrozenWallets,
 } from '../services/anchorAdminService.js'
 import { listAuditLogs } from '../services/adminAuditService.js'
 import { logger } from '../utils/logger.js'
@@ -52,6 +53,16 @@ export async function handleSolvency(req, res) {
   } catch (err) {
     logger.error('[anchorAdmin] solvency error', { err: err.message })
     return res.status(500).json({ error: 'No se pudo calcular la solvencia.' })
+  }
+}
+
+/** GET /api/v1/admin/anchor/frozen — 4.7 congelamientos activos (BOB + USDC) */
+export async function handleFrozenWallets(req, res) {
+  try {
+    return res.status(200).json(await getFrozenWallets())
+  } catch (err) {
+    logger.error('[anchorAdmin] frozen wallets error', { err: err.message })
+    return res.status(500).json({ error: 'No se pudo obtener los congelamientos activos.' })
   }
 }
 

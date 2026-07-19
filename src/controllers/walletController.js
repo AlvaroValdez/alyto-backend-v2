@@ -26,6 +26,7 @@
 
 import mongoose         from 'mongoose'
 import WalletBOB        from '../models/WalletBOB.js'
+import WalletUSDC       from '../models/WalletUSDC.js'
 import WalletTransaction from '../models/WalletTransaction.js'
 import User             from '../models/User.js'
 import BusinessProfile  from '../models/BusinessProfile.js'
@@ -35,6 +36,7 @@ import { sendEmail, EMAILS } from '../services/email.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
+import { recordAdminAction } from '../services/adminAuditService.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
 
@@ -1321,9 +1323,18 @@ export async function adminTraceUserWithdrawals(req, res) {
 // ─── FUNCIÓN 10 (ADMIN): PATCH /api/v1/admin/wallet/:userId/freeze ────────────
 
 /**
- * Congela la wallet de un usuario.
- * Mueve balance → balanceFrozen.
- * Fase 26: registra evento de congelamiento en Stellar (fire-and-forget).
+ * Congela la wallet de un usuario por orden regulatoria (AnchorAdmin 4.7).
+ *
+ * Congela AMBOS ledgers en la misma transacción atómica (BOB + USDC): mueve
+ * balance → balanceFrozen y status → 'frozen'. Sin esto, un usuario congelado en
+ * BOB podía seguir moviendo USDC internamente (executeUsdcP2pTransfer solo exige
+ * WalletUSDC.status === 'active').
+ *
+ * Registra la acción sensible en el audit trail admin DENTRO de la misma sesión
+ * (recordAdminAction con session → la acción y su auditoría commitean juntas o
+ * ninguna). Exige referencia del oficio/instrucción regulatoria (spec §4.7).
+ *
+ * Fase 26: refleja el congelamiento on-chain (freezeUserTrustline, fire-and-forget).
  */
 export async function adminFreezeWallet(req, res) {
   const session = await mongoose.startSession()
@@ -1331,12 +1342,19 @@ export async function adminFreezeWallet(req, res) {
 
   try {
     const { userId }                     = req.params
-    const { reason, reportNumber }       = req.body
+    const { reason }                     = req.body
+    // Referencia del oficio/instrucción regulatoria — obligatoria (§4.7).
+    // Acepta `regulatoryRef` o el alias legacy `reportNumber`.
+    const regulatoryRef                  = req.body.regulatoryRef ?? req.body.reportNumber
     const admin                          = req.user
 
     if (!reason) {
       await session.abortTransaction()
       return res.status(400).json({ error: 'El campo reason es obligatorio para congelar una wallet.' })
+    }
+    if (!regulatoryRef || !String(regulatoryRef).trim()) {
+      await session.abortTransaction()
+      return res.status(400).json({ error: 'La referencia del oficio o instrucción regulatoria es obligatoria para congelar una wallet.' })
     }
 
     const wallet = await WalletBOB.findOne({ userId }).session(session)
@@ -1370,8 +1388,39 @@ export async function adminFreezeWallet(req, res) {
       description:   `Wallet congelada por compliance. Razón: ${reason}`,
       confirmedBy:   admin._id,
       confirmedAt:   now,
-      metadata:      { reason, reportNumber: reportNumber ?? null },
+      metadata:      { reason, regulatoryRef },
     }], { session })
+
+    // Congelar también el ledger USDC (si el usuario tiene wallet USDC).
+    const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
+    if (walletUsdc && walletUsdc.status !== 'frozen') {
+      await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+        status:        'frozen',
+        balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0),
+        balance:       0,
+        frozenReason:  reason,
+        frozenAt:      now,
+        frozenBy:      admin._id,
+      }, { session })
+    }
+
+    // Auditoría de acción sensible — atómica con el congelamiento (misma sesión).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.freeze',
+      targetType: 'User',
+      targetId:   userId,
+      before: {
+        bob:  { status: wallet.status, balance: wallet.balance, balanceFrozen: wallet.balanceFrozen ?? 0 },
+        usdc: walletUsdc ? { status: walletUsdc.status, balance: walletUsdc.balance, balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
+      },
+      after: {
+        bob:  { status: 'frozen', balance: 0, balanceFrozen: wallet.balance },
+        usdc: walletUsdc ? { status: 'frozen', balance: 0, balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0) } : null,
+      },
+      reason,
+      metadata: { regulatoryRef },
+    })
 
     await session.commitTransaction()
 
@@ -1398,10 +1447,12 @@ export async function adminFreezeWallet(req, res) {
     notify(userId, NOTIFICATIONS.walletFrozen()).catch(() => {})
 
     return res.json({
-      walletId:  wallet.walletId,
-      status:    'frozen',
-      frozenAt:  now,
+      walletId:     wallet.walletId,
+      status:       'frozen',
+      frozenAt:     now,
       reason,
+      regulatoryRef,
+      usdcFrozen:   !!walletUsdc,
     })
 
   } catch (err) {
@@ -1426,6 +1477,7 @@ export async function adminUnfreezeWallet(req, res) {
 
   try {
     const { userId } = req.params
+    const { reason } = req.body   // motivo del descongelamiento (opcional)
     const admin      = req.user
 
     const wallet = await WalletBOB.findOne({ userId }).session(session)
@@ -1460,6 +1512,36 @@ export async function adminUnfreezeWallet(req, res) {
       confirmedBy:   admin._id,
       confirmedAt:   now,
     }], { session })
+
+    // Descongelar también el ledger USDC (si estaba congelado).
+    const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
+    if (walletUsdc && walletUsdc.status === 'frozen') {
+      await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+        status:        'active',
+        balance:       (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0),
+        balanceFrozen: 0,
+        frozenReason:  null,
+        frozenAt:      null,
+        frozenBy:      null,
+      }, { session })
+    }
+
+    // Auditoría de acción sensible — atómica con el descongelamiento.
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.unfreeze',
+      targetType: 'User',
+      targetId:   userId,
+      before: {
+        bob:  { status: 'frozen', balanceFrozen: wallet.balanceFrozen },
+        usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'frozen', balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
+      },
+      after: {
+        bob:  { status: 'active', balance: wallet.balanceFrozen },
+        usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'active', balance: (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0) } : null,
+      },
+      reason: reason ?? '',
+    })
 
     await session.commitTransaction()
 
