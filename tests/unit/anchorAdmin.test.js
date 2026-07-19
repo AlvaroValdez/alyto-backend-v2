@@ -12,6 +12,7 @@ import {
   classifyWalletReconciliation,
   computeSolvency,
   classifyListenerHealth,
+  evaluateAnchorAlerts,
 } from '../../src/services/anchorAdminService.js'
 
 describe('mirrorLiabilityUSDC', () => {
@@ -96,5 +97,51 @@ describe('classifyListenerHealth', () => {
     expect(r.status).toBe('red')
     expect(r.secondsSinceHeartbeat).toBe(210)
     expect(r.missedCycles).toBe(7)
+  })
+})
+
+describe('evaluateAnchorAlerts', () => {
+  const green = { health: 'green', horizon: { reachable: true }, secondsSinceHeartbeat: 10, missedCycles: 0 }
+
+  test('todo verde → sin alertas', () => {
+    expect(evaluateAnchorAlerts({ listener: green, reconciliation: { discrepancies: [] } })).toEqual([])
+  })
+  test("listener 'red' → alerta crítica listener-dead", () => {
+    const a = evaluateAnchorAlerts({ listener: { ...green, health: 'red' } })
+    expect(a).toHaveLength(1)
+    expect(a[0]).toMatchObject({ key: 'listener-dead', severity: 'critical' })
+  })
+  test("listener 'amber' → aviso listener-lagging", () => {
+    const a = evaluateAnchorAlerts({ listener: { ...green, health: 'amber' } })
+    expect(a[0]).toMatchObject({ key: 'listener-lagging', severity: 'warning' })
+  })
+  test("listener 'unknown' (arranque) → sin alerta", () => {
+    expect(evaluateAnchorAlerts({ listener: { ...green, health: 'unknown' } })).toEqual([])
+  })
+  test('Horizon inalcanzable → alerta crítica', () => {
+    const a = evaluateAnchorAlerts({ listener: { health: 'green', horizon: { reachable: false } } })
+    expect(a.some(x => x.key === 'listener-horizon-unreachable' && x.severity === 'critical')).toBe(true)
+  })
+  test('descuadre real de reconciliación → alerta crítica', () => {
+    const recon = {
+      totalMismatchUSDC: 12.5,
+      discrepancies: [
+        { type: 'balance_mismatch' },
+        { type: 'offchain_without_onchain' },
+      ],
+    }
+    const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon })
+    expect(a.some(x => x.key === 'reconciliation-discrepancy' && x.severity === 'critical')).toBe(true)
+  })
+  test('solo errores de fetch Horizon → aviso, no crítico', () => {
+    const recon = { discrepancies: [{ type: 'onchain_fetch_error' }, { type: 'onchain_fetch_error' }] }
+    const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon })
+    expect(a).toHaveLength(1)
+    expect(a[0]).toMatchObject({ key: 'reconciliation-fetch-errors', severity: 'warning' })
+  })
+  test('descuadres bajo el umbral no alertan (maxDiscrepancies)', () => {
+    const recon = { discrepancies: [{ type: 'balance_mismatch' }] }
+    const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon, thresholds: { maxDiscrepancies: 1 } })
+    expect(a.some(x => x.key === 'reconciliation-discrepancy')).toBe(false)
   })
 })

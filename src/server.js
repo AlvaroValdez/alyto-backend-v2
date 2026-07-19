@@ -874,6 +874,18 @@ async function startServer() {
       console.warn('[Server] STELLAR_SRL_PUBLIC_KEY no configurado — USDC monitor desactivado');
     }
 
+    // AnchorAdmin (Bloque 2) — alertas activas: listener caído + descuadre de
+    // reconciliación. In-process (infra core, como monitorChannelXLM). Gated por
+    // ANCHOR_ADMIN_ENABLED. El chequeo del listener corre agresivo; la
+    // reconciliación se autolimita a su sub-cadencia dentro del job.
+    if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
+      const { anchorAdminAlerts } = await import('./jobs/anchorAdminAlerts.js');
+      const alertIntervalMs = parseInt(process.env.ANCHOR_ALERT_INTERVAL_MS ?? String(2 * 60 * 1000), 10);
+      setTimeout(anchorAdminAlerts, 2 * 60 * 1000);          // primera corrida 2 min post-start
+      setInterval(anchorAdminAlerts, alertIntervalMs);        // default cada 2 min
+      console.info(`[Server] AnchorAdmin alerts programado cada ${Math.round(alertIntervalMs / 1000)}s`);
+    }
+
     // AWS-2B — Consumer SQS de webhooks IPN (no-op si SQS_ENABLED!=true)
     const { startIpnConsumerJob } = await import('./jobs/ipnQueueConsumer.js');
     startIpnConsumerJob();

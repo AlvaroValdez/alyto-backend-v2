@@ -148,6 +148,80 @@ export function classifyListenerHealth({ heartbeatAt, now = Date.now(), interval
   }
 }
 
+/**
+ * Deriva las alertas activas a disparar a partir del estado del listener y de la
+ * reconciliación (spec §5: los indicadores críticos deben disparar alerta, no solo
+ * mostrarse en pantalla). Función PURA — no envía nada, solo decide qué alertar.
+ *
+ * NO cubre el saldo XLM bajo del channel account: eso ya lo alerta `monitorChannelXLM`
+ * (email + Sentry). NO cubre solvencia: su identidad contable está sin confirmar, así
+ * que no se auto-alerta hasta validarla con el equipo.
+ *
+ * @param {{listener?:object, reconciliation?:object, thresholds?:{maxDiscrepancies?:number}}} p
+ * @returns {Array<{key:string, severity:'critical'|'warning', title:string, detail:string}>}
+ */
+export function evaluateAnchorAlerts({ listener, reconciliation, thresholds = {} }) {
+  const maxDiscrepancies = thresholds.maxDiscrepancies ?? 0
+  const alerts = []
+
+  // Horizon inalcanzable — el listener no pudo consultar el último ledger.
+  if (listener?.horizon && listener.horizon.reachable === false) {
+    alerts.push({
+      key:      'listener-horizon-unreachable',
+      severity: 'critical',
+      title:    'Horizon inalcanzable',
+      detail:   'El listener no pudo consultar el último ledger de Horizon.',
+    })
+  }
+
+  // Salud del listener por antigüedad del latido. 'unknown' (arranque reciente) y
+  // 'green' no alertan; 'red' es el caso agresivo del spec §4.2.
+  if (listener?.health === 'red') {
+    alerts.push({
+      key:      'listener-dead',
+      severity: 'critical',
+      title:    'Listener de pagos probablemente caído',
+      detail:   `Sin latido hace ${listener.secondsSinceHeartbeat}s (${listener.missedCycles} ciclos perdidos). Los pagos on-chain se liquidan pero el sistema no los acredita.`,
+    })
+  } else if (listener?.health === 'amber') {
+    alerts.push({
+      key:      'listener-lagging',
+      severity: 'warning',
+      title:    'Listener de pagos con retraso',
+      detail:   `Sin latido hace ${listener.secondsSinceHeartbeat}s (${listener.missedCycles} ciclos perdidos).`,
+    })
+  }
+
+  // Reconciliación del dual ledger. Separa descuadres reales de errores de fetch
+  // Horizon (transitorios): un descuadre real es crítico; los fetch errors son un
+  // aviso de que la reconciliación quedó incompleta.
+  if (reconciliation && Array.isArray(reconciliation.discrepancies)) {
+    const real = reconciliation.discrepancies.filter(
+      d => d.type === 'balance_mismatch' || d.type === 'offchain_without_onchain',
+    )
+    const fetchErrors = reconciliation.discrepancies.filter(d => d.type === 'onchain_fetch_error')
+
+    if (real.length > maxDiscrepancies) {
+      alerts.push({
+        key:      'reconciliation-discrepancy',
+        severity: 'critical',
+        title:    'Descuadre en la reconciliación del dual ledger',
+        detail:   `${real.length} descuadre(s) espejo vs on-chain, total ${reconciliation.totalMismatchUSDC ?? '?'} USDC.`,
+      })
+    }
+    if (fetchErrors.length > 0) {
+      alerts.push({
+        key:      'reconciliation-fetch-errors',
+        severity: 'warning',
+        title:    'Reconciliación incompleta (Horizon inestable)',
+        detail:   `${fetchErrors.length} dirección(es) no se pudieron consultar on-chain este ciclo.`,
+      })
+    }
+  }
+
+  return alerts
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // FUNCIONES CON I/O (Horizon + MongoDB) — orquestan los helpers puros
 // ═══════════════════════════════════════════════════════════════════════════
