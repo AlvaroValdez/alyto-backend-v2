@@ -1,55 +1,58 @@
 // src/services/kybAnalysisService.js
 //
-// AWS-4 — Análisis IA de expedientes KYB (Bedrock / Claude).
+// IA — Análisis de expedientes KYB (visión + documentos PDF).
 //
-// Tercer caso de uso de Bedrock. Cuando un usuario envía su solicitud Business
-// (NIT, escritura de constitución, CI del representante, etc.), Claude analiza
-// los documentos + los datos declarados y produce una SUGERENCIA estructurada
-// para el admin: score de riesgo, acción recomendada, documentos faltantes,
-// banderas. NO autoritativo — el admin decide en reviewKYBApplication.
+// Cuando un usuario envía su solicitud Business (NIT, escritura de constitución,
+// CI del representante, etc.), Claude analiza los documentos + los datos
+// declarados y produce una SUGERENCIA estructurada para el admin: score de
+// riesgo, acción recomendada, documentos faltantes, banderas. NO autoritativo —
+// el admin decide en reviewKYBApplication.
 //
-// Modelo: Sonnet (BEDROCK_MODEL_SMART) — visión + razonamiento.
-// API: Converse (soporta bloques `image` Y `document` PDF, a diferencia de
-// InvokeModel que usa el parser de comprobantes).
+// La llamada al modelo pasa por el adaptador llmProvider (formato neutro con
+// bloques image/document) — el proveedor y el modelo se eligen por env var.
+// Proveedor por defecto: API directa de Anthropic con Claude Sonnet 4.6 (visión
+// + razonamiento sobre varios documentos; la cuenta AWS no tiene cuota Bedrock
+// on-demand — ver docs/AWS_ESTADO_GENERAL.md §4). 'bedrock' queda como legado
+// vía KYB_AI_PROVIDER=bedrock (Converse soporta los mismos bloques).
 //
-// ── Prompt Management ───────────────────────────────────────────────────────
-// Como el análisis adjunta documentos binarios, NO se puede usar el prompt como
-// modelId (ese modo no admite attachments). En su lugar, si BEDROCK_KYB_PROMPT_ID
-// está configurado, se descarga el texto de instrucciones del prompt gestionado
-// (GetPrompt, cacheado) y se compone la llamada Converse con ese system + los
-// documentos. Si el SDK bedrock-agent no está o falla → fallback al prompt inline.
+// ── Prompt Management (legado Bedrock) ──────────────────────────────────────
+// Si BEDROCK_KYB_PROMPT_ID está configurado, se descarga el texto de
+// instrucciones del prompt gestionado (GetPrompt, cacheado) y se usa como
+// system, independientemente del proveedor de inferencia. Si el SDK
+// bedrock-agent no está o falla → fallback al prompt inline.
 //
-// Gating: TODO apagado salvo BEDROCK_KYB_ENABLED=true → analyzeKyb() devuelve null.
+// Gating: TODO apagado salvo KYB_AI_ENABLED=true (se acepta el nombre legado
+// BEDROCK_KYB_ENABLED=true) → analyzeKyb() devuelve null.
 // Fire-and-forget: el llamador NUNCA bloquea el flujo. Errores → Sentry + null.
 
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
+import { complete } from './llmProvider.js';
 
-const ENABLED       = process.env.BEDROCK_KYB_ENABLED === 'true';
+const ENABLED = process.env.KYB_AI_ENABLED === 'true'
+  || process.env.BEDROCK_KYB_ENABLED === 'true';
+
+const PROVIDER = process.env.KYB_AI_PROVIDER || 'anthropic';
+
+// Modelo por proveedor. Anthropic: alias vigente de Sonnet 4.6. Bedrock
+// (legado): var histórica compartida.
+const MODEL = process.env.KYB_AI_MODEL
+  || (PROVIDER === 'bedrock'
+    ? (process.env.BEDROCK_MODEL_SMART || 'anthropic.claude-sonnet-4-6-20251001-v1:0')
+    : 'claude-sonnet-4-6');
+
 const REGION        = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
-const MODEL_SMART   = process.env.BEDROCK_MODEL_SMART || 'anthropic.claude-sonnet-4-6-20251001-v1:0';
 // Identificador (ARN o id) del prompt en Bedrock Prompt Management. Opcional.
 const KYB_PROMPT_ID = process.env.BEDROCK_KYB_PROMPT_ID || '';
-const MAX_TOKENS    = Number(process.env.BEDROCK_KYB_MAX_TOKENS || 1024);
-const MAX_DOCS      = Number(process.env.BEDROCK_KYB_MAX_DOCS || 8);
-const MAX_DOC_BYTES = Number(process.env.BEDROCK_KYB_MAX_DOC_BYTES || 4_000_000); // ~4 MB por doc
+const MAX_TOKENS    = Number(process.env.KYB_AI_MAX_TOKENS || process.env.BEDROCK_KYB_MAX_TOKENS || 1024);
+const TEMPERATURE   = Number(process.env.KYB_AI_TEMPERATURE || 0.2);
+const MAX_DOCS      = Number(process.env.KYB_AI_MAX_DOCS || process.env.BEDROCK_KYB_MAX_DOCS || 8);
+const MAX_DOC_BYTES = Number(process.env.KYB_AI_MAX_DOC_BYTES || process.env.BEDROCK_KYB_MAX_DOC_BYTES || 4_000_000); // ~4 MB por doc
 
-let _client = null;
-let _converseCmd = null;
 let _instrCache = null;
 
 export function isKybAnalysisEnabled() {
   return ENABLED;
-}
-
-async function getClient() {
-  if (!ENABLED) return null;
-  if (_client) return _client;
-  const mod = await import('@aws-sdk/client-bedrock-runtime');
-  const { BedrockRuntimeClient, ConverseCommand } = mod;
-  _converseCmd = ConverseCommand;
-  _client = new BedrockRuntimeClient({ region: REGION });
-  return _client;
 }
 
 // Instrucciones INLINE (fallback). En modo Prompt Management se mantiene el
@@ -96,60 +99,62 @@ async function loadInstructions() {
         variant?.templateConfiguration?.text?.text ||
         variant?.templateConfiguration?.chat?.system?.[0]?.text;
       if (text) {
-        logger.info('[bedrock] Instrucciones KYB cargadas desde Prompt Management');
+        logger.info('[kyb-ai] Instrucciones KYB cargadas desde Prompt Management');
         _instrCache = text;
         return text;
       }
-      logger.warn('[bedrock] Prompt KYB gestionado sin texto utilizable — usando inline');
+      logger.warn('[kyb-ai] Prompt KYB gestionado sin texto utilizable — usando inline');
     } catch (err) {
-      logger.warn('[bedrock] No se pudo cargar prompt KYB gestionado — usando inline', { error: err.message });
+      logger.warn('[kyb-ai] No se pudo cargar prompt KYB gestionado — usando inline', { error: err.message });
     }
   }
   _instrCache = INLINE_INSTRUCTIONS;
   return _instrCache;
 }
 
-// Mapea mimetype → formato de bloque Converse (image vs document). Devuelve null
-// si no es soportado.
-function blockFormat(mimetype) {
+// Mapea mimetype → bloque neutro del adaptador (image vs document). Devuelve
+// null si no es soportado.
+function blockKind(mimetype) {
   switch (mimetype) {
     case 'image/jpeg':
-    case 'image/jpg':  return { kind: 'image', format: 'jpeg' };
-    case 'image/png':  return { kind: 'image', format: 'png' };
-    case 'image/webp': return { kind: 'image', format: 'webp' };
-    case 'image/gif':  return { kind: 'image', format: 'gif' };
-    case 'application/pdf': return { kind: 'document', format: 'pdf' };
+    case 'image/jpg':  return { kind: 'image', mediaType: 'image/jpeg' };
+    case 'image/png':  return { kind: 'image', mediaType: 'image/png' };
+    case 'image/webp': return { kind: 'image', mediaType: 'image/webp' };
+    case 'image/gif':  return { kind: 'image', mediaType: 'image/gif' };
+    case 'application/pdf': return { kind: 'document', mediaType: 'application/pdf' };
     default: return null;
   }
 }
 
-// El nombre de un bloque document en Converse solo admite [a-zA-Z0-9 ()\[\]-].
+// El nombre de un bloque document (Bedrock Converse) solo admite
+// [a-zA-Z0-9 ()\[\]-]; se aplica siempre para mantener compat entre proveedores.
 function safeDocName(filename, idx) {
   const base = String(filename || `documento-${idx}`).replace(/\.[^.]+$/, '');
   const clean = base.replace(/[^a-zA-Z0-9 \-\(\)\[\]]/g, ' ').trim().slice(0, 64);
   return clean || `documento-${idx}`;
 }
 
-// Construye los bloques de contenido a partir de los documentos del expediente.
+// Construye los bloques de contenido neutros a partir de los documentos del
+// expediente.
 function buildDocumentBlocks(documents = []) {
   const blocks = [];
   let used = 0;
   for (let i = 0; i < documents.length && used < MAX_DOCS; i++) {
     const d = documents[i];
     if (!d?.data) continue;
-    const fmt = blockFormat(d.mimetype);
+    const fmt = blockKind(d.mimetype);
     if (!fmt) continue;
-    const bytes = Buffer.from(d.data, 'base64');
-    if (bytes.length > MAX_DOC_BYTES) {
-      logger.info('[bedrock] Documento KYB omitido por tamaño', { filename: d.filename, bytes: bytes.length });
+    const bytes = Buffer.byteLength(d.data, 'base64');
+    if (bytes > MAX_DOC_BYTES) {
+      logger.info('[kyb-ai] Documento KYB omitido por tamaño', { filename: d.filename, bytes });
       continue;
     }
     // Etiqueta el documento con su tipo declarado para que el modelo lo ubique.
-    blocks.push({ text: `Documento ${used + 1} — tipo declarado: ${d.type || 'desconocido'}` });
+    blocks.push({ type: 'text', text: `Documento ${used + 1} — tipo declarado: ${d.type || 'desconocido'}` });
     if (fmt.kind === 'image') {
-      blocks.push({ image: { format: fmt.format, source: { bytes } } });
+      blocks.push({ type: 'image', mediaType: fmt.mediaType, data: d.data });
     } else {
-      blocks.push({ document: { format: fmt.format, name: safeDocName(d.filename, used + 1), source: { bytes } } });
+      blocks.push({ type: 'document', mediaType: fmt.mediaType, data: d.data, name: safeDocName(d.filename, used + 1) });
     }
     used++;
   }
@@ -187,35 +192,37 @@ export async function analyzeKyb({ business = {}, documents = [] } = {}) {
 
     const { blocks, used } = buildDocumentBlocks(documents);
     if (!used) {
-      logger.info('[bedrock] KYB sin documentos analizables — análisis omitido');
+      logger.info('[kyb-ai] KYB sin documentos analizables — análisis omitido');
       return null;
     }
-
-    const client = await getClient();
-    if (!client) return null;
 
     const instructions = await loadInstructions();
 
     const content = [
-      { text: `Datos declarados de la empresa:\n${businessSummary(business)}\n\nAnaliza los ${used} documento(s) adjuntos y devuelve el JSON solicitado.` },
+      { type: 'text', text: `Datos declarados de la empresa:\n${businessSummary(business)}\n\nAnaliza los ${used} documento(s) adjuntos y devuelve el JSON solicitado.` },
       ...blocks,
     ];
 
-    const resp = await client.send(new _converseCmd({
-      modelId: MODEL_SMART,
-      system: [{ text: instructions }],
+    const resp = await complete({
+      provider: PROVIDER,
+      model: MODEL,
+      system: instructions,
       messages: [{ role: 'user', content }],
-      inferenceConfig: { maxTokens: MAX_TOKENS, temperature: 0.2 },
-    }));
+      maxTokens: MAX_TOKENS,
+      temperature: TEMPERATURE,
+    });
 
-    const text = resp?.output?.message?.content?.[0]?.text ?? '';
-    const parsed = extractJson(text);
+    const parsed = extractJson(resp.text);
     if (!parsed) {
-      logger.warn('[bedrock] analyzeKyb sin JSON parseable', { stopReason: resp?.stopReason });
+      logger.warn('[kyb-ai] analyzeKyb sin JSON parseable', {
+        provider: PROVIDER, model: MODEL, stopReason: resp.stopReason,
+      });
       return null;
     }
 
-    logger.info('[bedrock] Expediente KYB analizado', {
+    logger.info('[kyb-ai] Expediente KYB analizado', {
+      provider: PROVIDER,
+      model: MODEL,
       docs: used,
       riskScore: parsed.riskScore,
       recommendedAction: parsed.recommendedAction,
@@ -224,18 +231,18 @@ export async function analyzeKyb({ business = {}, documents = [] } = {}) {
 
     return {
       ...parsed,
-      model: PromptModelTag(),
+      model: promptModelTag(),
       analyzedAt: new Date(),
     };
   } catch (err) {
-    logger.error('[bedrock] analyzeKyb falló', { error: err.message });
+    logger.error('[kyb-ai] analyzeKyb falló', { provider: PROVIDER, error: err.message });
     Sentry.captureException(err, { tags: { service: 'kybAnalysisService', fn: 'analyzeKyb' } });
     return null;
   }
 }
 
-function PromptModelTag() {
-  return KYB_PROMPT_ID ? 'bedrock:prompt-mgmt' : `bedrock:${MODEL_SMART.split('.').pop()}`;
+function promptModelTag() {
+  return KYB_PROMPT_ID ? `${PROVIDER}:prompt-mgmt` : `${PROVIDER}:${MODEL}`;
 }
 
 // Extrae el primer objeto JSON de un texto (Claude a veces lo envuelve en ```json).
