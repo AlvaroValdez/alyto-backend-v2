@@ -1,76 +1,55 @@
 // src/services/supportAgentService.js
 //
-// AWS-4 — Agente IA de soporte para usuarios (Bedrock / Claude).
+// Agente IA de soporte "Aly" para usuarios de Alyto.
 //
-// Segundo caso de uso de Bedrock (tras el parser de comprobantes). Responde
-// dudas de los usuarios sobre Alyto (cómo cargar la wallet, estados de
-// transacción genéricos, KYC, P2P, etc.) en lenguaje natural.
+// Responde dudas de los usuarios sobre la app (cómo cargar la wallet, estados de
+// transacción genéricos, KYC, P2P, etc.) en lenguaje natural. La llamada al
+// modelo pasa por el adaptador llmProvider (formato neutro) — el proveedor y el
+// modelo se eligen por env var, sin tocar este servicio.
 //
-// Modelo: BEDROCK_MODEL_SUPPORT (fallback BEDROCK_MODEL_SMART). Tarea acotada
-// (wallet, envíos cross-border, smart saving) → right-sizing a un modelo simple
-// (ej. Haiku 3.5) sin afectar el KYB que comparte BEDROCK_MODEL_SMART.
+// Proveedor por defecto: API directa de Anthropic con Claude Haiku 4.5 (tarea
+// acotada + reglas de compliance → right-sizing; ver docs/AWS_ESTADO_GENERAL.md §4
+// por el bloqueo de Bedrock que motivó la migración). 'bedrock' queda disponible
+// como legado vía SUPPORT_AI_PROVIDER=bedrock.
 //
-// ── Dos modos de operación ──────────────────────────────────────────────────
-//   A) Prompt Management (RECOMENDADO): el system prompt vive en la consola de
-//      AWS Bedrock → Prompt Management (versionable, editable SIN redeploy). Se
-//      referencia por ARN en BEDROCK_SUPPORT_PROMPT_ARN. En este modo el prompt
-//      gestionado define las instrucciones del sistema y recibe variables.
-//   B) Inline (FALLBACK): si no hay ARN configurado, usa el system prompt local
-//      SYSTEM_PROMPT. Permite probar el agente antes de crear el prompt en AWS.
+// Gating: TODO apagado salvo SUPPORT_AGENT_ENABLED=true (se acepta el nombre
+// legado BEDROCK_SUPPORT_ENABLED=true) → askSupport() devuelve null (no-op) y el
+// controller responde con un fallback a soporte humano.
 //
-// Gating: TODO apagado salvo BEDROCK_SUPPORT_ENABLED=true → askSupport() devuelve
-// null (no-op) y el controller responde con un fallback a soporte humano.
-//
-// A diferencia del parser, este servicio NO es fire-and-forget: el usuario espera
-// la respuesta. Pero igual NUNCA lanza — ante cualquier error devuelve null y el
-// controller degrada a un mensaje de soporte humano.
+// A diferencia del parser de comprobantes, este servicio NO es fire-and-forget:
+// el usuario espera la respuesta. Pero igual NUNCA lanza — ante cualquier error
+// devuelve null y el controller degrada a un mensaje de soporte humano.
 
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
+import { complete } from './llmProvider.js';
 
-const ENABLED        = process.env.BEDROCK_SUPPORT_ENABLED === 'true';
-const REGION         = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
-// Modelo del agente de soporte. Tarea acotada (wallet, envíos cross-border, smart
-// saving) → right-sizing a un modelo simple (ej. Haiku 3.5) sin afectar el KYB, que
-// comparte BEDROCK_MODEL_SMART y puede querer un modelo más fuerte. Var dedicada con
-// fallback a BEDROCK_MODEL_SMART y luego al default.
-// ⚠️ Default = inference profile us.* REAL y vigente. Claude 3.5 Haiku y los ids
-// "pelados" (sin prefijo us.) NO son invocables on-demand / están EOL en la cuenta
-// (verificado contra Bedrock 2026-06-23). Soporte usa Haiku 4.5: ya suscrito en la
-// cuenta, barato y suficiente para la tarea acotada. Siempre setear BEDROCK_MODEL_SUPPORT
-// con el id de TU consola; este default es solo el último recurso.
-const MODEL_SUPPORT  = process.env.BEDROCK_MODEL_SUPPORT
-  || process.env.BEDROCK_MODEL_SMART
-  || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
-// ARN del prompt en Bedrock Prompt Management. Si está → modo A (gestionado).
-const PROMPT_ARN     = process.env.BEDROCK_SUPPORT_PROMPT_ARN || '';
-// Guardrail opcional de Bedrock (filtros de contenido / PII).
-const GUARDRAIL_ID   = process.env.BEDROCK_SUPPORT_GUARDRAIL_ID || '';
-const GUARDRAIL_VER  = process.env.BEDROCK_SUPPORT_GUARDRAIL_VERSION || 'DRAFT';
-const MAX_TOKENS     = Number(process.env.BEDROCK_SUPPORT_MAX_TOKENS || 600);
-const TEMPERATURE    = Number(process.env.BEDROCK_SUPPORT_TEMPERATURE || 0.3);
+const ENABLED = process.env.SUPPORT_AGENT_ENABLED === 'true'
+  || process.env.BEDROCK_SUPPORT_ENABLED === 'true';
 
-let _client = null;
-let _converseCmd = null;
+const PROVIDER = process.env.SUPPORT_AI_PROVIDER || 'anthropic';
+
+// Modelo por proveedor. Anthropic: alias vigente de Haiku 4.5. Bedrock (legado):
+// cadena original — var dedicada → modelo smart compartido → inference profile us.*.
+const MODEL = process.env.SUPPORT_AI_MODEL
+  || (PROVIDER === 'bedrock'
+    ? (process.env.BEDROCK_MODEL_SUPPORT
+      || process.env.BEDROCK_MODEL_SMART
+      || 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
+    : 'claude-haiku-4-5');
+
+const MAX_TOKENS  = Number(process.env.SUPPORT_AI_MAX_TOKENS || process.env.BEDROCK_SUPPORT_MAX_TOKENS || 600);
+const TEMPERATURE = Number(process.env.SUPPORT_AI_TEMPERATURE || process.env.BEDROCK_SUPPORT_TEMPERATURE || 0.3);
+
+// Guardrail opcional de Bedrock (solo aplica con SUPPORT_AI_PROVIDER=bedrock).
+const GUARDRAIL_ID  = process.env.BEDROCK_SUPPORT_GUARDRAIL_ID || '';
+const GUARDRAIL_VER = process.env.BEDROCK_SUPPORT_GUARDRAIL_VERSION || 'DRAFT';
 
 export function isSupportAgentEnabled() {
   return ENABLED;
 }
 
-async function getClient() {
-  if (!ENABLED) return null;
-  if (_client) return _client;
-  const mod = await import('@aws-sdk/client-bedrock-runtime');
-  const { BedrockRuntimeClient, ConverseCommand } = mod;
-  _converseCmd = ConverseCommand;
-  // Sin credentials explícitas → cadena por defecto (IAM Role en prod, env en dev).
-  _client = new BedrockRuntimeClient({ region: REGION });
-  return _client;
-}
-
-// System prompt INLINE (modo B / fallback). En modo A (Prompt Management) las
-// instrucciones equivalentes se escriben en la consola de Bedrock; mantener
-// ambas versiones alineadas. Reglas de compliance NO negociables aquí.
+// System prompt del asistente. Reglas de compliance NO negociables aquí.
 const SYSTEM_PROMPT = `Eres "Aly", el asistente virtual de soporte de Alyto, una billetera digital y plataforma de pagos transfronterizos sobre la red Stellar, operada por AV Finance (LLC EE.UU. / SpA Chile / SRL Bolivia).
 
 Tu rol:
@@ -93,32 +72,13 @@ Tono: cercano, profesional, sin tecnicismos innecesarios. Respuestas de 1 a 4 fr
  */
 function buildContextText(ctx = {}) {
   const lines = [];
-  if (ctx.firstName)       lines.push(`Nombre: ${ctx.firstName}`);
-  if (ctx.accountType)     lines.push(`Tipo de cuenta: ${ctx.accountType}`);
-  if (ctx.legalEntity)     lines.push(`Entidad/corredor: ${ctx.legalEntity}`);
+  if (ctx.firstName)        lines.push(`Nombre: ${ctx.firstName}`);
+  if (ctx.accountType)      lines.push(`Tipo de cuenta: ${ctx.accountType}`);
+  if (ctx.legalEntity)      lines.push(`Entidad/corredor: ${ctx.legalEntity}`);
   if (ctx.residenceCountry) lines.push(`País de residencia: ${ctx.residenceCountry}`);
-  if (ctx.kycStatus)       lines.push(`Estado KYC: ${ctx.kycStatus}`);
-  if (ctx.alytoAlias)      lines.push(`Alias Alyto: @${ctx.alytoAlias}`);
+  if (ctx.kycStatus)        lines.push(`Estado KYC: ${ctx.kycStatus}`);
+  if (ctx.alytoAlias)       lines.push(`Alias Alyto: @${ctx.alytoAlias}`);
   return lines.length ? lines.join('\n') : 'Sin contexto adicional del usuario.';
-}
-
-// Aplana el historial a texto plano (modo A, donde el prompt gestionado recibe
-// la conversación como variable).
-function historyToText(history = []) {
-  if (!history.length) return 'Sin mensajes previos.';
-  return history
-    .map(m => `${m.role === 'assistant' ? 'Aly' : 'Usuario'}: ${m.text}`)
-    .join('\n');
-}
-
-// Convierte el historial al formato messages de la Converse API (modo B).
-function historyToMessages(history = [], userMessage) {
-  const msgs = history.map(m => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: [{ text: m.text }],
-  }));
-  msgs.push({ role: 'user', content: [{ text: userMessage }] });
-  return msgs;
 }
 
 /**
@@ -134,59 +94,47 @@ export async function askSupport({ userMessage, history = [], userContext = {} }
     if (!ENABLED) return null;
     if (!userMessage || !userMessage.trim()) return null;
 
-    const client = await getClient();
-    if (!client) return null;
+    const system = SYSTEM_PROMPT
+      .replace('{{SUPPORT_EMAIL}}', process.env.SUPPORT_EMAIL || 'soporte@alyto.app')
+      .replace('{{SUPPORT_WHATSAPP}}', process.env.SUPPORT_WHATSAPP || '')
+      + `\n\nContexto del usuario actual:\n${buildContextText(userContext)}`;
 
-    const guardrailConfig = GUARDRAIL_ID
-      ? { guardrailIdentifier: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VER }
-      : undefined;
+    const messages = history
+      .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', text: m.text }))
+      .concat([{ role: 'user', text: userMessage }]);
 
-    let command;
-    if (PROMPT_ARN) {
-      // ── Modo A: Prompt Management (system prompt gestionado en AWS) ──────────
-      command = new _converseCmd({
-        modelId: PROMPT_ARN,
-        promptVariables: {
-          user_context: { text: buildContextText(userContext) },
-          conversation: { text: historyToText(history) },
-          user_message: { text: userMessage },
-        },
-        ...(guardrailConfig ? { guardrailConfig } : {}),
+    const providerOptions = (PROVIDER === 'bedrock' && GUARDRAIL_ID)
+      ? { guardrailConfig: { guardrailIdentifier: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VER } }
+      : {};
+
+    const resp = await complete({
+      provider: PROVIDER,
+      model: MODEL,
+      system,
+      messages,
+      maxTokens: MAX_TOKENS,
+      temperature: TEMPERATURE,
+      providerOptions,
+    });
+
+    if (!resp.text) {
+      logger.warn('[support-ai] askSupport sin texto en la respuesta', {
+        provider: PROVIDER, model: MODEL, stopReason: resp.stopReason,
       });
-    } else {
-      // ── Modo B: inline (fallback antes de configurar Prompt Management) ──────
-      const systemText = SYSTEM_PROMPT
-        .replace('{{SUPPORT_EMAIL}}', process.env.SUPPORT_EMAIL || 'soporte@alyto.app')
-        .replace('{{SUPPORT_WHATSAPP}}', process.env.SUPPORT_WHATSAPP || '');
-      command = new _converseCmd({
-        modelId: MODEL_SUPPORT,
-        system: [
-          { text: systemText },
-          { text: `Contexto del usuario actual:\n${buildContextText(userContext)}` },
-        ],
-        messages: historyToMessages(history, userMessage),
-        inferenceConfig: { maxTokens: MAX_TOKENS, temperature: TEMPERATURE },
-        ...(guardrailConfig ? { guardrailConfig } : {}),
-      });
-    }
-
-    const resp = await client.send(command);
-    const reply = resp?.output?.message?.content?.[0]?.text?.trim();
-    if (!reply) {
-      logger.warn('[bedrock] askSupport sin texto en la respuesta', { stopReason: resp?.stopReason });
       return null;
     }
 
-    logger.info('[bedrock] askSupport respondido', {
-      mode: PROMPT_ARN ? 'prompt-mgmt' : 'inline',
-      stopReason: resp?.stopReason,
-      inputTokens: resp?.usage?.inputTokens,
-      outputTokens: resp?.usage?.outputTokens,
+    logger.info('[support-ai] askSupport respondido', {
+      provider: PROVIDER,
+      model: MODEL,
+      stopReason: resp.stopReason,
+      inputTokens: resp.usage?.inputTokens,
+      outputTokens: resp.usage?.outputTokens,
     });
 
-    return { reply, usage: resp?.usage };
+    return { reply: resp.text, usage: resp.usage };
   } catch (err) {
-    logger.error('[bedrock] askSupport falló', { error: err.message });
+    logger.error('[support-ai] askSupport falló', { provider: PROVIDER, error: err.message });
     Sentry.captureException(err, { tags: { service: 'supportAgentService', fn: 'askSupport' } });
     return null;
   }
