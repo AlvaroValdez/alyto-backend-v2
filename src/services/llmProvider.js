@@ -10,6 +10,10 @@
 //   complete({ provider, model, system, messages, maxTokens, temperature, providerOptions })
 //     system   → string (instrucciones completas, ya interpoladas)
 //     messages → [{ role: 'user'|'assistant', text: string }]  (alternancia ya saneada)
+//                o, para mensajes multimodales, { role, content: [bloques] } con:
+//                  { type: 'text', text }
+//                  { type: 'image', mediaType: 'image/jpeg'|'image/png'|..., data: base64 }
+//                  { type: 'document', mediaType: 'application/pdf', data: base64, name? }
 //   → { text, stopReason, usage: { inputTokens, outputTokens } }
 //
 // Proveedores:
@@ -26,6 +30,58 @@ let _anthropic = null;
 let _bedrock = null;
 let _converseCmd = null;
 
+// Traduce un mensaje neutro al formato de contenido de la API de Anthropic.
+// Mensajes solo-texto pasan como string; multimodales como content blocks.
+function toAnthropicContent(m) {
+  if (m.content == null) return m.text;
+  return m.content.map(b => {
+    switch (b.type) {
+      case 'text':
+        return { type: 'text', text: b.text };
+      case 'image':
+        return { type: 'image', source: { type: 'base64', media_type: b.mediaType, data: b.data } };
+      case 'document':
+        return {
+          type: 'document',
+          source: { type: 'base64', media_type: b.mediaType || 'application/pdf', data: b.data },
+          ...(b.name ? { title: b.name } : {}),
+        };
+      default:
+        throw new Error(`Bloque de contenido desconocido: ${b.type}`);
+    }
+  });
+}
+
+// Traduce un mensaje neutro al formato de contenido de Bedrock Converse
+// (image/document usan bytes crudos, no base64).
+const BEDROCK_IMAGE_FORMAT = {
+  'image/jpeg': 'jpeg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+function toBedrockContent(m) {
+  if (m.content == null) return [{ text: m.text }];
+  return m.content.map(b => {
+    switch (b.type) {
+      case 'text':
+        return { text: b.text };
+      case 'image': {
+        const format = BEDROCK_IMAGE_FORMAT[b.mediaType];
+        if (!format) throw new Error(`Formato de imagen no soportado por Bedrock: ${b.mediaType}`);
+        return { image: { format, source: { bytes: Buffer.from(b.data, 'base64') } } };
+      }
+      case 'document':
+        return {
+          document: { format: 'pdf', name: b.name || 'documento', source: { bytes: Buffer.from(b.data, 'base64') } },
+        };
+      default:
+        throw new Error(`Bloque de contenido desconocido: ${b.type}`);
+    }
+  });
+}
+
 async function completeAnthropic({ model, system, messages, maxTokens, temperature }) {
   if (!_anthropic) {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
@@ -36,7 +92,7 @@ async function completeAnthropic({ model, system, messages, maxTokens, temperatu
     max_tokens: maxTokens,
     temperature,
     system,
-    messages: messages.map(m => ({ role: m.role, content: m.text })),
+    messages: messages.map(m => ({ role: m.role, content: toAnthropicContent(m) })),
   });
   return {
     text: resp.content?.find(b => b.type === 'text')?.text?.trim() || '',
@@ -59,8 +115,8 @@ async function completeBedrock({ model, system, messages, maxTokens, temperature
   }
   const resp = await _bedrock.send(new _converseCmd({
     modelId: model,
-    system: [{ text: system }],
-    messages: messages.map(m => ({ role: m.role, content: [{ text: m.text }] })),
+    ...(system ? { system: [{ text: system }] } : {}),
+    messages: messages.map(m => ({ role: m.role, content: toBedrockContent(m) })),
     inferenceConfig: { maxTokens, temperature },
     ...(providerOptions.guardrailConfig ? { guardrailConfig: providerOptions.guardrailConfig } : {}),
   }));
