@@ -1,51 +1,53 @@
 // src/services/bedrockService.js
 //
-// AWS-4 — Integración con AWS Bedrock (Claude) para features de IA.
+// IA — parser de comprobantes bancarios BOB (visión).
 //
-// Primer caso de uso: parser de comprobantes bancarios BOB. El admin sube/recibe
-// la imagen del comprobante y Claude extrae monto, referencia y banco para
-// pre-rellenar la confirmación manual (NO autoritativo — el admin decide).
+// El admin sube/recibe la imagen del comprobante y Claude extrae monto,
+// referencia y banco para pre-rellenar la confirmación manual (NO autoritativo —
+// el admin decide). La llamada al modelo pasa por el adaptador llmProvider
+// (formato neutro con bloques de imagen) — el proveedor y el modelo se eligen
+// por env var, sin tocar este servicio.
 //
-// Gating: TODO apagado salvo BEDROCK_ENABLED=true. Si está OFF, parseComprobante()
-// devuelve null inmediatamente (no-op). El SDK se importa de forma perezosa y el
-// cliente usa la cadena de credenciales por defecto (IAM Role en prod / env).
+// Proveedor por defecto: API directa de Anthropic con Claude Haiku 4.5 (la
+// cuenta AWS no tiene cuota Bedrock on-demand — ver docs/AWS_ESTADO_GENERAL.md §4).
+// 'bedrock' queda disponible como legado vía COMPROBANTE_AI_PROVIDER=bedrock.
+//
+// Gating: TODO apagado salvo COMPROBANTE_AI_ENABLED=true (se acepta el nombre
+// legado BEDROCK_ENABLED=true). Si está OFF, parseComprobante() devuelve null
+// inmediatamente (no-op).
 //
 // Fire-and-forget: el llamador NUNCA debe bloquear el flujo principal esperando
 // esto (regla 13/17 de CLAUDE.md). Errores → Sentry + null, nunca lanzan.
 
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
+import { complete } from './llmProvider.js';
 
-const BEDROCK_ENABLED = process.env.BEDROCK_ENABLED === 'true';
-const BEDROCK_REGION = process.env.BEDROCK_REGION || process.env.AWS_REGION || 'us-east-1';
-// Haiku para parser (rápido/barato); ver CLAUDE.md AWS-4.
-const MODEL_FAST = process.env.BEDROCK_MODEL_FAST || 'anthropic.claude-haiku-4-5-20251001-v1:0';
+const ENABLED = process.env.COMPROBANTE_AI_ENABLED === 'true'
+  || process.env.BEDROCK_ENABLED === 'true';
 
-let _client = null;
-let _invokeCmd = null;
+const PROVIDER = process.env.COMPROBANTE_AI_PROVIDER || 'anthropic';
+
+// Modelo por proveedor. Anthropic: alias vigente de Haiku 4.5 (rápido/barato,
+// tarea acotada de extracción). Bedrock (legado): var histórica.
+const MODEL = process.env.COMPROBANTE_AI_MODEL
+  || (PROVIDER === 'bedrock'
+    ? (process.env.BEDROCK_MODEL_FAST || 'anthropic.claude-haiku-4-5-20251001-v1:0')
+    : 'claude-haiku-4-5');
+
+const MAX_TOKENS = Number(process.env.COMPROBANTE_AI_MAX_TOKENS || 512);
 
 export function isBedrockEnabled() {
-  return BEDROCK_ENABLED;
+  return ENABLED;
 }
 
-async function getClient() {
-  if (!BEDROCK_ENABLED) return null;
-  if (_client) return _client;
-  const mod = await import('@aws-sdk/client-bedrock-runtime');
-  const { BedrockRuntimeClient, InvokeModelCommand } = mod;
-  _invokeCmd = InvokeModelCommand;
-  // Sin credentials explícitas → cadena por defecto (IAM Role en prod, env en dev).
-  _client = new BedrockRuntimeClient({ region: BEDROCK_REGION });
-  return _client;
-}
-
-// Mapea mimetype a los media types que acepta la API de mensajes de Claude.
+// Mapea mimetype a los media types que acepta la visión de Claude.
 function imageMediaType(mimetype) {
   if (mimetype === 'image/jpeg' || mimetype === 'image/jpg') return 'image/jpeg';
   if (mimetype === 'image/png') return 'image/png';
   if (mimetype === 'image/webp') return 'image/webp';
   if (mimetype === 'image/gif') return 'image/gif';
-  return null; // PDFs y otros no soportados por la visión de Claude vía Bedrock InvokeModel
+  return null; // PDFs y otros no soportados por el parser de comprobantes
 }
 
 const PARSE_PROMPT = `Eres un asistente que extrae datos de comprobantes bancarios bolivianos (transferencias, depósitos QR, Banco Económico / BNB / otros).
@@ -70,54 +72,46 @@ NO inventes datos. Si un campo no se ve claramente, ponlo en null.`;
  */
 export async function parseComprobante(base64Data, mimetype) {
   try {
-    if (!BEDROCK_ENABLED) return null;
+    if (!ENABLED) return null;
     if (!base64Data) return null;
 
     const mediaType = imageMediaType(mimetype);
     if (!mediaType) {
-      logger.info('[bedrock] Comprobante no es imagen soportada — parser omitido', { mimetype });
+      logger.info('[comprobante-ai] Comprobante no es imagen soportada — parser omitido', { mimetype });
       return null;
     }
 
-    const client = await getClient();
-    if (!client) return null;
-
-    const payload = {
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 512,
+    const resp = await complete({
+      provider: PROVIDER,
+      model: MODEL,
+      maxTokens: MAX_TOKENS,
       messages: [
         {
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
+            { type: 'image', mediaType, data: base64Data },
             { type: 'text', text: PARSE_PROMPT },
           ],
         },
       ],
-    };
+    });
 
-    const resp = await client.send(
-      new _invokeCmd({
-        modelId: MODEL_FAST,
-        contentType: 'application/json',
-        accept: 'application/json',
-        body: JSON.stringify(payload),
-      })
-    );
-
-    const decoded = JSON.parse(new TextDecoder().decode(resp.body));
-    const text = decoded?.content?.[0]?.text ?? '';
-    const parsed = extractJson(text);
+    const parsed = extractJson(resp.text);
     if (!parsed) {
-      logger.warn('[bedrock] Respuesta sin JSON parseable');
+      logger.warn('[comprobante-ai] Respuesta sin JSON parseable', {
+        provider: PROVIDER, model: MODEL, stopReason: resp.stopReason,
+      });
       return null;
     }
-    logger.info('[bedrock] Comprobante parseado', {
-      amount: parsed.amount, confidence: parsed.confidence,
+    logger.info('[comprobante-ai] Comprobante parseado', {
+      provider: PROVIDER,
+      model: MODEL,
+      amount: parsed.amount,
+      confidence: parsed.confidence,
     });
     return parsed;
   } catch (err) {
-    logger.error('[bedrock] parseComprobante falló', { error: err.message });
+    logger.error('[comprobante-ai] parseComprobante falló', { provider: PROVIDER, error: err.message });
     Sentry.captureException(err, { tags: { service: 'bedrockService', fn: 'parseComprobante' } });
     return null;
   }
