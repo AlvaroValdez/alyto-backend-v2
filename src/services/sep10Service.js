@@ -9,7 +9,8 @@
  *
  * Flujo:
  *   1. GET  /api/v1/stellar/auth?account=G...
- *      → Servidor genera challenge (manage_data operation firmado por STELLAR_SRL_PUBLIC_KEY)
+ *      → Servidor genera challenge (manage_data operation firmado por el SIGNING_KEY:
+ *        cuenta dedicada STELLAR_SEP10_SECRET_KEY, o SRL como fallback legacy)
  *      → Retorna { transaction: <XDR>, network_passphrase }
  *
  *   2. POST /api/v1/stellar/auth
@@ -60,13 +61,31 @@ function resolveWebAuthDomain(homeDomain) {
   }
 }
 
+/**
+ * Keypair con el que se firman/verifican los challenges SEP-10.
+ *
+ * Usa la MISMA precedencia que `SEP10_SIGNING_PUBLIC` (config/stellar.js) para
+ * garantizar que el firmante coincida con el `SIGNING_KEY` publicado en el
+ * stellar.toml:
+ *   1. STELLAR_SEP10_SECRET_KEY  → cuenta dedicada (higiene de llaves).
+ *   2. STELLAR_SRL_SECRET_KEY    → fallback legacy (tesorería = firmante).
+ *
+ * La separación evita que la secreta de la cuenta que custodia los USDC sea la
+ * que firma los logins.
+ */
+function sep10SigningKeypair() {
+  return Keypair.fromSecret(
+    process.env.STELLAR_SEP10_SECRET_KEY ?? requireEnvSecret('STELLAR_SRL_SECRET_KEY'),
+  );
+}
+
 // ─── Challenge ───────────────────────────────────────────────────────────────
 
 /**
  * Genera un challenge SEP-10 para una cuenta Stellar.
  *
  * El challenge es una transacción con:
- *   - source: SIGNING_KEY del servidor (STELLAR_SRL_PUBLIC_KEY)
+ *   - source: SIGNING_KEY del servidor (cuenta de firma dedicada; ver sep10SigningKeypair)
  *   - sequence: 0 (no consume sequence real)
  *   - manage_data operation: nombre del home_domain + nonce aleatorio de 64 bytes
  *
@@ -78,7 +97,7 @@ export async function buildChallenge(accountId) {
     throw Object.assign(new Error('Invalid Stellar account ID'), { status: 400 });
   }
 
-  const serverKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_SRL_SECRET_KEY'));
+  const serverKeypair = sep10SigningKeypair();
 
   // SEP-10 spec: usamos una cuenta con sequence 0 para el challenge
   // No necesitamos cargar la cuenta real — el challenge no consume sequence
@@ -160,7 +179,7 @@ export async function verifyChallenge(transactionXdr) {
     throw Object.assign(new Error('Invalid transaction XDR'), { status: 400 });
   }
 
-  const serverKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_SRL_SECRET_KEY'));
+  const serverKeypair = sep10SigningKeypair();
 
   // 1. El source de la tx debe ser el SIGNING_KEY del servidor (spec SEP-10):
   //    rechaza challenges fabricados con otra cuenta como emisor

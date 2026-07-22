@@ -15,7 +15,7 @@
  *   ⏸ BP Ventures assets — PAUSADOS, sin integración iniciada
  */
 
-import { Horizon, Networks, Asset } from '@stellar/stellar-sdk';
+import { Horizon, Networks, Asset, Keypair } from '@stellar/stellar-sdk';
 
 // ─── Selección de red ────────────────────────────────────────────────────────
 
@@ -88,6 +88,36 @@ export const PRIORITY_FEE_STROOPS = process.env.STELLAR_PRIORITY_FEE_STROOPS || 
 
 /** Timeout estándar para transacciones (segundos). */
 export const TX_TIMEOUT_SECONDS = 30;
+
+// ─── SEP-10 Web Auth — llave de firma dedicada ───────────────────────────────
+
+/**
+ * Llave PÚBLICA que se publica como `SIGNING_KEY` en el stellar.toml y con cuya
+ * secreta el servidor firma/verifica los challenges SEP-10.
+ *
+ * Higiene de llaves (best practice SEP-10): la firma de autenticación debe vivir
+ * en una cuenta DEDICADA, separada de la tesorería SRL que custodia los USDC.
+ * Acoplar ambas obliga a tocar la cuenta con fondos para rotar la firma y expone
+ * públicamente cuál es la cuenta operativa.
+ *
+ * Precedencia (una sola variable controla el switch):
+ *   1. STELLAR_SEP10_SECRET_KEY  → se DERIVA la pública de ella. Garantiza que el
+ *      `SIGNING_KEY` del toml y el firmante real sean SIEMPRE el mismo: es
+ *      imposible desincronizarlos por error de operador. Si está seteada debe ser
+ *      válida (falla en boot si no — preferible a servir un toml roto en silencio).
+ *   2. STELLAR_SRL_PUBLIC_KEY    → fallback legacy (tesorería = firmante), el
+ *      comportamiento previo. Permite migrar en UN solo paso: al setear
+ *      STELLAR_SEP10_SECRET_KEY en el env, toml y firmante cambian juntos y
+ *      atómicamente en el próximo deploy.
+ *
+ * ⚠️ No se soporta publicar una pública "suelta" sin su secreta: un SIGNING_KEY
+ * cuya secreta el servidor no posee rompe SEP-10 (no podría firmar los challenges).
+ * ⚠️ El secreto NUNCA se exporta desde aquí; sep10Service lo resuelve con esta
+ * MISMA precedencia para firmar. Este módulo solo expone la pública.
+ */
+export const SEP10_SIGNING_PUBLIC = process.env.STELLAR_SEP10_SECRET_KEY
+  ? Keypair.fromSecret(process.env.STELLAR_SEP10_SECRET_KEY).publicKey()
+  : (process.env.STELLAR_SRL_PUBLIC_KEY ?? '');
 
 // ─── Info de red activa (útil para logs y debugging) ─────────────────────────
 
