@@ -23,6 +23,7 @@ import * as Sentry from '@sentry/node'
 import {
   getListenerStatus,
   reconcileDualLedger,
+  getSolvencySnapshot,
   evaluateAnchorAlerts,
 } from '../services/anchorAdminService.js'
 import { sendRawEmail } from '../services/email.js'
@@ -95,17 +96,24 @@ export async function anchorAdminAlerts() {
       return null
     })
 
-    // Reconciliación solo en su sub-cadencia más lenta (O(wallets) contra Horizon).
+    // Reconciliación + solvencia solo en su sub-cadencia más lenta (ambas O(wallets)
+    // contra Horizon). La solvencia agregada es la red de seguridad real del modelo
+    // ledger-only; la reconciliación por-wallet solo escala descuadres direccionales.
     let reconciliation = null
+    let solvency = null
     if (Date.now() - _lastReconAt > RECON_INTERVAL_MS) {
       reconciliation = await reconcileDualLedger({ limit: RECON_LIMIT }).catch((err) => {
         console.error('[AnchorAdmin Alerts] reconcileDualLedger falló:', err.message)
         return null
       })
+      solvency = await getSolvencySnapshot({ limit: RECON_LIMIT }).catch((err) => {
+        console.error('[AnchorAdmin Alerts] getSolvencySnapshot falló:', err.message)
+        return null
+      })
       _lastReconAt = Date.now()
     }
 
-    const alerts = evaluateAnchorAlerts({ listener, reconciliation })
+    const alerts = evaluateAnchorAlerts({ listener, reconciliation, solvency })
     const toFire = alerts.filter(a => _shouldAlert(a.key, COOLDOWN[a.severity] ?? COOLDOWN.warning))
 
     if (toFire.length === 0) return

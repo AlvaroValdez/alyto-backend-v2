@@ -34,19 +34,24 @@ describe('classifyWalletReconciliation', () => {
   test('espejo == on-chain → ok', () => {
     expect(classifyWalletReconciliation({ mirrorUSDC: 42.5, onChainUSDC: 42.5 }).status).toBe('ok')
   })
-  test('espejo positivo sin respaldo on-chain → offchain_without_onchain', () => {
+  test('espejo positivo sin respaldo on-chain → offchain_without_onchain (esperado, ledger-only)', () => {
     const r = classifyWalletReconciliation({ mirrorUSDC: 50, onChainUSDC: 0 })
     expect(r.status).toBe('offchain_without_onchain')
     expect(r.deltaUSDC).toBe(50)
   })
-  test('diferencia por encima de la tolerancia → balance_mismatch', () => {
+  test('espejo > on-chain con depósito on-chain (wallet mixta) → ledger_exceeds_onchain (esperado)', () => {
     const r = classifyWalletReconciliation({ mirrorUSDC: 100, onChainUSDC: 90 })
-    expect(r.status).toBe('balance_mismatch')
+    expect(r.status).toBe('ledger_exceeds_onchain')
     expect(r.deltaUSDC).toBe(10)
   })
-  test('on-chain MAYOR que espejo (posible inflow externo) → balance_mismatch con delta negativo', () => {
+  test('caso real 2026-07-22: mirror 61 / on-chain 50 → ledger_exceeds_onchain (mixta, no anomalía)', () => {
+    const r = classifyWalletReconciliation({ mirrorUSDC: 61, onChainUSDC: 50 })
+    expect(r.status).toBe('ledger_exceeds_onchain')
+    expect(r.deltaUSDC).toBe(11)
+  })
+  test('on-chain MAYOR que espejo (depósito sin acreditar) → onchain_exceeds_ledger, delta negativo', () => {
     const r = classifyWalletReconciliation({ mirrorUSDC: 90, onChainUSDC: 100 })
-    expect(r.status).toBe('balance_mismatch')
+    expect(r.status).toBe('onchain_exceeds_ledger')
     expect(r.deltaUSDC).toBe(-10)
   })
   test('diferencia dentro de la tolerancia de redondeo → ok', () => {
@@ -134,16 +139,33 @@ describe('evaluateAnchorAlerts', () => {
     const a = evaluateAnchorAlerts({ listener: { health: 'green', horizon: { reachable: false } } })
     expect(a.some(x => x.key === 'listener-horizon-unreachable' && x.severity === 'critical')).toBe(true)
   })
-  test('descuadre real de reconciliación → alerta crítica', () => {
+  test('descuadre real (on-chain sin acreditar) → alerta crítica con total de los reales', () => {
     const recon = {
-      totalMismatchUSDC: 12.5,
+      totalMismatchUSDC: 100,   // suma de TODOS (incluye esperados) — NO debe usarse
       discrepancies: [
-        { type: 'balance_mismatch' },
-        { type: 'offchain_without_onchain' },
+        { type: 'onchain_exceeds_ledger', deltaUSDC: -8 },
+        { type: 'ledger_exceeds_onchain', deltaUSDC: 40 },   // esperado, no cuenta
+        { type: 'offchain_without_onchain', deltaUSDC: 50 }, // esperado, no cuenta
       ],
     }
     const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon })
-    expect(a.some(x => x.key === 'reconciliation-discrepancy' && x.severity === 'critical')).toBe(true)
+    const critical = a.find(x => x.key === 'reconciliation-discrepancy')
+    expect(critical).toMatchObject({ severity: 'critical' })
+    // El total del email es solo del descuadre real (|−8| = 8), no de los 100 agregados.
+    expect(critical.detail).toContain('1 wallet(s)')
+    expect(critical.detail).toContain('8 USDC')
+  })
+  test('solo saldos ledger-only esperados (espejo > on-chain) → SIN alerta crítica', () => {
+    // Regresión del caso real 2026-07-22: 1 mixta + 2 puro ledger-only, todos esperados.
+    const recon = {
+      discrepancies: [
+        { type: 'ledger_exceeds_onchain', deltaUSDC: 11 },
+        { type: 'offchain_without_onchain', deltaUSDC: 14.627471 },
+        { type: 'offchain_without_onchain', deltaUSDC: 1.866737 },
+      ],
+    }
+    const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon, solvency: { covered: true, reliable: true } })
+    expect(a).toEqual([])
   })
   test('solo errores de fetch Horizon → aviso, no crítico', () => {
     const recon = { discrepancies: [{ type: 'onchain_fetch_error' }, { type: 'onchain_fetch_error' }] }
@@ -151,9 +173,37 @@ describe('evaluateAnchorAlerts', () => {
     expect(a).toHaveLength(1)
     expect(a[0]).toMatchObject({ key: 'reconciliation-fetch-errors', severity: 'warning' })
   })
-  test('descuadres bajo el umbral no alertan (maxDiscrepancies)', () => {
-    const recon = { discrepancies: [{ type: 'balance_mismatch' }] }
+  test('descuadres reales bajo el umbral no alertan (maxDiscrepancies)', () => {
+    const recon = { discrepancies: [{ type: 'onchain_exceeds_ledger', deltaUSDC: -5 }] }
     const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon, thresholds: { maxDiscrepancies: 1 } })
     expect(a.some(x => x.key === 'reconciliation-discrepancy')).toBe(false)
+  })
+})
+
+describe('evaluateAnchorAlerts — solvencia agregada', () => {
+  const green = { health: 'green', horizon: { reachable: true }, secondsSinceHeartbeat: 10, missedCycles: 0 }
+
+  test('solvencia cubierta → sin alerta', () => {
+    const solvency = { covered: true, reliable: true, liabilitiesUSDC: 77.49, reservesUSDC: 589.71, differenceUSDC: 512.22 }
+    expect(evaluateAnchorAlerts({ listener: green, solvency })).toEqual([])
+  })
+  test('sub-colateralización (covered:false) → alerta crítica con déficit', () => {
+    const solvency = { covered: false, reliable: true, liabilitiesUSDC: 1000, reservesUSDC: 950, differenceUSDC: -50 }
+    const a = evaluateAnchorAlerts({ listener: green, solvency })
+    const crit = a.find(x => x.key === 'solvency-uncovered')
+    expect(crit).toMatchObject({ severity: 'critical' })
+    expect(crit.detail).toContain('50 USDC')
+  })
+  test('solvencia no medible con fiabilidad (reliable:false) → aviso, no crítico', () => {
+    const solvency = { covered: true, reliable: false }
+    const a = evaluateAnchorAlerts({ listener: green, solvency })
+    expect(a).toHaveLength(1)
+    expect(a[0]).toMatchObject({ key: 'solvency-unreliable', severity: 'warning' })
+  })
+  test('déficit real gana a la fiabilidad: covered:false + reliable:false → solo crítico', () => {
+    const solvency = { covered: false, reliable: false, liabilitiesUSDC: 100, reservesUSDC: 80, differenceUSDC: -20 }
+    const a = evaluateAnchorAlerts({ listener: green, solvency })
+    expect(a).toHaveLength(1)
+    expect(a[0].key).toBe('solvency-uncovered')
   })
 })
