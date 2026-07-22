@@ -72,38 +72,53 @@ export function mirrorLiabilityUSDC(wallet) {
  * Clasifica el estado de reconciliación de UNA wallet: compara el saldo espejo
  * (MongoDB) contra el saldo real on-chain (Stellar) de su dirección custodial.
  *
- * Detecta dos de los tres tipos de inconsistencia del spec §4.4 que son
- * computables por-wallet:
- *   - 'balance_mismatch'          → ambos registros existen pero difieren
- *   - 'offchain_without_onchain'  → hay saldo espejo pero la cadena no lo respalda
- * (El tercero, 'onchain_without_offchain' — inflow a una dirección no registrada —
- *  no es detectable a nivel de una wallet conocida; se vigila con el contador
- *  noMatch del listener y un barrido de cadena en un bloque posterior.)
+ * ⚠️ La clasificación es CONSCIENTE DEL MODELO (custodial + ledger-only). En Alyto
+ * los saldos por conversión BOB→USDC (Fase 35/39) y P2P (Fase 41) se acreditan en
+ * el ledger Mongo SIN mover USDC a la dirección custodial del usuario — su respaldo
+ * vive en la tesorería SRL, no en su cuenta. Por eso la dirección del delta importa:
+ *
+ *   - 'onchain_exceeds_ledger'   → la cadena tiene MÁS que el ledger (on-chain > espejo).
+ *       USDC en la dirección custodial que NO se acreditó al usuario (depósito sin
+ *       reconocer / inflow externo). Única inconsistencia por-wallet que es una
+ *       ANOMALÍA REAL en este modelo.
+ *   - 'ledger_exceeds_onchain'   → el ledger tiene MÁS que la cadena, con algo on-chain
+ *       (wallet mixta: depósito on-chain + crédito ledger-only). ESPERADO.
+ *   - 'offchain_without_onchain' → saldo espejo sin nada on-chain (puro ledger-only).
+ *       ESPERADO.
+ *
+ * Los dos estados ESPERADOS (espejo > on-chain) NO son un hueco: su respaldo se
+ * garantiza a nivel AGREGADO por la prueba de solvencia (getSolvencySnapshot), no
+ * por dirección. La alerta solo escala 'onchain_exceeds_ledger' (ver evaluateAnchorAlerts).
+ * (El tipo 'onchain_without_offchain' —inflow a dirección NO registrada— no es
+ *  detectable por-wallet; se vigila con el contador noMatch del listener.)
  *
  * @param {{mirrorUSDC:number, onChainUSDC:number, toleranceUSDC?:number}} p
- * @returns {{status:'ok'|'balance_mismatch'|'offchain_without_onchain', deltaUSDC:number}}
+ * @returns {{status:'ok'|'onchain_exceeds_ledger'|'ledger_exceeds_onchain'|'offchain_without_onchain', deltaUSDC:number}}
  */
 export function classifyWalletReconciliation({ mirrorUSDC, onChainUSDC, toleranceUSDC = RECON_TOLERANCE_USDC }) {
   const mirror  = Number(mirrorUSDC)  || 0
   const onChain = Number(onChainUSDC) || 0
   const delta   = +(mirror - onChain).toFixed(7)   // USDC tiene 7 decimales on-chain
 
-  // Ambos prácticamente cero → nada que conciliar.
+  // Ambos prácticamente cero, o diferencia dentro de la tolerancia → nada que conciliar.
   if (Math.abs(mirror) <= toleranceUSDC && Math.abs(onChain) <= toleranceUSDC) {
     return { status: 'ok', deltaUSDC: 0 }
   }
+  if (Math.abs(delta) <= toleranceUSDC) {
+    return { status: 'ok', deltaUSDC: 0 }
+  }
 
-  // Espejo positivo pero la cadena no lo respalda (subcolateralización del usuario).
-  if (mirror > toleranceUSDC && onChain <= toleranceUSDC) {
+  // Dirección on-chain > espejo: la cadena tiene más que el ledger → anomalía REAL.
+  if (onChain - mirror > toleranceUSDC) {
+    return { status: 'onchain_exceeds_ledger', deltaUSDC: delta }   // delta < 0
+  }
+
+  // Dirección espejo > on-chain: estado ESPERADO del modelo ledger-only (respaldo en
+  // tesorería). Sin nada on-chain → puro ledger-only; con algo on-chain → wallet mixta.
+  if (Math.abs(onChain) <= toleranceUSDC) {
     return { status: 'offchain_without_onchain', deltaUSDC: delta }
   }
-
-  // Cualquier diferencia por encima de la tolerancia.
-  if (Math.abs(delta) > toleranceUSDC) {
-    return { status: 'balance_mismatch', deltaUSDC: delta }
-  }
-
-  return { status: 'ok', deltaUSDC: 0 }
+  return { status: 'ledger_exceeds_onchain', deltaUSDC: delta }
 }
 
 /**
@@ -160,10 +175,10 @@ export function classifyListenerHealth({ heartbeatAt, now = Date.now(), interval
  * (email + Sentry). NO cubre solvencia: su identidad contable está sin confirmar, así
  * que no se auto-alerta hasta validarla con el equipo.
  *
- * @param {{listener?:object, reconciliation?:object, thresholds?:{maxDiscrepancies?:number}}} p
+ * @param {{listener?:object, reconciliation?:object, solvency?:object, thresholds?:{maxDiscrepancies?:number}}} p
  * @returns {Array<{key:string, severity:'critical'|'warning', title:string, detail:string}>}
  */
-export function evaluateAnchorAlerts({ listener, reconciliation, thresholds = {} }) {
+export function evaluateAnchorAlerts({ listener, reconciliation, solvency, thresholds = {} }) {
   const maxDiscrepancies = thresholds.maxDiscrepancies ?? 0
   const alerts = []
 
@@ -195,21 +210,27 @@ export function evaluateAnchorAlerts({ listener, reconciliation, thresholds = {}
     })
   }
 
-  // Reconciliación del dual ledger. Separa descuadres reales de errores de fetch
-  // Horizon (transitorios): un descuadre real es crítico; los fetch errors son un
-  // aviso de que la reconciliación quedó incompleta.
+  // Reconciliación del dual ledger. En el modelo custodial + ledger-only, la ÚNICA
+  // inconsistencia por-wallet que es anomalía real es 'onchain_exceeds_ledger' (la
+  // cadena tiene más USDC que el ledger → depósito sin acreditar). Las direcciones con
+  // espejo > on-chain ('offchain_without_onchain', 'ledger_exceeds_onchain') son el
+  // estado ESPERADO de los saldos por conversión/P2P: su respaldo lo garantiza la
+  // tesorería a nivel agregado, y esa cobertura la vigila la alerta de solvencia (abajo).
+  // Los fetch errors son transitorios → solo un aviso de que quedó incompleta.
   if (reconciliation && Array.isArray(reconciliation.discrepancies)) {
-    const real = reconciliation.discrepancies.filter(
-      d => d.type === 'balance_mismatch' || d.type === 'offchain_without_onchain',
-    )
+    const real        = reconciliation.discrepancies.filter(d => d.type === 'onchain_exceeds_ledger')
     const fetchErrors = reconciliation.discrepancies.filter(d => d.type === 'onchain_fetch_error')
 
     if (real.length > maxDiscrepancies) {
+      // Total solo de los descuadres reales (no de los saldos ledger-only esperados).
+      const total = real.every(d => Number.isFinite(d.deltaUSDC))
+        ? +real.reduce((s, d) => s + Math.abs(d.deltaUSDC), 0).toFixed(7)
+        : (reconciliation.totalMismatchUSDC ?? '?')
       alerts.push({
         key:      'reconciliation-discrepancy',
         severity: 'critical',
         title:    'Descuadre en la reconciliación del dual ledger',
-        detail:   `${real.length} descuadre(s) espejo vs on-chain, total ${reconciliation.totalMismatchUSDC ?? '?'} USDC.`,
+        detail:   `${real.length} wallet(s) con USDC on-chain sin acreditar en el ledger (on-chain > espejo), total ${total} USDC.`,
       })
     }
     if (fetchErrors.length > 0) {
@@ -218,6 +239,29 @@ export function evaluateAnchorAlerts({ listener, reconciliation, thresholds = {}
         severity: 'warning',
         title:    'Reconciliación incompleta (Horizon inestable)',
         detail:   `${fetchErrors.length} dirección(es) no se pudieron consultar on-chain este ciclo.`,
+      })
+    }
+  }
+
+  // Solvencia agregada (§4.5): la red de seguridad REAL del modelo ledger-only. Si la
+  // reserva (custodial + tesorería) no cubre el pasivo (saldos + payouts en vuelo), es
+  // sub-colateralización real → crítico. Si no se pudo medir con fiabilidad (algún fetch
+  // on-chain falló), la cobertura quedó ciega → aviso.
+  if (solvency) {
+    if (solvency.covered === false) {
+      const deficit = Number.isFinite(solvency.differenceUSDC) ? Math.abs(solvency.differenceUSDC) : '?'
+      alerts.push({
+        key:      'solvency-uncovered',
+        severity: 'critical',
+        title:    'Sub-colateralización de la tesorería',
+        detail:   `El pasivo (${solvency.liabilitiesUSDC ?? '?'} USDC) supera la reserva custodial+tesorería (${solvency.reservesUSDC ?? '?'} USDC). Déficit ${deficit} USDC.`,
+      })
+    } else if (solvency.reliable === false) {
+      alerts.push({
+        key:      'solvency-unreliable',
+        severity: 'warning',
+        title:    'Solvencia no verificable este ciclo',
+        detail:   'No se pudo medir la reserva on-chain con fiabilidad (fetch Horizon fallido); la cobertura quedó sin confirmar.',
       })
     }
   }
@@ -384,7 +428,7 @@ export async function reconcileDualLedger({ limit = 500 } = {}) {
     // Limitación explícita (spec §5: sin límites silenciosos): el tipo
     // 'onchain_without_offchain' (inflow a dirección no registrada) NO se detecta
     // aquí; se vigila con el contador noMatch del listener + barrido futuro.
-    coverageNote: "Detecta 'balance_mismatch' y 'offchain_without_onchain'. 'onchain_without_offchain' se vigila vía listener noMatch (bloque futuro).",
+    coverageNote: "Detecta 'onchain_exceeds_ledger' (anomalía real), 'ledger_exceeds_onchain' y 'offchain_without_onchain' (esperados en el modelo ledger-only, respaldo agregado en tesorería vía solvencia). 'onchain_without_offchain' se vigila vía listener noMatch (bloque futuro).",
     discrepancies,
   }
 }
