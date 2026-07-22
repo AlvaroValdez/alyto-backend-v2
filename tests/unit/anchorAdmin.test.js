@@ -139,7 +139,7 @@ describe('evaluateAnchorAlerts', () => {
     const a = evaluateAnchorAlerts({ listener: { health: 'green', horizon: { reachable: false } } })
     expect(a.some(x => x.key === 'listener-horizon-unreachable' && x.severity === 'critical')).toBe(true)
   })
-  test('descuadre real (on-chain sin acreditar) → alerta crítica con total de los reales', () => {
+  test('on-chain > espejo → AVISO (no crítico) con total de los excedentes', () => {
     const recon = {
       totalMismatchUSDC: 100,   // suma de TODOS (incluye esperados) — NO debe usarse
       discrepancies: [
@@ -149,11 +149,13 @@ describe('evaluateAnchorAlerts', () => {
       ],
     }
     const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon })
-    const critical = a.find(x => x.key === 'reconciliation-discrepancy')
-    expect(critical).toMatchObject({ severity: 'critical' })
-    // El total del email es solo del descuadre real (|−8| = 8), no de los 100 agregados.
-    expect(critical.detail).toContain('1 wallet(s)')
-    expect(critical.detail).toContain('8 USDC')
+    const disc = a.find(x => x.key === 'reconciliation-discrepancy')
+    // Degradado: on-chain > espejo NUNCA es sub-colateralización → aviso, no crítico.
+    expect(disc).toMatchObject({ severity: 'warning' })
+    expect(a.some(x => x.severity === 'critical')).toBe(false)
+    // El total es solo del excedente on-chain (|−8| = 8), no de los 100 agregados.
+    expect(disc.detail).toContain('1 wallet(s)')
+    expect(disc.detail).toContain('8 USDC')
   })
   test('solo saldos ledger-only esperados (espejo > on-chain) → SIN alerta crítica', () => {
     // Regresión del caso real 2026-07-22: 1 mixta + 2 puro ledger-only, todos esperados.
@@ -173,10 +175,17 @@ describe('evaluateAnchorAlerts', () => {
     expect(a).toHaveLength(1)
     expect(a[0]).toMatchObject({ key: 'reconciliation-fetch-errors', severity: 'warning' })
   })
-  test('descuadres reales bajo el umbral no alertan (maxDiscrepancies)', () => {
+  test('excedentes on-chain bajo el umbral no alertan (maxDiscrepancies)', () => {
     const recon = { discrepancies: [{ type: 'onchain_exceeds_ledger', deltaUSDC: -5 }] }
     const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon, thresholds: { maxDiscrepancies: 1 } })
     expect(a.some(x => x.key === 'reconciliation-discrepancy')).toBe(false)
+  })
+  test('la única alerta CRÍTICA de contabilidad es la solvencia, no la reconciliación por-wallet', () => {
+    const recon = { discrepancies: [{ type: 'onchain_exceeds_ledger', deltaUSDC: -32.343611 }] }
+    const a = evaluateAnchorAlerts({ listener: green, reconciliation: recon, solvency: { covered: true, reliable: true } })
+    // Reproduce el correo real 2026-07-22: on-chain > espejo con solvencia cubierta.
+    expect(a.every(x => x.severity !== 'critical')).toBe(true)
+    expect(a.find(x => x.key === 'reconciliation-discrepancy')).toMatchObject({ severity: 'warning' })
   })
 })
 
