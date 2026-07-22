@@ -76,6 +76,18 @@ describe('computeSolvency', () => {
     const r = computeSolvency({ liabilitiesUSDC: 1000, reservesUSDC: 999.99995, toleranceUSDC: 0.001 })
     expect(r.covered).toBe(true)
   })
+  test('solvencia de dos lados: reserva custodial+tesorería cubre saldos+en-vuelo (regresión del falso sub-colateralizado)', () => {
+    // Escenario real 2026-07-22: custodial 50 + tesorería 539.71 = 589.71 reserva;
+    // saldos usuarios 77.49 + payouts en vuelo 0 = 77.49 pasivo. Antes la reserva
+    // contaba solo lo custodial (50) → falso 'uncovered'. Con los dos pozos → covered.
+    const reservesUSDC    = 50 + 539.71
+    const liabilitiesUSDC = 77.49 + 0
+    const r = computeSolvency({ liabilitiesUSDC, reservesUSDC })
+    expect(r.covered).toBe(true)
+    expect(r.status).toBe('covered')
+    // Y la trampa que se corrige: custodial-only habría reportado déficit.
+    expect(computeSolvency({ liabilitiesUSDC, reservesUSDC: 50 }).covered).toBe(false)
+  })
 })
 
 describe('classifyListenerHealth', () => {

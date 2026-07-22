@@ -29,6 +29,7 @@ import WalletUSDC   from '../models/WalletUSDC.js'
 import WalletBOB    from '../models/WalletBOB.js'
 import User         from '../models/User.js'
 import { HEARTBEAT_KEY } from '../jobs/monitorUSDCDeposits.js'
+import { getUSDCAvailableNow } from '../services/treasuryLiquidity.js'
 
 // ─── Parámetros configurables ─────────────────────────────────────────────────
 
@@ -389,9 +390,25 @@ export async function reconcileDualLedger({ limit = 500 } = {}) {
 }
 
 /**
- * 4.5 — Cuadre de reservas contra pasivos (prueba de solvencia).
- * Pasivo = Σ saldos de usuarios (mirror). Reserva = Σ USDC on-chain custodiado
- * en las direcciones custodiales de esos mismos usuarios.
+ * 4.5 — Cuadre de reservas contra pasivos (prueba de solvencia, modelo de dos lados).
+ *
+ * En el modelo custodial + ledger-only de Alyto el USDC vive en DOS pozos y hay DOS
+ * clases de pasivo, así que una solvencia honesta suma ambos lados:
+ *
+ *   RESERVA  = USDC custodial on-chain (depósitos directos de usuarios, Fase 40)
+ *            + USDC de la tesorería SRL on-chain (respaldo de conversiones BOB→USDC
+ *              y P2P, que acreditan el ledger sin mover USDC a la cuenta del usuario)
+ *
+ *   PASIVO   = Σ saldos USDC de usuarios (mirror: balance + congelado)
+ *            + USDC de payouts comprometidos/en vuelo contra la tesorería
+ *              (getUSDCAvailableNow.inflight — estados payout_pending_usdc_send /
+ *               payout_in_transit / payout_sent)
+ *
+ * Cubierto ⇔ RESERVA ≥ PASIVO. La reserva de tesorería y el en-vuelo salen de
+ * `treasuryLiquidity` (misma fuente que el pre-check de payout) para no desincronizar
+ * definiciones. Antes la reserva contaba SOLO lo custodial y omitía la tesorería, por
+ * lo que reportaba sub-colateralización falsa (los saldos por conversión/P2P están
+ * respaldados por la tesorería, no por la cuenta custodial del usuario).
  */
 export async function getSolvencySnapshot({ limit = 2000 } = {}) {
   const wallets = await WalletUSDC.find({ status: { $in: ['active', 'frozen'] }, stellarAddress: { $ne: null } })
@@ -399,21 +416,37 @@ export async function getSolvencySnapshot({ limit = 2000 } = {}) {
     .limit(limit)
     .lean()
 
-  let liabilitiesUSDC = 0
+  // ── Pasivo lado usuarios + reserva lado custodial (por dirección) ────────────
+  let userLiabilitiesUSDC = 0
   const addresses = new Set()
   for (const w of wallets) {
-    liabilitiesUSDC += mirrorLiabilityUSDC(w)
+    userLiabilitiesUSDC += mirrorLiabilityUSDC(w)
     if (w.stellarAddress) addresses.add(w.stellarAddress)
   }
 
-  // Reserva = suma de USDC on-chain en las direcciones custodiales (una por usuario).
-  let reservesUSDC = 0
+  let custodialReserveUSDC = 0
   let reserveFetchErrors = 0
   await Promise.all([...addresses].map(async (addr) => {
-    try { reservesUSDC += await getStellarUSDCBalance(addr) }
+    try { custodialReserveUSDC += await getStellarUSDCBalance(addr) }
     catch { reserveFetchErrors++ }
   }))
 
+  // ── Lado tesorería: reserva on-chain + payouts en vuelo (pasivo) ─────────────
+  // getUSDCAvailableNow ya excluye lo custodial: mide SOLO el pozo de tesorería.
+  let treasuryReserveUSDC = 0
+  let inflightPayoutUSDC  = 0
+  let treasuryFetchError  = false
+  try {
+    const t = await getUSDCAvailableNow('SRL')
+    treasuryReserveUSDC = Number(t.treasury) || 0
+    inflightPayoutUSDC  = Number(t.inflight) || 0
+    if (t.treasury == null) treasuryFetchError = true   // sin pubkey → reserva de tesorería no medible
+  } catch {
+    treasuryFetchError = true
+  }
+
+  const reservesUSDC    = custodialReserveUSDC + treasuryReserveUSDC
+  const liabilitiesUSDC = userLiabilitiesUSDC + inflightPayoutUSDC
   const solvency = computeSolvency({ liabilitiesUSDC, reservesUSDC })
 
   return {
@@ -421,9 +454,14 @@ export async function getSolvencySnapshot({ limit = 2000 } = {}) {
     walletCount:        wallets.length,
     custodialAddresses: addresses.size,
     reserveFetchErrors,
+    // Desglose de los dos lados para el panel (§4.5).
+    custodialReserveUSDC: +custodialReserveUSDC.toFixed(7),
+    treasuryReserveUSDC:  +treasuryReserveUSDC.toFixed(7),
+    userLiabilitiesUSDC:  +userLiabilitiesUSDC.toFixed(7),
+    inflightPayoutUSDC:   +inflightPayoutUSDC.toFixed(7),
     ...solvency,
-    // Si hubo errores de fetch, la reserva está subestimada → advertir.
-    reliable: reserveFetchErrors === 0,
+    // Reserva subestimada si falló algún fetch custodial O el de tesorería.
+    reliable: reserveFetchErrors === 0 && !treasuryFetchError,
   }
 }
 
