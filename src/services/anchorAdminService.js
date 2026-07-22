@@ -210,27 +210,31 @@ export function evaluateAnchorAlerts({ listener, reconciliation, solvency, thres
     })
   }
 
-  // Reconciliación del dual ledger. En el modelo custodial + ledger-only, la ÚNICA
-  // inconsistencia por-wallet que es anomalía real es 'onchain_exceeds_ledger' (la
-  // cadena tiene más USDC que el ledger → depósito sin acreditar). Las direcciones con
-  // espejo > on-chain ('offchain_without_onchain', 'ledger_exceeds_onchain') son el
-  // estado ESPERADO de los saldos por conversión/P2P: su respaldo lo garantiza la
-  // tesorería a nivel agregado, y esa cobertura la vigila la alerta de solvencia (abajo).
-  // Los fetch errors son transitorios → solo un aviso de que quedó incompleta.
+  // Reconciliación del dual ledger. En el modelo custodial + ledger-only con barrido de
+  // USDC custodial a tesorería, el saldo on-chain de una dirección está DECORRELACIONADO
+  // del ledger en AMBAS direcciones, así que NINGÚN descuadre por-wallet es riesgo de
+  // colateralización — esa cobertura solo la mide la solvencia agregada (abajo).
+  //   - espejo > on-chain ('offchain_without_onchain', 'ledger_exceeds_onchain'): estado
+  //     esperado de conversión/P2P; respaldo en tesorería. NO se alerta.
+  //   - on-chain > espejo ('onchain_exceeds_ledger'): USDC en la dirección custodial por
+  //     encima del ledger. NUNCA es sub-colateralización (hay de más, no de menos) y suele
+  //     ser TRANSITORIO (ventana depósito→acreditación→barrido) o el reverso de un P2P
+  //     ledger-only. Se degrada a AVISO (cooldown 6h): sirve para detectar un depósito
+  //     PERSISTENTEMENTE sin acreditar, no para paginar en cada liquidación.
+  //   - fetch errors: transitorios → aviso de reconciliación incompleta.
   if (reconciliation && Array.isArray(reconciliation.discrepancies)) {
-    const real        = reconciliation.discrepancies.filter(d => d.type === 'onchain_exceeds_ledger')
-    const fetchErrors = reconciliation.discrepancies.filter(d => d.type === 'onchain_fetch_error')
+    const onchainExcess = reconciliation.discrepancies.filter(d => d.type === 'onchain_exceeds_ledger')
+    const fetchErrors   = reconciliation.discrepancies.filter(d => d.type === 'onchain_fetch_error')
 
-    if (real.length > maxDiscrepancies) {
-      // Total solo de los descuadres reales (no de los saldos ledger-only esperados).
-      const total = real.every(d => Number.isFinite(d.deltaUSDC))
-        ? +real.reduce((s, d) => s + Math.abs(d.deltaUSDC), 0).toFixed(7)
+    if (onchainExcess.length > maxDiscrepancies) {
+      const total = onchainExcess.every(d => Number.isFinite(d.deltaUSDC))
+        ? +onchainExcess.reduce((s, d) => s + Math.abs(d.deltaUSDC), 0).toFixed(7)
         : (reconciliation.totalMismatchUSDC ?? '?')
       alerts.push({
         key:      'reconciliation-discrepancy',
-        severity: 'critical',
-        title:    'Descuadre en la reconciliación del dual ledger',
-        detail:   `${real.length} wallet(s) con USDC on-chain sin acreditar en el ledger (on-chain > espejo), total ${total} USDC.`,
+        severity: 'warning',
+        title:    'USDC on-chain sin acreditar en el ledger (revisar si persiste)',
+        detail:   `${onchainExcess.length} wallet(s) con on-chain > espejo, total ${total} USDC. Suele ser transitorio (liquidación en curso) y NO es riesgo de colateralización; investigar solo si se repite en ciclos sucesivos.`,
       })
     }
     if (fetchErrors.length > 0) {
