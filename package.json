@@ -10,6 +10,7 @@
     "seed:corredores": "node scripts/seedCorredores.js",
     "seed:corredores:espl": "node scripts/seedCorredoresEsPl.js",
     "seed:admin": "node scripts/seedAdmin.js",
+    "seed:ledger": "node scripts/seed-chart-of-accounts.mjs",
     "check:env": "node scripts/checkEnv.js",
     "check:production": "node scripts/checkProduction.js",
     "sentry:test": "node scripts/sentrySmokeTest.js",
