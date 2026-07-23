@@ -195,17 +195,18 @@ export async function postEntry(entry, session) {
   assertBalanced(lines)
   assertAccountsKnown(lines)
 
-  const isManual = sourceType === 'manual'
-  if (!isManual && !sourceRef) throw new LedgerError(`sourceRef requerido para sourceType='${sourceType}'`)
+  // Idempotencia por sourceRef: si se provee, dedupe (eventos, apertura, ajustes
+  // referenciados). Solo un 'manual' SIN sourceRef se auto-referencia y no dedupe.
+  const hasRef = sourceRef != null && sourceRef !== ''
+  if (!hasRef && sourceType !== 'manual') throw new LedgerError(`sourceRef requerido para sourceType='${sourceType}'`)
 
-  // Idempotencia: eventos ya posteados devuelven el asiento existente (no-op).
-  if (!isManual) {
+  if (hasRef) {
     const existing = await JournalEntry.findOne({ sourceType, sourceRef, posturePurpose }).session(session ?? null)
     if (existing) return existing
   }
 
   const entryId = await nextEntryId(session)
-  const finalSourceRef = isManual ? entryId : sourceRef
+  const finalSourceRef = hasRef ? sourceRef : entryId
 
   let created
   try {
@@ -216,7 +217,7 @@ export async function postEntry(entry, session) {
     created = doc
   } catch (err) {
     // Carrera concurrente: el índice único ganó por el otro request. Devolver el suyo.
-    if (err?.code === 11000 && !isManual) {
+    if (err?.code === 11000 && hasRef) {
       const winner = await JournalEntry.findOne({ sourceType, sourceRef, posturePurpose }).session(session ?? null)
       if (winner) return winner
     }

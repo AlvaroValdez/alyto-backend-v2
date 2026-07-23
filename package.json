@@ -11,6 +11,8 @@
     "seed:corredores:espl": "node scripts/seedCorredoresEsPl.js",
     "seed:admin": "node scripts/seedAdmin.js",
     "seed:ledger": "node scripts/seed-chart-of-accounts.mjs",
+    "ledger:opening": "node scripts/ledger-opening-balance.mjs",
+    "ledger:trial-balance": "node scripts/ledger-trial-balance.mjs",
     "check:env": "node scripts/checkEnv.js",
     "check:production": "node scripts/checkProduction.js",
     "sentry:test": "node scripts/sentrySmokeTest.js",
