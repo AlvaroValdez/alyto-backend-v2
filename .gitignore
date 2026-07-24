@@ -48,3 +48,22 @@ corredores-*-alyto.pdf
 
 # Claude Code harness lock
 .claude/scheduled_tasks.lock
+
+# --- Interno: NO publicar (limpieza 2026-07) ---
+CLAUDE.md
+docs/
+.claude/
+SECRETOS_LIMPIEZA.md
+EVIDENCIA_INMUTABILIDAD.md
+INMUTABILIDAD.md
+RESUMEN_CIERRE_GAPS.md
+CHANGELOG_FLOWS.md
+ESTADO_TECNICO_ASFI.md
+wallets_and_txs.json
+*_data.json
+get_*.js
+inspect_*.js
+search_*.js
+find_all_matches.js
+list_recent_txs.js
+_*.mjs
