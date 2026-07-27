@@ -35,19 +35,35 @@ export function classifyWalletTx(wtx) {
 
   switch (wtx.type) {
     case 'deposit':
-      if (wtx.metadata?.sourceUSDCWtxId) return { post: false, reason: 'pata de conversión USDC→BOB (slice B)' }
+      // Pata de crédito BOB de una conversión USDC→BOB, o depósito bancario real.
+      if (wtx.metadata?.sourceUSDCWtxId) return { post: true, purpose: 'convert_usdc_to_bob' }
       return { post: true, purpose: 'deposit' }
     case 'usdc_deposit':
-      if (wtx.metadata?.sourceBOBWtxId) return { post: false, reason: 'pata de conversión BOB→USDC (slice B)' }
+      // Pata de crédito USDC de una conversión BOB→USDC, o depósito on-chain real.
+      if (wtx.metadata?.sourceBOBWtxId) return { post: true, purpose: 'convert_bob_to_usdc' }
       return { post: true, purpose: 'deposit' }
     case 'withdrawal':   return { post: true, purpose: 'withdrawal' }
     case 'send':         return { post: true, purpose: 'p2p' }
     case 'receive':      return { post: false, reason: 'P2P deduplicado (se postea desde el send)' }
     case 'freeze':       return { post: true, purpose: 'freeze' }
     case 'unfreeze':     return { post: true, purpose: 'unfreeze' }
-    case 'bob_to_usdc':  return { post: false, reason: 'conversión (slice B — decisión FX)' }
-    case 'usdc_to_bob':  return { post: false, reason: 'conversión (slice B — decisión FX)' }
+    // Patas de DÉBITO de conversión: se deduplican (el asiento completo se postea
+    // desde la pata de crédito, que lleva swapRevenueBob en su metadata).
+    case 'bob_to_usdc':  return { post: false, reason: 'pata débito BOB→USDC (posteada desde la pata crédito usdc_deposit)' }
+    case 'usdc_to_bob':  return { post: false, reason: 'pata débito USDC→BOB (posteada desde la pata crédito deposit BOB)' }
     default:             return { post: false, reason: `tipo no mapeado: ${wtx.type}` }
+  }
+}
+
+const R7 = (n) => +(Number(n) || 0).toFixed(7)
+
+function entryBase(wtx, purpose) {
+  return {
+    entity: 'SRL',
+    sourceType: 'wallet_tx',
+    sourceRef: wtx.wtxId,
+    posturePurpose: purpose,
+    description: wtx.description || wtx.type,
   }
 }
 
@@ -60,17 +76,16 @@ export function buildWalletTxEntry(wtx) {
   const cls = classifyWalletTx(wtx)
   if (!cls.post) return null
 
+  // Conversiones cross-currency (§6): asiento completo desde la pata de crédito.
+  if (cls.purpose === 'convert_bob_to_usdc') return buildBobToUsdcEntry(wtx)
+  if (cls.purpose === 'convert_usdc_to_bob') return buildUsdcToBobEntry(wtx)
+
+  // Eventos mono-moneda (slice A).
   const currency = wtx.currency || 'BOB'
   const { liab, frozen, feeRevenue } = accountsFor(currency)
-  const amount = Number(wtx.amount) || 0
+  const amount = R7(wtx.amount)
   const dims   = { userId: wtx.userId ?? null, sourceTxId: wtx.wtxId }
-  const base   = {
-    entity: 'SRL',
-    sourceType: 'wallet_tx',
-    sourceRef: wtx.wtxId,
-    posturePurpose: cls.purpose,
-    description: wtx.description || wtx.type,
-  }
+  const base   = entryBase(wtx, cls.purpose)
 
   switch (wtx.type) {
     case 'deposit':       // depósito BOB real (banco)
@@ -93,7 +108,7 @@ export function buildWalletTxEntry(wtx) {
 
     case 'send': {        // P2P: emisor ↓ (monto+fee), receptor ↑ (monto), fee → ingreso
       const fee   = Number(wtx.metadata?.fee) || 0
-      const total = +(amount + fee).toFixed(7)
+      const total = R7(amount + fee)
       const cpDims = { userId: wtx.counterpartyUserId ?? null, sourceTxId: wtx.wtxId }
       const lines = [
         { account: liab, currency, debit: total,   dims },
@@ -118,6 +133,50 @@ export function buildWalletTxEntry(wtx) {
     default:
       return null
   }
+}
+
+/**
+ * Conversión BOB→USDC (ancla: pata de crédito `usdc_deposit` con sourceBOBWtxId).
+ * Modelo §6, spread reconocido al confirmar (decisión FX = A, base devengado):
+ *   Dr 2010 bobAmount BOB · Cr 1090 (bobAmount−spread) BOB · Cr 4060 spread BOB
+ *   Dr 1090 usdcAmount USDC · Cr 2020 usdcAmount USDC
+ * Balancea por moneda; 1090 absorbe la posición FX; 4060 = ingreso por spread (BOB).
+ */
+function buildBobToUsdcEntry(wtx) {
+  const usdcAmount = R7(wtx.amount)
+  const bobAmount  = R7(wtx.metadata?.bobAmount)
+  const swap       = R7(wtx.metadata?.swapRevenueBob)
+  if (!bobAmount || !usdcAmount) return null   // metadata incompleta → no postear (reconcile lo detecta)
+  const dims  = { userId: wtx.userId ?? null, sourceTxId: wtx.wtxId }
+  const lines = [
+    { account: '2010', currency: 'BOB',  debit:  bobAmount, dims },
+    { account: '1090', currency: 'BOB',  credit: R7(bobAmount - swap), dims },
+    { account: '1090', currency: 'USDC', debit:  usdcAmount, dims },
+    { account: '2020', currency: 'USDC', credit: usdcAmount, dims },
+  ]
+  if (swap > 0) lines.push({ account: '4060', currency: 'BOB', credit: swap, dims })
+  return { ...entryBase(wtx, 'convert_bob_to_usdc'), lines }
+}
+
+/**
+ * Conversión USDC→BOB (ancla: pata de crédito `deposit` BOB con sourceUSDCWtxId).
+ *   Dr 2020 usdcAmount USDC · Cr 1090 usdcAmount USDC
+ *   Dr 1090 (bobAmount+spread) BOB · Cr 2010 bobAmount BOB · Cr 4060 spread BOB
+ */
+function buildUsdcToBobEntry(wtx) {
+  const bobAmount  = R7(wtx.amount)
+  const usdcAmount = R7(wtx.metadata?.usdcAmount)
+  const swap       = R7(wtx.metadata?.swapRevenueBob)
+  if (!bobAmount || !usdcAmount) return null
+  const dims  = { userId: wtx.userId ?? null, sourceTxId: wtx.wtxId }
+  const lines = [
+    { account: '2020', currency: 'USDC', debit:  usdcAmount, dims },
+    { account: '1090', currency: 'USDC', credit: usdcAmount, dims },
+    { account: '1090', currency: 'BOB',  debit:  R7(bobAmount + swap), dims },
+    { account: '2010', currency: 'BOB',  credit: bobAmount, dims },
+  ]
+  if (swap > 0) lines.push({ account: '4060', currency: 'BOB', credit: swap, dims })
+  return { ...entryBase(wtx, 'convert_usdc_to_bob'), lines }
 }
 
 export default { classifyWalletTx, buildWalletTxEntry }

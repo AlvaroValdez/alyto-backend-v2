@@ -29,13 +29,61 @@ describe('classifyWalletTx — qué postea y qué no', () => {
   test('receive se deduplica (se postea desde el send)', () => {
     expect(classifyWalletTx(wtx({ type: 'receive' })).post).toBe(false)
   })
-  test('conversiones se saltan (slice B)', () => {
+  test('patas de DÉBITO de conversión se deduplican (se postean desde la pata crédito)', () => {
     expect(classifyWalletTx(wtx({ type: 'bob_to_usdc' })).post).toBe(false)
     expect(classifyWalletTx(wtx({ type: 'usdc_to_bob' })).post).toBe(false)
   })
-  test('deposit/usdc_deposit que son pata de conversión se saltan', () => {
-    expect(classifyWalletTx(wtx({ type: 'deposit', metadata: { sourceUSDCWtxId: 'X' } })).post).toBe(false)
-    expect(classifyWalletTx(wtx({ type: 'usdc_deposit', currency: 'USDC', metadata: { sourceBOBWtxId: 'X' } })).post).toBe(false)
+  test('patas de CRÉDITO de conversión SÍ postean (con su propósito)', () => {
+    expect(classifyWalletTx(wtx({ type: 'usdc_deposit', currency: 'USDC', metadata: { sourceBOBWtxId: 'X' } })))
+      .toMatchObject({ post: true, purpose: 'convert_bob_to_usdc' })
+    expect(classifyWalletTx(wtx({ type: 'deposit', metadata: { sourceUSDCWtxId: 'X' } })))
+      .toMatchObject({ post: true, purpose: 'convert_usdc_to_bob' })
+  })
+})
+
+describe('conversiones cross-currency (slice B, spread al confirmar)', () => {
+  test('BOB→USDC: balancea por moneda, spread al 4060, control accounts mueven', () => {
+    // 700 BOB → 99 USDC, spread 7 BOB. Ancla en la pata usdc_deposit.
+    const e = buildWalletTxEntry(wtx({
+      type: 'usdc_deposit', currency: 'USDC', amount: 99,
+      metadata: { sourceBOBWtxId: 'WTX-B', bobAmount: 700, swapRevenueBob: 7 },
+    }))
+    expectValidEntry(e)
+    expect(e.posturePurpose).toBe('convert_bob_to_usdc')
+    expect(e.lines.find(l => l.account === '2010').debit).toBe(700)   // pasivo BOB usuario ↓
+    expect(e.lines.find(l => l.account === '2020').credit).toBe(99)   // pasivo USDC usuario ↑
+    expect(e.lines.find(l => l.account === '4060').credit).toBe(7)    // ingreso spread (BOB)
+    // 1090 BOB = 700 − 7 = 693 (crédito); 1090 USDC = 99 (débito)
+    expect(e.lines.find(l => l.account === '1090' && l.currency === 'BOB').credit).toBe(693)
+    expect(e.lines.find(l => l.account === '1090' && l.currency === 'USDC').debit).toBe(99)
+  })
+
+  test('USDC→BOB: balancea, spread al 4060, ancla en la pata deposit BOB', () => {
+    // 100 USDC → 693 BOB, spread 7 BOB. Ancla en la pata deposit BOB.
+    const e = buildWalletTxEntry(wtx({
+      type: 'deposit', currency: 'BOB', amount: 693,
+      metadata: { sourceUSDCWtxId: 'WTX-U', usdcAmount: 100, swapRevenueBob: 7 },
+    }))
+    expectValidEntry(e)
+    expect(e.posturePurpose).toBe('convert_usdc_to_bob')
+    expect(e.lines.find(l => l.account === '2020').debit).toBe(100)   // pasivo USDC usuario ↓
+    expect(e.lines.find(l => l.account === '2010').credit).toBe(693)  // pasivo BOB usuario ↑
+    expect(e.lines.find(l => l.account === '4060').credit).toBe(7)    // ingreso spread
+    expect(e.lines.find(l => l.account === '1090' && l.currency === 'BOB').debit).toBe(700)  // 693 + 7
+  })
+
+  test('conversión sin spread (swap=0) NO agrega línea 4060 y sigue balanceada', () => {
+    const e = buildWalletTxEntry(wtx({
+      type: 'usdc_deposit', currency: 'USDC', amount: 100,
+      metadata: { sourceBOBWtxId: 'WTX-B', bobAmount: 700, swapRevenueBob: 0 },
+    }))
+    expectValidEntry(e)
+    expect(e.lines.find(l => l.account === '4060')).toBeUndefined()
+    expect(e.lines.find(l => l.account === '1090' && l.currency === 'BOB').credit).toBe(700)
+  })
+
+  test('metadata incompleta (sin bobAmount) → null, no postea un asiento roto', () => {
+    expect(buildWalletTxEntry(wtx({ type: 'usdc_deposit', currency: 'USDC', amount: 99, metadata: { sourceBOBWtxId: 'X' } }))).toBeNull()
   })
 })
 
