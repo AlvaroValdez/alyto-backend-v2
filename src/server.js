@@ -41,7 +41,6 @@ import paymentRoutes       from './routes/paymentRoutes.js';
 import payoutRoutes        from './routes/payoutRoutes.js';
 import institutionalRoutes from './routes/institutionalRoutes.js';
 import userRoutes          from './routes/userRoutes.js';
-import identityRoutes      from './routes/identityRoutes.js';
 import adminRoutes         from './routes/adminRoutes.js';
 import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmin (feature-gated)
 import regionalRoutes      from './routes/regionalRoutes.js';
@@ -370,7 +369,6 @@ app.use('/api/v1/payments',      paymentsLimiter, paymentRoutes);
 app.use('/api/v1/payouts',       payoutRoutes);
 app.use('/api/v1/institutional', institutionalRoutes);
 app.use('/api/v1/user',          userRoutes);
-app.use('/api/v1/identity',      identityRoutes);
 app.use('/api/v1/admin',         adminRoutes);
 app.use('/api/v1/regional',      regionalRoutes);
 app.use('/api/v1/ipn',           ipnRoutes);

@@ -15,7 +15,7 @@
  *       coincide, documento vencido) se marca como 'rejected'. Errores recuperables
  *       se ignoran para que el usuario reintente.
  *
- * Lookup de usuario: stripeVerificationSessionId guardado en identityController.
+ * Lookup de usuario: stripeVerificationSessionId guardado en kycController.
  */
 
 import Stripe          from 'stripe';
