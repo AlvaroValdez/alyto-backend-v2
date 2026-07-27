@@ -13,6 +13,7 @@
     "seed:ledger": "node scripts/seed-chart-of-accounts.mjs",
     "ledger:opening": "node scripts/ledger-opening-balance.mjs",
     "ledger:trial-balance": "node scripts/ledger-trial-balance.mjs",
+    "ledger:sync": "node scripts/ledger-sync.mjs",
     "check:env": "node scripts/checkEnv.js",
     "check:production": "node scripts/checkProduction.js",
     "sentry:test": "node scripts/sentrySmokeTest.js",
