@@ -9,6 +9,7 @@ import Stripe          from 'stripe';
 import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { screenUser }   from '../services/sanctionsService.js';
+import { approveKycFromSession } from '../webhooks/stripeWebhook.js';
 
 let _stripe = null;
 function getStripe() {
@@ -152,16 +153,12 @@ export async function getKycStatus(req, res) {
         );
 
         if (session.status === 'verified') {
-          // Auto-aprobar: el webhook no llegó pero Stripe ya completó la verificación
-          await User.findByIdAndUpdate(user._id, {
-            kycStatus:     'approved',
-            kycApprovedAt: new Date(),
-            kycProvider:   'stripe_identity',
-          });
-          invalidateUserCache(user._id); // forzar refresco del cache del middleware
+          // Auto-aprobar: el webhook no llegó pero Stripe ya completó la
+          // verificación. Reusa el hook del webhook para aplicar TODOS los
+          // efectos (verified_outputs, screening AML, keypair custodial,
+          // notificación) — antes este path solo actualizaba el estado.
+          await approveKycFromSession(session);
           console.info(`[KYC Status] ✅ Auto-aprobado por polling — userId: ${user._id}`);
-          // Screening AML asíncrono (fire-and-forget) — no bloquea respuesta al usuario
-          runSanctionsScreening(user._id, user.firstName, user.lastName, user.identityDocument?.number);
           return res.json({ kycStatus: 'approved', kycApprovedAt: new Date() });
         }
 
