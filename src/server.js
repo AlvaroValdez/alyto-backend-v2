@@ -895,6 +895,17 @@ async function startServer() {
       console.info(`[Server] AnchorAdmin alerts programado cada ${Math.round(alertIntervalMs / 1000)}s`);
     }
 
+    // Libro Mayor (Fase 2, shadow) — proyecta WalletTransaction al GL. Gated por
+    // LEDGER_POSTING_ENABLED. Idempotente y cursor-based; NO toca los flujos de
+    // dinero. No-op si el flag está apagado o falta el asiento de apertura.
+    if (['shadow', 'strict', 'true', '1'].includes((process.env.LEDGER_POSTING_ENABLED ?? '').toLowerCase())) {
+      const { runLedgerSyncJob } = await import('./services/ledgerSync.js');
+      const ledgerIntervalMs = parseInt(process.env.LEDGER_SYNC_INTERVAL_MS ?? String(5 * 60 * 1000), 10);
+      setTimeout(runLedgerSyncJob, 60 * 1000);                  // primera corrida 1 min post-start
+      setInterval(runLedgerSyncJob, ledgerIntervalMs);          // default cada 5 min
+      console.info(`[Server] Libro Mayor sync programado cada ${Math.round(ledgerIntervalMs / 1000)}s (shadow)`);
+    }
+
     // AWS-2B — Consumer SQS de webhooks IPN (no-op si SQS_ENABLED!=true)
     const { startIpnConsumerJob } = await import('./jobs/ipnQueueConsumer.js');
     startIpnConsumerJob();
