@@ -3,8 +3,6 @@
  *
  * GET /api/v1/kyc/session  → Crea VerificationSession de Stripe Identity
  * GET /api/v1/kyc/status   → Devuelve el kycStatus actual del usuario autenticado
- *
- * Nota: La sesión biométrica delega la lógica al identityController.
  */
 
 import Stripe          from 'stripe';
@@ -47,7 +45,7 @@ export async function createKycSession(req, res) {
       allowed_types: ['driving_license', 'id_card', 'passport'],
     };
 
-    // Sesión con type+options inline (patrón estándar Stripe, igual que identityController).
+    // Sesión con type+options inline (patrón estándar Stripe).
     // NO usar verification_flow junto con type/options — son mutuamente excluyentes.
     const sessionParams = {
       type: 'document',
