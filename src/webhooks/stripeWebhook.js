@@ -155,6 +155,17 @@ async function _findUserForSession(session) {
   return { user: null, isCurrentSession: false };
 }
 
+/**
+ * Aplica TODOS los efectos de una aprobación KYC a partir de una sesión de
+ * Stripe Identity: kycStatus, verified_outputs, screening AML, notificación y
+ * provisión del keypair custodial. Exportada para que el fallback por polling
+ * (kycController.getKycStatus) apruebe con exactamente los mismos efectos que
+ * el webhook.
+ */
+export async function approveKycFromSession(session) {
+  return _approveKyc(session);
+}
+
 async function _approveKyc(session) {
   const { user } = await _findUserForSession(session);
 
@@ -173,31 +184,20 @@ async function _approveKyc(session) {
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
 
-  // Extracción de datos verificados (DOB, documento, dirección) — best-effort,
-  // fire-and-forget. Enriquece/confirma lo que el usuario declaró en el form de
-  // cumplimiento con la fuente autoritativa (Stripe). NUNCA bloquea la aprobación.
-  _persistVerifiedOutputs(session, user._id).catch(() => {});
+  // Extracción de datos verificados (DOB, documento, dirección, nombres) —
+  // best-effort, y LUEGO screening AML con los datos más frescos: los nombres
+  // verificados por Stripe son la fuente autoritativa para sanciones, no lo
+  // declarado en el registro (que puede ser el default 'Usuario Alyto').
+  // La cadena completa es fire-and-forget: NUNCA bloquea la aprobación.
+  _persistVerifiedOutputs(session, user._id)
+    .catch(() => null)
+    .then(vo => _screenAfterApproval(user, vo))
+    .catch(() => {});
 
   notify(user._id, {
     title: '¡Identidad verificada! ✓',
     body:  'Tu identidad fue verificada exitosamente. Ya puedes empezar a usar Alyto.',
     data:  { type: 'kyc_approved' },
-  }).catch(() => {});
-
-  // Screening AML (fire-and-forget) — Fase 28, exigencia ASFI
-  screenUser({
-    firstName:      user.firstName,
-    lastName:       user.lastName,
-    documentNumber: user.identityDocument?.number,
-  }).then(result => {
-    const update = { sanctionsScreenedAt: result.screenedAt, sanctionsFlag: !result.isClean };
-    if (!result.isClean) {
-      console.warn('[Sanctions KYC Webhook] ⚠️ Posible hit:', {
-        userId: user._id?.toString(),
-        hits:   result.hits.map(h => `${h.entryId} (${h.listSource})`),
-      });
-    }
-    User.findByIdAndUpdate(user._id, update).catch(() => {});
   }).catch(() => {});
 
   // Provisión de keypair Stellar custodial (fire-and-forget) — modelo custodial activo.
@@ -218,10 +218,46 @@ async function _approveKyc(session) {
 }
 
 /**
+ * Screening AML post-aprobación (Fase 28, exigencia ASFI) — corre DESPUÉS de
+ * persistir los verified_outputs, con los datos autoritativos de Stripe si
+ * están (nombres verificados, documento actualizado). Nunca lanza.
+ */
+async function _screenAfterApproval(user, vo) {
+  try {
+    const fresh = await User.findById(user._id)
+      .select('firstName lastName identityDocument.number').lean().catch(() => null);
+
+    const result = await screenUser({
+      firstName:      (typeof vo?.first_name === 'string' && vo.first_name.trim()) || fresh?.firstName || user.firstName,
+      lastName:       (typeof vo?.last_name === 'string' && vo.last_name.trim())  || fresh?.lastName  || user.lastName,
+      documentNumber: fresh?.identityDocument?.number ?? user.identityDocument?.number,
+    });
+
+    const update = { sanctionsScreenedAt: result.screenedAt, sanctionsFlag: !result.isClean };
+    if (!result.isClean) {
+      console.warn('[Sanctions KYC Webhook] ⚠️ Posible hit:', {
+        userId: user._id?.toString(),
+        hits:   result.hits.map(h => `${h.entryId} (${h.listSource})`),
+      });
+    }
+    await User.findByIdAndUpdate(user._id, update);
+  } catch (err) {
+    console.warn('[Sanctions KYC Webhook] Screening post-aprobación falló:', err.message);
+  }
+}
+
+// Defaults de nombre del registro (authController) — si siguen intactos al
+// aprobar, se reemplazan por los nombres verificados del documento.
+const REGISTER_FIRSTNAME_PLACEHOLDER = 'Usuario';
+const REGISTER_LASTNAME_PLACEHOLDER  = 'Alyto';
+
+/**
  * Recupera los verified_outputs de la sesión de Stripe Identity y persiste los
- * datos autoritativos (fecha de nacimiento verificada, número de documento real
- * y, si falta, la dirección extraída del documento). Best-effort: tolera cualquier
- * variación del shape de la API y nunca lanza.
+ * datos autoritativos (fecha de nacimiento verificada, número de documento real,
+ * nombres del documento si el perfil sigue con placeholders y, si falta, la
+ * dirección extraída del documento). Best-effort: tolera cualquier variación
+ * del shape de la API y nunca lanza. Devuelve los verified_outputs (o null)
+ * para que el screening AML posterior use los datos autoritativos.
  */
 async function _persistVerifiedOutputs(session, userId) {
   try {
@@ -229,14 +265,25 @@ async function _persistVerifiedOutputs(session, userId) {
       session.id, { expand: ['verified_outputs'] },
     );
     const vo = full?.verified_outputs;
-    if (!vo) return;
+    if (!vo) return null;
 
     const $set = {};
-    const current = await User.findById(userId).select('address identityDocument.number').lean();
+    const current = await User.findById(userId)
+      .select('address identityDocument.number firstName lastName').lean();
 
     // Fecha de nacimiento verificada (fuente autoritativa).
     if (vo.dob && vo.dob.year) {
       $set.dateOfBirth = new Date(Date.UTC(vo.dob.year, (vo.dob.month ?? 1) - 1, vo.dob.day ?? 1));
+    }
+    // Nombres verificados del documento — solo si el perfil conserva los
+    // defaults del registro (no pisar lo que el usuario declaró a propósito).
+    if (typeof vo.first_name === 'string' && vo.first_name.trim()
+        && current?.firstName === REGISTER_FIRSTNAME_PLACEHOLDER) {
+      $set.firstName = vo.first_name.trim();
+    }
+    if (typeof vo.last_name === 'string' && vo.last_name.trim()
+        && current?.lastName === REGISTER_LASTNAME_PLACEHOLDER) {
+      $set.lastName = vo.last_name.trim();
     }
     // Número de documento: usar el de Stripe SOLO si el usuario no declaró uno real
     // en el KYC (no pisar el CI declarado). Reemplaza el placeholder 'PENDING_VERIFICATION'.
@@ -263,8 +310,10 @@ async function _persistVerifiedOutputs(session, userId) {
       invalidateUserCache(userId);
       console.info('[KYC Webhook] verified_outputs persistidos:', { userId: userId?.toString(), fields: Object.keys($set) });
     }
+    return vo;
   } catch (err) {
     console.warn('[KYC Webhook] No se pudieron extraer verified_outputs:', err.message);
+    return null;
   }
 }
 
