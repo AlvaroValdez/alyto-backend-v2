@@ -13,7 +13,12 @@
  *   identity.verification_session.requires_input
  *     → La sesión requiere corrección. Si el error es definitivo (ej. selfie no
  *       coincide, documento vencido) se marca como 'rejected'. Errores recuperables
- *       se ignoran para que el usuario reintente.
+ *       devuelven al usuario a 'pending' para que reintente.
+ *
+ *   identity.verification_session.canceled
+ *     → Sesión cancelada — se devuelve al usuario a 'pending' (reintento).
+ *
+ * Errores al procesar un evento responden 500 → Stripe reintenta con backoff.
  *
  * Lookup de usuario: stripeVerificationSessionId guardado en kycController.
  */
@@ -104,8 +109,11 @@ export async function handleStripeWebhook(req, res) {
       case 'identity.verification_session.canceled': {
         const session = event.data.object;
         console.info(
-          `[KYC Webhook] ${event.type} | sessionId: ${session.id} | El usuario canceló la verificación`
+          `[KYC Webhook] ${event.type} | sessionId: ${session.id} | La sesión fue cancelada`
         );
+        // Sin esto el usuario queda atascado en 'in_review' (el polling tampoco
+        // resuelve 'canceled') sin botón de reintento.
+        await _recoverKyc(session, 'canceled');
         break;
       }
 
@@ -114,8 +122,11 @@ export async function handleStripeWebhook(req, res) {
         console.info(`[Stripe Webhook] Evento no procesado: ${event.type}`);
     }
   } catch (err) {
-    // Loguear pero responder 200 para evitar que Stripe reintente indefinidamente
+    // Responder 500 para que Stripe REINTENTE el evento (backoff hasta 3 días).
+    // Un fallo transitorio (DB caída) ya no pierde la aprobación/rechazo — antes
+    // se respondía 200 y el evento se descartaba para siempre.
     console.error('[Stripe Webhook] Error procesando evento:', err.message);
+    return res.status(500).json({ error: 'Event processing failed' });
   }
 
   return res.status(200).json({ received: true });
@@ -123,13 +134,37 @@ export async function handleStripeWebhook(req, res) {
 
 // ─── Helpers privados ─────────────────────────────────────────────────────────
 
+/**
+ * Busca al usuario de una sesión: primero por stripeVerificationSessionId
+ * (camino normal) y, si no matchea, por session.metadata.userId — cubre el caso
+ * de una sesión pisada por un reintento posterior o un write fallido tras crear
+ * la sesión. Devuelve { user, isCurrentSession }.
+ */
+async function _findUserForSession(session) {
+  let user = await User.findOne({ stripeVerificationSessionId: session.id });
+  if (user) return { user, isCurrentSession: true };
+
+  const metaUserId = session.metadata?.userId;
+  if (metaUserId) {
+    user = await User.findById(metaUserId).catch(() => null);
+    if (user) {
+      console.warn(`[KYC Webhook] Sesión ${session.id} no es la vigente del usuario ${user._id} (actual: ${user.stripeVerificationSessionId ?? 'ninguna'}) — recuperado vía metadata.userId`);
+      return { user, isCurrentSession: false };
+    }
+  }
+  return { user: null, isCurrentSession: false };
+}
+
 async function _approveKyc(session) {
-  const user = await User.findOne({ stripeVerificationSessionId: session.id });
+  const { user } = await _findUserForSession(session);
 
   if (!user) {
     console.warn(`[KYC Webhook] Usuario no encontrado para sessionId: ${session.id} — ¿Se guardó stripeVerificationSessionId en la sesión?`);
     return;
   }
+
+  // Una identidad verificada por Stripe aprueba SIEMPRE, aunque la sesión ya no
+  // sea la vigente (p.ej. el usuario relanzó otra sesión mientras esta procesaba).
 
   const prevStatus    = user.kycStatus;
   user.kycStatus      = 'approved';
@@ -241,10 +276,17 @@ async function _persistVerifiedOutputs(session, userId) {
  * atascado en 'in_review' con polling infinito.
  */
 async function _recoverKyc(session, errorCode) {
-  const user = await User.findOne({ stripeVerificationSessionId: session.id });
+  const { user, isCurrentSession } = await _findUserForSession(session);
 
   if (!user) {
     console.warn(`[KYC Webhook] Usuario no encontrado para sessionId: ${session.id}`);
+    return;
+  }
+
+  // Una sesión vieja (pisada por un reintento) no debe tocar el estado del
+  // intento vigente.
+  if (!isCurrentSession) {
+    console.info(`[KYC Webhook] Corrección recuperable de sesión no vigente ignorada — userId: ${user._id} | sessionId: ${session.id}`);
     return;
   }
 
@@ -271,10 +313,17 @@ async function _recoverKyc(session, errorCode) {
 }
 
 async function _rejectKyc(session, errorCode) {
-  const user = await User.findOne({ stripeVerificationSessionId: session.id });
+  const { user, isCurrentSession } = await _findUserForSession(session);
 
   if (!user) {
     console.warn(`[KYC Webhook] Usuario no encontrado para sessionId: ${session.id}`);
+    return;
+  }
+
+  // Un rechazo de una sesión no vigente, o llegado tarde, nunca degrada una
+  // identidad ya aprobada (p.ej. el usuario reintentó y la nueva sesión verificó).
+  if (!isCurrentSession || user.kycStatus === 'approved') {
+    console.info(`[KYC Webhook] Rechazo ignorado — userId: ${user._id} | sessionId: ${session.id} | vigente: ${isCurrentSession} | kycStatus: ${user.kycStatus}`);
     return;
   }
 

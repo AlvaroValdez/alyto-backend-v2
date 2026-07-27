@@ -205,6 +205,15 @@ export async function getKycStatus(req, res) {
           return res.json({ kycStatus: 'in_review', kycApprovedAt: null });
         }
 
+        if (session.status === 'canceled') {
+          // Sesión cancelada (API/redacción) — sin esto el usuario queda en
+          // in_review con polling infinito y sin botón de reintento.
+          await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
+          invalidateUserCache(user._id);
+          console.info(`[KYC Status] ↩️ Sesión cancelada — reset a 'pending' para reintento — userId: ${user._id}`);
+          return res.json({ kycStatus: 'pending', kycApprovedAt: null });
+        }
+
         // session.status === 'processing' → seguir esperando
       } catch (stripeErr) {
         // Si Stripe falla, devolvemos el estado de DB sin bloquear al usuario
