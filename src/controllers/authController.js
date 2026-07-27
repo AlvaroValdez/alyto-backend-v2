@@ -170,7 +170,12 @@ export async function registerUser(req, res) {
       console.warn('[Auth] User accepted old T&C version:', termsVersion);
     }
 
-    const countryCode = String(country).toUpperCase();
+    const countryCode = String(country).trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(countryCode)) {
+      return res.status(400).json({
+        error: 'El país debe ser un código ISO de 2 letras (ej. BO, CL, US).',
+      });
+    }
     const normalizedEmail = String(email).toLowerCase().trim();
 
     // ── Verificar duplicado antes de hashear ───────────────────────────────
@@ -268,6 +273,11 @@ export async function registerUser(req, res) {
     });
 
   } catch (err) {
+    // Carrera de registro concurrente con el mismo email: el check previo pasó
+    // en ambos requests pero el índice único lo rechaza — responder como duplicado.
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'El email ya está registrado.' });
+    }
     console.error('[Auth] Error en registerUser:', err.message);
     return res.status(500).json({ error: 'Error al registrar usuario.' });
   }
