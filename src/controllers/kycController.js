@@ -93,6 +93,11 @@ export async function createKycSession(req, res) {
 
 // ─── getKycStatus ─────────────────────────────────────────────────────────────
 
+// Antigüedad a partir de la cual una sesión 'requires_input' SIN error se
+// considera abandonada (el usuario cerró sin terminar) y se degrada a 'pending'.
+// Debe superar holgadamente lo que tarda una verificación normal (~2-5 min).
+const KYC_SESSION_STALE_MS = Number(process.env.KYC_SESSION_STALE_MIN || 15) * 60 * 1000;
+
 // Errores de Stripe Identity que implican rechazo definitivo (mismo set que el webhook)
 const HARD_REJECTION_CODES = new Set([
   'document_expired',
@@ -174,16 +179,30 @@ export async function getKycStatus(req, res) {
             return res.json({ kycStatus: 'rejected', kycApprovedAt: null });
           }
 
-          // Error recuperable (abandoned, consent_declined, device, etc.): el usuario
-          // empezó pero no terminó la biometría. Sin esto quedaría en 'in_review' y el
-          // frontend haría polling infinito. Lo devolvemos a 'pending' para que pueda
-          // re-lanzar /kyc/session y reintentar con una sesión nueva.
-          if (user.kycStatus !== 'pending') {
-            await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
-            invalidateUserCache(user._id);
-            console.info(`[KYC Status] ↩️ Sesión recuperable (${errorCode ?? 'unknown'}) — reset a 'pending' para reintento — userId: ${user._id}`);
+          // ⚠️ Una sesión RECIÉN creada también está en 'requires_input' sin error
+          // mientras el usuario captura documento/selfie (el flujo nativo/móvil
+          // hace polling DURANTE la verificación). Degradar a 'pending' en ese
+          // momento desactiva este fallback (los polls con 'pending' ya no
+          // consultan Stripe) y permite crear una segunda sesión que pisa la
+          // primera. Solo tratamos como recuperable si hay un error real
+          // (abandoned, consent_declined, device...) o la sesión quedó vieja.
+          const sessionAgeMs = session.created ? Date.now() - session.created * 1000 : 0;
+          const isStale      = sessionAgeMs > KYC_SESSION_STALE_MS;
+
+          if (errorCode || isStale) {
+            // Recuperable: el usuario empezó pero no terminó la biometría. Lo
+            // devolvemos a 'pending' para que pueda re-lanzar /kyc/session y
+            // reintentar con una sesión nueva (sin esto: polling infinito).
+            if (user.kycStatus !== 'pending') {
+              await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
+              invalidateUserCache(user._id);
+              console.info(`[KYC Status] ↩️ Sesión recuperable (${errorCode ?? `sin error, ${Math.round(sessionAgeMs / 60000)} min`}) — reset a 'pending' para reintento — userId: ${user._id}`);
+            }
+            return res.json({ kycStatus: 'pending', kycApprovedAt: null });
           }
-          return res.json({ kycStatus: 'pending', kycApprovedAt: null });
+
+          // Verificación en curso — mantener in_review y seguir consultando Stripe.
+          return res.json({ kycStatus: 'in_review', kycApprovedAt: null });
         }
 
         // session.status === 'processing' → seguir esperando
