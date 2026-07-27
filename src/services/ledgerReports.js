@@ -25,14 +25,17 @@ const R7 = (n) => +(Number(n) || 0).toFixed(7)
 /** Cuenta de apertura/plug multi-moneda (patrimonio). */
 const OPENING_EQUITY = '3010'
 
-/** Mapa cuenta de control → campo de wallet, para reconciliación. */
+/**
+ * Mapa cuenta de control → campo de wallet, para reconciliación.
+ * ⚠️ `balanceReserved` NO se incluye: es un earmark DENTRO de `balance`
+ * (balanceAvailable = balance − balanceReserved), no un pasivo adicional. Por eso
+ * no hay cuenta de control 2012/2022 en el pasivo — las reservas no mueven dinero.
+ */
 export const CONTROL_ACCOUNTS = [
   { code: '2010', currency: 'BOB',  model: 'WalletBOB',  field: 'balance' },
   { code: '2011', currency: 'BOB',  model: 'WalletBOB',  field: 'balanceFrozen' },
-  { code: '2012', currency: 'BOB',  model: 'WalletBOB',  field: 'balanceReserved' },
   { code: '2020', currency: 'USDC', model: 'WalletUSDC', field: 'balance' },
   { code: '2021', currency: 'USDC', model: 'WalletUSDC', field: 'balanceFrozen' },
-  { code: '2022', currency: 'USDC', model: 'WalletUSDC', field: 'balanceReserved' },
 ]
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -84,11 +87,11 @@ export function buildOpeningBalanceLines(s) {
   }
 
   // ── BOB ── pasivo usuarios (crédito) vs banco (débito) + plug equity ──
-  const bobLiab   = R7((s.bob?.balance || 0) + (s.bob?.frozen || 0) + (s.bob?.reserved || 0))
+  // Pasivo = balance + frozen. `reserved` NO se suma: es un earmark dentro de balance.
+  const bobLiab   = R7((s.bob?.balance || 0) + (s.bob?.frozen || 0))
   const bankBob   = R7(s.bankBob || 0)
   push('2010', 'BOB', 0, s.bob?.balance || 0)
   push('2011', 'BOB', 0, s.bob?.frozen || 0)
-  push('2012', 'BOB', 0, s.bob?.reserved || 0)
   push('1030', 'BOB', bankBob, 0)
   // plug: equilibra BOB. liab (crédito) vs banco (débito): falta débito = liab−banco.
   const bobPlug = R7(bobLiab - bankBob)
@@ -96,11 +99,11 @@ export function buildOpeningBalanceLines(s) {
   else if (bobPlug < 0) push(OPENING_EQUITY, 'BOB', 0, -bobPlug)
 
   // ── USDC ── pasivo usuarios (crédito) vs tesorería+custodia (débito) + plug ──
-  const usdcLiab  = R7((s.usdc?.balance || 0) + (s.usdc?.frozen || 0) + (s.usdc?.reserved || 0))
+  // Pasivo = balance + frozen (reserved está dentro de balance, no se suma).
+  const usdcLiab  = R7((s.usdc?.balance || 0) + (s.usdc?.frozen || 0))
   const usdcAsset = R7((s.treasuryUsdc || 0) + (s.custodialUsdc || 0))
   push('2020', 'USDC', 0, s.usdc?.balance || 0)
   push('2021', 'USDC', 0, s.usdc?.frozen || 0)
-  push('2022', 'USDC', 0, s.usdc?.reserved || 0)
   push('1010', 'USDC', s.treasuryUsdc || 0, 0)
   push('1020', 'USDC', s.custodialUsdc || 0, 0)
   // plug: débito total = usdcAsset; crédito total = usdcLiab. diff → equity.
