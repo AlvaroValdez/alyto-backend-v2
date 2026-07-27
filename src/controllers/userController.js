@@ -15,6 +15,7 @@ import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
+import { isRealDocumentNumber } from '../utils/clientDocument.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,9 @@ function buildProfileResponse(user) {
     sourceOfFunds:         user.sourceOfFunds ?? null,
     dateOfBirth:           user.dateOfBirth   ?? null,
     address:               user.address ?? null,
+    // CI/RUT declarado — null mientras siga el placeholder del registro.
+    documentNumber:        isRealDocumentNumber(user.identityDocument?.number)
+                             ? user.identityDocument.number : null,
     createdAt:      user.createdAt,
     avatarUrl:      user.avatarUrl ?? null,
     fcmTokens:      (user.fcmTokens ?? []).length,
@@ -165,7 +169,13 @@ export async function updateProfile(req, res) {
  * Se llama ANTES de lanzar Stripe Identity. Setea kycProfileCompletedAt, que
  * actúa como gate para crear la sesión biométrica.
  *
- * Body: { dateOfBirth, nationality, sourceOfFunds, address:{street,city,state,zip,country}, phone? }
+ * También captura el número de documento DECLARADO (CI/RUT/pasaporte). ASFI: el
+ * Comprobante Oficial debe listar el documento del cliente, y Stripe Identity
+ * no devuelve id_number de forma confiable para CI boliviano — la declaración
+ * en el CDD es la fuente primaria. Gated: KYC_REQUIRE_DOCUMENT_NUMBER=true lo
+ * vuelve obligatorio (mismo gate que usaba el flujo /identity/verify retirado).
+ *
+ * Body: { dateOfBirth, nationality, sourceOfFunds, address:{street,city,state,zip,country}, phone?, documentNumber? }
  */
 export async function updateKycProfile(req, res) {
   try {
@@ -206,6 +216,16 @@ export async function updateKycProfile(req, res) {
     if (!city)                errors.push('La ciudad es requerida.');
     if (!ISO2_RE.test(country)) errors.push('Selecciona el país de residencia.');
 
+    // — Número de documento declarado (CI/RUT/pasaporte) —
+    const documentNumber = typeof b.documentNumber === 'string' ? b.documentNumber.trim() : '';
+    const requireDoc     = process.env.KYC_REQUIRE_DOCUMENT_NUMBER === 'true';
+    if (documentNumber && (documentNumber.length < 4 || documentNumber.length > 30)) {
+      errors.push('El número de documento debe tener entre 4 y 30 caracteres.');
+    }
+    if (requireDoc && !documentNumber) {
+      errors.push('Ingresa tu número de documento (CI).');
+    }
+
     if (errors.length > 0) {
       return res.status(400).json({ error: errors[0], errors });
     }
@@ -225,6 +245,8 @@ export async function updateKycProfile(req, res) {
       kycProfileCompletedAt: new Date(),
     };
     if (phone) $set.phone = phone;
+    // El CI declarado reemplaza el placeholder 'PENDING_VERIFICATION' del registro.
+    if (documentNumber) $set['identityDocument.number'] = documentNumber;
 
     const updated = await User.findByIdAndUpdate(
       req.user._id,
