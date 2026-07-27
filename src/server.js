@@ -44,6 +44,7 @@ import userRoutes          from './routes/userRoutes.js';
 import adminRoutes         from './routes/adminRoutes.js';
 import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmin (feature-gated)
 import marketingAgentRoutes from './routes/marketingAgentRoutes.js'; // Agente de marketing (feature-gated)
+import ledgerAdminRoutes   from './routes/ledgerAdminRoutes.js';   // Libro Mayor reportes (feature-gated)
 import regionalRoutes      from './routes/regionalRoutes.js';
 import ipnRoutes           from './routes/ipn.js';
 import internalJobsRoutes  from './routes/internalJobsRoutes.js';
@@ -399,6 +400,13 @@ if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
 if (process.env.MARKETING_AGENT_ENABLED === 'true') {
   app.use('/api/v1/admin/marketing', marketingAgentRoutes);
   console.info('[Alyto Server] Agente de marketing habilitado → /api/v1/admin/marketing');
+}
+
+// Libro Mayor — reportes contables (Fase 3). Feature-gated por LEDGER_POSTING_ENABLED
+// (mismo flag del posteo). Read-only + POST /sync. Rollback = apagar el flag.
+if (['shadow', 'strict', 'true', '1'].includes((process.env.LEDGER_POSTING_ENABLED ?? '').toLowerCase())) {
+  app.use('/api/v1/admin/ledger', ledgerAdminRoutes);
+  console.info('[Alyto Server] Libro Mayor habilitado → /api/v1/admin/ledger');
 }
 
 // stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
