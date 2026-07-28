@@ -8,7 +8,8 @@
 //
 // Formato neutro:
 //   complete({ provider, model, system, messages, maxTokens, temperature, providerOptions })
-//     system   → string (instrucciones completas, ya interpoladas)
+//     system   → string, o bloques [{ text, cache?: true }] — cache marca un
+//                breakpoint de prompt caching (Anthropic; ignorado en Bedrock)
 //     messages → [{ role: 'user'|'assistant', text: string }]  (alternancia ya saneada)
 //                o, para mensajes multimodales, { role, content: [bloques] } con:
 //                  { type: 'text', text }
@@ -82,6 +83,26 @@ function toBedrockContent(m) {
   });
 }
 
+// El system neutro admite string o bloques [{text, cache?}]. Con cache:true el
+// bloque marca un breakpoint de prompt caching (Anthropic; ignorado en Bedrock).
+// Poner el contenido ESTABLE antes del breakpoint y lo volátil después — el
+// cache es prefix-match. Nota: si el prefijo queda bajo el mínimo cacheable del
+// modelo (Haiku 4.5: 4096 tokens) la API lo ignora en silencio, sin error.
+function toAnthropicSystem(system) {
+  if (system == null || typeof system === 'string') return system;
+  return system.map(b => ({
+    type: 'text',
+    text: b.text,
+    ...(b.cache ? { cache_control: { type: 'ephemeral' } } : {}),
+  }));
+}
+
+function toBedrockSystem(system) {
+  if (system == null) return undefined;
+  if (typeof system === 'string') return [{ text: system }];
+  return system.map(b => ({ text: b.text }));
+}
+
 async function completeAnthropic({ model, system, messages, maxTokens, temperature }) {
   if (!_anthropic) {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
@@ -91,7 +112,7 @@ async function completeAnthropic({ model, system, messages, maxTokens, temperatu
     model,
     max_tokens: maxTokens,
     temperature,
-    system,
+    system: toAnthropicSystem(system),
     messages: messages.map(m => ({ role: m.role, content: toAnthropicContent(m) })),
   });
   return {
@@ -100,6 +121,8 @@ async function completeAnthropic({ model, system, messages, maxTokens, temperatu
     usage: {
       inputTokens: resp.usage?.input_tokens,
       outputTokens: resp.usage?.output_tokens,
+      cacheReadTokens: resp.usage?.cache_read_input_tokens,
+      cacheWriteTokens: resp.usage?.cache_creation_input_tokens,
     },
   };
 }
@@ -115,7 +138,7 @@ async function completeBedrock({ model, system, messages, maxTokens, temperature
   }
   const resp = await _bedrock.send(new _converseCmd({
     modelId: model,
-    ...(system ? { system: [{ text: system }] } : {}),
+    ...(system ? { system: toBedrockSystem(system) } : {}),
     messages: messages.map(m => ({ role: m.role, content: toBedrockContent(m) })),
     inferenceConfig: { maxTokens, temperature },
     ...(providerOptions.guardrailConfig ? { guardrailConfig: providerOptions.guardrailConfig } : {}),

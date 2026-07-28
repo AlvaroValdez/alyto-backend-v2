@@ -23,30 +23,35 @@
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
 import { complete } from './llmProvider.js';
+import { getSupportKnowledge } from './supportKnowledge.js';
 
-const ENABLED = process.env.SUPPORT_AGENT_ENABLED === 'true'
-  || process.env.BEDROCK_SUPPORT_ENABLED === 'true';
-
-const PROVIDER = process.env.SUPPORT_AI_PROVIDER || 'anthropic';
-
-// Modelo por proveedor. Anthropic: alias vigente de Haiku 4.5. Bedrock (legado):
-// cadena original — var dedicada → modelo smart compartido → inference profile us.*.
-const MODEL = process.env.SUPPORT_AI_MODEL
-  || (PROVIDER === 'bedrock'
-    ? (process.env.BEDROCK_MODEL_SUPPORT
-      || process.env.BEDROCK_MODEL_SMART
-      || 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
-    : 'claude-haiku-4-5');
-
-const MAX_TOKENS  = Number(process.env.SUPPORT_AI_MAX_TOKENS || process.env.BEDROCK_SUPPORT_MAX_TOKENS || 600);
-const TEMPERATURE = Number(process.env.SUPPORT_AI_TEMPERATURE || process.env.BEDROCK_SUPPORT_TEMPERATURE || 0.3);
-
-// Guardrail opcional de Bedrock (solo aplica con SUPPORT_AI_PROVIDER=bedrock).
-const GUARDRAIL_ID  = process.env.BEDROCK_SUPPORT_GUARDRAIL_ID || '';
-const GUARDRAIL_VER = process.env.BEDROCK_SUPPORT_GUARDRAIL_VERSION || 'DRAFT';
+// Config leída DENTRO de funciones (regla 21 CLAUDE.md): en producción los
+// secretos se cargan antes del import dinámico de app.js, pero leer env en
+// ámbito de módulo es el patrón que causó servicios apuntando a sandbox.
+function cfg() {
+  const provider = process.env.SUPPORT_AI_PROVIDER || 'anthropic';
+  return {
+    enabled: process.env.SUPPORT_AGENT_ENABLED === 'true'
+      || process.env.BEDROCK_SUPPORT_ENABLED === 'true',
+    provider,
+    // Modelo por proveedor. Anthropic: alias vigente de Haiku 4.5. Bedrock
+    // (legado): var dedicada → modelo smart compartido → inference profile us.*.
+    model: process.env.SUPPORT_AI_MODEL
+      || (provider === 'bedrock'
+        ? (process.env.BEDROCK_MODEL_SUPPORT
+          || process.env.BEDROCK_MODEL_SMART
+          || 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
+        : 'claude-haiku-4-5'),
+    maxTokens:   Number(process.env.SUPPORT_AI_MAX_TOKENS || process.env.BEDROCK_SUPPORT_MAX_TOKENS || 600),
+    temperature: Number(process.env.SUPPORT_AI_TEMPERATURE || process.env.BEDROCK_SUPPORT_TEMPERATURE || 0.3),
+    // Guardrail opcional de Bedrock (solo con SUPPORT_AI_PROVIDER=bedrock).
+    guardrailId:  process.env.BEDROCK_SUPPORT_GUARDRAIL_ID || '',
+    guardrailVer: process.env.BEDROCK_SUPPORT_GUARDRAIL_VERSION || 'DRAFT',
+  };
+}
 
 export function isSupportAgentEnabled() {
-  return ENABLED;
+  return cfg().enabled;
 }
 
 // System prompt del asistente. Reglas de compliance NO negociables aquí.
@@ -100,50 +105,65 @@ function buildContextText(ctx = {}) {
  */
 export async function askSupport({ userMessage, history = [], userContext = {} } = {}) {
   try {
-    if (!ENABLED) return null;
+    const { enabled, provider, model, maxTokens, temperature, guardrailId, guardrailVer } = cfg();
+    if (!enabled) return null;
     if (!userMessage || !userMessage.trim()) return null;
 
-    const system = SYSTEM_PROMPT
+    // Conocimiento operativo vivo (corredores + campos por destino). Fail-open:
+    // si no está disponible, Aly responde con el prompt base.
+    const knowledge = await getSupportKnowledge();
+
+    // System en dos bloques para prompt caching: el prefijo ESTABLE (prompt +
+    // catálogo, idéntico entre requests mientras dure el cache del catálogo)
+    // lleva marca de cache; el contexto del usuario (varía por request) va después.
+    const stableSystem = SYSTEM_PROMPT
       .replace('{{SUPPORT_EMAIL}}', process.env.SUPPORT_EMAIL || 'soporte@alyto.app')
       .replace('{{SUPPORT_WHATSAPP}}', process.env.SUPPORT_WHATSAPP || '')
-      + `\n\nContexto del usuario actual:\n${buildContextText(userContext)}`;
+      + (knowledge ? `\n\n${knowledge}` : '');
+
+    const system = [
+      { text: stableSystem, cache: true },
+      { text: `Contexto del usuario actual:\n${buildContextText(userContext)}` },
+    ];
 
     const messages = history
       .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', text: m.text }))
       .concat([{ role: 'user', text: userMessage }]);
 
-    const providerOptions = (PROVIDER === 'bedrock' && GUARDRAIL_ID)
-      ? { guardrailConfig: { guardrailIdentifier: GUARDRAIL_ID, guardrailVersion: GUARDRAIL_VER } }
+    const providerOptions = (provider === 'bedrock' && guardrailId)
+      ? { guardrailConfig: { guardrailIdentifier: guardrailId, guardrailVersion: guardrailVer } }
       : {};
 
     const resp = await complete({
-      provider: PROVIDER,
-      model: MODEL,
+      provider,
+      model,
       system,
       messages,
-      maxTokens: MAX_TOKENS,
-      temperature: TEMPERATURE,
+      maxTokens,
+      temperature,
       providerOptions,
     });
 
     if (!resp.text) {
       logger.warn('[support-ai] askSupport sin texto en la respuesta', {
-        provider: PROVIDER, model: MODEL, stopReason: resp.stopReason,
+        provider, model, stopReason: resp.stopReason,
       });
       return null;
     }
 
     logger.info('[support-ai] askSupport respondido', {
-      provider: PROVIDER,
-      model: MODEL,
+      provider,
+      model,
       stopReason: resp.stopReason,
       inputTokens: resp.usage?.inputTokens,
       outputTokens: resp.usage?.outputTokens,
+      cacheReadTokens: resp.usage?.cacheReadTokens,
+      knowledgeChars: knowledge.length,
     });
 
     return { reply: resp.text, usage: resp.usage };
   } catch (err) {
-    logger.error('[support-ai] askSupport falló', { provider: PROVIDER, error: err.message });
+    logger.error('[support-ai] askSupport falló', { error: err.message });
     Sentry.captureException(err, { tags: { service: 'supportAgentService', fn: 'askSupport' } });
     return null;
   }
