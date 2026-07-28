@@ -78,7 +78,7 @@ await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
 
 // ─── Importaciones diferidas ──────────────────────────────────────────────────
 
-const { default: app }         = await import('../../src/server.js');
+const { default: app }         = await import('../../src/app.js');
 const { default: request }     = await import('supertest');
 const { default: Transaction } = await import('../../src/models/Transaction.js');
 

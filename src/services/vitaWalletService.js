@@ -29,10 +29,22 @@ import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-if (!process.env.VITA_API_URL) {
-  console.warn('[Vita] ⚠️ VITA_API_URL no definida — usando sandbox por defecto. Configurar en producción.');
+// ⚠️ Resolución PEREZOSA + memoizada, NO en ámbito de módulo: server.js inyecta
+// AWS Secrets Manager en process.env con un `await` de nivel superior que, por
+// hoisting de ESM, corre DESPUÉS de evaluarse este módulo. Leer process.env aquí
+// arriba capturaba `undefined` y caía al default SANDBOX aunque el secret tuviera
+// la URL de producción — payouts reales contra api.stage (audit 2026-07-28).
+let _baseUrl = null;
+
+export function getVitaBaseUrl() {
+  if (_baseUrl === null) {
+    if (!process.env.VITA_API_URL) {
+      console.warn('[Vita] ⚠️ VITA_API_URL no definida — usando sandbox por defecto. Configurar en producción.');
+    }
+    _baseUrl = `${process.env.VITA_API_URL || 'https://api.stage.vitawallet.io'}/api/businesses`;
+  }
+  return _baseUrl;
 }
-const VITA_BASE_URL = `${process.env.VITA_API_URL || 'https://api.stage.vitawallet.io'}/api/businesses`;
 
 // ─── HMAC-SHA256 — Generación de firma (portado de V1.5 vitaClient.js) ────────
 
@@ -221,7 +233,7 @@ async function vitaRequest(method, path, body = null) {
     'Authorization': `V2-HMAC-SHA256, Signature: ${signature}`,
   };
 
-  const url        = `${VITA_BASE_URL}${path}`;
+  const url        = `${getVitaBaseUrl()}${path}`;
   const timeoutMs  = getTimeout(path);
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
