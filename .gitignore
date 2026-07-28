@@ -67,3 +67,6 @@ search_*.js
 find_all_matches.js
 list_recent_txs.js
 _*.mjs
+
+# System prompt del agente de marketing — artefacto de compliance, NO va al repo público
+config/marketing-agent-prompt.txt
