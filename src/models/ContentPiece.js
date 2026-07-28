@@ -83,6 +83,29 @@ const contentPieceSchema = new mongoose.Schema({
 
   creadoPor:  { type: String, default: 'marketing-agent', trim: true },
 
+  // ── Publicación ────────────────────────────────────────────────────────────
+  //
+  // `postId` es la prueba de que la pieza salió: mientras esté vacío, la pieza
+  // NO se publicó, pase lo que pase con el estado. Es el campo sobre el que se
+  // apoya la idempotencia — publicar dos veces es tan grave como aprobar dos
+  // veces, pero además es irreversible desde acá.
+  publicacion: {
+    postId:       { type: String, default: null },   // id del post en la red
+    url:          { type: String, default: null },   // permalink, si la API lo devuelve
+    publicadoEn:  { type: Date,   default: null },
+    publicadoPor: { type: String, default: null },   // admin que apretó el botón
+    intentos:     { type: Number, default: 0 },
+
+    // Marca de intento en vuelo. La API de una red social no acepta claves de
+    // idempotencia: si el proceso muere entre "llamé" y "guardé el resultado",
+    // no hay forma de saber si el post salió. Reintentar a ciegas podría
+    // duplicarlo, así que la pieza queda trabada acá y hay que destrabarla a
+    // mano después de mirar la red. Preferimos un bloqueo visible a un post
+    // duplicado silencioso.
+    enCurso:      { type: Boolean, default: false },
+    ultimoError:  { type: String,  default: null },
+  },
+
   // Quién resolvió el gate humano (identificador del admin) y cuándo. Null
   // mientras nadie decidió. Evidencia de que hubo revisión humana.
   aprobadoPor: { type: String, default: null, trim: true },

@@ -23,6 +23,8 @@ import {
   aprobar,
   rechazar,
   estadoModulo,
+  publicar,
+  destrabar,
 } from '../controllers/marketingAgentController.js'
 
 const router = Router()
@@ -35,5 +37,7 @@ router.get ('/pendientes',    listarPendientes)  // cola de aprobación (más vi
 router.get ('/historial',     listarHistorial)   // todas, paginado + filtros
 router.post('/:id/aprobar',   aprobar)           // gate humano: visto bueno
 router.post('/:id/rechazar',  rechazar)          // gate humano: descarte ({ motivo } opcional)
+router.post('/:id/publicar',  publicar)          // sale a la red — irreversible desde acá
+router.post('/:id/destrabar', destrabar)         // libera un intento que no cerró
 
 export default router
