@@ -42,3 +42,7 @@ process.env.STELLAR_CHANNEL_SECRET  = 'STEST000000000000000000000000000000000000
 
 // CORS
 process.env.CORS_ORIGIN = '*';
+
+// Agente de marketing — el prompt real vive fuera del repo (ver
+// src/config/marketingAgentPrompt.js). En tests basta uno de juguete.
+process.env.MARKETING_AGENT_SYSTEM_PROMPT = 'Eres el agente de contenido de prueba de Alyto.';
