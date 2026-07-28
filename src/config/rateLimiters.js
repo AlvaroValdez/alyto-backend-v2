@@ -149,3 +149,17 @@ export const supportChatLimiter = makeLimiter({
   maxPermissive: 60,
   message:       'Demasiados mensajes al asistente. Espera un momento e intenta de nuevo.',
 });
+
+// ─── Limiter: Lista de espera del lanzamiento (endpoint público sin auth) ──────
+
+// Alta en la waitlist de alyto.io. Es público y sin sesión, así que la IP es el
+// único control. Holgado para no castigar redes compartidas (oficinas, móvil),
+// pero suficiente para frenar el llenado automatizado de la lista. El honeypot
+// del controller cubre el caso de bots simples.
+
+export const waitlistLimiter = makeLimiter({
+  windowMs:      15 * 60 * 1000,
+  max:           10,
+  maxPermissive: 60,
+  message:       'Demasiados intentos de registro. Intenta de nuevo en unos minutos.',
+});

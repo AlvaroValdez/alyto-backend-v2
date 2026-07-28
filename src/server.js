@@ -46,6 +46,7 @@ import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmi
 import regionalRoutes      from './routes/regionalRoutes.js';
 import ipnRoutes           from './routes/ipn.js';
 import internalJobsRoutes  from './routes/internalJobsRoutes.js';
+import waitlistRoutes      from './routes/waitlistRoutes.js';      // landing alyto.io — lista de espera
 import dashboardRoutes     from './routes/dashboardRoutes.js';
 import kycRoutes           from './routes/kycRoutes.js';
 import kybRoutes           from './routes/kybRoutes.js';
@@ -372,6 +373,7 @@ app.use('/api/v1/admin',         adminRoutes);
 app.use('/api/v1/regional',      regionalRoutes);
 app.use('/api/v1/ipn',           ipnRoutes);
 app.use('/api/v1/internal',      internalJobsRoutes);    // AWS-2A — disparo de jobs (token interno)
+app.use('/api/v1/waitlist',      waitlistRoutes);        // landing alyto.io — público, limiter propio
 app.use('/api/v1/kyc',           kycRoutes);
 app.use('/api/v1/kyb',           kybRoutes);
 app.use('/api/v1/wallet',        walletRoutes);         // Fase 25 — Wallet BOB (SRL Bolivia)
