@@ -43,6 +43,7 @@ import institutionalRoutes from './routes/institutionalRoutes.js';
 import userRoutes          from './routes/userRoutes.js';
 import adminRoutes         from './routes/adminRoutes.js';
 import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmin (feature-gated)
+import marketingAgentRoutes from './routes/marketingAgentRoutes.js'; // Agente de marketing (feature-gated)
 import regionalRoutes      from './routes/regionalRoutes.js';
 import ipnRoutes           from './routes/ipn.js';
 import internalJobsRoutes  from './routes/internalJobsRoutes.js';
@@ -390,6 +391,14 @@ app.use('/api/v1/support',       supportRoutes);        // AWS-4 — Agente IA d
 if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
   app.use('/api/v1/admin/anchor', anchorAdminRoutes);
   console.info('[Alyto Server] AnchorAdmin habilitado → /api/v1/admin/anchor');
+}
+
+// Agente de marketing y educación financiera. Feature-gated (MARKETING_AGENT_ENABLED).
+// Genera contenido con IA, lo clasifica con reglas deterministas y deja las piezas
+// de alto riesgo en cola de aprobación humana. Rollback = apagar el flag.
+if (process.env.MARKETING_AGENT_ENABLED === 'true') {
+  app.use('/api/v1/admin/marketing', marketingAgentRoutes);
+  console.info('[Alyto Server] Agente de marketing habilitado → /api/v1/admin/marketing');
 }
 
 // stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
