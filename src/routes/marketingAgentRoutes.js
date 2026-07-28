@@ -19,6 +19,7 @@ import { checkAdmin } from '../middlewares/checkAdmin.js'
 import {
   generar,
   listarPendientes,
+  listarPublicables,
   listarHistorial,
   aprobar,
   rechazar,
@@ -34,6 +35,7 @@ router.use(protect, checkAdmin)
 router.get ('/estado',        estadoModulo)      // flag + modelo + conteo por estado
 router.post('/generar',       generar)           // { tarea } → genera, clasifica y persiste
 router.get ('/pendientes',    listarPendientes)  // cola de aprobación (más viejas primero)
+router.get ('/publicables',   listarPublicables) // listas para salir al aire
 router.get ('/historial',     listarHistorial)   // todas, paginado + filtros
 router.post('/:id/aprobar',   aprobar)           // gate humano: visto bueno
 router.post('/:id/rechazar',  rechazar)          // gate humano: descarte ({ motivo } opcional)

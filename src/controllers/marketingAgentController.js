@@ -22,6 +22,7 @@ import { verificarProhibiciones } from '../services/riskClassifier.js';
 import {
   publicarPieza, destrabarPieza, isPublishEnabled, estadoCanales,
 } from '../services/marketingPublishService.js';
+import { canalesSoportados } from '../services/publishers/publisherRegistry.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
 import { logger } from '../utils/logger.js';
 
@@ -140,6 +141,49 @@ export async function listarPendientes(req, res) {
     });
   } catch (err) {
     return fail(res, err, 'listarPendientes', 'No se pudo obtener la cola de aprobación.');
+  }
+}
+
+// ─── GET /api/v1/admin/marketing/publicables ─────────────────────────────────
+
+/**
+ * Lo que está listo para salir al aire: aprobadas o de bajo riesgo, todavía sin
+ * publicar. Espejo de /pendientes — juntas cubren las dos colas de trabajo del
+ * admin (revisar y publicar).
+ */
+export async function listarPublicables(req, res) {
+  try {
+    const { page, limit, skip } = paginacion(req.query);
+
+    const filtro = {
+      estado: { $in: ['aprobado', 'autopublicado'] },
+      'publicacion.postId': null,
+    };
+
+    const [piezas, total] = await Promise.all([
+      ContentPiece.find(filtro).sort({ createdAt: 1 }).skip(skip).limit(limit).lean(),
+      ContentPiece.countDocuments(filtro),
+    ]);
+
+    // Se marca por qué una pieza no se puede publicar, para que el panel lo
+    // muestre en vez de ofrecer un botón que va a rebotar.
+    const canalesConPublicador = new Set(canalesSoportados());
+    const conEstado = piezas.map(p => ({
+      ...p,
+      publicable: canalesConPublicador.has(p.canal) && !p.publicacion?.enCurso,
+      motivoNoPublicable: !canalesConPublicador.has(p.canal)
+        ? `${p.canal} no acepta publicaciones de solo texto por API`
+        : p.publicacion?.enCurso
+          ? 'Hay un intento de publicación sin resolver'
+          : null,
+    }));
+
+    return res.status(200).json({
+      piezas: conEstado,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    return fail(res, err, 'listarPublicables', 'No se pudo obtener la lista de publicables.');
   }
 }
 
@@ -379,6 +423,6 @@ export async function destrabar(req, res) {
 }
 
 export default {
-  generar, listarPendientes, listarHistorial, aprobar, rechazar, estadoModulo,
-  publicar, destrabar,
+  generar, listarPendientes, listarPublicables, listarHistorial,
+  aprobar, rechazar, estadoModulo, publicar, destrabar,
 };
