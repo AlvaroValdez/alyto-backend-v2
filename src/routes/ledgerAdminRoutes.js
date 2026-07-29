@@ -17,6 +17,7 @@ import {
   handleIncomeStatement,
   handleTreasuryStatement,
   handleSyncNow,
+  handleConsolidated,
   handleClosedThrough,
   handleClosePeriod,
   handleReverseEntry,
@@ -31,6 +32,7 @@ router.get('/reconciliation',      handleReconciliation)
 router.get('/balance-sheet',       handleBalanceSheet)
 router.get('/pnl',                 handleIncomeStatement)
 router.get('/treasury/:account',   handleTreasuryStatement)
+router.get('/consolidated',        handleConsolidated)
 router.get('/closed-through',      handleClosedThrough)
 router.post('/sync',               handleSyncNow)
 // Fase 4 — GL autoritativo: cierre de período y storno.
