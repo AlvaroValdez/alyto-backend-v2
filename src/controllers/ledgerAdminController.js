@@ -10,6 +10,7 @@ import { trialBalance, reconcileControlAccounts } from '../services/ledgerReport
 import { balanceSheet, incomeStatement, treasuryStatement } from '../services/ledgerStatements.js'
 import { syncLedgerFromWalletTx, ledgerPostingEnabled } from '../services/ledgerSync.js'
 import { reverseEntry, closePeriod, getClosedThrough } from '../services/ledgerClose.js'
+import { consolidatedBalanceSheet } from '../services/ledgerConsolidated.js'
 import { LedgerError } from '../services/ledgerService.js'
 import { logger } from '../utils/logger.js'
 
@@ -60,6 +61,15 @@ export async function handleSyncNow(req, res) {
     if (!ledgerPostingEnabled()) return res.status(200).json({ skipped: 'flag-off', message: 'LEDGER_POSTING_ENABLED apagado.' })
     return res.status(200).json(await syncLedgerFromWalletTx({ dryRun: false }))
   } catch (e) { return fail(res, e, 'No se pudo ejecutar la sincronización.') }
+}
+
+/** GET /admin/ledger/consolidated?functional=USD — balance general consolidado (USD|BOB). */
+export async function handleConsolidated(req, res) {
+  try {
+    const functional = (req.query.functional ?? 'USD').toUpperCase()
+    if (!['USD', 'BOB'].includes(functional)) return res.status(400).json({ error: 'functional debe ser USD o BOB' })
+    return res.status(200).json(await consolidatedBalanceSheet({ functional, entity: req.query.entity }))
+  } catch (e) { return fail(res, e, 'No se pudo generar el balance consolidado.') }
 }
 
 /** GET /admin/ledger/closed-through — fecha hasta la que el período está cerrado. */

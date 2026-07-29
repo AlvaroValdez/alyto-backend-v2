@@ -59,6 +59,7 @@ export const CHART_OF_ACCOUNTS = [
   { code: '4040', name: 'Retención de utilidad',             type: 'income',    normalSide: 'credit', currency: 'BOB'  },
   { code: '4050', name: 'Comisión P2P USDC',                 type: 'income',    normalSide: 'credit', currency: 'USDC' },
   { code: '4060', name: 'Spread de conversión swap',         type: 'income',    normalSide: 'credit', currency: 'BOB'  },
+  { code: '4070', name: 'Resultado por diferencia de cambio', type: 'income',   normalSide: 'credit', currency: 'USD'  },
   // ── Gastos (deudor) ──
   { code: '5010', name: 'Costo payout Vita',                 type: 'expense',   normalSide: 'debit',  currency: 'USD'  },
   { code: '5020', name: 'Costo payout Harbor',               type: 'expense',   normalSide: 'debit',  currency: 'USDC' },
