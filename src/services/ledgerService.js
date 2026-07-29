@@ -20,6 +20,7 @@ import LedgerAccount from '../models/LedgerAccount.js'
 import JournalEntry  from '../models/JournalEntry.js'
 import JournalLine   from '../models/JournalLine.js'
 import Counter       from '../models/Counter.js'
+import SystemConfig  from '../models/SystemConfig.js'
 import { logger }    from '../utils/logger.js'
 
 /** Tolerancia de balanceo (absorbe redondeo float; USDC tiene 7 decimales on-chain). */
@@ -188,12 +189,23 @@ async function nextEntryId(session) {
 export async function postEntry(entry, session) {
   const {
     entity, sourceType, sourceRef, posturePurpose = 'default',
-    lines, date, description = '', postedBy = 'system',
+    lines, date, description = '', postedBy = 'system', reversalOf = null,
   } = entry
 
   if (!['LLC', 'SpA', 'SRL'].includes(entity)) throw new LedgerError(`entity inválido: ${entity}`)
   assertBalanced(lines)
   assertAccountsKnown(lines)
+
+  // Guard de período cerrado (Fase 4): no se admite posteo con fecha ≤ el corte de
+  // cierre, salvo los propios asientos de cierre/apertura. Inline (sin importar
+  // ledgerClose) para no crear ciclo de imports.
+  const purpose = posturePurpose ?? 'default'
+  if (!purpose.startsWith('close') && purpose !== 'opening') {
+    const closed = await SystemConfig.getValue('ledger:period:closedThrough', null)
+    if (closed?.at && new Date(date ?? Date.now()) <= new Date(closed.at)) {
+      throw new LedgerError(`período cerrado hasta ${String(closed.at).slice(0, 10)}: no se admite posteo con fecha ≤ ese corte`)
+    }
+  }
 
   // Idempotencia por sourceRef: si se provee, dedupe (eventos, apertura, ajustes
   // referenciados). Solo un 'manual' SIN sourceRef se auto-referencia y no dedupe.
@@ -211,7 +223,7 @@ export async function postEntry(entry, session) {
   let created
   try {
     const [doc] = await JournalEntry.create([{
-      entryId, date: date ?? new Date(), entity, description,
+      entryId, date: date ?? new Date(), entity, description, reversalOf,
       sourceType, sourceRef: finalSourceRef, posturePurpose, postedBy, status: 'posted',
     }], { session: session ?? undefined })
     created = doc
