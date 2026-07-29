@@ -2,27 +2,31 @@
 //
 // Conocimiento operativo vivo para el asistente Aly.
 //
-// Genera un bloque de texto compacto con los corredores ACTIVOS y los campos
-// del formulario de beneficiario por destino, desde las MISMAS fuentes que usa
-// el formulario de la app:
-//   - TransactionConfig (corredores activos, moneda, mínimos)
-//   - HARBOR_FORM_FIELDS (destinos vía OwlPay Harbor — bo-us, bo-br, etc.)
+// Genera un bloque de texto compacto con los corredores ACTIVOS, sus campos de
+// beneficiario, comisiones visibles y riel de pago, más las comisiones/límites
+// del P2P USDC — desde las MISMAS fuentes que usa la app:
+//   - TransactionConfig (corredores activos, moneda, mínimos, fees visibles)
+//   - HARBOR_FORM_FIELDS + SUPPORTED_METHODS_BY_COUNTRY (destinos Harbor)
 //   - Reglas Vita en vivo (destinos LatAm vía Vita Wallet)
-// Si mañana cambian los campos o se activa/desactiva un corredor, Aly lo
-// refleja sin tocar código — misma filosofía que el formulario dinámico.
+//   - WalletFeeConfig (comisiones y límites USDC P2P)
+// Si mañana cambian fees, campos o corredores desde el admin, Aly lo refleja
+// sin tocar código — misma filosofía que el formulario dinámico.
 //
-// Cache in-process 1 h (mismo TTL que withdrawalRulesCache del controller).
-// Fail-open: ante cualquier error devuelve '' y Aly responde con el prompt
-// base — el chat de soporte nunca depende de Vita ni de la DB para funcionar.
+// ⚠️ NUNCA incluir aquí: profitRetentionPercent ni fees internas (regla 11 del
+// proyecto), revenue acumulada, números de cuenta, direcciones o credenciales.
+//
+// Cache in-process 1 h. Fail-open: ante cualquier error devuelve '' y Aly
+// responde con el prompt base — el chat nunca depende de Vita ni de la DB.
 
 import { logger } from '../utils/logger.js';
 import TransactionConfig from '../models/TransactionConfig.js';
-import { HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
+import WalletFeeConfig from '../models/WalletFeeConfig.js';
+import { HARBOR_FORM_FIELDS, SUPPORTED_METHODS_BY_COUNTRY } from '../utils/harborMethodSupport.js';
 import { getWithdrawalRules as getVitaWithdrawalRules, getVitaCountryKey } from './vitaWalletService.js';
 
-const CACHE_TTL_MS       = 60 * 60 * 1000;  // 1 hora
-const FAIL_RETRY_MS      = 5 * 60 * 1000;   // tras un fallo, reintentar en 5 min
-const MAX_KNOWLEDGE_CHARS = 14000;          // tope duro (~3.5k tokens)
+const CACHE_TTL_MS        = 60 * 60 * 1000;  // 1 hora
+const FAIL_RETRY_MS       = 5 * 60 * 1000;   // tras un fallo, reintentar en 5 min
+const MAX_KNOWLEDGE_CHARS = 14000;           // tope duro (~3.5k tokens)
 
 let _cache = { text: null, at: 0, ttl: CACHE_TTL_MS };
 
@@ -58,27 +62,82 @@ function fieldSummary(f) {
 }
 
 /**
- * Formatea el catálogo a texto. Pura (sin I/O) — testeable con fixtures.
- * @param {Array<{country:string, currency:string, method:string, minUSD:number|null, fields:Array}>} entries
+ * Comisión VISIBLE al usuario del corredor, en una frase compacta.
+ * Solo campos que la app muestra en el desglose — jamás fees internas
+ * (profitRetentionPercent queda excluida por diseño; regla 11 del proyecto).
+ */
+function feeSummary(c) {
+  const parts = [];
+  if (c.alytoCSpread > 0)    parts.push(`${c.alytoCSpread}% spread`);
+  if (c.payinFeePercent > 0) parts.push(`${c.payinFeePercent}% pay-in`);
+  if (c.fixedFee > 0)        parts.push(`${c.fixedFee} ${c.originCurrency ?? ''} fija`.trim());
+  if (c.payoutFeeFixed > 0)  parts.push(`${c.payoutFeeFixed} ${c.destinationCurrency ?? ''} al pago`.trim());
+  if (!parts.length) return '';
+
+  const bizSpread = c.businessAlytoCSpread ?? null;
+  const bizFixed  = c.businessFixedFee ?? null;
+  const bizParts = [
+    bizSpread !== null ? `${bizSpread}% spread` : null,
+    bizFixed !== null && bizFixed > 0 ? `${bizFixed} ${c.originCurrency ?? ''} fija`.trim() : null,
+  ].filter(Boolean);
+  const biz = bizParts.length ? ` (business: ${bizParts.join(' + ')})` : '';
+
+  return ` Comisión referencial: ${parts.join(' + ')}${biz}.`;
+}
+
+/** Riel/medio por el que llega el dinero al destino. */
+function railSummary(entry) {
+  if (entry.method === 'owlPay') {
+    const key = EU_COUNTRIES.has(entry.country) ? 'EU' : entry.country;
+    const rails = SUPPORTED_METHODS_BY_COUNTRY[key];
+    if (rails?.length) return ` Llega vía ${rails.join(' o ')}.`;
+  }
+  if (entry.method === 'vitaWallet') return ' Llega como depósito bancario local.';
+  return '';
+}
+
+/**
+ * Formatea el catálogo de corredores a texto. Pura (sin I/O) — testeable.
  */
 export function formatCorridorKnowledge(entries) {
   if (!entries.length) return '';
 
   const lines = entries.map(e => {
     const name = COUNTRY_NAMES[e.country] ?? e.country;
-    const min  = e.minUSD ? ` Mínimo referencial: $${e.minUSD} USD (el vigente lo muestra la app al cotizar).` : '';
+    const min  = e.minUSD ? ` Mínimo referencial: $${e.minUSD} USD.` : '';
+    const rail = railSummary(e);
+    const fee  = e.feeText ?? '';
     if (!e.fields?.length) {
-      return `- ${name} (${e.country}, ${e.currency}): disponible; la app muestra los datos requeridos del beneficiario.${min}`;
+      return `- ${name} (${e.country}, ${e.currency}): disponible; la app muestra los datos requeridos del beneficiario.${rail}${min}${fee}`;
     }
     const fields = e.fields.map(fieldSummary).filter(Boolean).join(', ');
-    return `- ${name} (${e.country}, ${e.currency}): datos del beneficiario: ${fields}.${min}`;
+    return `- ${name} (${e.country}, ${e.currency}): datos del beneficiario: ${fields}.${rail}${min}${fee}`;
   });
 
-  return `Destinos de transferencia internacional ACTIVOS y datos que pide el formulario (el * marca campo obligatorio). Esta lista es la única fuente de verdad: si un país no aparece, HOY no es destino disponible y debes decirlo. No inventes campos ni destinos.
+  return `Destinos de transferencia internacional ACTIVOS y datos que pide el formulario (el * marca campo obligatorio). Esta lista es la única fuente de verdad: si un país no aparece, HOY no es destino disponible y debes decirlo. No inventes campos, comisiones ni destinos. Comisiones y mínimos son referenciales: el desglose y la tasa exactos SIEMPRE los muestra la app al cotizar.
 
 ${lines.join('\n')}
 
 Nota: los países de la zona euro (Alemania, Francia, Italia, etc.) usan el destino "Europa (zona euro)".`;
+}
+
+/**
+ * Sección P2P USDC (comisiones y límites vigentes). Pura — testeable.
+ */
+export function formatP2pKnowledge(fc) {
+  if (!fc) return '';
+  const feeParts = fc.usdcP2pEnabled
+    ? [
+        fc.usdcP2pFeePercent > 0 ? `${fc.usdcP2pFeePercent}%` : null,
+        fc.usdcP2pFeeFixed > 0 ? `${fc.usdcP2pFeeFixed} USDC fija` : null,
+      ].filter(Boolean)
+    : [];
+  const fee = feeParts.length ? `comisión ${feeParts.join(' + ')}` : 'sin comisión actualmente';
+  const free = (fc.usdcP2pEnabled && fc.usdcP2pFreeBelow > 0)
+    ? ` Envíos menores a ${fc.usdcP2pFreeBelow} USDC: gratis.` : '';
+  const lims = `Límites: mínimo ${fc.usdcP2pMinPerTx} USDC por envío, máximo ${fc.usdcP2pMaxPerTx || 'sin límite'} USDC por envío y ${fc.usdcP2pMaxDaily || 'sin límite'} USDC por día (business: ${fc.businessUsdcP2pMaxPerTx || 'sin límite'} por envío / ${fc.businessUsdcP2pMaxDaily || 'sin límite'} por día).`;
+
+  return `Envíos P2P USDC entre usuarios Alyto (por alias @usuario, instantáneos): ${fee}.${free} ${lims}`;
 }
 
 /**
@@ -90,7 +149,7 @@ export async function getSupportKnowledge() {
   try {
     const corridors = await TransactionConfig
       .find({ isActive: true })
-      .select('corridorId destinationCountry destinationCurrency payoutMethod minAmountUSD')
+      .select('corridorId originCountry originCurrency destinationCountry destinationCurrency payoutMethod minAmountUSD alytoCSpread businessAlytoCSpread fixedFee businessFixedFee payinFeePercent payoutFeeFixed')
       .lean();
 
     // Reglas Vita en una sola llamada (vitaWalletService cachea internamente).
@@ -102,12 +161,17 @@ export async function getSupportKnowledge() {
       logger.warn('[support-knowledge] Vita rules no disponibles (best-effort)', { error: err.message });
     }
 
-    // Un destino puede tener varios corredores (EU auto-ruteado): dedupe por
-    // país+moneda quedándose con el primero (sort payoutMethod asc prefiere
-    // Harbor, igual que el resolver del controller).
+    // Un destino puede tener varios corredores: dedupe por país+moneda. Orden de
+    // preferencia: origen BO primero (base principal de usuarios del chat) y,
+    // dentro del origen, payoutMethod asc (Harbor antes que Vita — mismo criterio
+    // que el resolver del controller para destinos auto-ruteados como EU).
+    const sorted = [...corridors].sort((a, b) =>
+      ((a.originCountry === 'BO' ? 0 : 1) - (b.originCountry === 'BO' ? 0 : 1))
+      || (a.payoutMethod ?? '').localeCompare(b.payoutMethod ?? ''));
+
     const seen = new Set();
     const entries = [];
-    for (const c of corridors.sort((a, b) => (a.payoutMethod ?? '').localeCompare(b.payoutMethod ?? ''))) {
+    for (const c of sorted) {
       const country = (c.destinationCountry ?? '').toUpperCase();
       if (!country) continue;
       const dedupeKey = `${country}:${c.destinationCurrency ?? ''}`;
@@ -129,12 +193,23 @@ export async function getSupportKnowledge() {
         currency: c.destinationCurrency ?? '',
         method:   c.payoutMethod ?? '',
         minUSD:   c.minAmountUSD ?? null,
+        feeText:  feeSummary(c),
         fields,
       });
     }
 
     entries.sort((a, b) => a.country.localeCompare(b.country));
-    let text = formatCorridorKnowledge(entries);
+
+    // Comisiones/límites P2P USDC (singleton, editable desde admin).
+    let p2pText = '';
+    try {
+      const fc = await WalletFeeConfig.getSingleton();
+      p2pText = formatP2pKnowledge(fc?.toObject ? fc.toObject() : fc);
+    } catch (err) {
+      logger.warn('[support-knowledge] WalletFeeConfig no disponible (best-effort)', { error: err.message });
+    }
+
+    let text = formatCorridorKnowledge(entries) + (p2pText ? `\n\n${p2pText}` : '');
 
     if (text.length > MAX_KNOWLEDGE_CHARS) {
       logger.warn('[support-knowledge] catálogo excede tope, se trunca', { length: text.length });
@@ -151,4 +226,4 @@ export async function getSupportKnowledge() {
   }
 }
 
-export default { getSupportKnowledge, formatCorridorKnowledge };
+export default { getSupportKnowledge, formatCorridorKnowledge, formatP2pKnowledge };
