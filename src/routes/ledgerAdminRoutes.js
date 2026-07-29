@@ -17,6 +17,9 @@ import {
   handleIncomeStatement,
   handleTreasuryStatement,
   handleSyncNow,
+  handleClosedThrough,
+  handleClosePeriod,
+  handleReverseEntry,
 } from '../controllers/ledgerAdminController.js'
 
 const router = Router()
@@ -28,6 +31,10 @@ router.get('/reconciliation',      handleReconciliation)
 router.get('/balance-sheet',       handleBalanceSheet)
 router.get('/pnl',                 handleIncomeStatement)
 router.get('/treasury/:account',   handleTreasuryStatement)
+router.get('/closed-through',      handleClosedThrough)
 router.post('/sync',               handleSyncNow)
+// Fase 4 — GL autoritativo: cierre de período y storno.
+router.post('/close',              handleClosePeriod)
+router.post('/entries/:entryId/reverse', handleReverseEntry)
 
 export default router
