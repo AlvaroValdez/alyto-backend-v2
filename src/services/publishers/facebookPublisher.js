@@ -90,9 +90,34 @@ export async function publicar({ titulo, cuerpo }) {
 
   return {
     postId,
-    url: `https://www.facebook.com/${postId.replace('_', '/posts/')}`,
+    url: await permalink(postId, token),
     raw: data,
   };
+}
+
+/**
+ * Pide a Meta el permalink del post.
+ *
+ * No se construye a mano: el primer segmento de la URL que devuelve Meta NO es
+ * el id de la página (se verificó contra un post real), así que armarla con
+ * `{page-id}/posts/{post-id}` produce un enlace roto. Hay que preguntárselo.
+ *
+ * ⚠️ Es best-effort a propósito. Si esta llamada falla, el post YA está
+ * publicado: devolver null y seguir es correcto, porque el registro que importa
+ * es el postId. Dejar que un fallo cosmético convierta una publicación exitosa
+ * en un error haría que el sistema pierda el rastro de un post que sí salió —
+ * el peor resultado posible.
+ */
+async function permalink(postId, token) {
+  try {
+    const r = await fetch(
+      `${GRAPH()}/${postId}?fields=permalink_url&access_token=${encodeURIComponent(token)}`,
+    );
+    const d = await r.json();
+    return d?.permalink_url ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export default { canal, nombre, disponible, faltaConfigurar, publicar };

@@ -31,6 +31,24 @@ global.fetch = fetchMock
 const okMeta = (id = '123_456') => ({
   ok: true, status: 200, json: async () => ({ id }),
 })
+
+// El adaptador hace DOS llamadas: POST /feed para publicar y GET ?permalink_url
+// para el enlace. `mockPublicacion` las distingue y cuenta solo las de publicar,
+// que son las que no deben repetirse nunca.
+function mockPublicacion({ id = '123_456', permalink = 'https://www.facebook.com/x/posts/y',
+                           publicar = null, demora = 0 } = {}) {
+  const contador = { publicaciones: 0, permalinks: 0 }
+  fetchMock.mockImplementation(async (url, opts) => {
+    if (opts?.method === 'POST') {
+      contador.publicaciones++
+      if (demora) await new Promise(r => setTimeout(r, demora))
+      return publicar ? publicar() : okMeta(id)
+    }
+    contador.permalinks++
+    return { ok: true, status: 200, json: async () => ({ id, permalink_url: permalink }) }
+  })
+  return contador
+}
 const errorMeta = (msg = 'Invalid OAuth access token', status = 400, code = 190) => ({
   ok: false, status, json: async () => ({ error: { message: msg, code } }),
 })
@@ -78,21 +96,22 @@ describe('gating', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('camino feliz', () => {
   test('publica, guarda postId y pasa a estado publicado', async () => {
-    fetchMock.mockResolvedValue(okMeta('999_888'))
+    mockPublicacion({ id: '999_888', permalink: 'https://www.facebook.com/abc/posts/888' })
     const p = await sembrar()
 
     const out = await publicarPieza(p._id.toString(), { actor: 'admin@alyto.app' })
 
     expect(out.estado).toBe('publicado')
     expect(out.publicacion.postId).toBe('999_888')
-    expect(out.publicacion.url).toContain('999/posts/888')
+    // El permalink lo devuelve Meta; NO se construye con el id de la página.
+    expect(out.publicacion.url).toBe('https://www.facebook.com/abc/posts/888')
     expect(out.publicacion.publicadoPor).toBe('admin@alyto.app')
     expect(out.publicacion.enCurso).toBe(false)
     expect(out.publicacion.intentos).toBe(1)
   })
 
   test('el post lleva título y cuerpo en un solo mensaje', async () => {
-    fetchMock.mockResolvedValue(okMeta())
+    mockPublicacion()
     const p = await sembrar({ titulo: 'Título', cuerpo: 'Cuerpo del post.' })
 
     await publicarPieza(p._id.toString())
@@ -102,8 +121,25 @@ describe('camino feliz', () => {
     expect(fetchMock.mock.calls[0][0]).toContain('/999/feed')
   })
 
+  test('si el permalink falla, la publicación NO falla: se guarda el postId igual', async () => {
+    // El permalink es cosmético; el postId es el registro. Dejar que un fallo
+    // cosmético convierta una publicación exitosa en error haría que el sistema
+    // pierda el rastro de un post que sí salió.
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === 'POST') return okMeta('555_666')
+      throw new Error('ETIMEDOUT')          // falla solo el GET del permalink
+    })
+    const p = await sembrar()
+
+    const out = await publicarPieza(p._id.toString())
+
+    expect(out.estado).toBe('publicado')
+    expect(out.publicacion.postId).toBe('555_666')
+    expect(out.publicacion.url).toBeNull()
+  })
+
   test('una pieza aprobada por un humano también se publica', async () => {
-    fetchMock.mockResolvedValue(okMeta())
+    mockPublicacion()
     const p = await sembrar({ estado: 'aprobado', clasificacionFinal: 'alto', aprobadoPor: 'admin@alyto.app' })
 
     expect((await publicarPieza(p._id.toString())).estado).toBe('publicado')
@@ -113,7 +149,7 @@ describe('camino feliz', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('idempotencia: nunca dos veces', () => {
   test('publicar una pieza ya publicada devuelve YA_PUBLICADA sin llamar a la red', async () => {
-    fetchMock.mockResolvedValue(okMeta('111_222'))
+    mockPublicacion({ id: '111_222' })
     const p = await sembrar()
     await publicarPieza(p._id.toString())
     fetchMock.mockClear()
@@ -124,18 +160,13 @@ describe('idempotencia: nunca dos veces', () => {
   })
 
   test('dos clics simultáneos → un solo post', async () => {
-    let llamadas = 0
-    fetchMock.mockImplementation(async () => {
-      llamadas++
-      await new Promise(r => setTimeout(r, 30))   // ventana para la carrera
-      return okMeta('777_888')
-    })
+    const contador = mockPublicacion({ id: '777_888', demora: 30 })  // ventana para la carrera
     const p = await sembrar()
     const id = p._id.toString()
 
     const res = await Promise.allSettled([publicarPieza(id), publicarPieza(id)])
 
-    expect(llamadas).toBe(1)                                   // la red se llamó UNA vez
+    expect(contador.publicaciones).toBe(1)                     // se publicó UNA vez
     expect(res.filter(r => r.status === 'fulfilled')).toHaveLength(1)
     expect(res.find(r => r.status === 'rejected').reason.code).toBe('INTENTO_EN_CURSO')
 
@@ -202,7 +233,7 @@ describe('fallos: la diferencia entre "no salió" y "no sé"', () => {
     await destrabarPieza(p._id.toString(), { actor: 'admin@alyto.app' })
 
     fetchMock.mockReset()
-    fetchMock.mockResolvedValue(okMeta('333_444'))
+    mockPublicacion({ id: '333_444' })
     const out = await publicarPieza(p._id.toString())
 
     expect(out.publicacion.postId).toBe('333_444')
@@ -210,7 +241,7 @@ describe('fallos: la diferencia entre "no salió" y "no sé"', () => {
   })
 
   test('no se puede destrabar una pieza que ya se publicó', async () => {
-    fetchMock.mockResolvedValue(okMeta())
+    mockPublicacion()
     const p = await sembrar()
     await publicarPieza(p._id.toString())
 
