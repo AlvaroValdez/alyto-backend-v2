@@ -32,7 +32,7 @@
   },
   "keywords": [],
   "author": "AV Finance",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.4",
     "@aws-sdk/client-bedrock-runtime": "^3.1057.0",
