@@ -1,12 +1,12 @@
 # Alyto
 
-**A regulated Stellar anchor for Bolivia, operated by AV Finance SRL.**
+**A supervised Stellar anchor for Bolivia, operated by AV Finance SRL.**
 
 Alyto is a payment rail built on the Stellar network. It provides custodial USDC
 accounts, a full SEP-compliant anchor, and cross-border settlement, operated by
-AV Finance SRL, a Bolivian Financial Technology Enterprise (ETF) and Virtual
+AV Finance SRL, a Bolivian Financial Technology Company (ETF) and Virtual
 Asset Service Provider (PSAV). AV Finance SRL is in the process of entering
-ASFI's Regulated Testing Environment (Entorno Controlado de Pruebas) under
+ASFI's Controlled Testing Environment (Entorno Controlado de Pruebas) under
 Supreme Decree 5384, the supervised stage that precedes the full ETF/PSAV
 license.
 
@@ -29,7 +29,7 @@ All of the following are implemented and served in production (see the public
 - **SEP-12** (KYC API): maps biometric identity verification (document plus
   liveness) to the SEP-12 standard.
 - **SEP-24** (Interactive Deposit and Withdrawal): for external Stellar wallets.
-- **SEP-31** (Cross-Border Payments): exposes regulated settlement corridors as a
+- **SEP-31** (Cross-Border Payments): exposes settlement corridors as a
   standard receiving anchor.
 
 ## Architecture
