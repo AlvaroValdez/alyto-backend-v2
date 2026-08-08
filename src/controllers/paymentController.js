@@ -2775,7 +2775,10 @@ export async function getTransactionStatus(req, res) {
     // Comprobante Oficial SRL Bolivia — URL pre-firmada fresca (s3key:// → presigned 1h)
     boliviaCompliance: transaction.boliviaCompliance
       ? {
-          comprobanteUrl:         await resolveComprobanteUrl(transaction.boliviaCompliance.comprobanteUrl),
+          comprobanteUrl:         await resolveComprobanteUrl(
+            transaction.boliviaCompliance.comprobanteUrl
+            ?? transaction.boliviaCompliance.comprobantePdfUrl,
+          ),
           numeroComprobante:      transaction.boliviaCompliance.numeroComprobante     ?? null,
           comprobanteGeneratedAt: transaction.boliviaCompliance.comprobanteGeneratedAt ?? null,
         }
