@@ -234,11 +234,37 @@ async function _presign(key, expiresIn) {
 }
 
 /**
+ * Extrae el key S3 de un objeto nuestro a partir de una referencia almacenada.
+ * Los keys inmutables siempre empiezan por un prefijo de `IMMUTABLE_KEY_PREFIXES`
+ * (hoy 'pdfs/'), así que localizamos '/pdfs/' en el pathname — funciona tanto en
+ * URLs virtual-hosted (host = bucket) como path-style (R2/MinIO, con el bucket en
+ * el path), porque en ambos casos el key arranca en 'pdfs/'.
+ *
+ * @param {string} urlOrKey
+ * @returns {string|null} key (ej. 'pdfs/bolivia/BOL-...pdf') o null si no se reconoce
+ */
+function extractStorageKey(urlOrKey) {
+  try {
+    const { pathname } = new URL(urlOrKey)
+    const decoded = decodeURIComponent(pathname)
+    const idx = decoded.indexOf('/pdfs/')
+    if (idx !== -1) return decoded.slice(idx + 1) // sin la '/' inicial → 'pdfs/...'
+  } catch {
+    // no era una URL absoluta — nada que extraer
+  }
+  return null
+}
+
+/**
  * Resuelve una referencia de comprobante almacenada en BD a una URL descargable.
  * Acepta:
- *   - 's3key://<key>'  → genera presigned URL fresca (1 hora)
- *   - URL http/https   → devuelve tal cual (URL pública o presigned ya generada)
- *   - null/undefined   → devuelve null
+ *   - 's3key://<key>'   → genera presigned URL fresca (1 hora)
+ *   - URL S3 pre-firmada (SigV4, esquema legacy que EXPIRA) → si reconocemos el
+ *     objeto (key bajo 'pdfs/'), re-firma fresco desde el key. Esto auto-cura los
+ *     registros históricos que guardaron una presigned de 6-7 días ya vencida,
+ *     sin necesidad de migrar la BD.
+ *   - URL http/https pública (CDN, sin firma) → devuelve tal cual (no expira)
+ *   - null/undefined    → devuelve null
  *
  * @param {string|null} stored — valor de boliviaCompliance.comprobanteUrl en MongoDB
  * @returns {Promise<string|null>}
@@ -248,6 +274,14 @@ export async function resolveComprobanteUrl(stored) {
   if (stored.startsWith('s3key://')) {
     const key = stored.slice('s3key://'.length)
     return getDownloadUrl(key, 3600) // URL fresca de 1 hora
+  }
+  // Presigned SigV4 persistida (legacy) → expira. Re-firmar fresco desde el key.
+  if (/^https?:\/\//i.test(stored) && /[?&]X-Amz-Signature=/i.test(stored)) {
+    const key = extractStorageKey(stored)
+    if (key) {
+      const fresh = await getDownloadUrl(key, 3600)
+      if (fresh) return fresh
+    }
   }
   return stored
 }

@@ -942,7 +942,7 @@ router.post('/regenerate-comprobante', async (req, res) => {
     const User = (await import('../models/User.js')).default;
     const { generarNumeroCorrelativo }  = await import('../utils/correlativoService.js');
     const { generateOfficialReceipt }   = await import('../utils/pdfGenerator.js');
-    const { uploadBuffer, getDownloadUrl } = await import('../services/storageService.js');
+    const { uploadBuffer, resolveComprobanteUrl } = await import('../services/storageService.js');
 
     const user = await User.findById(tx.userId).lean();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -977,22 +977,22 @@ router.post('/regenerate-comprobante', async (req, res) => {
 
     const { buffer, filename } = await generateOfficialReceipt(dto);
     const s3Key  = `pdfs/bolivia/${numeroComprobante}_${filename}`;
-    const { url, key } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
 
-    // Generar presigned URL de 7 días para guardar en BD (no depende de resolución dinámica)
-    const resolvedUrl = await getDownloadUrl(key ?? s3Key, 6 * 24 * 3600);
-    const storedUrl   = resolvedUrl ?? url; // fallback a s3key:// si falla
-
+    // Guardar la REFERENCIA durable (s3key:// o URL pública CDN), NUNCA una
+    // presigned que expira. El serve la re-firma fresca en cada lectura.
     await Transaction.findByIdAndUpdate(tx._id, {
       $set: {
-        'boliviaCompliance.comprobanteUrl':         storedUrl,
+        'boliviaCompliance.comprobanteUrl':         url,
         'boliviaCompliance.numeroComprobante':      numeroComprobante,
         'boliviaCompliance.comprobanteGeneratedAt': new Date(),
       },
     });
 
-    res.json({ ok: true, transactionId, comprobanteUrl: storedUrl, numeroComprobante,
-               resolvedOk: !!resolvedUrl });
+    // Devolver al admin una URL usable AHORA (fresca de 1h), no la referencia cruda.
+    const freshUrl = await resolveComprobanteUrl(url);
+    res.json({ ok: true, transactionId, comprobanteUrl: freshUrl, numeroComprobante,
+               resolvedOk: !!freshUrl });
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack?.split('\n').slice(0, 5) });
   }
