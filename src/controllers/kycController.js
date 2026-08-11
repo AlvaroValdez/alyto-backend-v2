@@ -9,6 +9,8 @@ import Stripe          from 'stripe';
 import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { screenUser }   from '../services/sanctionsService.js';
+import { readDocumentNumber } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { approveKycFromSession } from '../webhooks/stripeWebhook.js';
 
 let _stripe = null;
@@ -294,9 +296,13 @@ export async function approveKycTest(req, res) {
     console.info(`[KYC Test] ✅ KYC aprobado manualmente — userId: ${userId}`);
 
     // Screening AML (fire-and-forget) — también en modo test para cubrir el flujo
-    const fullUser = await User.findById(userId).select('firstName lastName identityDocument').lean();
+    const fullUser = await User.findById(userId)
+      .select('firstName lastName identityDocument +identityDocument.numberCiphertext').lean();
     if (fullUser) {
-      runSanctionsScreening(userId, fullUser.firstName, fullUser.lastName, fullUser.identityDocument?.number);
+      if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* cae a solo-nombre */ } }
+      let ci = null;
+      try { ci = readDocumentNumber(fullUser); } catch { ci = null; }
+      runSanctionsScreening(userId, fullUser.firstName, fullUser.lastName, ci);
     }
 
     return res.json({

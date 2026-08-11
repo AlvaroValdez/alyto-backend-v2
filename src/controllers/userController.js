@@ -15,7 +15,17 @@ import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
-import { isRealDocumentNumber } from '../utils/clientDocument.js';
+import { isRealDocumentNumber, readDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
+
+// select:false → hay que pedir explícitamente el ciphertext del CI para poder descifrarlo.
+const DOC_CIPHERTEXT_SELECT = '+identityDocument.numberCiphertext';
+
+/** Envía el perfil asegurando la DEK cargada si el CI viene cifrado. */
+async function sendProfile(res, user) {
+  if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* degrada a documentNumber:null */ } }
+  return res.status(200).json(buildProfileResponse(user));
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -64,9 +74,12 @@ function buildProfileResponse(user) {
     sourceOfFunds:         user.sourceOfFunds ?? null,
     dateOfBirth:           user.dateOfBirth   ?? null,
     address:               user.address ?? null,
-    // CI/RUT declarado — null mientras siga el placeholder del registro.
-    documentNumber:        isRealDocumentNumber(user.identityDocument?.number)
-                             ? user.identityDocument.number : null,
+    // CI/RUT declarado — descifrado si aplica; null mientras siga el placeholder
+    // del registro o si el ciphertext no está disponible (degradación segura).
+    documentNumber:        (() => {
+      try { const n = readDocumentNumber(user); return isRealDocumentNumber(n) ? n : null; }
+      catch { return null; }
+    })(),
     createdAt:      user.createdAt,
     avatarUrl:      user.avatarUrl ?? null,
     fcmTokens:      (user.fcmTokens ?? []).length,
@@ -89,10 +102,10 @@ function buildProfileResponse(user) {
  */
 export async function getProfile(req, res) {
   try {
-    const user = await User.findById(req.user._id).lean();
+    const user = await User.findById(req.user._id).select(DOC_CIPHERTEXT_SELECT).lean();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
-    return res.status(200).json(buildProfileResponse(user));
+    return sendProfile(res, user);
   } catch (err) {
     console.error('[UserCtrl] getProfile error:', err.message);
     return res.status(500).json({ error: 'Error interno al obtener el perfil.' });
@@ -148,11 +161,11 @@ export async function updateProfile(req, res) {
       req.user._id,
       { $set },
       { returnDocument: 'after', runValidators: true },
-    ).lean();
+    ).select(DOC_CIPHERTEXT_SELECT).lean();
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
-    return res.status(200).json(buildProfileResponse(updated));
+    return sendProfile(res, updated);
   } catch (err) {
     console.error('[UserCtrl] updateProfile error:', err.message);
     return res.status(500).json({ error: 'Error interno al actualizar el perfil.' });
@@ -246,18 +259,19 @@ export async function updateKycProfile(req, res) {
     };
     if (phone) $set.phone = phone;
     // El CI declarado reemplaza el placeholder 'PENDING_VERIFICATION' del registro.
-    if (documentNumber) $set['identityDocument.number'] = documentNumber;
+    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo.
+    if (documentNumber) await applyDocumentNumberToSet($set, req.user._id, documentNumber);
 
     const updated = await User.findByIdAndUpdate(
       req.user._id,
       { $set },
       { returnDocument: 'after', runValidators: true },
-    ).lean();
+    ).select(DOC_CIPHERTEXT_SELECT).lean();
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
     invalidateUserCache(req.user._id); // refrescar el gate kycProfileCompletedAt en protect()
 
-    return res.status(200).json(buildProfileResponse(updated));
+    return sendProfile(res, updated);
   } catch (err) {
     console.error('[UserCtrl] updateKycProfile error:', err.message);
     return res.status(500).json({ error: 'Error al guardar la información de cumplimiento.' });

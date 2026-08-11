@@ -58,6 +58,7 @@ import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
 import { mapVitaError }       from '../utils/vitaErrorMapper.js';
 import { resolveClientDocument } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
@@ -682,8 +683,10 @@ async function generateSrlComprobante(transaction) {
     if (transaction.legalEntity !== 'SRL') return;
     if (transaction.boliviaCompliance?.comprobanteUrl) return; // ya generado (idempotente)
 
-    const user = await User.findById(transaction.userId).lean();
+    // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
+    const user = await User.findById(transaction.userId).select('+identityDocument.numberCiphertext').lean();
     if (!user) return;
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* comprobante cae a "En verificación" */ } }
 
     const numeroComprobante = await generarNumeroCorrelativo('BOL');
     const digital          = transaction.digitalAssetAmount ?? 0;
