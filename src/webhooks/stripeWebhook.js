@@ -29,7 +29,8 @@ import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { notify }       from '../services/notifications.js';
 import { screenUser }   from '../services/sanctionsService.js';
 import { provisionUserKeypair } from '../services/custodyService.js';
-import { isRealDocumentNumber } from '../utils/clientDocument.js';
+import { isRealDocumentNumber, readDocumentNumber, hasRealDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -225,12 +226,16 @@ async function _approveKyc(session) {
 async function _screenAfterApproval(user, vo) {
   try {
     const fresh = await User.findById(user._id)
-      .select('firstName lastName identityDocument.number').lean().catch(() => null);
+      .select('firstName lastName identityDocument.number +identityDocument.numberCiphertext').lean().catch(() => null);
+
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* screening cae a solo-nombre */ } }
+    let documentNumber = null;
+    try { documentNumber = readDocumentNumber(fresh) ?? readDocumentNumber(user); } catch { documentNumber = null; }
 
     const result = await screenUser({
       firstName:      (typeof vo?.first_name === 'string' && vo.first_name.trim()) || fresh?.firstName || user.firstName,
       lastName:       (typeof vo?.last_name === 'string' && vo.last_name.trim())  || fresh?.lastName  || user.lastName,
-      documentNumber: fresh?.identityDocument?.number ?? user.identityDocument?.number,
+      documentNumber,
     });
 
     const update = { sanctionsScreenedAt: result.screenedAt, sanctionsFlag: !result.isClean };
@@ -269,7 +274,7 @@ async function _persistVerifiedOutputs(session, userId) {
 
     const $set = {};
     const current = await User.findById(userId)
-      .select('address identityDocument.number firstName lastName').lean();
+      .select('address identityDocument.number +identityDocument.numberCiphertext firstName lastName').lean();
 
     // Fecha de nacimiento verificada (fuente autoritativa).
     if (vo.dob && vo.dob.year) {
@@ -287,11 +292,12 @@ async function _persistVerifiedOutputs(session, userId) {
     }
     // Número de documento: usar el de Stripe SOLO si el usuario no declaró uno real
     // en el KYC (no pisar el CI declarado). Reemplaza el placeholder 'PENDING_VERIFICATION'.
+    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo.
     if (
       typeof vo.id_number === 'string' && vo.id_number.trim() &&
-      !isRealDocumentNumber(current?.identityDocument?.number)
+      !hasRealDocumentNumber(current)
     ) {
-      $set['identityDocument.number'] = vo.id_number.trim();
+      await applyDocumentNumberToSet($set, userId, vo.id_number.trim());
     }
     // Dirección del documento — solo como respaldo si el usuario no cargó una.
     const hasAddr = current?.address && (current.address.street || current.address.city);

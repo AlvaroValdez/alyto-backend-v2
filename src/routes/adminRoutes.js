@@ -943,9 +943,15 @@ router.post('/regenerate-comprobante', async (req, res) => {
     const { generarNumeroCorrelativo }  = await import('../utils/correlativoService.js');
     const { generateOfficialReceipt }   = await import('../utils/pdfGenerator.js');
     const { uploadBuffer, resolveComprobanteUrl } = await import('../services/storageService.js');
+    const { readDocumentNumber, isRealDocumentNumber } = await import('../utils/clientDocument.js');
+    const { ensureDek, isPiiEncryptionEnabled } = await import('../services/piiCrypto.js');
 
-    const user = await User.findById(tx.userId).lean();
+    // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
+    const user = await User.findById(tx.userId).select('+identityDocument.numberCiphertext').lean();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* cae a "NO REGISTRADO" */ } }
+    let ciReal = null;
+    try { const n = readDocumentNumber(user); ciReal = isRealDocumentNumber(n) ? n : null; } catch { ciReal = null; }
 
     const numeroComprobante = tx.boliviaCompliance?.numeroComprobante
       ?? await generarNumeroCorrelativo('BOL');
@@ -959,10 +965,7 @@ router.post('/regenerate-comprobante', async (req, res) => {
     const dto = {
       numeroComprobante,
       nombreCliente:        user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
-      nitOci:               user.taxId
-        ?? (user.identityDocument?.number && !/pending|verification/i.test(user.identityDocument.number)
-            ? user.identityDocument.number : null)
-        ?? 'NO REGISTRADO',
+      nitOci:               user.taxId ?? ciReal ?? 'NO REGISTRADO',
       tipoDocumento:        user.taxId ? 'NIT' : 'CI',
       codigoClienteAlyto:   user._id.toString(),
       fechaHora:            (tx.createdAt ?? new Date()).toISOString(),

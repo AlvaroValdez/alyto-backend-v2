@@ -24,11 +24,28 @@ const identityDocumentSchema = new Schema(
       enum:     ['passport', 'national_id', 'rut', 'ci_bolivia', 'nit', 'ein'],
       required: true,
     },
-    /** Número de documento — cifrado en reposo en producción (AWS KMS) */
+    /**
+     * Número de documento.
+     * - Si el cifrado PII está activo (PII_ENCRYPTION_ENABLED) y hay un CI real,
+     *   este campo guarda el marcador `ENCRYPTED` y el valor real vive cifrado en
+     *   `numberCiphertext`. Si no, guarda el sentinel `PENDING_VERIFICATION` o
+     *   (modo legacy / flag OFF) el número en claro.
+     * - Leer SIEMPRE vía `readDocumentNumber()` (utils/clientDocument.js), nunca
+     *   este campo directo. Escribir vía `resolveDocumentNumberStorage()`.
+     */
     number: {
       type:     String,
       required: true,
       trim:     true,
+    },
+    /**
+     * Ciphertext AES-256-GCM del CI real (esquema `v1:` de services/piiCrypto.js),
+     * sobre una DEK envuelta por AWS KMS. select:false — nunca sale en queries por
+     * defecto ni en respuestas API; solo `readDocumentNumber()` lo descifra.
+     */
+    numberCiphertext: {
+      type:   String,
+      select: false,
     },
     /** País emisor del documento (ISO 3166-1 alpha-2) */
     issuingCountry: {

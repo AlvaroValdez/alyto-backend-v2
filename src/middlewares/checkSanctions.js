@@ -22,6 +22,8 @@
 import * as Sentry from '@sentry/node'
 import { screenUser } from '../services/sanctionsService.js'
 import User from '../models/User.js'
+import { readDocumentNumber } from '../utils/clientDocument.js'
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js'
 
 const SCREENING_UNAVAILABLE_RESPONSE = {
   error:   'Servicio temporalmente no disponible.',
@@ -40,10 +42,14 @@ export async function checkSanctions(req, res, next) {
 
     // protect() no incluye identityDocument en su .select() — sin esta lectura
     // el screening corría SIEMPRE solo por nombre (audit 2026-06-11).
-    let documentNumber = user.identityDocument?.number
+    // El CI se descifra vía readDocumentNumber (numberCiphertext, select:false).
+    let documentNumber = null
+    try { documentNumber = readDocumentNumber(user) } catch { documentNumber = null }
     if (!documentNumber && user._id) {
-      const docUser = await User.findById(user._id).select('identityDocument.number').lean()
-      documentNumber = docUser?.identityDocument?.number
+      const docUser = await User.findById(user._id)
+        .select('identityDocument.number +identityDocument.numberCiphertext').lean()
+      if (isPiiEncryptionEnabled()) { try { await ensureDek() } catch { /* cae a solo-nombre */ } }
+      try { documentNumber = readDocumentNumber(docUser) } catch { documentNumber = null }
     }
 
     const result = await screenUser({

@@ -12,10 +12,12 @@
  */
 
 import crypto   from 'crypto';
+import mongoose from 'mongoose';
 import bcrypt   from 'bcryptjs';
 import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
+import { resolveDocumentNumberStorage } from '../utils/clientDocument.js';
 import WalletBOB    from '../models/WalletBOB.js';
 import WalletUSDC   from '../models/WalletUSDC.js';
 import Transaction  from '../models/Transaction.js';
@@ -197,7 +199,16 @@ export async function registerUser(req, res) {
     const nowTs     = new Date();
 
     // ── Creación del usuario ───────────────────────────────────────────────
+    // _id se pre-genera para poder cifrar el CI (AAD atado al userId) dentro del
+    // mismo create — sin una segunda escritura. resolveDocumentNumberStorage cifra
+    // el valor real cuando PII_ENCRYPTION_ENABLED; si no, guarda el sentinel.
+    const _id      = new mongoose.Types.ObjectId();
+    const rawDoc   = (typeof documentNumber === 'string' && documentNumber.trim().length >= 4)
+                       ? documentNumber.trim() : '';
+    const docStore = await resolveDocumentNumberStorage(_id, rawDoc);
+
     const user = await User.create({
+      _id,
       firstName:        (typeof firstName === 'string' && firstName.trim()) || 'Usuario',
       lastName:         (typeof lastName === 'string' && lastName.trim())   || 'Alyto',
       email:            normalizedEmail,
@@ -211,14 +222,13 @@ export async function registerUser(req, res) {
       emailVerificationLastSent: nowTs,
       residenceCountry: countryCode,
       preferences:      { currency: getDefaultCurrency(countryCode) },
-      // Documento del cliente: si el onboarding ya lo declara, se guarda; si no,
-      // queda 'PENDING_VERIFICATION' hasta capturarse en el flujo KYC.
+      // Documento del cliente: si el onboarding ya lo declara, se guarda (cifrado
+      // si el flag está activo); si no, queda 'PENDING_VERIFICATION' hasta el KYC.
       identityDocument: {
-        type:           ENTITY_DEFAULT_DOC[legalEntity],
-        number:         (typeof documentNumber === 'string' && documentNumber.trim().length >= 4)
-                          ? documentNumber.trim()
-                          : 'PENDING_VERIFICATION',
-        issuingCountry: countryCode,
+        type:             ENTITY_DEFAULT_DOC[legalEntity],
+        number:           docStore.number,
+        numberCiphertext: docStore.numberCiphertext ?? undefined,
+        issuingCountry:   countryCode,
       },
       // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI
       tosAcceptance: {

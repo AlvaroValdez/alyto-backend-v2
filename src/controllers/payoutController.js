@@ -20,7 +20,8 @@ import Transaction from '../models/Transaction.js';
 import User        from '../models/User.js';
 import { generateOfficialReceipt } from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
-import { resolveClientDocument } from '../utils/clientDocument.js';
+import { resolveClientDocument, readDocumentNumber } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { autoGenerateBusinessInvoice } from './businessInvoiceController.js';
 import { uploadBuffer } from '../services/storageService.js';
 
@@ -106,9 +107,11 @@ export async function processBoliviaManualPayout(req, res) {
   }
 
   // ── 5. Cargar usuario para datos KYC del comprobante ─────────────────────
+  // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
   let user;
   try {
-    user = await User.findById(transaction.userId).lean();
+    user = await User.findById(transaction.userId).select('+identityDocument.numberCiphertext').lean();
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* comprobante cae a "En verificación" */ } }
   } catch (err) {
     console.error('[Alyto Payout Bolivia] Error cargando usuario:', {
       transactionId,
@@ -157,7 +160,7 @@ export async function processBoliviaManualPayout(req, res) {
         status:      'completed',
         completedAt: ahora,
         'boliviaCompliance.comprobanteGeneratedAt': ahora,
-        'boliviaCompliance.clientTaxId':            user.taxId ?? user.identityDocument?.number,
+        'boliviaCompliance.clientTaxId':            user.taxId ?? readDocumentNumber(user),
         'boliviaCompliance.amountBob':              transaction.originalAmount,
         'boliviaCompliance.exchangeRateBob':        tipoCambioBob,
       },

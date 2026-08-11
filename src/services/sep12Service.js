@@ -17,6 +17,7 @@
 import User from '../models/User.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import { logger } from '../utils/logger.js';
+import { applyDocumentNumberToSet } from '../utils/clientDocument.js';
 
 // ─── Mapeo de estados ────────────────────────────────────────────────────────
 
@@ -144,8 +145,11 @@ export async function putCustomer({ accountId, fields }) {
   // Documento de identidad
   if (fields.id_type || fields.id_number || fields.id_issuer) {
     updates['identityDocument.type']           = mapIdType(fields.id_type);
-    updates['identityDocument.number']         = fields.id_number;
     updates['identityDocument.issuingCountry'] = fields.id_issuer;
+    // CI cifrado (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo.
+    if (fields.id_number != null && String(fields.id_number).trim()) {
+      await applyDocumentNumberToSet(updates, user._id, String(fields.id_number).trim());
+    }
   }
 
   await User.findByIdAndUpdate(user._id, { $set: updates });
