@@ -149,7 +149,10 @@ export async function getWalletTransactions(req, res) {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '20', 10)))
     const skip  = (page - 1) * limit
 
-    const filter = { userId: user._id }
+    // Solo movimientos de la wallet BOB. Excluimos explícitamente los USDC
+    // (walletModel:'WalletUSDC') — que se listan en /wallet/usdc/transactions —
+    // usando $ne para NO dejar fuera movimientos BOB legacy sin el campo seteado.
+    const filter = { userId: user._id, walletModel: { $ne: 'WalletUSDC' } }
     if (req.query.type)   filter.type   = req.query.type
     if (req.query.status) filter.status = req.query.status
 
@@ -667,6 +670,19 @@ export async function requestWithdrawal(req, res) {
       return res.status(400).json({ error: 'Saldo insuficiente.' })
     }
 
+    // Imagen QR bancaria opcional (adjunta por el usuario para facilitar el pago
+    // del admin). Se persiste DENTRO de la creación transaccional para que el QR no
+    // pueda perderse: o queda guardado junto con el retiro, o el retiro no se crea.
+    // (Antes se guardaba con un updateOne post-commit fire-and-forget que, si fallaba,
+    //  dejaba el retiro sin QR y el admin no podía procesar la devolución.)
+    const bankQrImage = req.file ? {
+      data:       req.file.buffer.toString('base64'),
+      mimetype:   req.file.mimetype,
+      filename:   req.file.originalname,
+      size:       req.file.size,
+      uploadedAt: new Date(),
+    } : null
+
     const [wtx] = await WalletTransaction.create([{
       walletId:      wallet._id,
       userId:        user._id,
@@ -684,32 +700,13 @@ export async function requestWithdrawal(req, res) {
         ...(accountNumber ? { accountNumber } : {}),
         ...(accountHolder ? { accountHolder } : {}),
         ...(accountType   ? { accountType }   : {}),
+        ...(bankQrImage   ? { bankQrImage }   : {}),
       },
       expiresAt:     new Date(Date.now() + 72 * 60 * 60 * 1000),  // 72h para retiros
     }], { session })
     await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
 
-    // Imagen QR bancaria opcional (adjunta por el usuario para facilitar pago admin)
-    const bankQrMeta = {}
-    if (req.file) {
-      bankQrMeta.bankQrImage = {
-        data:       req.file.buffer.toString('base64'),
-        mimetype:   req.file.mimetype,
-        filename:   req.file.originalname,
-        size:       req.file.size,
-        uploadedAt: new Date(),
-      }
-    }
-
     await session.commitTransaction()
-
-    // Guardar QR fuera de la sesión (no es monetario, fallo no es crítico)
-    if (req.file) {
-      await WalletTransaction.updateOne(
-        { _id: wtx._id },
-        { $set: { 'metadata.bankQrImage': bankQrMeta.bankQrImage } },
-      ).catch(err => console.warn('[Wallet] Error guardando QR bancario:', err.message))
-    }
 
     // Push notification al usuario
     notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
