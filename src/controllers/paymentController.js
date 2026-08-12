@@ -56,6 +56,7 @@ import {
   createPayin,
   VITA_SENT_ONLY_COUNTRIES,
   getVitaCountryKey,
+  getVitaSentCountry,
 }                              from '../services/vitaWalletService.js';
 import {
   getHarborQuote,
@@ -1672,23 +1673,50 @@ export async function initCrossBorderPayment(req, res) {
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 async function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
-  // GT, SV, ES, PL only exist in vita_sent table — fall back to it for pricing.
-  // All other countries use withdrawal table (original behavior).
   const destUpper  = destinationCountry.toUpperCase();
-  const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? vitaPricesResponse?.vita_sent?.prices?.attributes
-    : vitaPricesResponse?.withdrawal?.prices?.attributes;
+  const isVitaSent = VITA_SENT_ONLY_COUNTRIES.has(destUpper);
 
-  const attrs = attrsSource ?? vitaPricesResponse?.withdrawal?.prices?.attributes;
-  if (!attrs) return null;
-
-  // vita_sent (ES/PL/GT/SV): las claves ISO directas existen en la tabla — no mapear.
+  // vita_sent (ES/PL/GT/SV/EU): claves ISO directas en la tabla, con EU→'es'
+  // (getVitaSentCountry — la eurozona entra por España, el IBAN fija el país).
   // withdrawal (todos los demás): CA→'causd', HK→'hkusd', etc.
-  const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? destinationCountry.toLowerCase()
+  const countryKey = isVitaSent
+    ? getVitaSentCountry(destUpper).toLowerCase()
     : getVitaCountryKey(destinationCountry);
   const origin     = originCurrency.toUpperCase();
   let rate;
+
+  // ── Países vita_sent con origen USD/USDC/BOB: tasa desde usd.vita_sent ──────
+  // Es el MISMO rail que ejecuta el dispatch (createVitaSentPayout) y es
+  // autosuficiente: NO depende de la sección CLP, por eso va ANTES del gate de
+  // attrs (que apunta a la sección CLP y no aplica aquí).
+  if (isVitaSent && (origin === 'USD' || origin === 'USDC' || origin === 'BOB')) {
+    const sentAttrs = vitaPricesResponse?.usd?.vita_sent?.prices?.attributes;
+    const sentRate  = Number(sentAttrs?.usd_sell?.[countryKey] ?? NaN);
+    if (isFinite(sentRate) && sentRate > 0) {
+      const fixedCost  = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
+      const validUntil = sentAttrs?.valid_until ?? null;
+      if (origin === 'BOB') {
+        const BOB_USD_RATE = await getBOBRate();
+        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil };
+      }
+      return { rate: sentRate, fixedCost, validUntil };
+    }
+  }
+
+  // ── Sección CLP (tasas cross-rate / origen CLP) ──────────────────────────────
+  // La API de Vita anida las tablas por moneda de origen (clp.withdrawal,
+  // clp.vita_sent, usd.withdrawal, ...). Se conservan las rutas top-level como
+  // primer intento por compatibilidad con la forma antigua de la respuesta.
+  const attrsSource = isVitaSent
+    ? (vitaPricesResponse?.vita_sent?.prices?.attributes
+        ?? vitaPricesResponse?.clp?.vita_sent?.prices?.attributes)
+    : (vitaPricesResponse?.withdrawal?.prices?.attributes
+        ?? vitaPricesResponse?.clp?.withdrawal?.prices?.attributes);
+
+  const attrs = attrsSource
+    ?? vitaPricesResponse?.withdrawal?.prices?.attributes
+    ?? vitaPricesResponse?.clp?.withdrawal?.prices?.attributes;
+  if (!attrs) return null;
 
   // ── Destino Bolivia (BO): Vita no tiene clp_sell['bo'] — derivar via BOB_USD_RATE ──
   // AV Finance SRL es el anchor manual: paga en BOB directamente.
@@ -1737,7 +1765,8 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     rate = clpToDest / clpToUsd;
   } else if (origin === 'BOB') {
     // Bolivia: Vita no tiene bob_sell. Dos pasos:
-    //   PASO 1 — tasa USD→destino (USD directo o cross-rate CLP)
+    //   PASO 1 — tasa USD→destino (USD directo o cross-rate CLP; vita_sent ya
+    //            se resolvió arriba antes del gate)
     //   PASO 2 — dividir por BOB_USD_RATE (desde MongoDB o .env)
     const BOB_USD_RATE  = await getBOBRate();
     const usdAttrs      = vitaPricesResponse?.usd?.withdrawal?.prices?.attributes;
@@ -1977,7 +2006,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   }
 
   // ── Vita / anchorBolivia ──────────────────────────────────────────────────
-  let usdToDestRate, validUntil, providerMeta;
+  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta;
 
   {
     let vitaResponse;
@@ -1999,6 +2028,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     }
 
     usdToDestRate = vitaPricingUSD.rate;
+    vitaFixedCost = vitaPricingUSD.fixedCost;
     validUntil    = vitaPricingUSD.validUntil;
     providerMeta  = { providerQuoteId: null, rateSource: 'vita', rateExpiresAt: null, rateConfidence: 'estimated' };
   }
@@ -2007,8 +2037,11 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   try {
     quote = calculateQuote({
       amount, corridor, bobPerUsdc,
-      providerRate: usdToDestRate,
-      accountType:  req.user?.accountType,
+      providerRate:     usdToDestRate,
+      // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
+      // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
+      providerFixedFee: vitaFixedCost,
+      accountType:      req.user?.accountType,
     });
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
@@ -2024,7 +2057,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     / bobPerUsdc,
   );
 
-  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate, '| provider:', providerMeta.rateSource);
+  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate, '| fixedCost:', vitaFixedCost, '| provider:', providerMeta.rateSource);
   console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', quote.effectiveRate);
   console.log('[Quote BOB] netBOB:', amount - quote.totalDeductedReal, '| usdcTransit:', quote.digitalAssetAmount, '| dest:', quote.destinationAmount);
 
@@ -2359,7 +2392,7 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdcToDestRate, validUntil } = vitaPricingUSD;
+    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
 
     // ── Quote unificado — canonical formula (spec v1.0 §3.2) ─────────────────
     let quote;
@@ -2368,8 +2401,10 @@ export async function getQuote(req, res) {
         amount,
         corridor,
         bobPerUsdc,
-        providerRate: usdcToDestRate,
-        accountType: req.user?.accountType,
+        providerRate:     usdcToDestRate,
+        // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
+        providerFixedFee: vitaFixedCost,
+        accountType:      req.user?.accountType,
       });
     } catch (err) {
       console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);

@@ -34,6 +34,7 @@ import {
   createPayout,
   createVitaSentPayout,
   VITA_SENT_ONLY_COUNTRIES,
+  getVitaSentCountry,
   getPrices,
 } from '../services/vitaWalletService.js';
 import {
@@ -1601,12 +1602,15 @@ export async function dispatchPayout(transaction) {
         // de lo contrario se hace una llamada fresca.
         if (!sharedLivePrices) await getPrices();
 
-        // GT, SV, ES, PL solo están disponibles vía vita_sent (no en withdrawal rails).
+        // GT, SV, ES, PL, EU solo van vía vita_sent (no en withdrawal rails).
         // Para todos los demás destinos se sigue usando withdrawal (comportamiento original).
         const destCountry = (transaction.destinationCountry ?? '').toUpperCase();
         if (VITA_SENT_ONLY_COUNTRIES.has(destCountry)) {
-          console.info(`[dispatchPayout] ${destCountry} → vita_sent routing`);
-          return createVitaSentPayout(vitaPayload);
+          // Vita no conoce 'EU' como país — la eurozona entra por 'ES' (el IBAN
+          // del beneficiario determina el país final). getVitaSentCountry mapea.
+          const sentCountry = getVitaSentCountry(destCountry);
+          console.info(`[dispatchPayout] ${destCountry} → vita_sent routing (country=${sentCountry})`);
+          return createVitaSentPayout({ ...vitaPayload, country: sentCountry });
         }
         return createPayout(vitaPayload);
       }

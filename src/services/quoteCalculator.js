@@ -47,6 +47,11 @@ export function getEffectiveSpreadPct(corridor, user) {
  * @param {object}  input.corridor      TransactionConfig doc or plain config
  * @param {number}  input.bobPerUsdc    BOB → USDC rate (admin-configured or env fallback)
  * @param {number}  input.providerRate   USDC → destination currency rate (raw from provider, no markup)
+ * @param {number}  [input.providerFixedFee] Comisión FIJA del proveedor en moneda DESTINO
+ *                                      (ej. fixed_cost de Vita /prices). Si > 0, GANA sobre
+ *                                      corridor.payoutFeeFixed — es lo que el proveedor
+ *                                      descuenta de verdad al ejecutar; sin esto el quote
+ *                                      promete más de lo que el beneficiario recibe.
  * @param {string}  [input.accountType] 'business' applies businessAlytoCSpread when set
  * @returns {{
  *   originAmount:       number,
@@ -60,7 +65,7 @@ export function getEffectiveSpreadPct(corridor, user) {
  *   digitalAsset:       string
  * }}
  */
-export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, accountType = 'personal' }) {
+export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, providerFixedFee = null, accountType = 'personal' }) {
   if (!amount || amount <= 0) {
     throw new Error('calculateQuote: amount must be positive');
   }
@@ -100,8 +105,11 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, acc
   const usdcTransitAmount = round2(netBOB / bobPerUsdc);
 
   // Step 6 — destination amount using RAW provider rate (no markup — spec §1.2, §6.1)
-  // payoutFeeFixed is stored in destination currency — do NOT multiply by providerRate
-  const payoutFeeInDest   = corridor.payoutFeeFixed ?? 0;
+  // Comisión fija en moneda DESTINO — do NOT multiply by providerRate.
+  // Prioridad: la fija REAL del proveedor (fixed_cost live de Vita) sobre la
+  // configurada en el corredor — mismo criterio que la rama CLP del WS y el
+  // getQuote no-manual (`vitaFixedCost > 0 ? vitaFixedCost : payoutFeeFixed`).
+  const payoutFeeInDest   = (providerFixedFee > 0) ? providerFixedFee : (corridor.payoutFeeFixed ?? 0);
   const destinationAmount = round2((usdcTransitAmount * providerRate) - payoutFeeInDest);
 
   // Step 7 — effective rate for display (6 decimales para preservar rates < 1)

@@ -24,7 +24,7 @@ import jwt                 from 'jsonwebtoken';
 import User                from '../models/User.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
-import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey } from './vitaWalletService.js';
+import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey, getVitaSentCountry } from './vitaWalletService.js';
 import { resolveMinAmountOrigin, resolveQuoteRate } from './exchangeRateService.js';
 import { resolveEuCorridorByAmount } from '../routing/euAmountRouter.js';
 import { calculateQuote }  from './quoteCalculator.js';
@@ -144,7 +144,10 @@ function extractPricing(originCurrency, destinationCountry) {
   const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
-  const countryKey = destinationCountry.toLowerCase();
+  // Países vita_sent usan su clave propia (EU → 'es'); el resto, ISO minúsculas.
+  const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? getVitaSentCountry(destUpper).toLowerCase()
+    : destinationCountry.toLowerCase();
   const origin     = originCurrency.toUpperCase();
   let rate;
 
@@ -194,8 +197,23 @@ function extractPricingUSD(destinationCountry) {
   const destUpper = destinationCountry.toUpperCase();
   const usdKey    = getVitaCountryKey(destinationCountry, 'USD');
 
-  // Tasa directa USD: exactamente lo que Vita aplica internamente para currency='usd'
-  if (!VITA_SENT_ONLY_COUNTRIES.has(destUpper)) {
+  // Países vita_sent: tasa directa desde usd.vita_sent — el rail que el dispatch
+  // realmente ejecuta (createVitaSentPayout). EU se traduce a 'es' (eurozona por
+  // IBAN, precedente bo-es pre-2026-05-10). Sin esto EU caía en withdrawal['eu']
+  // (peor tasa + fixed_cost 5 EUR que el quote además no descontaba).
+  if (VITA_SENT_ONLY_COUNTRIES.has(destUpper)) {
+    const sentKey   = getVitaSentCountry(destUpper).toLowerCase();
+    const sentAttrs = vitaCache.prices?.usd?.vita_sent?.prices?.attributes;
+    const sentRate  = Number(sentAttrs?.usd_sell?.[sentKey] ?? NaN);
+    if (isFinite(sentRate) && sentRate > 0) {
+      return {
+        rate:       sentRate,
+        fixedCost:  Number(sentAttrs?.fixed_cost?.[sentKey] ?? 0),
+        validUntil: sentAttrs?.valid_until ?? null,
+      };
+    }
+  } else {
+    // Tasa directa USD: exactamente lo que Vita aplica internamente para currency='usd'
     const usdAttrs   = vitaCache.prices?.usd?.withdrawal?.prices?.attributes;
     const directRate = Number(usdAttrs?.usd_sell?.[usdKey] ?? NaN);
     if (isFinite(directRate) && directRate > 0) {
@@ -214,7 +232,9 @@ function extractPricingUSD(destinationCountry) {
   const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
-  const countryKey = destinationCountry.toLowerCase();
+  const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+    ? getVitaSentCountry(destUpper).toLowerCase()
+    : destinationCountry.toLowerCase();
   const clpToDest  = Number(attrs?.clp_sell?.[countryKey] ?? NaN);
   const clpToUsd   = Number(attrs?.clp_sell?.['us']       ?? NaN);
   if (!isFinite(clpToDest) || !isFinite(clpToUsd) || clpToUsd <= 0) return null;
@@ -404,7 +424,7 @@ async function computeQuote(state) {
       return null;
     }
 
-    const { rate: usdToDestRate, validUntil } = usdPricing;
+    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
 
     let quote;
     try {
@@ -412,8 +432,11 @@ async function computeQuote(state) {
         amount,
         corridor,
         bobPerUsdc,
-        providerRate: usdToDestRate,
-        accountType:  state.accountType,
+        providerRate:     usdToDestRate,
+        // Fija REAL del proveedor (fixed_cost live): sin descontarla el quote
+        // prometía más de lo que Vita entrega (ej. EU withdrawal: 5 EUR).
+        providerFixedFee: vitaFixedCost,
+        accountType:      state.accountType,
       });
     } catch (err) {
       console.warn('[Alyto WS] calculateQuote rejected:', err.message);
@@ -431,6 +454,7 @@ async function computeQuote(state) {
       bobPerUsdc,
       usdcTransitAmount: quote.digitalAssetAmount,
       usdToDestRate,
+      vitaFixedCost,
       destinationAmount: quote.destinationAmount,
       effectiveRate:     quote.effectiveRate,
     });
