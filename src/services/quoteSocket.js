@@ -27,7 +27,7 @@ import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey, getVitaSentCountry } from './vitaWalletService.js';
 import { resolveMinAmountOrigin, resolveQuoteRate } from './exchangeRateService.js';
 import { resolveEuCorridor } from '../routing/euAmountRouter.js';
-import { calculateQuote }  from './quoteCalculator.js';
+import { calculateQuote, toPublicFees } from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import Sentry              from './sentry.js';
@@ -406,7 +406,10 @@ async function computeQuote(state) {
         payoutMethod:        corridor.payoutMethod,
         usdcTransitAmount:   quote.digitalAssetAmount,
         bobPerUsdc,
-        fees:                quote.fees,
+        fees:                toPublicFees(quote.fees, {
+          originCurrency:      corridor.originCurrency,
+          destinationCurrency: corridor.destinationCurrency,
+        }),
         quoteExpiresAt:      new Date(Date.now() + QUOTE_VALIDITY_MS),
         rateConfidence:      'estimated',
         harborPaymentMethod: harborRateData.paymentMethod,
@@ -473,7 +476,10 @@ async function computeQuote(state) {
       payoutMethod:        corridor.payoutMethod,
       usdcTransitAmount:   quote.digitalAssetAmount,
       bobPerUsdc,
-      fees:                quote.fees,
+      fees:                toPublicFees(quote.fees, {
+        originCurrency:      corridor.originCurrency,
+        destinationCurrency: corridor.destinationCurrency,
+      }),
       quoteExpiresAt,
       rateConfidence:      'estimated',
       updatedAt: new Date(),

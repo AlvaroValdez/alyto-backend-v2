@@ -144,4 +144,30 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
   };
 }
 
-export default { calculateQuote };
+/**
+ * Convierte los fees internos al shape PÚBLICO que consume el frontend.
+ *
+ * ⚠️ `payoutFee` sale en 0 A PROPÓSITO: está en moneda DESTINO y ya viene
+ * descontado de `destinationAmount`. El frontend suma los fees para mostrar
+ * "Costo del envío" en moneda ORIGEN (Step1Amount / Step4Confirm), así que
+ * incluirlo mezclaría unidades y mostraría un total absurdo (ej. sumar 3495 COP
+ * a Bs 21.34 → "Bs 3.516"). Es la misma convención que ya usaban las rutas CLP.
+ *
+ * La fija real del proveedor se expone aparte y ETIQUETADA con su moneda, para
+ * que el frontend pueda mostrarla si algún día se quiere ser explícito.
+ *
+ * @param {object} fees                 quote.fees de calculateQuote
+ * @param {string} originCurrency       moneda en la que están los fees sumables
+ * @param {string} destinationCurrency  moneda de la fija del proveedor
+ */
+export function toPublicFees(fees, { originCurrency, destinationCurrency } = {}) {
+  return {
+    ...fees,
+    payoutFee:                0,
+    feeCurrency:              originCurrency ?? null,
+    providerFixedFee:         fees?.payoutFee ?? 0,
+    providerFixedFeeCurrency: destinationCurrency ?? null,
+  };
+}
+
+export default { calculateQuote, toPublicFees };

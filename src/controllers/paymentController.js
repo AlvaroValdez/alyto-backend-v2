@@ -34,7 +34,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
-import { calculateQuote, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
+import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -1996,7 +1996,13 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
       bobPerUsdc,
       usdcToDestRate:      selected.exchangeRate,
       harborPaymentMethod: selected.paymentMethod,
-      fees: { ...quote.fees, alytoProfitUSDC },
+      fees: {
+        ...toPublicFees(quote.fees, {
+          originCurrency:      corridor.originCurrency,
+          destinationCurrency: corridor.destinationCurrency,
+        }),
+        alytoProfitUSDC,
+      },
       payinMethod:     corridor.payinMethod,
       payoutMethod:    corridor.payoutMethod,
       entity:          'SRL',
@@ -2464,7 +2470,10 @@ export async function getQuote(req, res) {
       bobPerUsdc,
       usdcToDestRate,
       fees: {
-        ...quote.fees,
+        ...toPublicFees(quote.fees, {
+          originCurrency:      corridor.originCurrency,
+          destinationCurrency: corridor.destinationCurrency,
+        }),
         alytoProfitUSDC,
       },
       quoteExpiresAt,

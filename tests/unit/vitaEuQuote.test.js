@@ -12,7 +12,7 @@
  */
 
 import '../setup.env.js'
-import { calculateQuote } from '../../src/services/quoteCalculator.js'
+import { calculateQuote, toPublicFees } from '../../src/services/quoteCalculator.js'
 import { getVitaSentCountry, VITA_SENT_ONLY_COUNTRIES } from '../../src/services/vitaWalletService.js'
 
 // Corredor tipo bo-es (SRL retail): 6.5% spread + Bs 6 fija, sin payoutFeeFixed propio.
@@ -72,5 +72,35 @@ describe('calculateQuote — providerFixedFee (fija real del proveedor)', () => 
       providerRate: 0.852417, providerFixedFee: 5,
     })
     expect(q.fees.payoutFee).toBe(5)
+  })
+})
+
+describe('toPublicFees — no mezclar monedas en el "Costo del envío"', () => {
+  // El frontend suma payinFee+alytoCSpread+fixedFee+payoutFee y lo muestra en
+  // moneda ORIGEN. La fija del proveedor está en moneda DESTINO y ya viene
+  // descontada de destinationAmount → exponerla ahí mostraría, p.ej., "Bs 3.516"
+  // en un envío cuyo costo real es Bs 21.34 (fija de 3495 COP de bo-co).
+  const q = calculateQuote({
+    amount: 1000, corridor: CORRIDOR, bobPerUsdc: BOB_PER_USDC,
+    providerRate: 3100.75, providerFixedFee: 3495,   // caso real bo-co (COP)
+  })
+
+  test('payoutFee se expone en 0 (ya descontado, en otra moneda)', () => {
+    const pub = toPublicFees(q.fees, { originCurrency: 'BOB', destinationCurrency: 'COP' })
+    expect(q.fees.payoutFee).toBe(3495)   // interno: real
+    expect(pub.payoutFee).toBe(0)         // público: no sumable en BOB
+  })
+
+  test('la suma que hace el frontend queda en moneda origen y es correcta', () => {
+    const pub = toPublicFees(q.fees, { originCurrency: 'BOB', destinationCurrency: 'COP' })
+    const costoEnvioFrontend = pub.payinFee + pub.alytoCSpread + pub.fixedFee + pub.payoutFee
+    expect(costoEnvioFrontend).toBe(pub.totalDeducted)   // 65 + 6 = 71 BOB, sin COP mezclados
+  })
+
+  test('la fija real se conserva etiquetada con su moneda (transparencia)', () => {
+    const pub = toPublicFees(q.fees, { originCurrency: 'BOB', destinationCurrency: 'COP' })
+    expect(pub.providerFixedFee).toBe(3495)
+    expect(pub.providerFixedFeeCurrency).toBe('COP')
+    expect(pub.feeCurrency).toBe('BOB')
   })
 })
