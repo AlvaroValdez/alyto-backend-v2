@@ -74,7 +74,7 @@ import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
-import { resolveEuCorridorByAmount, isEuSepaDestination } from '../routing/euAmountRouter.js';
+import { resolveEuCorridor, isEuSepaDestination } from '../routing/euAmountRouter.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -644,17 +644,20 @@ export async function getWithdrawalRulesController(req, res) {
       corridor = await TransactionConfig.findOne({ corridorId: corridorIdParam, isActive: true }).lean();
     }
     // Destinos multi-corredor (EU: bo-eu-srl owlPay + bo-es vitaWallet): sin
-    // corridorId el findOne era no determinista. sort por payoutMethod asc
-    // ('owlPay' < 'vitaWallet') prefiere Harbor — proveedor primario del
-    // auto-router EU y el formulario que guardan los contactos.
+    // corridorId el findOne era no determinista. Orden de preferencia:
+    //   - EU/SEPA → vitaWallet (regla fija "EU siempre Vita", euAmountRouter.js):
+    //     el formulario correcto es el IBAN de Vita, no el SWIFT/WIRE de Harbor.
+    //   - resto → payoutMethod asc ('owlPay' < 'vitaWallet'), Harbor primario.
+    const preferVita = isEuSepaDestination(countryCode);
+    const sortSpec   = preferVita ? { payoutMethod: -1 } : { payoutMethod: 1 };
     if (!corridor) {
       const query = { destinationCountry: countryCode, isActive: true };
       if (legalEntity) query.legalEntity = legalEntity;
-      corridor = await TransactionConfig.findOne(query).sort({ payoutMethod: 1 }).lean();
+      corridor = await TransactionConfig.findOne(query).sort(sortSpec).lean();
     }
     if (!corridor && legalEntity) {
       corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true })
-        .sort({ payoutMethod: 1 }).lean();
+        .sort(sortSpec).lean();
     }
   } catch (err) {
     console.warn('[Alyto WithdrawalRules] Error resolviendo corredor:', err.message);
@@ -2154,9 +2157,9 @@ export async function getQuote(req, res) {
     } else {
       const origin = originCountry.toUpperCase();
       const dest   = destinationCountry.toUpperCase();
-      // Router EU por monto: si destino es EU/SEPA y existen corredores Vita+Harbor,
-      // elegir proveedor según monto (≥ umbral USD → Harbor; si no → Vita).
-      corridor = await resolveEuCorridorByAmount(origin, dest, amount);
+      // EU/SEPA → SIEMPRE Vita (regla fija en código, ver euAmountRouter.js).
+      // Si no hay corredor Vita para ese origen, cae al lookup normal.
+      corridor = await resolveEuCorridor(origin, dest);
       if (!corridor) {
         corridor = await TransactionConfig.findOne({
           originCountry:      origin,
@@ -3309,20 +3312,17 @@ export async function getAvailableCorridors(req, res) {
     }
     // Múltiples corredores mismo país+moneda.
     if (isEuSepaDestination(group[0].destinationCountry)) {
-      // Auto-ruteado: una sola entrada, mínimo = el más bajo del grupo (piso real),
-      // sin corridorId (el quote lo resuelve por monto). payoutMethod='auto'.
-      const minRetail = Math.min(...group.map(c => c.minAmountUSD         ?? Infinity));
-      const minBiz    = Math.min(...group.map(c => c.minAmountUSDBusiness ?? Infinity));
-      const minOrigin = Math.min(...group.map(c => c.minAmountOrigin      ?? Infinity));
-      result.push(mapCorridor(group[0], {
-        corridorId:           null,                 // auto-ruteado: frontend NO envía corridorId
-        payoutMethod:         'auto',
-        minAmountUSD:         Number.isFinite(minRetail) ? minRetail : null,
-        minAmountUSDBusiness: Number.isFinite(minBiz)    ? minBiz    : null,
-        minAmountOrigin:      Number.isFinite(minOrigin) ? minOrigin : 0,
-        autoRouted:           true,
-        providers:            group.map(c => c.payoutMethod),
-      }));
+      // EU/SEPA → SIEMPRE Vita (regla fija, ver euAmountRouter.js). Se expone UNA
+      // entrada: el corredor Vita real, con su corridorId y sus propios mínimos
+      // (nada de 'auto'/autoRouted — el frontend envía el corridorId y Step3
+      // resuelve el formulario por payoutMethod, camino estándar).
+      // Si el grupo no tuviera Vita (config anómala) se mantienen explícitos.
+      const vita = group.find(c => c.payoutMethod === 'vitaWallet');
+      if (vita) {
+        result.push(mapCorridor(vita));
+      } else {
+        for (const c of group) result.push(mapCorridor(c));
+      }
     } else {
       // Multi-proveedor sin auto-router → no colapsar (mantener explícitos para no
       // romper la resolución por corridorId). Defensivo: hoy no ocurre fuera de EU.

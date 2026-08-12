@@ -26,7 +26,7 @@ import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey, getVitaSentCountry } from './vitaWalletService.js';
 import { resolveMinAmountOrigin, resolveQuoteRate } from './exchangeRateService.js';
-import { resolveEuCorridorByAmount } from '../routing/euAmountRouter.js';
+import { resolveEuCorridor } from '../routing/euAmountRouter.js';
 import { calculateQuote }  from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
@@ -674,11 +674,10 @@ async function handleSubscribe(ws, msg) {
         isActive:   true,
       }).lean();
     } else {
-      // Router EU por monto (Harbor [30,9998] vs Vita fuera de rango) sin corridorId explícito.
-      corridor = await resolveEuCorridorByAmount(originCountry, destCountry, Number(msg.originAmount));
-      if (corridor) {
-        ws.quoteState.autoRouteEu = true;   // re-resolver en update_amount
-      } else {
+      // EU/SEPA → SIEMPRE Vita (regla fija en código, ver euAmountRouter.js).
+      // Ya no depende del monto: no hay que re-resolver en update_amount.
+      corridor = await resolveEuCorridor(originCountry, destCountry);
+      if (!corridor) {
         corridor = await TransactionConfig.findOne({
           originCountry:      originCountry,
           destinationCountry: destCountry,
@@ -740,19 +739,8 @@ async function handleUpdateAmount(ws, msg) {
 
   ws.quoteState.originAmount = Number(msg.originAmount);
 
-  // Router EU por monto: re-resolver el corredor si el monto cruza el rango Harbor [30,9998].
-  if (ws.quoteState.autoRouteEu) {
-    const re = await resolveEuCorridorByAmount(
-      ws.quoteState.originCountry,
-      ws.quoteState.destinationCountry,
-      ws.quoteState.originAmount,
-    );
-    if (re && re.corridorId !== ws.quoteState.corridorId) {
-      ws.quoteState.corridor   = re;
-      ws.quoteState.corridorId = re.corridorId;
-    }
-  }
-
+  // El corredor NO cambia al cambiar el monto: EU va siempre por Vita y el resto
+  // se fijó en subscribe_quote. (Antes se re-resolvía por el rango Harbor.)
   const quote = await computeQuote(ws.quoteState);
   if (!quote) {
     send(ws, { type: 'quote_error', code: 'VITA_UNAVAILABLE', message: 'No se pudo recalcular la cotización.' });
