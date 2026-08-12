@@ -142,7 +142,18 @@ export function verifyQR(rawQrContent) {
   try {
     payload = JSON.parse(rawQrContent);
   } catch {
-    return { valid: false, error: 'QR inválido — no es JSON válido.' };
+    // No es JSON → no es un QR Alyto. Distinguimos el caso frecuente (el usuario
+    // escaneó un QR bancario / de otra app) para dar un mensaje accionable en vez
+    // del error técnico. QRs bancarios bolivianos y EMVCo empiezan con "000201"
+    // (tag 00 = payload format indicator) o son numéricos puros; también URLs.
+    const raw = String(rawQrContent ?? '').trim();
+    const looksBankOrEmvco = /^000201/.test(raw) || /^\d{12,}$/.test(raw) || /^https?:\/\//i.test(raw);
+    return {
+      valid: false,
+      error: looksBankOrEmvco
+        ? 'Este QR no es de Alyto (parece un QR bancario o de otra app). En "Pagar" solo funcionan códigos QR Alyto.'
+        : 'QR no reconocido. Asegúrate de escanear un código QR generado por Alyto.',
+    };
   }
 
   const { sig, ...dataWithoutSig } = payload;
