@@ -70,6 +70,7 @@ import { resolveComprobanteUrl } from '../services/storageService.js';
 import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
+import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
@@ -836,7 +837,9 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
-  const minAmount = await resolveMinAmountOrigin(corridor, req.user?.accountType);
+  // Mínimo EFECTIVO (incluye el guard de piso del proveedor) — misma fuente que
+  // el quote, así no se puede crear una transacción que el payout va a rechazar.
+  const { min: minAmount } = await resolveEffectiveMinimum(corridor, req.user?.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
       error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
@@ -2213,9 +2216,18 @@ export async function getQuote(req, res) {
     });
   }
 
-  // Validar monto mínimo del corredor
-  const minAmountOrigin = await resolveMinAmountOrigin(corridor, req.user?.accountType);
+  // Validar monto mínimo del corredor — mínimo EFECTIVO: el configurado, elevado
+  // si hiciera falta para que el NETO (post-fees) alcance el piso del proveedor.
+  // Sin esto el usuario cotizaba y pagaba, y el payout moría después en Vita/Harbor
+  // (ver corridorMinimums.js).
+  const { min: minAmountOrigin, raisedBy, floorUSD } =
+    await resolveEffectiveMinimum(corridor, req.user?.accountType);
   if (amount < minAmountOrigin) {
+    if (raisedBy) {
+      console.info('[Alyto Quote] mínimo elevado por piso del proveedor', {
+        corridorId: corridor.corridorId, minAmountOrigin, floorUSD,
+      });
+    }
     return res.status(400).json({
       error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
       min:    minAmountOrigin,
@@ -3282,12 +3294,30 @@ export async function getAvailableCorridors(req, res) {
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
+  // Mínimo EFECTIVO por corredor — el mismo que valida el quote (incluye el guard
+  // de piso del proveedor). Se calcula acá para que lo que el usuario VE en el
+  // selector coincida con lo que el backend EXIGE: antes el listado mostraba el
+  // mínimo configurado y el quote rechazaba con otro número (o peor, aceptaba y
+  // el payout moría en el proveedor). Las tasas y /prices están cacheadas.
+  const vitaPricesForMins = corridors.some(c => c.payoutMethod === 'vitaWallet')
+    ? await getPrices().catch(() => null)
+    : null;
+  const effMins = new Map();
+  await Promise.all(corridors.map(async (c) => {
+    try {
+      effMins.set(c.corridorId, await resolveEffectiveMinimum(
+        { ...c, originCurrency: userOriginCurrency }, req.user?.accountType, vitaPricesForMins,
+        { forDisplay: true },   // muestra con colchón; el quote exige el piso exacto
+      ));
+    } catch { /* fail-open: se usa el configurado */ }
+  }));
+
   // Agrupar por (destinationCountry + destinationCurrency). Cuando un destino EU/SEPA
-  // tiene MÚLTIPLES proveedores (Harbor + Vita, ej. bo-eu-srl + bo-es), se colapsa en
-  // UNA sola entrada "auto-ruteada": el backend elige proveedor por monto y el frontend
-  // NO envía corridorId. Casos como bo-cn (CNY) vs bo-cn-usd (USD) NO se colapsan
-  // (distinta moneda → entradas separadas).
+  // tiene MÚLTIPLES proveedores (Harbor + Vita, ej. bo-eu-srl + bo-es) se expone solo
+  // el de Vita (regla "EU siempre Vita", euAmountRouter.js). Casos como bo-cn (CNY) vs
+  // bo-cn-usd (USD) NO se colapsan (distinta moneda → entradas separadas).
   const mapCorridor = (c, extra = {}) => {
+    const eff = effMins.get(c.corridorId);
     const meta = COUNTRY_META[c.destinationCountry] ?? {};
     return {
       corridorId:              c.corridorId,
@@ -3298,9 +3328,14 @@ export async function getAvailableCorridors(req, res) {
       payinMethod:             c.payinMethod,
       payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
       payoutMethod:            c.payoutMethod,
-      minAmountOrigin:         c.minAmountOrigin         ?? 0,
-      minAmountUSD:            c.minAmountUSD            ?? null,
+      // Mínimo efectivo (ya incluye el piso del proveedor). Fallback al configurado
+      // si el cálculo falló — nunca dejamos el campo vacío.
+      minAmountOrigin:         eff?.min    ?? c.minAmountOrigin ?? 0,
+      minAmountUSD:            eff?.minUSD ?? c.minAmountUSD    ?? null,
       minAmountUSDBusiness:    c.minAmountUSDBusiness    ?? null,
+      // Señal de por qué el mínimo es más alto que el configurado (diagnóstico/UI).
+      minRaisedBy:             eff?.raisedBy ?? null,
+      providerFloorUSD:        eff?.floorUSD ?? null,
       autoRouted:              false,
       ...extra,
     };
