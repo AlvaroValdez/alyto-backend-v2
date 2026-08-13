@@ -2216,12 +2216,20 @@ export async function getQuote(req, res) {
     });
   }
 
+  // Precios de Vita: se piden UNA sola vez por cotización y se reusan tanto para
+  // el piso del mínimo como para la tasa más abajo (getPrices cachea, pero pedirlo
+  // dos veces en el mismo request es ruido innecesario).
+  let vitaResponse = null;
+  if (corridor.payoutMethod === 'vitaWallet') {
+    vitaResponse = await getPrices().catch(() => null);   // el 503 se decide más abajo
+  }
+
   // Validar monto mínimo del corredor — mínimo EFECTIVO: el configurado, elevado
   // si hiciera falta para que el NETO (post-fees) alcance el piso del proveedor.
   // Sin esto el usuario cotizaba y pagaba, y el payout moría después en Vita/Harbor
   // (ver corridorMinimums.js).
   const { min: minAmountOrigin, raisedBy, floorUSD } =
-    await resolveEffectiveMinimum(corridor, req.user?.accountType);
+    await resolveEffectiveMinimum(corridor, req.user?.accountType, vitaResponse);
   if (amount < minAmountOrigin) {
     if (raisedBy) {
       console.info('[Alyto Quote] mínimo elevado por piso del proveedor', {
@@ -2377,16 +2385,19 @@ export async function getQuote(req, res) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
-  let vitaResponse;
-  try {
-    vitaResponse = await getPrices();
-  } catch (err) {
-    console.error('[Alyto Quote] Vita /prices no disponible:', {
-      corridorId: corridor.corridorId, userId, error: err.message,
-    });
-    return res.status(503).json({
-      error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
-    });
+  // Si ya se obtuvieron arriba (corredor Vita) se reusan; si no, o si aquel intento
+  // falló, se piden aquí — este es el punto donde la falta de tasas SÍ es un 503.
+  if (!vitaResponse) {
+    try {
+      vitaResponse = await getPrices();
+    } catch (err) {
+      console.error('[Alyto Quote] Vita /prices no disponible:', {
+        corridorId: corridor.corridorId, userId, error: err.message,
+      });
+      return res.status(503).json({
+        error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
+      });
+    }
   }
 
   // ── 3a. Corredores manuales (SRL Bolivia): BOB → USDC → destino ────────────
