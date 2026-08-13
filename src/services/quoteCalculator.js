@@ -156,15 +156,26 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
  * La fija real del proveedor se expone aparte y ETIQUETADA con su moneda, para
  * que el frontend pueda mostrarla si algún día se quiere ser explícito.
  *
+ * ⚠️ LISTA BLANCA, no `...fees`. Esta función se escribió spreando el objeto
+ * interno y eso dejaba viajar al usuario `profitRetention`, `totalDeductedReal`,
+ * `vitaRateMarkup` y `alytoProfitUSDC` — el margen de Alyto, que la regla 11 de
+ * CLAUDE.md prohíbe mostrar. Al ser lista blanca, un campo interno nuevo en
+ * calculateQuote NO se filtra solo: hay que agregarlo aquí a propósito.
+ *
  * @param {object} fees                 quote.fees de calculateQuote
  * @param {string} originCurrency       moneda en la que están los fees sumables
  * @param {string} destinationCurrency  moneda de la fija del proveedor
  */
 export function toPublicFees(fees, { originCurrency, destinationCurrency } = {}) {
   return {
-    ...fees,
-    payoutFee:                0,
-    feeCurrency:              originCurrency ?? null,
+    payinFee:      fees?.payinFee     ?? 0,
+    alytoCSpread:  fees?.alytoCSpread ?? 0,
+    fixedFee:      fees?.fixedFee     ?? 0,
+    // Ya descontado de destinationAmount y en otra moneda → no sumable aquí.
+    payoutFee:     0,
+    totalDeducted: fees?.totalDeducted ?? 0,
+    feeCurrency:   originCurrency ?? null,
+    // Transparencia: la fija del proveedor, etiquetada con SU moneda.
     providerFixedFee:         fees?.payoutFee ?? 0,
     providerFixedFeeCurrency: destinationCurrency ?? null,
   };

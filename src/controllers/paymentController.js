@@ -1999,13 +1999,12 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
       bobPerUsdc,
       usdcToDestRate:      selected.exchangeRate,
       harborPaymentMethod: selected.paymentMethod,
-      fees: {
-        ...toPublicFees(quote.fees, {
-          originCurrency:      corridor.originCurrency,
-          destinationCurrency: corridor.destinationCurrency,
-        }),
-        alytoProfitUSDC,
-      },
+      // alytoProfitUSDC (margen de Alyto) se re-agregaba DESPUÉS de toPublicFees,
+      // anulando el filtro. Va solo al console.info de arriba.
+      fees: toPublicFees(quote.fees, {
+        originCurrency:      corridor.originCurrency,
+        destinationCurrency: corridor.destinationCurrency,
+      }),
       payinMethod:     corridor.payinMethod,
       payoutMethod:    corridor.payoutMethod,
       entity:          'SRL',
@@ -2096,10 +2095,13 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     harborPaymentMethod: providerMeta.rateSource?.startsWith('harbor:')
       ? providerMeta.rateSource.replace('harbor:', '')
       : null,
-    fees: {
-      ...quote.fees,
-      alytoProfitUSDC,
-    },
+    // alytoProfitUSDC y profitRetention NO viajan al usuario (regla 11 CLAUDE.md):
+    // esta ruta hacía `...quote.fees` y los exponía junto con la fija en moneda
+    // destino. toPublicFees es lista blanca — ver quoteCalculator.js.
+    fees: toPublicFees(quote.fees, {
+      originCurrency:      corridor.originCurrency,
+      destinationCurrency: corridor.destinationCurrency,
+    }),
     payinMethod:   corridor.payinMethod,
     payoutMethod:  corridor.payoutMethod,
     entity:        'SRL',
@@ -2330,17 +2332,15 @@ export async function getQuote(req, res) {
       isManualCorridor:       true,
       paymentRef,
 
+      // El comentario decía "NO visible al usuario" pero profitRetention y
+      // totalDeductedReal iban en el body de la respuesta igual. Fuera.
       fees: {
-        // Visible al usuario (total sin profitRetention — regla CLAUDE.md)
-        payinFee:          round2(payinFee),
-        alytoCSpread:      round2(spreadFee),
-        fixedFee:          round2(fixedFee),
-        payoutFee:         0,
-        totalDeducted:     round2(payinFee + spreadFee + fixedFee),
-        feeCurrency:       'CLP',
-        // BD interna — auditoría (NO visible al usuario)
-        profitRetention:   profitFee,
-        totalDeductedReal,
+        payinFee:      round2(payinFee),
+        alytoCSpread:  round2(spreadFee),
+        fixedFee:      round2(fixedFee),
+        payoutFee:     0,
+        totalDeducted: round2(payinFee + spreadFee + fixedFee),
+        feeCurrency:   'CLP',
       },
 
       payinInstructions: {
@@ -2492,13 +2492,12 @@ export async function getQuote(req, res) {
       usdcTransitAmount:    quote.digitalAssetAmount,
       bobPerUsdc,
       usdcToDestRate,
-      fees: {
-        ...toPublicFees(quote.fees, {
-          originCurrency:      corridor.originCurrency,
-          destinationCurrency: corridor.destinationCurrency,
-        }),
-        alytoProfitUSDC,
-      },
+      // alytoProfitUSDC (margen de Alyto) se re-agregaba DESPUÉS de toPublicFees,
+      // anulando el filtro. Va solo al console.info de arriba.
+      fees: toPublicFees(quote.fees, {
+        originCurrency:      corridor.originCurrency,
+        destinationCurrency: corridor.destinationCurrency,
+      }),
       quoteExpiresAt,
       payinMethod:  corridor.payinMethod,
       payoutMethod: corridor.payoutMethod,
@@ -2560,13 +2559,13 @@ export async function getQuote(req, res) {
     destinationCurrency: corridor.destinationCurrency,
     exchangeRate,
     fees: {
-      payinFee:          round2(payinFee),
-      alytoCSpread:      round2(alytoCSpread),
-      fixedFee:          round2(fixedFee),
-      payoutFee:         0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
-      profitRetention:   round2(profitRetention),
-      totalDeducted:     round2(payinFee + alytoCSpread + fixedFee),
-      totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
+      payinFee:      round2(payinFee),
+      alytoCSpread:  round2(alytoCSpread),
+      fixedFee:      round2(fixedFee),
+      payoutFee:     0,   // fija del proveedor: ya descontada del destino, en otra moneda
+      totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
+      feeCurrency:   corridor.originCurrency,
+      // profitRetention / totalDeductedReal quedan fuera: son internos (regla 11).
     },
     payinMethod:  corridor.payinMethod,
     payoutMethod: corridor.payoutMethod,

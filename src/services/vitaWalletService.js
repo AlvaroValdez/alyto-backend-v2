@@ -340,29 +340,33 @@ export function getPaymentMethods(countryIso) {
  *     y tiene form via clave 'eu' (IBAN/SWIFT). Pendiente migración de form frontend
  *     antes de cambiar a withdrawal — mantenemos vita_sent por ahora.
  *
- * ES/EU restaurados 2026-08-12 (decisión de proveedor EU): el rail vita_sent['es']
- * cotiza MEJOR que withdrawal['eu'] (tasa 0.8676 vs 0.8524, fixed_cost 0 vs 5 EUR)
- * y que Harbor (SEPA deshabilitado por bug SWIFT_CODE; WIRE con fija ~17.5 EUR).
- * El corredor EU (destinationCountry='EU') se traduce a 'ES' vía getVitaSentCountry
- * — mismo precedente que PL: form IBAN/SWIFT (clave 'eu') + transacción vita_sent.
- * Historia: ES estuvo aquí hasta 2026-05-10, cuando el tráfico EUR se movió a
- * Harbor SEPA (bo-eu-srl) — pero SEPA quedó deshabilitado y EU cayó en
- * withdrawal['eu'], el peor rail de los tres.
+ * ⚠️ ES/EU NO van aquí — se intentó el 2026-08-12 y se revirtió el mismo día.
+ * La idea era usar vita_sent['es'] porque cotiza mejor que withdrawal['eu']
+ * (0.8676 vs 0.8524, sin la fija de 5 EUR). Tres hechos lo desmienten:
+ *   1. vita_sent es la RED INTERNA de Vita (ver createVitaSentPayout), no un rail
+ *      bancario — no entrega a un IBAN italiano.
+ *   2. Sus precios no son por país: attributes = { valid_until, usd_sell,
+ *      fixed_cost, fixed_cost_usd }. No existe min_amount['es'] ni sell_prices['es'];
+ *      la "mejor tasa" era la tasa plana del rail, comparada contra otra cosa.
+ *   3. En producción NUNCA se ejecutó una sola transacción vita_sent (4 transacciones
+ *      históricas en la cuenta, todas withdrawal).
+ * ES salió de este set el 2026-05-10 (commit acc8e62) al mover el tráfico EUR;
+ * volver a meterlo resucitaba un camino retirado a propósito y sin uso real.
+ * EU se paga por withdrawal['eu'], que sí tiene form (16 campos, IBAN + SWIFT),
+ * mínimo ($10) y fija (5 EUR) declarados — esa fija ahora se descuenta del monto
+ * prometido, que era el problema de fondo.
  */
-export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL', 'ES', 'EU']);
+export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
 
 /**
- * Traduce el destinationCountry del corredor al país que entiende el rail
- * vita_sent. Vita no conoce 'EU' como país: la eurozona entra por 'ES'
- * (clave 'es' en las tablas vita_sent; el IBAN determina el país final,
- * igual que hacía el corredor bo-es original pre-2026-05-10).
+ * País que entiende el rail vita_sent. Hoy es la identidad — se mantiene como
+ * punto único por si algún destino necesitara traducción (ver historia de 'EU').
  *
- * @param {string} countryCode ISO alpha-2 o 'EU'
- * @returns {string} país para payload/pricing de vita_sent (ej. 'ES', 'GT')
+ * @param {string} countryCode ISO alpha-2
+ * @returns {string} país para payload/pricing de vita_sent
  */
 export function getVitaSentCountry(countryCode) {
-  const upper = (countryCode ?? '').toUpperCase();
-  return upper === 'EU' ? 'ES' : upper;
+  return (countryCode ?? '').toUpperCase();
 }
 
 /**

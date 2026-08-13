@@ -19,19 +19,22 @@ import { getVitaSentCountry, VITA_SENT_ONLY_COUNTRIES } from '../../src/services
 const CORRIDOR = { alytoCSpread: 6.5, fixedFee: 6, payinFeePercent: 0, profitRetentionPercent: 0, payoutFeeFixed: 0 }
 const BOB_PER_USDC = 11.77   // ≈ tasa del caso real (214.66 BOB netos → 18.24 USDC)
 
-describe('getVitaSentCountry', () => {
-  test('EU se traduce a ES (la eurozona entra por España, el IBAN fija el país)', () => {
-    expect(getVitaSentCountry('EU')).toBe('ES')
-    expect(getVitaSentCountry('eu')).toBe('ES')
+describe('rail de EU — vita_sent NO es un rail bancario', () => {
+  // Se intentó enrutar EU por vita_sent['es'] por su mejor tasa aparente y se
+  // revirtió el mismo día: vita_sent es la red interna de Vita, sus precios no
+  // son por país (no existe min_amount['es']) y en producción jamás se ejecutó
+  // una sola transacción por ese rail. ES ya había salido del set en mayo.
+  test('EU y ES NO entran al rail vita_sent', () => {
+    expect(VITA_SENT_ONLY_COUNTRIES.has('EU')).toBe(false)
+    expect(VITA_SENT_ONLY_COUNTRIES.has('ES')).toBe(false)
   })
-  test('el resto de países vita_sent quedan idénticos', () => {
+  test('GT/SV/PL sí siguen en vita_sent (no tienen withdrawal_rules)', () => {
+    for (const c of ['GT', 'SV', 'PL']) expect(VITA_SENT_ONLY_COUNTRIES.has(c)).toBe(true)
+  })
+  test('getVitaSentCountry ya no traduce EU→ES: ese camino no existe', () => {
     expect(getVitaSentCountry('GT')).toBe('GT')
-    expect(getVitaSentCountry('SV')).toBe('SV')
-    expect(getVitaSentCountry('PL')).toBe('PL')
-    expect(getVitaSentCountry('ES')).toBe('ES')
-  })
-  test('el set vita_sent incluye ES y EU (restaurados) sin perder GT/SV/PL', () => {
-    for (const c of ['GT', 'SV', 'PL', 'ES', 'EU']) expect(VITA_SENT_ONLY_COUNTRIES.has(c)).toBe(true)
+    expect(getVitaSentCountry('pl')).toBe('PL')
+    expect(getVitaSentCountry('EU')).toBe('EU')
   })
 })
 
@@ -47,8 +50,7 @@ describe('calculateQuote — providerFixedFee (fija real del proveedor)', () => 
     expect(q.fees.payoutFee).toBe(5)
   })
 
-  test('vía vita_sent (fija 0) la promesa mejora y coincide con lo que Vita entrega', () => {
-    // 18.24 × 0.8676 − 0 = 15.83 EUR — MÁS que los 15.52 prometidos con el bug
+  test('sin fija del proveedor no se descuenta nada del destino', () => {
     const q = calculateQuote({
       amount: 236, corridor: CORRIDOR, bobPerUsdc: BOB_PER_USDC,
       providerRate: 0.8676, providerFixedFee: 0,
@@ -102,5 +104,22 @@ describe('toPublicFees — no mezclar monedas en el "Costo del envío"', () => {
     expect(pub.providerFixedFee).toBe(3495)
     expect(pub.providerFixedFeeCurrency).toBe('COP')
     expect(pub.feeCurrency).toBe('BOB')
+  })
+
+  test('NINGÚN campo interno llega al usuario (regla 11)', () => {
+    // Era `...fees`, así que profitRetention, totalDeductedReal, vitaRateMarkup y
+    // alytoProfitUSDC —el margen de Alyto— viajaban en la respuesta del quote.
+    const pub = toPublicFees(
+      { ...q.fees, profitRetention: 30, totalDeductedReal: 101, vitaRateMarkup: 0.02, alytoProfitUSDC: 4.38 },
+      { originCurrency: 'BOB', destinationCurrency: 'COP' },
+    )
+    for (const k of ['profitRetention', 'totalDeductedReal', 'vitaRateMarkup', 'alytoProfitUSDC']) {
+      expect(pub).not.toHaveProperty(k)
+    }
+  })
+
+  test('es lista blanca: un campo interno NUEVO tampoco se filtra solo', () => {
+    const pub = toPublicFees({ ...q.fees, margenSecretoFuturo: 999 }, { originCurrency: 'BOB' })
+    expect(pub).not.toHaveProperty('margenSecretoFuturo')
   })
 })

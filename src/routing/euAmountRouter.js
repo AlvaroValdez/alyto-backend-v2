@@ -1,16 +1,24 @@
 /**
  * euAmountRouter.js — Resolución de proveedor para destinos EU/SEPA.
  *
- * DECISIÓN 2026-08-12 — **EU va SIEMPRE por Vita** (rail vita_sent, ver
- * VITA_SENT_ONLY_COUNTRIES). Ya no se elige proveedor por monto.
+ * DECISIÓN 2026-08-12 — **EU va SIEMPRE por Vita**, rail withdrawal['eu'].
+ * Ya no se elige proveedor por monto.
  *
  * Por qué (medido en vivo contra Vita prod + Harbor, 18.24 USDC / 236 BOB):
- *   - Vita vita_sent['es'] : tasa 0.8676, fija 0     → 15.83 EUR   ← mejor en TODO el rango
+ *   - Vita withdrawal['eu']: tasa 0.8524, fija 5 EUR → 10.55 EUR   ← el que se usa
  *   - Harbor SEPA          : tasa 0.8650, fee ~0.3%  → 15.4x EUR   (DESHABILITADO: bug SWIFT_CODE)
- *   - Harbor WIRE          : tasa 0.8650, fija ~17.5 → 9.36 EUR    (único rail Harbor operativo hoy)
- *   - Vita withdrawal['eu']: tasa 0.8524, fija 5 EUR → 10.55 EUR   (rail anterior, peor)
+ *   - Harbor WIRE          : tasa 0.8650, fija ~17.5 →  9.36 EUR   (único rail Harbor operativo hoy)
  * Además Harbor RECHAZA montos < 31 USD ("source.amount must be between 31 and 9998"),
  * dejando fuera el ticket retail típico de Bolivia.
+ *
+ * ⚠️ La fija de 5 EUR pesa muchísimo en ticket chico — casi la mitad de lo
+ * entregado en el ejemplo de arriba. Ahora al menos se descuenta del monto
+ * PROMETIDO en vez de aparecer como sorpresa, pero el mínimo del corredor merece
+ * una decisión de producto: el piso del proveedor ($10) no protege de una oferta
+ * mala, solo de una que el proveedor rechace.
+ *
+ * Se evaluó vita_sent['es'] (mejor tasa, sin fija) y NO sirve: es la red interna
+ * de Vita, no un rail bancario. Ver VITA_SENT_ONLY_COUNTRIES.
  *
  * La regla vive en CÓDIGO (no en un toggle de admin) para que no dependa de que
  * alguien desactive el corredor Harbor: mientras exista un corredor Vita EUR para

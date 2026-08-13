@@ -103,14 +103,19 @@ describe('providerFloorUSD', () => {
     expect(providerFloorUSD({ payoutMethod: 'anchorBolivia' })).toBeNull()
   })
   test('Vita lee min_amount del rail que ejecutará el dispatch', () => {
+    // Forma real de /prices: withdrawal tiene mapas POR PAÍS; vita_sent es una
+    // tarifa plana ({ valid_until, usd_sell, fixed_cost, fixed_cost_usd }) y no
+    // declara min_amount — de ahí que GT/SV/PL caigan al mínimo configurado.
     const prices = {
       usd: {
-        withdrawal: { prices: { attributes: { min_amount: { co: 1, au: 50 } } } },
-        vita_sent:  { prices: { attributes: { min_amount: { es: 7 } } } },
+        withdrawal: { prices: { attributes: { min_amount: { co: 1, au: 50, eu: 10 } } } },
+        vita_sent:  { prices: { attributes: { usd_sell: 0.86, fixed_cost: 0 } } },
       },
     }
     expect(providerFloorUSD({ payoutMethod: 'vitaWallet', destinationCountry: 'AU' }, prices)).toBe(50)
-    // EU se resuelve por vita_sent['es'] (regla EU→Vita)
-    expect(providerFloorUSD({ payoutMethod: 'vitaWallet', destinationCountry: 'EU' }, prices)).toBe(7)
+    // EU se paga por withdrawal['eu'] — vita_sent es red interna, no rail bancario
+    expect(providerFloorUSD({ payoutMethod: 'vitaWallet', destinationCountry: 'EU' }, prices)).toBe(10)
+    // GT va por vita_sent, que no publica piso → null (fail-open al configurado)
+    expect(providerFloorUSD({ payoutMethod: 'vitaWallet', destinationCountry: 'GT' }, prices)).toBeNull()
   })
 })
