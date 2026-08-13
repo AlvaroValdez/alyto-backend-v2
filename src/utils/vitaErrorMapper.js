@@ -199,6 +199,9 @@ export function classifyVitaIpnStatus(status) {
 
 // Claves donde Vita (o cualquier pasarela) suele poner el motivo. Orden = prioridad.
 const REASON_KEYS = [
+  // reject_motive es el campo canónico de Vita (visto en included.withdrawal de
+  // GET /transactions/:id). Va primero: es el que de verdad usan.
+  'reject_motive',
   'rejection_reason', 'denial_reason', 'reject_reason', 'failure_reason',
   'status_detail', 'status_description', 'reason', 'motivo',
   'observation', 'observacion', 'error_message', 'error_description',
@@ -207,19 +210,32 @@ const REASON_KEYS = [
 
 const CODE_KEYS = ['rejection_code', 'error_code', 'status_code', 'code'];
 
-/** Primera clave con contenido, hasta 3 niveles de anidación (el motivo suele venir anidado). */
-function pickByKeys(body, keys, depth = 0) {
-  if (!body || typeof body !== 'object' || depth > 3) return null;
-  for (const k of keys) {
-    const v = body[k];
-    if (typeof v === 'string' && v.trim()) return v.trim();
-    if (typeof v === 'number') return String(v);
-  }
-  for (const v of Object.values(body)) {
-    if (v && typeof v === 'object') {
-      const found = pickByKeys(v, keys, depth + 1);
+/** Busca UNA clave concreta en todo el árbol, hasta 3 niveles. */
+function findKey(node, key, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 3) return null;
+  const v = node[key];
+  if (typeof v === 'string' && v.trim()) return v.trim();
+  if (typeof v === 'number') return String(v);
+  for (const child of Object.values(node)) {
+    if (child && typeof child === 'object') {
+      const found = findKey(child, key, depth + 1);
       if (found) return found;
     }
+  }
+  return null;
+}
+
+/**
+ * Primera clave CON CONTENIDO respetando el orden de prioridad de `keys`.
+ *
+ * Se recorre clave por clave sobre todo el árbol, no nivel por nivel: si no, un
+ * `message` genérico en la raíz le ganaría a un `reject_motive` anidado, que es
+ * justo el dato específico que se quiere. La prioridad la define la lista.
+ */
+function pickByKeys(body, keys) {
+  for (const k of keys) {
+    const found = findKey(body, k);
+    if (found) return found;
   }
   return null;
 }

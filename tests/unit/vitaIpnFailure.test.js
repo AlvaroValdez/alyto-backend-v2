@@ -12,6 +12,20 @@ import {
   classifyVitaIpnStatus, mapVitaIpnFailure,
   VITA_IPN_FAILURE_STATUSES, VITA_IPN_PROGRESS_STATUSES,
 } from '../../src/utils/vitaErrorMapper.js'
+import { extractVitaTxAttributes } from '../../src/jobs/reconcileVitaTransfers.js'
+
+// Forma REAL de GET /transactions/:id (capturada de api.vitawallet.io el 2026-08-12
+// para el payout denegado 7bcbdfec — la transacción que destapó todo esto).
+const RESPUESTA_REAL_VITA = {
+  transaction: {
+    id:   '7bcbdfec-c7ea-4d7b-9ab9-29f6339a7c74',
+    type: 'business_transaction',
+    attributes: {
+      status: 'denied', amount: '18.24', currency: 'usd', order: 'ALY-C-1786548682442-NE1YVC',
+      included: { withdrawal: { country_iso_code: 'EU', total_sent: '10.54', reject_motive: null } },
+    },
+  },
+}
 
 describe('classifyVitaIpnStatus', () => {
   test('reconoce el éxito', () => {
@@ -110,5 +124,38 @@ describe('mapVitaIpnFailure — el motivo real llega al admin', () => {
     const body = { status: 'denied', reason: 'x' }
     expect(mapVitaIpnFailure(body, { stage: 'payin'  }).adminMessage).toMatch(/^Payin/)
     expect(mapVitaIpnFailure(body, { stage: 'payout' }).adminMessage).toMatch(/^Payout/)
+  })
+
+  test('reject_motive (el campo canónico de Vita) manda sobre el resto', () => {
+    const m = mapVitaIpnFailure({
+      status: 'denied', message: 'texto genérico',
+      included: { withdrawal: { reject_motive: 'IBAN no pertenece al beneficiario' } },
+    })
+    expect(m.reason).toBe('IBAN no pertenece al beneficiario')
+  })
+})
+
+describe('extractVitaTxAttributes — la red de seguridad leía el sitio equivocado', () => {
+  test('encuentra el status en la forma REAL de Vita', () => {
+    // El encadenado viejo (resp.data.transaction ?? … ?? resp) caía en `resp`,
+    // cuya única clave es `transaction` → status undefined → toda tx se
+    // clasificaba como "Vita aún trabajando" y nunca se resolvía nada.
+    const viejo = RESPUESTA_REAL_VITA?.data?.transaction ?? RESPUESTA_REAL_VITA?.data ?? RESPUESTA_REAL_VITA
+    expect(viejo.status).toBeUndefined()                       // el bug
+
+    expect(extractVitaTxAttributes(RESPUESTA_REAL_VITA).status).toBe('denied')
+  })
+
+  test('el motivo del rechazo queda disponible para el mapper', () => {
+    const attrs = extractVitaTxAttributes(RESPUESTA_REAL_VITA)
+    const m = mapVitaIpnFailure(attrs, { stage: 'payout' })
+    expect(m.vitaStatus).toBe('denied')
+    expect(m.adminMessage).toContain('denied')
+  })
+
+  test('conserva las formas alternativas por si Vita cambia el envoltorio', () => {
+    expect(extractVitaTxAttributes({ data: { transaction: { status: 'completed' } } }).status).toBe('completed')
+    expect(extractVitaTxAttributes({ data: { withdrawal:  { status: 'denied'    } } }).status).toBe('denied')
+    expect(extractVitaTxAttributes({ status: 'completed' }).status).toBe('completed')
   })
 })
