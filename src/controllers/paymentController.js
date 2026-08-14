@@ -2795,13 +2795,15 @@ export async function getTransactionStatus(req, res) {
     destinationCountry,
     // Rate dest/origin desde amounts — fuente única (ver utils/rateDisplay.js).
     exchangeRate:        getDisplayRate(transaction),
+    // profitRetention NO va aquí: esta ruta es del USUARIO (protect, no admin) y
+    // la regla 11 prohíbe mostrarle la retención interna. Estaba expuesta igual
+    // que en el quote, misma familia de fuga.
     fees: f
       ? {
           alytoCSpread:    f.alytoCSpread    ?? 0,
           fixedFee:        f.fixedFee        ?? 0,
           payinFee:        f.payinFee        ?? 0,
           payoutFee:       f.payoutFee       ?? 0,
-          profitRetention: f.profitRetention ?? 0,
           totalDeducted:   f.totalDeducted   ?? 0,
           feeCurrency:     f.feeCurrency     ?? transaction.originCurrency ?? 'USD',
         }
@@ -2863,7 +2865,9 @@ export async function getTransactionStatus(req, res) {
       reason:         h.reason,
     })),
     // ── Detalle de fallo user-facing (NO exponer failureReason técnico) ─────
-    failure: transaction.status === 'failed' ? {
+    // 'refunded' también lo lleva: si no, marcar una tx como reembolsada le BORRA
+    // al usuario la explicación de qué pasó, justo cuando más contexto necesita.
+    failure: ['failed', 'refunded'].includes(transaction.status) ? {
       reason:    transaction.userFailureReason ?? null,
       action:    transaction.userFailureAction ?? null,
       category:  transaction.failureCategory   ?? null,
