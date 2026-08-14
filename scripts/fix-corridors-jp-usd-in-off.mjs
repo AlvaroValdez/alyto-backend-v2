@@ -57,6 +57,33 @@ async function main() {
     }
   }
 
+  // ── bo-ca: CAD → USD ────────────────────────────────────────────────────────
+  // La clave de Vita para Canadá es 'causd' y su sell es ~0.9925 — eso es USD
+  // (CAD estaría ~1.37); no existe clave 'ca' en CAD. El corredor etiquetaba CAD
+  // pero el número calculado y lo que recibe el beneficiario son DÓLARES: la
+  // pantalla y el comprobante mentían la moneda (a favor del usuario, pero
+  // mentían). Tercer caso del patrón "solo USD" que Jolin enumeró el 3/7:
+  // España, Japón y Canadá.
+  const ca = await TransactionConfig.findOne({ corridorId: 'bo-ca' });
+  if (!ca) {
+    console.log('bo-ca: no existe en esta BD.');
+  } else if (ca.destinationCurrency === 'USD') {
+    console.log('bo-ca: ya está en USD. Sin cambios.');
+  } else {
+    console.log(`bo-ca: ${ca.destinationCurrency} → USD  (método ${ca.payoutMethod}, minUSD ${ca.minAmountUSD}, activo ${ca.isActive})`);
+    if (APPLY) {
+      const nota = `[${HOY}] destinationCurrency CAD→USD. Vita paga Canadá SOLO en USD ` +
+        "(clave 'causd', sell ~0.99 = tasa USD; no existe rail CAD — confirmado por " +
+        'Jolin/OwlPay 3/7: "Spain, Japan, Canada just USD"). La cotización ya calculaba ' +
+        'en USD pero se mostraba etiquetada CAD. El beneficiario recibe USD en su banco ' +
+        'canadiense — mismo modelo que EC/PA/VE/JP. Revertir si Vita habilita CAD.';
+      ca.destinationCurrency = 'USD';
+      ca.adminNotes = [ca.adminNotes?.trim(), nota].filter(Boolean).join('\n');
+      await ca.save();
+      console.log('  ✓ aplicado');
+    }
+  }
+
   // ── bo-in: desactivar ───────────────────────────────────────────────────────
   const inC = await TransactionConfig.findOne({ corridorId: 'bo-in' });
   if (!inC) {
