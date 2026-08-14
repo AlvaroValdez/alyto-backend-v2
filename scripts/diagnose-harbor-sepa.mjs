@@ -24,7 +24,7 @@
 import 'dotenv/config';
 import { getHarborQuote, getHarborTransferRequirements, getCustomerUuid } from '../src/services/owlPayService.js';
 
-const MONTO = Number(process.argv[2] ?? 100);
+const MONTO = Number(process.argv.find(a => /^[0-9.]+$/.test(a)) ?? 100);
 
 function campos(schema) {
   const props = schema?.properties ?? schema?.schema?.properties ?? null;
@@ -38,7 +38,44 @@ function additionalProps(schema) {
   return v === undefined ? '(no declarado)' : String(v);
 }
 
+/**
+ * Barrido de TODOS los destinos Harbor. Se agregó al descubrir que EU responde
+ * 3018 también en producción: había que saber si es solo EU o si el proveedor
+ * está caído para todos los corredores.
+ */
+async function barrido() {
+  const DESTINOS = [
+    ['EU','EUR'], ['MX','MXN'], ['BR','BRL'], ['US','USD'], ['GB','GBP'], ['JP','JPY'],
+    ['SG','SGD'], ['IN','INR'], ['AE','AED'], ['CN','CNY'], ['NG','NGN'], ['HK','HKD'],
+  ];
+  console.log(`Harbor: ${process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL}`);
+  console.log(`Barrido de destinos con ${MONTO} USDC\n`);
+  console.log('  país  resultado');
+  let ok = 0, fallan = [];
+  for (const [pais, mon] of DESTINOS) {
+    try {
+      const qs = await getHarborQuote({
+        sourceAmount: MONTO, sourceCurrency: 'USDC',
+        sourceChain: process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+        destCountry: pais, destCurrency: mon,
+        customerUuid: getCustomerUuid('LLC'), returnAll: true,
+      });
+      const l = Array.isArray(qs) ? qs : [qs];
+      console.log(`  ${pais.padEnd(5)} ✓ ${l.map(q => `${q.paymentMethod}:${q.destinationAmount}`).join('  ')}`);
+      ok++;
+    } catch (e) {
+      const msg = String(e.message).replace(/\s+/g, ' ').slice(0, 70);
+      console.log(`  ${pais.padEnd(5)} ✗ ${msg}`);
+      fallan.push(pais);
+    }
+  }
+  console.log(`\n  ${ok}/${DESTINOS.length} destinos cotizan` +
+              (fallan.length ? ` · fallan: ${fallan.join(', ')}` : ''));
+}
+
 async function main() {
+  if (process.argv.includes('--barrido')) return barrido();
+
   console.log(`Harbor: ${process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL}`);
   console.log(`Cotizando ${MONTO} USDC → EUR\n`);
 
