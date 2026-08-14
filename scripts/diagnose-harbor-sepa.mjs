@@ -73,7 +73,69 @@ async function barrido() {
               (fallan.length ? ` · fallan: ${fallan.join(', ')}` : ''));
 }
 
+/**
+ * Aísla la CAUSA del 3018 antes de escribirle a soporte de OwlPay. El PDF que
+ * dice "3018 = corridor not enabled for your customer tier" es una compilación
+ * NUESTRA, no el doc oficial — hay que descartar primero que el error lo provoque
+ * nuestro payload. Variables que se cruzan:
+ *   - moneda destino: local vs USD (Jolin 3/7: "Spain, Japan, Canada solo USD")
+ *   - on_behalf_of: con customer vs sin él (nivel aplicación)
+ *   - repetición: 3 intentos para separar fallo duro de API inestable (HK/US timeouts)
+ */
+async function hipotesis() {
+  const base = process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL;
+  console.log(`Harbor: ${base}\n`);
+
+  async function quoteCrudo({ pais, moneda, conCustomer }) {
+    const payload = {
+      source:      { type: 'individual', chain: process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
+                     country: 'US', asset: 'USDC', amount: Number(MONTO).toFixed(2) },
+      destination: { type: 'individual', country: pais, asset: moneda },
+      commission:  { percentage: '0.5', amount: 0 },
+    };
+    if (conCustomer) payload.on_behalf_of = getCustomerUuid('LLC');
+    const r = await fetch(`${base}/v2/transfers/quotes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': process.env.OWLPAY_API_KEY },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25_000),
+    });
+    const t = await r.text();
+    let j; try { j = JSON.parse(t); } catch { j = null; }
+    if (r.ok) {
+      const l = Array.isArray(j?.data) ? j.data : [j?.data ?? j];
+      return `✓ ${l.map(q => q?.payment_method ?? '?').join(',')}`;
+    }
+    return `✗ ${r.status} code=${j?.code ?? '?'} ${String(j?.message ?? t).slice(0, 45)}`;
+  }
+
+  const CASOS = [
+    // moneda local vs USD — si USD cotiza y la local no, el problema es la moneda
+    ['EU', 'EUR'], ['EU', 'USD'],
+    ['MX', 'MXN'], ['MX', 'USD'],
+    ['JP', 'JPY'], ['JP', 'USD'],
+    ['IN', 'INR'], ['IN', 'USD'],
+    ['GB', 'GBP'], ['GB', 'USD'],
+    // control positivo: sabemos que cotiza
+    ['BR', 'BRL'],
+  ];
+
+  console.log('  caso        con on_behalf_of                    SIN on_behalf_of');
+  for (const [pais, moneda] of CASOS) {
+    const con = await quoteCrudo({ pais, moneda, conCustomer: true }).catch(e => `✗ ${String(e.message).slice(0, 40)}`);
+    const sin = await quoteCrudo({ pais, moneda, conCustomer: false }).catch(e => `✗ ${String(e.message).slice(0, 40)}`);
+    console.log(`  ${pais}→${moneda}     ${con.padEnd(35)} ${sin}`);
+  }
+
+  console.log('\n  ── HK: 3 intentos (¿timeout duro o API inestable?) ──');
+  for (let i = 1; i <= 3; i++) {
+    const r = await quoteCrudo({ pais: 'HK', moneda: 'HKD', conCustomer: true }).catch(e => `✗ ${String(e.message).slice(0, 50)}`);
+    console.log(`  intento ${i}: ${r}`);
+  }
+}
+
 async function main() {
+  if (process.argv.includes('--hipotesis')) return hipotesis();
   if (process.argv.includes('--barrido')) return barrido();
 
   console.log(`Harbor: ${process.env.OWLPAY_BASE_URL ?? process.env.OWLPAY_API_URL}`);
