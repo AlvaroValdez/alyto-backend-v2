@@ -1,19 +1,28 @@
 import Contact from '../models/Contact.js'
 import TransactionConfig from '../models/TransactionConfig.js'
+import { isEuSepaDestination } from '../routing/euAmountRouter.js'
 import * as Sentry from '@sentry/node'
 
 /**
  * Corredor activo para un destino, respetando la entidad del usuario.
  * 'EU' cubre el legacy 'ES' (bo-es migró a destinationCountry='EU').
+ *
+ * ⚠️ MISMO ORDEN que getWithdrawalRulesController: en destinos multi-corredor de
+ * la misma entidad el findOne era no determinista, y para EU (bo-es Vita +
+ * bo-eu-srl Harbor, ambos SRL) llegó a resolver Harbor — contradiciendo la regla
+ * "EU va por Vita" Y el formulario que el propio FE mostró al usuario. La
+ * preferencia debe calzar con la de withdrawal-rules o el formType estampado no
+ * corresponde al form que la persona llenó.
  */
 async function findActiveCorridor(destinationCountry, legalEntity) {
-  const dest  = destinationCountry === 'ES' ? 'EU' : destinationCountry
+  const dest = destinationCountry === 'ES' ? 'EU' : destinationCountry
+  const sortSpec = isEuSepaDestination(dest) ? { payoutMethod: -1 } : { payoutMethod: 1 }
   const query = { destinationCountry: dest, isActive: true }
   if (legalEntity) {
-    const c = await TransactionConfig.findOne({ ...query, legalEntity }).lean()
+    const c = await TransactionConfig.findOne({ ...query, legalEntity }).sort(sortSpec).lean()
     if (c) return c
   }
-  return TransactionConfig.findOne(query).lean()
+  return TransactionConfig.findOne(query).sort(sortSpec).lean()
 }
 
 /** payoutMethod del corredor → formType del contacto. */

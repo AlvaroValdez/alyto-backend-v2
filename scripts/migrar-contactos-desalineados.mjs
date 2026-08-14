@@ -28,6 +28,7 @@ import mongoose from 'mongoose';
 import Contact from '../src/models/Contact.js';
 import TransactionConfig from '../src/models/TransactionConfig.js';
 import User from '../src/models/User.js';
+import { isEuSepaDestination } from '../src/routing/euAmountRouter.js';
 
 const APPLY = process.argv.includes('--apply');
 
@@ -60,10 +61,14 @@ async function corridorFor(dest, legalEntity, cache) {
   const key = `${dest === 'ES' ? 'EU' : dest}:${legalEntity ?? ''}`;
   if (!cache.has(key)) {
     const destination = dest === 'ES' ? 'EU' : dest;
+    // Mismo orden que withdrawal-rules/contactsController: EU prefiere Vita
+    // (bo-es y bo-eu-srl son ambos SRL — sin esto el findOne era una moneda al
+    // aire y llegó a marcar "sin mapeo" contactos EU perfectamente vigentes).
+    const sortSpec = isEuSepaDestination(destination) ? { payoutMethod: -1 } : { payoutMethod: 1 };
     let c = legalEntity
-      ? await TransactionConfig.findOne({ destinationCountry: destination, isActive: true, legalEntity }).lean()
+      ? await TransactionConfig.findOne({ destinationCountry: destination, isActive: true, legalEntity }).sort(sortSpec).lean()
       : null;
-    if (!c) c = await TransactionConfig.findOne({ destinationCountry: destination, isActive: true }).lean();
+    if (!c) c = await TransactionConfig.findOne({ destinationCountry: destination, isActive: true }).sort(sortSpec).lean();
     cache.set(key, c);
   }
   return cache.get(key);
