@@ -159,3 +159,34 @@ describe('extractVitaTxAttributes — la red de seguridad leía el sitio equivoc
     expect(extractVitaTxAttributes({ status: 'completed' }).status).toBe('completed')
   })
 })
+
+describe('rechazo SIN motivo — no culpar a quien no sabemos que se equivocó', () => {
+  // Vita deniega con reject_motive null (lo habitual). El fallback genérico decía
+  // "verifica los datos del beneficiario" y marcaba retryable: acusaba a la usuaria
+  // de un error que no consta, y la invitaba a repetir un envío que volvería a
+  // fallar. Visto en vivo con ALY-C-1786548682442-NE1YVC.
+  const sinMotivo = mapVitaIpnFailure({ status: 'denied', amount: '18.24', order: 'ALY-C-1' })
+
+  test('no atribuye la culpa a los datos del beneficiario', () => {
+    expect(sinMotivo.userMessage).not.toMatch(/datos ingresados|verifica los datos/i)
+    expect(sinMotivo.userAction).not.toMatch(/verifica/i)
+  })
+
+  test('dice de dónde vino el rechazo y deriva a soporte', () => {
+    expect(sinMotivo.userMessage).toMatch(/proveedor/i)
+    expect(sinMotivo.userAction).toMatch(/soporte@alyto\.app/)
+  })
+
+  test('no ofrece reintentar algo que no se puede corregir', () => {
+    expect(sinMotivo.retryable).toBe(false)
+  })
+
+  test('CON motivo diagnosticable sí conserva el mensaje accionable', () => {
+    const conCampo = mapVitaIpnFailure({
+      status: 'denied', code: 305,
+      details: { field: 'account_bank', message: 'Solo se permiten números.' },
+    })
+    expect(conCampo.userMessage).toMatch(/número de cuenta/)
+    expect(conCampo.retryable).toBe(true)
+  })
+})

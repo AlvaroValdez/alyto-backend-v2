@@ -273,8 +273,26 @@ export function mapVitaIpnFailure(body, { stage = 'payout' } = {}) {
     `${etapa} rechazado por Vita (status="${rawStatus}"` +
     `${code != null ? `, code=${code}` : ''}): ${detalle}`;
 
+  // ⚠️ Vita rechazó SIN decir por qué (reject_motive null, que es lo habitual).
+  // El fallback de mapVitaError dice "no pudimos completar con los datos
+  // ingresados · verifica los datos del beneficiario": culpa a la usuaria de algo
+  // que NO sabemos que hizo mal, y la invita a reintentar un envío que volverá a
+  // fallar por la misma causa desconocida. Visto en vivo con
+  // ALY-C-1786548682442-NE1YVC. Sin motivo no se acusa a nadie: se dice la verdad,
+  // que el rechazo vino del proveedor, y se deriva a soporte.
+  const sinDiagnostico = !reason && base.category === 'VITA_UNKNOWN';
+  const userFacing = sinDiagnostico
+    ? {
+        userMessage: 'Nuestro proveedor de pagos rechazó la transferencia y el dinero no llegó al destinatario.',
+        userAction:  'No es necesario que hagas nada: nuestro equipo ya fue notificado y revisará tu caso. ' +
+                     'Si quieres apurarlo, escríbenos a soporte@alyto.app.',
+        retryable:   false,   // no hay nada que la usuaria pueda corregir
+      }
+    : {};
+
   return {
     ...base,
+    ...userFacing,
     // Si no se pudo clasificar, la categoría al menos nombra el estado real de Vita.
     category: base.category === 'VITA_UNKNOWN'
       ? `VITA_IPN_${rawStatus.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`

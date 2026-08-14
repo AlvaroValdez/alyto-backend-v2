@@ -34,6 +34,9 @@ import { sendEmail, EMAILS } from '../src/services/email.js';
 const TX_ID    = process.argv[2];
 const APPLY    = process.argv.includes('--apply');
 const NOTIFICAR = process.argv.includes('--notificar');
+// --forzar: reescribe una tx que YA está en failed. Necesario cuando el job de
+// reconciliación llegó primero y dejó un mensaje al usuario peor que el nuestro.
+const FORZAR   = process.argv.includes('--forzar');
 
 const ESTADOS_DENEGADOS = new Set([
   'denied', 'rejected', 'failed', 'canceled', 'cancelled', 'returned', 'expired',
@@ -67,7 +70,12 @@ async function main() {
 
   const tx = await Transaction.findOne({ alytoTransactionId: TX_ID });
   if (!tx)                 { console.log('Transacción no encontrada.'); return cerrar(); }
-  if (tx.status === 'failed') { console.log(`Ya está en failed: "${tx.failureReason}". Nada que hacer.`); return cerrar(); }
+  if (tx.status === 'failed' && !FORZAR) {
+    console.log(`Ya está en failed: "${String(tx.failureReason).slice(0, 120)}…"`);
+    console.log(`  mensaje a la usuaria: "${tx.userFailureReason ?? '—'}"`);
+    console.log('  Nada que hacer. Usar --forzar para reescribirlo.');
+    return cerrar();
+  }
   if (!tx.payoutReference) { console.log('Sin payoutReference — no se puede consultar a Vita.'); return cerrar(); }
 
   console.log(`  estado en Alyto : ${tx.status}`);
