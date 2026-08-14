@@ -37,6 +37,81 @@ export function faltaConfigurar() {
   return faltan;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Salud de la credencial
+//
+// Un Page Access Token "permanente" (expires_at = 0) NO es inmortal: muere con
+// un cambio de contraseña, con un evento de seguridad de Meta (la consolidación
+// de cuentas invalidó sesiones y nos pasó), al perder el rol de admin sobre la
+// Página o al borrar la app.
+//
+// Sin este chequeo el operador se entera de que el token murió recién cuando
+// intenta publicar. Con él, el panel lo muestra antes de que alguien redacte una
+// pieza contando con poder publicarla.
+//
+// NUNCA lanza: un fallo de la verificación no puede romper la pantalla de estado.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TTL_VERIFICACION_MS = 60_000;   // el panel se refresca seguido; no castigar a Meta
+let cacheVerificacion = null;         // { vencimiento, resultado }
+
+/**
+ * ¿La credencial sirve ahora mismo?
+ *
+ * `ok` es de tres estados a propósito:
+ *   true  → verificada y válida
+ *   false → Meta dice que no sirve
+ *   null  → no se pudo verificar (timeout/red). NO es lo mismo que "rota":
+ *           afirmar que murió haría que alguien la regenere sin necesidad.
+ *
+ * @returns {Promise<{ok:boolean|null, motivo?:string, codigo?:number, expira?:string|null, permisos?:string[]}>}
+ */
+export async function verificarCredencial() {
+  if (!disponible()) {
+    return { ok: false, motivo: `Sin configurar: falta ${faltaConfigurar().join(', ')}.` };
+  }
+
+  if (cacheVerificacion && Date.now() < cacheVerificacion.vencimiento) {
+    return cacheVerificacion.resultado;
+  }
+
+  const token = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+  let resultado;
+
+  try {
+    const r = await fetch(
+      `${GRAPH()}/debug_token?input_token=${encodeURIComponent(token)}` +
+      `&access_token=${encodeURIComponent(token)}`,
+      { signal: AbortSignal.timeout(5000) },   // /estado no puede colgarse por Meta
+    );
+    const d = await r.json();
+
+    if (d.error) {
+      // El 190 es el caso real: invalidado por cambio de contraseña o evento de
+      // seguridad. Meta explica cuál en el mensaje, así que se pasa tal cual.
+      resultado = { ok: false, motivo: d.error.message, codigo: d.error.code ?? null };
+    } else if (!d.data?.is_valid) {
+      resultado = { ok: false, motivo: 'Meta reporta la credencial como no válida.' };
+    } else {
+      resultado = {
+        ok: true,
+        expira: d.data.expires_at === 0 ? null : new Date(d.data.expires_at * 1000).toISOString(),
+        permisos: d.data.scopes ?? [],
+      };
+    }
+  } catch (err) {
+    resultado = { ok: null, motivo: `No se pudo verificar con Meta: ${err.message}` };
+  }
+
+  cacheVerificacion = { vencimiento: Date.now() + TTL_VERIFICACION_MS, resultado };
+  return resultado;
+}
+
+/** Solo para tests: invalida el cache de la verificación. */
+export function __resetCacheVerificacion() {
+  cacheVerificacion = null;
+}
+
 /**
  * Publica una pieza como post de texto en la página.
  *

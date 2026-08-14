@@ -298,3 +298,75 @@ describe('canales sin publicador', () => {
       .rejects.toMatchObject({ code: 'CANAL_SIN_PUBLICADOR', canal: 'x' })
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('salud de la credencial', () => {
+  // Un token "permanente" (expires_at 0) igual muere con un cambio de contraseña
+  // o un evento de seguridad de Meta. Pasó de verdad: la consolidación de cuentas
+  // invalidó el token y nos enteramos recién al intentar publicar.
+
+  let verificarCredencial, __resetCacheVerificacion
+  beforeAll(async () => {
+    const fb = await import('../../src/services/publishers/facebookPublisher.js')
+    verificarCredencial = fb.verificarCredencial
+    __resetCacheVerificacion = fb.__resetCacheVerificacion
+  })
+  beforeEach(() => __resetCacheVerificacion())
+
+  test('token vivo → ok:true, sin vencimiento, con permisos', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      data: { is_valid: true, expires_at: 0, type: 'PAGE',
+              scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'] },
+    })})
+
+    const v = await verificarCredencial()
+
+    expect(v.ok).toBe(true)
+    expect(v.expira).toBeNull()                       // null = no expira
+    expect(v.permisos).toContain('pages_manage_posts')
+  })
+
+  test('token invalidado (código 190) → ok:false con el motivo de Meta', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      error: { code: 190, message: 'The session has been invalidated because the user changed their password' },
+    })})
+
+    const v = await verificarCredencial()
+
+    expect(v.ok).toBe(false)
+    expect(v.codigo).toBe(190)
+    expect(v.motivo).toMatch(/invalidated/i)
+  })
+
+  test('sin credencial configurada → ok:false diciendo QUÉ falta', async () => {
+    delete process.env.FACEBOOK_PAGE_ACCESS_TOKEN
+
+    const v = await verificarCredencial()
+
+    expect(v.ok).toBe(false)
+    expect(v.motivo).toContain('FACEBOOK_PAGE_ACCESS_TOKEN')
+    expect(fetchMock).not.toHaveBeenCalled()          // ni se molesta en llamar
+  })
+
+  test('timeout de red → ok:null (indeterminado), NO false', async () => {
+    // Distinción deliberada: afirmar que la credencial murió cuando solo se cayó
+    // la red haría que alguien la regenere sin necesidad.
+    fetchMock.mockRejectedValue(new Error('The operation was aborted due to timeout'))
+
+    const v = await verificarCredencial()
+
+    expect(v.ok).toBeNull()
+    expect(v.motivo).toMatch(/no se pudo verificar/i)
+  })
+
+  test('cachea el resultado: dos llamadas seguidas pegan una sola vez a Meta', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      data: { is_valid: true, expires_at: 0, scopes: [] },
+    })})
+
+    await verificarCredencial()
+    await verificarCredencial()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
