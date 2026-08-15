@@ -48,4 +48,28 @@ export function estadoPublicadores() {
   }));
 }
 
-export default { canalesSoportados, getPublisher, estadoPublicadores };
+/**
+ * Estado + verificación real de la credencial de cada canal.
+ *
+ * Se separa de estadoPublicadores() porque esta versión hace I/O contra la red:
+ * quien solo necesita saber si un canal está configurado no debería pagar una
+ * llamada a Meta. Las verificaciones corren en paralelo y ninguna puede tumbar
+ * a las otras.
+ */
+export async function verificarCanales() {
+  const publicadores = Object.values(PUBLICADORES);
+  const verificaciones = await Promise.all(publicadores.map(async p => {
+    if (typeof p.verificarCredencial !== 'function') return { ok: null, motivo: 'Sin verificación implementada.' };
+    try { return await p.verificarCredencial(); }
+    catch (err) { return { ok: null, motivo: `Verificación falló: ${err.message}` }; }
+  }));
+  return publicadores.map((p, i) => ({
+    canal: p.canal,
+    nombre: p.nombre,
+    disponible: p.disponible(),
+    falta: p.disponible() ? [] : p.faltaConfigurar(),
+    credencial: verificaciones[i],
+  }));
+}
+
+export default { canalesSoportados, getPublisher, estadoPublicadores, verificarCanales };

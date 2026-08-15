@@ -20,7 +20,7 @@ import ContentPiece from '../models/ContentPiece.js';
 import { procesarPieza, isMarketingAgentEnabled } from '../services/marketingAgentService.js';
 import { verificarProhibiciones } from '../services/riskClassifier.js';
 import {
-  publicarPieza, destrabarPieza, isPublishEnabled, estadoCanales,
+  publicarPieza, destrabarPieza, isPublishEnabled, estadoCanalesVerificado,
 } from '../services/marketingPublishService.js';
 import { canalesSoportados } from '../services/publishers/publisherRegistry.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
@@ -337,7 +337,9 @@ export async function estadoModulo(_req, res) {
       piezas: Object.fromEntries(porEstado.map(e => [e._id, e.total])),
       publicacion: {
         habilitada: isPublishEnabled(),
-        canales:    estadoCanales(),
+        // Verificado contra Meta, no solo "hay una variable seteada": un token
+        // puede estar presente y muerto, y eso hoy solo se descubría al publicar.
+        canales:    await estadoCanalesVerificado(),
       },
     });
   } catch (err) {

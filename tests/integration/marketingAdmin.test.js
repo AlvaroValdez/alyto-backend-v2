@@ -429,6 +429,18 @@ describe('evidencia de la revisión humana', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('GET /estado', () => {
+  test('reporta la salud de la credencial de cada canal, no solo si hay variable', async () => {
+    const res = await request(app).get('/api/v1/admin/marketing/estado').set(como(ADMIN));
+
+    expect(res.status).toBe(200);
+    const fb = res.body.publicacion?.canales?.find(c => c.canal === 'facebook');
+    expect(fb).toBeTruthy();
+    // `credencial` es lo nuevo: un token puede estar presente Y muerto.
+    expect(fb).toHaveProperty('credencial');
+    expect(fb.credencial).toHaveProperty('ok');
+    expect([true, false, null]).toContain(fb.credencial.ok);
+  });
+
   test('reporta flag, modelo y conteo por estado', async () => {
     await sembrarPieza();
     await sembrarPieza();

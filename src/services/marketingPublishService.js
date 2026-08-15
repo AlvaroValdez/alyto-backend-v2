@@ -24,7 +24,7 @@ import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
 import ContentPiece from '../models/ContentPiece.js';
 import { verificarProhibiciones } from './riskClassifier.js';
-import { getPublisher, estadoPublicadores } from './publishers/publisherRegistry.js';
+import { getPublisher, estadoPublicadores, verificarCanales } from './publishers/publisherRegistry.js';
 
 /** Estados desde los que una pieza puede salir al aire. */
 const PUBLICABLES = ['aprobado', 'autopublicado'];
@@ -35,6 +35,11 @@ export function isPublishEnabled() {
 
 export function estadoCanales() {
   return estadoPublicadores();
+}
+
+/** Igual que estadoCanales() pero verificando la credencial contra la red. */
+export function estadoCanalesVerificado() {
+  return verificarCanales();
 }
 
 function error(codigo, mensaje, extra = {}) {
@@ -206,4 +211,4 @@ export async function destrabarPieza(id, opts = {}) {
   }, { returnDocument: 'after' });
 }
 
-export default { isPublishEnabled, estadoCanales, publicarPieza, destrabarPieza };
+export default { isPublishEnabled, estadoCanales, estadoCanalesVerificado, publicarPieza, destrabarPieza };
