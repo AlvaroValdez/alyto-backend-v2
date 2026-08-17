@@ -327,6 +327,41 @@ function textosDeSlides(p) {
 }
 
 /**
+ * Superficie publicable de una pieza: TODO el texto que termina a la vista.
+ *
+ * Definición única a propósito. Antes vivía duplicada en el controller y en el
+ * servicio de publicación —ambos con el comentario "lo mismo que analiza el
+ * clasificador"— y bastaba con agregar un campo acá para que dejara de ser
+ * cierto en silencio. Este proyecto ya tuvo ese bug: dos deny-lists de
+ * compliance que vetaban cosas distintas.
+ *
+ * Solo se acepta texto real. Un campo que no sea string (número, objeto,
+ * undefined) se descarta en vez de coercionarse: sin este filtro
+ * `{cuerpo: {...}}` se convertiría en "[object Object]", contaría como
+ * contenido con texto y saldría clasificado BAJO. Sería fallar abierto justo
+ * cuando el parseo salió mal.
+ */
+function camposPublicables(contentPiece) {
+  const p = contentPiece || {};
+  return [p.titulo, p.cuerpo, p.sugerenciaVisual, ...textosDeSlides(p)]
+    .filter(v => typeof v === 'string');
+}
+
+/**
+ * El texto publicable de una pieza, plano.
+ *
+ * Es lo que hay que pasarle a `verificarProhibiciones` en cualquier chequeo
+ * previo a publicar, para que mire exactamente la misma superficie que miró el
+ * clasificador — ni más ni menos.
+ *
+ * @param {object} contentPiece
+ * @returns {string}
+ */
+export function textoPublicable(contentPiece) {
+  return camposPublicables(contentPiece).filter(s => s.trim()).join('\n');
+}
+
+/**
  * Clasifica el riesgo regulatorio de una pieza de contenido.
  *
  * Analiza `titulo` + `cuerpo` + `sugerenciaVisual` + el texto de todos los
@@ -349,14 +384,7 @@ function textosDeSlides(p) {
  *   dispararon cada señal — para que el admin vea POR QUÉ está en la cola.
  */
 export function clasificarRiesgo(contentPiece) {
-  const p = contentPiece || {};
-  // Solo se acepta texto real. Un campo que no sea string (número, objeto, undefined)
-  // se descarta en vez de coercionarse: sin este filtro, `{cuerpo: {...}}` se
-  // convertiría en "[object Object]", contaría como contenido con texto y saldría
-  // clasificado BAJO. Sería fallar abierto justo cuando el parseo salió mal.
-  const campos = [p.titulo, p.cuerpo, p.sugerenciaVisual, ...textosDeSlides(p)]
-    .filter(v => typeof v === 'string');
-  const texto = normalizar(campos.join('\n'));
+  const texto = normalizar(camposPublicables(contentPiece).join('\n'));
 
   if (!texto.trim()) {
     return { nivel: 'alto', motivos: [MOTIVOS.VACIO], coincidencias: [] };
@@ -392,6 +420,7 @@ export function clasificarRiesgo(contentPiece) {
 export default {
   clasificarRiesgo,
   verificarProhibiciones,
+  textoPublicable,
   normalizar,
   MOTIVOS,
   TERMINOS_REGULACION,
