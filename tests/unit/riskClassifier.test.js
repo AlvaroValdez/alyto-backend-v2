@@ -410,6 +410,99 @@ describe('entradas inválidas → falla cerrado (ALTO)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Carruseles — el texto de los slides ES contenido publicado
+//
+// El modo de fallo que cubren estos tests: pie del post impecable, la infracción
+// escondida en el slide 4. Si el clasificador solo mirara titulo/cuerpo, la
+// pieza saldría BAJO → autopublicada, y el 90% del mensaje de un carrusel (que
+// vive en las imágenes) se publicaría sin gate.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('carruseles → los slides entran al clasificador', () => {
+  // Pie de post deliberadamente limpio: si algo dispara, vino del slide.
+  const carrusel = (slides) => ({
+    titulo: 'Cinco señales de alerta',
+    cuerpo: 'Aprendé a reconocerlas antes de mover tu dinero.',
+    formato: 'carrusel',
+    slides,
+  })
+
+  test('carrusel enteramente limpio → BAJO', () => {
+    const r = clasificarRiesgo(carrusel([
+      { orden: 1, rol: 'portada',    titulo: 'Cinco señales de alerta', texto: '' },
+      { orden: 2, rol: 'desarrollo', titulo: 'Te apuran',   texto: 'La urgencia es la herramienta favorita de quien te quiere estafar.' },
+      { orden: 3, rol: 'cierre',     titulo: 'Ante la duda', texto: 'Consultá antes de mover tu dinero.' },
+    ]))
+    expect(r.nivel).toBe('bajo')
+    expect(r.motivos).toEqual([])
+  })
+
+  test.each([
+    ['una cifra',              'Comisión de apenas 2% por operación.',            MOTIVOS.CIFRAS],
+    ['mención regulatoria',    'Estamos regulados por ASFI desde 2024.',          MOTIVOS.REGULACION],
+    ['promesa de rendimiento', 'Invertí hoy y duplicá tu dinero.',                MOTIVOS.PROMESA],
+    ['terminología vetada',    'La forma más barata de enviar remesas a Bolivia.', MOTIVOS.MARCA],
+    ['certificación falsa',    'Tus fondos están asegurados por la FDIC.',        MOTIVOS.LEGAL],
+  ])('%s escondida en el slide 4 → ALTO', (_, textoSlide, motivo) => {
+    const r = clasificarRiesgo(carrusel([
+      { orden: 1, rol: 'portada',    titulo: 'Cinco señales de alerta', texto: '' },
+      { orden: 2, rol: 'desarrollo', titulo: 'Te apuran',  texto: 'La urgencia es señal de alerta.' },
+      { orden: 3, rol: 'desarrollo', titulo: 'Sin respaldo', texto: 'Verificá quién está detrás.' },
+      { orden: 4, rol: 'desarrollo', titulo: 'Ojo acá',    texto: textoSlide },
+      { orden: 5, rol: 'cierre',     titulo: 'Ante la duda', texto: 'Consultá antes de mover tu dinero.' },
+    ]))
+    expect(r.nivel).toBe('alto')
+    expect(r.motivos).toContain(motivo)
+  })
+
+  test('también mira el TÍTULO del slide, no solo el texto', () => {
+    const r = clasificarRiesgo(carrusel([
+      { orden: 1, rol: 'portada',    titulo: 'Ganá 5% garantizado', texto: '' },
+      { orden: 2, rol: 'desarrollo', titulo: 'Cómo funciona',       texto: 'Es simple y transparente.' },
+    ]))
+    expect(r.nivel).toBe('alto')
+    expect(r.motivos).toContain(MOTIVOS.CIFRAS)
+  })
+
+  test('la coincidencia se devuelve para poder resaltarla en el panel', () => {
+    const r = clasificarRiesgo(carrusel([
+      { orden: 1, rol: 'portada',    titulo: 'Portada',   texto: '' },
+      { orden: 2, rol: 'desarrollo', titulo: 'Comisión',  texto: 'Solo 2% por operación.' },
+    ]))
+    expect(r.coincidencias.join(' ')).toContain('2%')
+  })
+
+  test('una prohibición absoluta en un slide la ve verificarProhibiciones', () => {
+    // El guard duro corre sobre texto plano, así que el servicio tiene que
+    // pasarle también los slides. Este test fija ese contrato.
+    const slides = [
+      { orden: 1, rol: 'portada',    titulo: 'Portada', texto: '' },
+      { orden: 2, rol: 'desarrollo', titulo: 'Envíos',  texto: 'La mejor app de remesas.' },
+    ]
+    const plano = slides.map(s => `${s.titulo}\n${s.texto}`).join('\n')
+    expect(verificarProhibiciones(plano).ok).toBe(false)
+  })
+
+  describe('slides rotos no abren el gate', () => {
+    test.each([
+      ['slides no es array',      'no soy un array'],
+      ['slides con null',         [null, undefined]],
+      ['slides con no-objetos',   ['texto suelto', 42]],
+      ['campos que no son string', [{ orden: 1, titulo: { a: 1 }, texto: 42 }]],
+    ])('%s → se descartan sin romper', (_, slides) => {
+      const r = clasificarRiesgo({ titulo: 'Título neutro', cuerpo: 'Cuerpo limpio sobre custodia.', slides })
+      expect(['alto', 'bajo']).toContain(r.nivel)
+      expect(Array.isArray(r.coincidencias)).toBe(true)
+    })
+
+    test('si SOLO hay slides y son ilegibles → VACIO → ALTO', () => {
+      const r = clasificarRiesgo({ slides: [{ orden: 1, titulo: 42, texto: null }] })
+      expect(r.nivel).toBe('alto')
+      expect(r.motivos).toContain(MOTIVOS.VACIO)
+    })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Determinismo — regresión contra el bug clásico de regex con flag /g/
 // ─────────────────────────────────────────────────────────────────────────────
 describe('determinismo', () => {

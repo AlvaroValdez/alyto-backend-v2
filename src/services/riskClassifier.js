@@ -302,17 +302,48 @@ function coincidenciasDe(texto, regexes) {
 }
 
 /**
+ * Texto publicable de los slides de un carrusel.
+ *
+ * En un carrusel el grueso del mensaje vive en las imágenes, no en el pie del
+ * post. Si estos campos no entraran al clasificador, el control quedaría ciego
+ * justo donde más se dice: una cifra o un "regulados por ASFI" en el slide 4 se
+ * publicaría sin pasar por la cola, con el pie del post perfectamente limpio.
+ *
+ * Se recorre defensivamente porque esto viene de parsear la respuesta de un
+ * modelo: `slides` puede no ser array, traer nulls o traer campos que no son
+ * string. Todo eso se descarta en vez de coercionarse, igual que arriba.
+ */
+function textosDeSlides(p) {
+  if (!Array.isArray(p.slides)) return [];
+
+  const textos = [];
+  for (const s of p.slides) {
+    if (!s || typeof s !== 'object') continue;
+    for (const v of [s.titulo, s.texto]) {
+      if (typeof v === 'string') textos.push(v);
+    }
+  }
+  return textos;
+}
+
+/**
  * Clasifica el riesgo regulatorio de una pieza de contenido.
  *
- * Analiza `titulo` + `cuerpo` + `sugerenciaVisual` juntos. La sugerencia visual
- * se incluye porque termina siendo una imagen publicada: una cifra ahí se
- * publica igual que una cifra en el cuerpo.
+ * Analiza `titulo` + `cuerpo` + `sugerenciaVisual` + el texto de todos los
+ * `slides`, juntos. La sugerencia visual se incluye porque termina siendo una
+ * imagen publicada: una cifra ahí se publica igual que una cifra en el cuerpo.
+ * Los slides, por el mismo motivo y con más razón.
  *
  * Falla cerrado: una pieza sin texto legible se clasifica ALTO, no BAJO. Si el
  * parseo de la respuesta del modelo salió mal, la pieza va a revisión humana en
  * vez de colarse como "apta para publicar".
  *
- * @param {{titulo?:string, cuerpo?:string, sugerenciaVisual?:string}} contentPiece
+ * ⚠️ Un carrusel cuyos slides no parsearon NO se detecta acá — se detecta al
+ * persistir (ContentPiece valida que un carrusel traiga 2–10 slides numerados).
+ * Este módulo decide sobre contenido, no sobre integridad estructural.
+ *
+ * @param {{titulo?:string, cuerpo?:string, sugerenciaVisual?:string,
+ *          slides?:Array<{titulo?:string, texto?:string}>}} contentPiece
  * @returns {{nivel:'alto'|'bajo', motivos:string[], coincidencias:string[]}}
  *   `coincidencias` son los fragmentos (ya normalizados, sin tildes) que
  *   dispararon cada señal — para que el admin vea POR QUÉ está en la cola.
@@ -323,7 +354,8 @@ export function clasificarRiesgo(contentPiece) {
   // se descarta en vez de coercionarse: sin este filtro, `{cuerpo: {...}}` se
   // convertiría en "[object Object]", contaría como contenido con texto y saldría
   // clasificado BAJO. Sería fallar abierto justo cuando el parseo salió mal.
-  const campos = [p.titulo, p.cuerpo, p.sugerenciaVisual].filter(v => typeof v === 'string');
+  const campos = [p.titulo, p.cuerpo, p.sugerenciaVisual, ...textosDeSlides(p)]
+    .filter(v => typeof v === 'string');
   const texto = normalizar(campos.join('\n'));
 
   if (!texto.trim()) {
