@@ -29,7 +29,7 @@ import WalletUSDC   from '../models/WalletUSDC.js'
 import WalletBOB    from '../models/WalletBOB.js'
 import User         from '../models/User.js'
 import { HEARTBEAT_KEY } from '../jobs/monitorUSDCDeposits.js'
-import { getUSDCAvailableNow } from '../services/treasuryLiquidity.js'
+import { getUSDCAvailableNow, getTreasuryReserveUSDC } from '../services/treasuryLiquidity.js'
 
 // ─── Parámetros configurables ─────────────────────────────────────────────────
 
@@ -175,10 +175,14 @@ export function classifyListenerHealth({ heartbeatAt, now = Date.now(), interval
  * (email + Sentry). NO cubre solvencia: su identidad contable está sin confirmar, así
  * que no se auto-alerta hasta validarla con el equipo.
  *
- * @param {{listener?:object, reconciliation?:object, solvency?:object, thresholds?:{maxDiscrepancies?:number}}} p
+ * @param {{listener?:object, reconciliation?:object, solvency?:object,
+ *          thresholds?:{maxDiscrepancies?:number, minHotUSDC?:number}}} p
+ *   thresholds.minHotUSDC — mínimo operativo de la cuenta caliente. En 0 o ausente
+ *   la alerta de recarga no se evalúa (despliegue sin reserva fría).
  * @returns {Array<{key:string, severity:'critical'|'warning', title:string, detail:string}>}
  */
 export function evaluateAnchorAlerts({ listener, reconciliation, solvency, thresholds = {} }) {
+  const minHotUSDC = Number(thresholds.minHotUSDC) || 0
   const maxDiscrepancies = thresholds.maxDiscrepancies ?? 0
   const alerts = []
 
@@ -266,6 +270,21 @@ export function evaluateAnchorAlerts({ listener, reconciliation, solvency, thres
         severity: 'warning',
         title:    'Solvencia no verificable este ciclo',
         detail:   'No se pudo medir la reserva on-chain con fiabilidad (fetch Horizon fallido); la cobertura quedó sin confirmar.',
+      })
+    }
+
+    // Recarga de la cuenta caliente. Con reserva fría, la solvencia puede estar
+    // perfecta y aun así los payouts empezar a fallar porque la caliente se agotó:
+    // la fría no se moviliza sola, exige dos firmas. Avisar ANTES de que el primer
+    // payout rebote — es un problema de liquidez, no de solvencia.
+    if (solvency.coldConfigured && minHotUSDC > 0 && Number.isFinite(solvency.treasuryHotUSDC)
+        && solvency.treasuryHotUSDC < minHotUSDC) {
+      alerts.push({
+        key:      'treasury-hot-low',
+        severity: 'warning',
+        title:    'Cuenta caliente por debajo del mínimo operativo',
+        detail:   `La caliente tiene ${solvency.treasuryHotUSDC} USDC, por debajo del mínimo de ${minHotUSDC} USDC. `
+                + `Requiere recarga desde la reserva fría (dos firmas). Reserva fría disponible: ${solvency.treasuryColdUSDC ?? '?'} USDC.`,
       })
     }
   }
@@ -480,15 +499,28 @@ export async function getSolvencySnapshot({ limit = 2000 } = {}) {
   }))
 
   // ── Lado tesorería: reserva on-chain + payouts en vuelo (pasivo) ─────────────
-  // getUSDCAvailableNow ya excluye lo custodial: mide SOLO el pozo de tesorería.
+  // La RESERVA suma caliente + fría: la fría respalda el pasivo aunque requiera dos
+  // firmas para moverse. Medirla solo con la caliente reportaría un déficit falso en
+  // cuanto el grueso del respaldo se traslade a la fría.
+  // El VUELO sigue saliendo de getUSDCAvailableNow, que excluye lo custodial.
   let treasuryReserveUSDC = 0
+  let treasuryHotUSDC     = 0
+  let treasuryColdUSDC    = 0
+  let coldConfigured      = false
   let inflightPayoutUSDC  = 0
   let treasuryFetchError  = false
   try {
-    const t = await getUSDCAvailableNow('SRL')
-    treasuryReserveUSDC = Number(t.treasury) || 0
+    const [reserve, t] = await Promise.all([
+      getTreasuryReserveUSDC('SRL'),
+      getUSDCAvailableNow('SRL'),
+    ])
+    treasuryReserveUSDC = Number(reserve.total) || 0
+    treasuryHotUSDC     = Number(reserve.hot)   || 0
+    treasuryColdUSDC    = Number(reserve.cold)  || 0
+    coldConfigured      = reserve.coldConfigured
     inflightPayoutUSDC  = Number(t.inflight) || 0
-    if (t.treasury == null) treasuryFetchError = true   // sin pubkey → reserva de tesorería no medible
+    // Sin pubkey o con un fetch fallido, la reserva quedó subestimada.
+    if (reserve.total == null || reserve.partial) treasuryFetchError = true
   } catch {
     treasuryFetchError = true
   }
@@ -505,6 +537,11 @@ export async function getSolvencySnapshot({ limit = 2000 } = {}) {
     // Desglose de los dos lados para el panel (§4.5).
     custodialReserveUSDC: +custodialReserveUSDC.toFixed(7),
     treasuryReserveUSDC:  +treasuryReserveUSDC.toFixed(7),
+    // Desglose caliente/fría: la caliente es lo movilizable por el sistema, la fría
+    // exige multifirma. La suma es el respaldo; solo la caliente es liquidez.
+    treasuryHotUSDC:      +treasuryHotUSDC.toFixed(7),
+    treasuryColdUSDC:     +treasuryColdUSDC.toFixed(7),
+    coldConfigured,
     userLiabilitiesUSDC:  +userLiabilitiesUSDC.toFixed(7),
     inflightPayoutUSDC:   +inflightPayoutUSDC.toFixed(7),
     ...solvency,

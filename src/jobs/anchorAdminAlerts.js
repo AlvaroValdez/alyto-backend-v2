@@ -26,6 +26,7 @@ import {
   getSolvencySnapshot,
   evaluateAnchorAlerts,
 } from '../services/anchorAdminService.js'
+import { minHotUSDC } from '../services/treasuryLiquidity.js'
 import { sendRawEmail } from '../services/email.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -113,7 +114,10 @@ export async function anchorAdminAlerts() {
       _lastReconAt = Date.now()
     }
 
-    const alerts = evaluateAnchorAlerts({ listener, reconciliation, solvency })
+    const alerts = evaluateAnchorAlerts({
+      listener, reconciliation, solvency,
+      thresholds: { minHotUSDC: minHotUSDC() },
+    })
     const toFire = alerts.filter(a => _shouldAlert(a.key, COOLDOWN[a.severity] ?? COOLDOWN.warning))
 
     if (toFire.length === 0) return
