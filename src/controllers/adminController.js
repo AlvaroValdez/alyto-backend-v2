@@ -17,10 +17,12 @@
  * getGlobalAnalytics      → Analytics global: entidades, corredores, volumen.
  */
 
+import mongoose          from 'mongoose';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import WalletTransaction from '../models/WalletTransaction.js';
+import { recordAdminAction } from '../services/adminAuditService.js';
 import { dispatchPayout } from './ipnController.js';
 import { confirmBankQrDeposit } from './walletController.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
@@ -1993,5 +1995,258 @@ export async function resetUserTokenVersion(req, res) {
     success: true,
     message: 'tokenVersion reset to 0',
     user: { id: user._id, email: user.email, tokenVersion: user.tokenVersion },
+  });
+}
+
+// ─── SEP-24 — Cierre de instrucciones caducadas ──────────────────────────────
+//
+// Una instrucción SEP-24 queda en `sep24_*_pending` esperando que el usuario
+// envíe los fondos. Si nunca los envía, la instrucción caduca pero el documento
+// se queda en ese estado para siempre: `updateTransactionStatus` no acepta
+// 'cancelled' (ver VALID_STATUSES), así que el backoffice no tenía forma de
+// cerrarlas y el único camino era escribir directo en la base.
+//
+// Estos dos endpoints cierran ese hueco con un control auditable: se listan los
+// candidatos con sus bloqueos evaluados, y el cierre exige que el operador nombre
+// explícitamente las instrucciones y justifique la acción. Nunca hay barrido
+// masivo implícito.
+
+/** Estados SEP-24 en los que una instrucción espera fondos del usuario. */
+const SEP24_PENDING_STATUSES = ['sep24_deposit_pending', 'sep24_withdraw_pending'];
+
+/**
+ * Determina si una instrucción SEP-24 puede cerrarse administrativamente.
+ *
+ * Solo es seguro cerrar cuando caducó y no existe ni un indicio de que hayan
+ * llegado fondos. Cerrar una instrucción con fondos recibidos dejaría al usuario
+ * sin acreditar y sin registro del reclamo, que es exactamente el daño que hay
+ * que evitar — de ahí que los tres controles de rastro sean excluyentes.
+ *
+ * @param {object} tx  documento Transaction (lean o hidratado)
+ * @param {Date}   now
+ * @returns {{ safeToCancel: boolean, blockers: string[] }}
+ */
+export function evaluateSep24Closure(tx, now = new Date()) {
+  const blockers = [];
+
+  if (!SEP24_PENDING_STATUSES.includes(tx.status)) {
+    blockers.push(`status '${tx.status}': no es una instrucción SEP-24 pendiente`);
+  }
+
+  if (!tx.expiresAt) {
+    blockers.push('sin fecha de expiración: no se puede afirmar que haya caducado');
+  } else if (new Date(tx.expiresAt) >= now) {
+    // Comparación inclusiva a propósito: en el instante exacto del vencimiento la
+    // instrucción todavía se considera vigente. El daño es asimétrico — dejarla
+    // abierta un momento más solo ensucia el backoffice; cerrarla un momento antes
+    // puede descartar un depósito en curso.
+    blockers.push(`vigente hasta ${new Date(tx.expiresAt).toISOString()}`);
+  }
+
+  if (tx.stellarTxHash || tx.stellarTxId) {
+    blockers.push('tiene transacción Stellar asociada: pudo haber recibido fondos');
+  }
+  if (tx.externalTransactionId) {
+    blockers.push('tiene referencia externa del proveedor');
+  }
+  if ((tx.ipnLog?.length ?? 0) > 0) {
+    blockers.push(`registra ${tx.ipnLog.length} evento(s) en ipnLog`);
+  }
+
+  return { safeToCancel: blockers.length === 0, blockers };
+}
+
+/** Filtro que resuelve un identificador que puede ser alytoTransactionId o _id. */
+function sep24IdFilter(rawId) {
+  const id = String(rawId).trim();
+  const or = [{ alytoTransactionId: id }];
+  if (mongoose.Types.ObjectId.isValid(id)) or.push({ _id: id });
+  return { $or: or };
+}
+
+/**
+ * GET /api/v1/admin/transactions/sep24/expired
+ *
+ * Lista las instrucciones SEP-24 pendientes con su evaluación de cierre. No muta
+ * nada: es la vista que el operador revisa antes de decidir.
+ *
+ * Query: ?includeActive=true para ver también las que siguen vigentes.
+ */
+export async function listExpiredSep24(req, res) {
+  const includeActive = String(req.query.includeActive ?? '') === 'true';
+  const now = new Date();
+
+  let docs;
+  try {
+    docs = await Transaction.find({ status: { $in: SEP24_PENDING_STATUSES } })
+      .select('alytoTransactionId status sep24Type originalAmount originCurrency createdAt expiresAt stellarTxHash stellarTxId externalTransactionId ipnLog')
+      .sort({ createdAt: 1 })
+      .lean();
+  } catch (err) {
+    console.error('[Admin listExpiredSep24] Error:', err.message);
+    return res.status(500).json({ error: 'Error al listar instrucciones SEP-24.' });
+  }
+
+  const items = docs.map((tx) => {
+    const { safeToCancel, blockers } = evaluateSep24Closure(tx, now);
+    return {
+      alytoTransactionId: tx.alytoTransactionId,
+      id:                 String(tx._id),
+      status:             tx.status,
+      sep24Type:          tx.sep24Type ?? null,
+      amount:             tx.originalAmount ?? null,
+      currency:           tx.originCurrency ?? null,
+      createdAt:          tx.createdAt,
+      expiresAt:          tx.expiresAt ?? null,
+      safeToCancel,
+      blockers,
+    };
+  }).filter((it) => includeActive || it.safeToCancel || it.blockers.every((b) => !b.startsWith('vigente hasta')));
+
+  return res.json({
+    success:   true,
+    total:     items.length,
+    cancelable: items.filter((it) => it.safeToCancel).length,
+    items,
+  });
+}
+
+/**
+ * POST /api/v1/admin/transactions/sep24/expired/cancel
+ *
+ * Cierra instrucciones SEP-24 caducadas que nunca recibieron fondos.
+ *
+ * Body: { transactionIds: string[], reason: string }
+ *
+ * Deliberadamente NO existe un modo "cerrar todas": el operador debe nombrar cada
+ * instrucción. Los controles de seguridad se reevalúan en el servidor sobre el
+ * documento fresco — lo que el cliente mande no se toma como verdad — y la
+ * transición se hace de forma atómica para que dos operadores concurrentes no
+ * puedan cerrar la misma instrucción dos veces.
+ *
+ * Cada cierre queda en AdminAuditLog dentro de la misma transacción Mongo que la
+ * mutación: si la auditoría no se puede escribir, el cierre se revierte.
+ */
+export async function cancelExpiredSep24(req, res) {
+  const { transactionIds, reason } = req.body ?? {};
+
+  if (!Array.isArray(transactionIds) || transactionIds.length === 0) {
+    return res.status(400).json({
+      error: 'transactionIds debe ser un arreglo no vacío con los identificadores a cerrar.',
+    });
+  }
+  if (transactionIds.length > 100) {
+    return res.status(400).json({ error: 'Máximo 100 instrucciones por llamada.' });
+  }
+  if (!reason || reason.trim().length < 10) {
+    return res.status(400).json({
+      error: 'Se requiere una justificación del cierre (mín. 10 caracteres). Ej: "Cierre administrativo: instrucciones caducadas sin recepción de fondos".',
+    });
+  }
+
+  const justification = reason.trim();
+  const now     = new Date();
+  const results = [];
+
+  for (const rawId of transactionIds) {
+    const tx = await Transaction.findOne(sep24IdFilter(rawId))
+      .select('alytoTransactionId status sep24Type originalAmount originCurrency expiresAt stellarTxHash stellarTxId externalTransactionId ipnLog')
+      .lean();
+
+    if (!tx) {
+      results.push({ id: String(rawId), outcome: 'not_found' });
+      continue;
+    }
+
+    const { safeToCancel, blockers } = evaluateSep24Closure(tx, now);
+    if (!safeToCancel) {
+      results.push({
+        id: tx.alytoTransactionId ?? String(tx._id),
+        outcome: 'skipped',
+        blockers,
+      });
+      continue;
+    }
+
+    const statusReason =
+      `Instrucción SEP-24 caducada el ${new Date(tx.expiresAt).toISOString().slice(0, 10)} sin recepción de fondos ` +
+      `(sin transacción Stellar, sin referencia externa y sin eventos de proveedor). Cierre administrativo. ` +
+      `Sin impacto patrimonial para el usuario.`;
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      // Guard atómico: la transición solo procede si el documento sigue en un
+      // estado SEP-24 pendiente. Si otro operador ganó la carrera, no hacemos nada.
+      const updated = await Transaction.findOneAndUpdate(
+        { _id: tx._id, status: { $in: SEP24_PENDING_STATUSES } },
+        {
+          $set:  { status: 'cancelled', statusReason },
+          $push: {
+            ipnLog: {
+              provider:   'manual',
+              eventType:  'sep24_expired_cancelled',
+              status:     'cancelled',
+              rawPayload: { reason: justification, previousStatus: tx.status },
+              receivedAt: now,
+            },
+          },
+        },
+        { session, returnDocument: 'after' },
+      );
+
+      if (!updated) {
+        await session.abortTransaction();
+        results.push({
+          id: tx.alytoTransactionId ?? String(tx._id),
+          outcome: 'skipped',
+          blockers: ['otro proceso modificó el estado durante la operación'],
+        });
+        continue;
+      }
+
+      await recordAdminAction({
+        req, session,
+        action:     'transaction.sep24_expired_cancel',
+        targetType: 'Transaction',
+        targetId:   tx.alytoTransactionId ?? String(tx._id),
+        before:     { status: tx.status, expiresAt: tx.expiresAt },
+        after:      { status: 'cancelled', statusReason },
+        reason:     justification,
+        metadata:   {
+          sep24Type: tx.sep24Type ?? null,
+          amount:    tx.originalAmount ?? null,
+          currency:  tx.originCurrency ?? null,
+        },
+      });
+
+      await session.commitTransaction();
+      results.push({ id: tx.alytoTransactionId ?? String(tx._id), outcome: 'cancelled' });
+    } catch (err) {
+      await session.abortTransaction().catch(() => {});
+      console.error('[Admin cancelExpiredSep24] Error cerrando instrucción:', {
+        id: tx.alytoTransactionId ?? String(tx._id), error: err.message,
+      });
+      results.push({
+        id: tx.alytoTransactionId ?? String(tx._id),
+        outcome: 'error',
+        error:   err.message,
+      });
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  const cancelled = results.filter((r) => r.outcome === 'cancelled').length;
+
+  console.info('[Admin] Cierre de instrucciones SEP-24 caducadas:', {
+    solicitadas: transactionIds.length, cerradas: cancelled, admin: req.user?.email,
+  });
+
+  return res.json({
+    success:   true,
+    requested: transactionIds.length,
+    cancelled,
+    results,
   });
 }
