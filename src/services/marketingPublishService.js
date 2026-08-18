@@ -23,7 +23,7 @@
 import { logger } from '../utils/logger.js';
 import * as Sentry from '@sentry/node';
 import ContentPiece from '../models/ContentPiece.js';
-import { verificarProhibiciones } from './riskClassifier.js';
+import { verificarProhibiciones, textoPublicable } from './riskClassifier.js';
 import { getPublisher, estadoPublicadores, verificarCanales } from './publishers/publisherRegistry.js';
 
 /** Estados desde los que una pieza puede salir al aire. */
@@ -48,9 +48,6 @@ function error(codigo, mensaje, extra = {}) {
   Object.assign(e, extra);
   return e;
 }
-
-/** Texto publicable de una pieza — lo mismo que mira el clasificador. */
-const textoDe = (p) => [p.titulo, p.cuerpo, p.sugerenciaVisual].filter(Boolean).join('\n');
 
 /**
  * Publica una pieza en su canal.
@@ -108,7 +105,7 @@ export async function publicarPieza(id, opts = {}) {
   }
 
   // ⚠️ Último control antes de que sea irreversible.
-  const veto = verificarProhibiciones(textoDe(pieza));
+  const veto = verificarProhibiciones(textoPublicable(pieza));
   if (!veto.ok) {
     logger.error('[marketing-publish] publicación bloqueada por prohibición absoluta', {
       piezaId: id, actor, motivo: veto.motivo, coincidencia: veto.coincidencia,

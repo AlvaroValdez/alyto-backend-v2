@@ -64,10 +64,18 @@ export function isMarketingAgentEnabled() {
 
 const CAMPOS = [
   'TITULO', 'CUERPO', 'SUGERENCIA_VISUAL', 'CANAL', 'TIPO',
-  'AUTOEVALUACION_RIESGO', 'MOTIVO_RIESGO',
+  'AUTOEVALUACION_RIESGO', 'MOTIVO_RIESGO', 'FORMATO',
 ];
 
-const RE_ETIQUETA = new RegExp(`^[\\s*#>-]*(${CAMPOS.join('|')})\\s*\\**\\s*:\\s*(.*)$`, 'i');
+// Los slides viajan como etiquetas numeradas (SLIDE_1_TITULO, SLIDE_1_TEXTO…)
+// y no como un bloque JSON a propósito: el parser por líneas ya tolera que el
+// modelo agregue markdown o se salga del formato, y un JSON mal cerrado —o
+// envuelto en ```— tira la pieza entera. Acá, una etiqueta que no matchea se
+// pierde sola sin arrastrar al resto.
+const RE_ETIQUETA = new RegExp(
+  `^[\\s*#>-]*(${CAMPOS.join('|')}|SLIDE_\\d+_(?:ROL|TITULO|TEXTO))\\s*\\**\\s*:\\s*(.*)$`,
+  'i',
+);
 
 export function parseRespuestaAgente(texto) {
   const campos = {};
@@ -97,13 +105,97 @@ export function parseRespuestaAgente(texto) {
 const normalizar = (s) => String(s || '')
   .normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
-const CANALES = ['facebook', 'x', 'tiktok'];
-const TIPOS   = ['captacion', 'educacion'];
+const CANALES  = ['facebook', 'x', 'tiktok'];
+const TIPOS    = ['captacion', 'educacion'];
+const FORMATOS = ['post', 'carrusel'];
+const ROLES    = ['portada', 'desarrollo', 'cierre'];
 
 function error(codigo, mensaje) {
   const e = new Error(mensaje);
   e.code = codigo;
   return e;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slides
+//
+// Dónde ser estricto y dónde no, que es la única decisión de diseño acá:
+//
+//   ESTRICTO con la integridad del contenido — números faltantes, slides
+//   vacíos, formato contradictorio. Un carrusel al que le falta un paso publica
+//   un argumento incompleto, y regenerar cuesta centavos: fallar es barato.
+//
+//   TOLERANTE con los metadatos de presentación — el ROL se infiere si falta o
+//   viene raro. No carga peso de compliance, y tirar una pieza entera porque el
+//   modelo escribió "intro" en vez de "portada" es desperdiciar la generación.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RE_CAMPO_SLIDE = /^SLIDE_(\d+)_(ROL|TITULO|TEXTO)$/i;
+
+/** Rol por posición, para cuando el modelo no lo dio o dio uno inventado. */
+function rolPorPosicion(indice, total) {
+  if (indice === 0) return 'portada';
+  if (indice === total - 1) return 'cierre';
+  return 'desarrollo';
+}
+
+/**
+ * Arma los slides a partir de los campos SLIDE_n_* ya parseados.
+ *
+ * @param {Record<string,string>} campos
+ * @returns {Array<{orden:number, rol:string, titulo:string, texto:string}>}
+ * @throws {Error & {code:string}} si la numeración tiene huecos o hay slides vacíos
+ */
+function extraerSlides(campos) {
+  const porNumero = new Map();
+
+  for (const [clave, valor] of Object.entries(campos)) {
+    const m = clave.match(RE_CAMPO_SLIDE);
+    if (!m) continue;
+
+    const n = Number(m[1]);
+    // El 0 y los negativos no existen en el contrato; ignorarlos en silencio
+    // dejaría un hueco más abajo, así que se rechaza acá con el motivo real.
+    if (!Number.isInteger(n) || n < 1) {
+      throw error('SLIDES_INVALIDOS', `El modelo numeró un slide con "${m[1]}", que no es una posición válida.`);
+    }
+
+    if (!porNumero.has(n)) porNumero.set(n, {});
+    porNumero.get(n)[m[2].toUpperCase()] = valor;
+  }
+
+  if (porNumero.size === 0) return [];
+
+  const numeros = [...porNumero.keys()].sort((a, b) => a - b);
+
+  // Sin renumerar. Si el modelo emitió 1, 2 y 4, no sabemos si se salteó la
+  // cuenta o si el slide 3 se perdió al generar — y renumerar a 1,2,3 publicaría
+  // el carrusel con un paso menos sin que nadie se entere. Falla cerrado.
+  const esperado = numeros.map((_, i) => i + 1);
+  if (numeros.join(',') !== esperado.join(',')) {
+    throw error('SLIDES_INVALIDOS',
+      `Los slides deben venir numerados de 1 a ${numeros.length} sin huecos (recibidos: ${numeros.join(', ')}).`);
+  }
+
+  return numeros.map((n, i) => {
+    const crudo  = porNumero.get(n);
+    const titulo = (crudo.TITULO || '').trim();
+    const texto  = (crudo.TEXTO  || '').trim();
+
+    if (!titulo && !texto) {
+      throw error('SLIDES_INVALIDOS', `El slide ${n} vino sin título ni texto.`);
+    }
+
+    const rolCrudo = normalizar(crudo.ROL);
+    const rol = ROLES.includes(rolCrudo) ? rolCrudo : rolPorPosicion(i, numeros.length);
+    if (rolCrudo && rol !== rolCrudo) {
+      logger.warn('[marketing-agent] rol de slide no reconocido, se infiere por posición', {
+        slide: n, recibido: crudo.ROL, inferido: rol,
+      });
+    }
+
+    return { orden: n, rol, titulo, texto };
+  });
 }
 
 /**
@@ -165,12 +257,36 @@ export async function generarContenido(tarea) {
     autoevaluacionRiesgo = 'alto';
   }
 
+  // Sin FORMATO se asume 'post': es lo que respondían todas las piezas antes de
+  // que existieran los carruseles, y un default que cambia el tipo de pieza
+  // sería peor que uno conservador.
+  const formato = normalizar(campos.FORMATO) || 'post';
+  if (!FORMATOS.includes(formato)) {
+    throw error('FORMATO_INVALIDO', `El modelo devolvió un formato no soportado: "${campos.FORMATO}"`);
+  }
+
+  const slides = extraerSlides(campos);
+
+  // El modelo se contradijo. No se infiere el formato a partir de los slides ni
+  // se los descarta: lo primero ignora lo que declaró, lo segundo tira contenido
+  // en silencio. Las dos formas de "arreglarlo" son peores que regenerar.
+  if (formato === 'carrusel' && (slides.length < 2 || slides.length > 10)) {
+    throw error('SLIDES_INVALIDOS',
+      `Un carrusel lleva entre 2 y 10 slides; el modelo devolvió ${slides.length}.`);
+  }
+  if (formato === 'post' && slides.length > 0) {
+    throw error('SLIDES_INVALIDOS',
+      `El modelo declaró FORMATO: post pero devolvió ${slides.length} slides.`);
+  }
+
   return {
     titulo:             campos.TITULO,
     cuerpo:             campos.CUERPO,
     sugerenciaVisual:   campos.SUGERENCIA_VISUAL || null,
     canal,
     tipo,
+    formato,
+    slides,
     autoevaluacionRiesgo,
     motivoRiesgoModelo: campos.MOTIVO_RIESGO || null,
     usage:              resp.usage,
@@ -206,6 +322,8 @@ export async function procesarPieza(tarea, opts = {}) {
       sugerenciaVisual:    generado.sugerenciaVisual,
       canal:               generado.canal,
       tipo:                generado.tipo,
+      formato:             generado.formato,
+      slides:              generado.slides,
       autoevaluacionRiesgo: generado.autoevaluacionRiesgo,
       motivoRiesgoModelo:  generado.motivoRiesgoModelo,
       clasificacionFinal:  veredicto.nivel,
@@ -234,6 +352,8 @@ export async function procesarPieza(tarea, opts = {}) {
       piezaId: pieza._id.toString(),
       canal: generado.canal,
       tipo: generado.tipo,
+      formato: generado.formato,
+      slides: generado.slides.length,
       clasificacionFinal: veredicto.nivel,
       estado,
       divergencia,

@@ -18,7 +18,7 @@ import mongoose from 'mongoose';
 import * as Sentry from '@sentry/node';
 import ContentPiece from '../models/ContentPiece.js';
 import { procesarPieza, isMarketingAgentEnabled } from '../services/marketingAgentService.js';
-import { verificarProhibiciones } from '../services/riskClassifier.js';
+import { verificarProhibiciones, textoPublicable } from '../services/riskClassifier.js';
 import {
   publicarPieza, destrabarPieza, isPublishEnabled, estadoCanalesVerificado,
 } from '../services/marketingPublishService.js';
@@ -53,9 +53,6 @@ const HTTP_PUBLICACION = {
   PUBLICADOR_RESPUESTA_RARA:502,
   NO_TRABADA:               409,
 };
-
-/** Texto publicable de una pieza: lo mismo que analiza el clasificador. */
-const textoDe = (p) => [p.titulo, p.cuerpo, p.sugerenciaVisual].filter(Boolean).join('\n');
 
 /** Paginación saneada desde query params. */
 function paginacion(query) {
@@ -130,7 +127,7 @@ export async function listarPendientes(req, res) {
     // en vez de dejar que el admin haga clic y reciba un 422. Un gate que rebota
     // sin explicar de antemano entrena a ignorar los errores.
     const conVeto = piezas.map(p => {
-      const veto = verificarProhibiciones(textoDe(p));
+      const veto = verificarProhibiciones(textoPublicable(p));
       return veto.ok ? { ...p, prohibida: false }
                      : { ...p, prohibida: true, motivoProhibicion: veto.motivo, coincidencia: veto.coincidencia };
     });
@@ -245,7 +242,7 @@ async function resolver(req, res, { estadoNuevo, accionAudit, fn, bloquearProhib
       const candidata = await ContentPiece.findById(id).lean();
       if (!candidata) return res.status(404).json({ error: 'Pieza no encontrada.' });
 
-      const veto = verificarProhibiciones(textoDe(candidata));
+      const veto = verificarProhibiciones(textoPublicable(candidata));
       if (!veto.ok) {
         logger.warn('[marketingAgent] aprobación bloqueada por prohibición absoluta', {
           piezaId: id, actor, motivo: veto.motivo, coincidencia: veto.coincidencia,

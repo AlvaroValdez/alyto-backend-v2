@@ -250,3 +250,173 @@ describe('llamada al modelo', () => {
     delete process.env.MARKETING_AGENT_MODEL;
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Carruseles
+//
+// El contrato son etiquetas numeradas SLIDE_n_*. Lo que se fija acá es DÓNDE el
+// parser es estricto y dónde no: estricto con la integridad del contenido
+// (huecos en la numeración, slides vacíos, formato contradictorio), tolerante
+// con los metadatos de presentación (el ROL se infiere).
+//
+// La asimetría es deliberada: regenerar cuesta centavos, publicar un carrusel
+// al que le falta un paso del argumento no se deshace.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Respuesta con bloques SLIDE_n a partir de una lista de [rol, titulo, texto].
+function respuestaCarrusel(slides, extra = {}) {
+  const base = respuesta({ ...extra });
+  const bloques = slides.flatMap(([rol, titulo, texto], i) => [
+    '',
+    `SLIDE_${i + 1}_ROL: ${rol}`,
+    `SLIDE_${i + 1}_TITULO: ${titulo}`,
+    `SLIDE_${i + 1}_TEXTO: ${texto}`,
+  ]);
+  return { ...base, text: `${base.text}\nFORMATO: carrusel${bloques.join('\n')}` };
+}
+
+const TRES_SLIDES = [
+  ['portada',    'Cinco señales de alerta', ''],
+  ['desarrollo', 'Te apuran',               'La urgencia es la herramienta de quien te quiere estafar.'],
+  ['cierre',     'Ante la duda',            'Consultá antes de mover tu dinero.'],
+];
+
+describe('carruseles — parseo', () => {
+  test('sin FORMATO se asume post y no hay slides (compatibilidad)', async () => {
+    completeMock.mockResolvedValue(respuesta());
+    const g = await generarContenido('tarea');
+    expect(g.formato).toBe('post');
+    expect(g.slides).toEqual([]);
+  });
+
+  test('carrusel bien formado → slides ordenados y con rol', async () => {
+    completeMock.mockResolvedValue(respuestaCarrusel(TRES_SLIDES));
+
+    const g = await generarContenido('Generá un carrusel sobre estafas.');
+
+    expect(g.formato).toBe('carrusel');
+    expect(g.slides).toHaveLength(3);
+    expect(g.slides.map(s => s.orden)).toEqual([1, 2, 3]);
+    expect(g.slides.map(s => s.rol)).toEqual(['portada', 'desarrollo', 'cierre']);
+    expect(g.slides[1].titulo).toBe('Te apuran');
+    expect(g.slides[0].texto).toBe('');   // la portada no lleva cuerpo
+  });
+
+  test('el CUERPO del post sigue siendo obligatorio en un carrusel', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({ ...r, text: r.text.replace(/^CUERPO:.*$/m, '') });
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'RESPUESTA_NO_PARSEABLE' });
+  });
+
+  test('el texto de un slide puede ser multilínea', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({
+      ...r,
+      text: r.text.replace('SLIDE_2_TEXTO: La urgencia', 'SLIDE_2_TEXTO: La urgencia\ny la presión'),
+    });
+    const g = await generarContenido('tarea')
+    expect(g.slides[1].texto).toContain('y la presión');
+  });
+});
+
+describe('carruseles — estricto con el contenido', () => {
+  test('hueco en la numeración → falla, NO renumera', async () => {
+    // Si el modelo emitió 1, 2 y 4, no sabemos si se salteó la cuenta o si el
+    // slide 3 se perdió. Renumerar publicaría el carrusel con un paso menos.
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({ ...r, text: r.text.replace(/SLIDE_3_/g, 'SLIDE_4_') });
+
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'SLIDES_INVALIDOS' });
+  });
+
+  test('slide sin título ni texto → falla', async () => {
+    completeMock.mockResolvedValue(respuestaCarrusel([
+      ['portada',    'Cinco señales', ''],
+      ['desarrollo', '',              ''],
+      ['cierre',     'Ante la duda',  'Consultá.'],
+    ]));
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'SLIDES_INVALIDOS' });
+  });
+
+  test.each([
+    ['un solo slide', 1],
+    ['once slides',   11],
+  ])('carrusel con %s → falla', async (_, n) => {
+    const slides = Array.from({ length: n }, (_, i) => ['desarrollo', `Título ${i + 1}`, 'Texto.'])
+    completeMock.mockResolvedValue(respuestaCarrusel(slides));
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'SLIDES_INVALIDOS' });
+  });
+
+  test('FORMATO post + slides → falla en vez de descartarlos en silencio', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({ ...r, text: r.text.replace('FORMATO: carrusel', 'FORMATO: post') });
+
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'SLIDES_INVALIDOS' });
+  });
+
+  test('formato inventado → falla', async () => {
+    const r = respuesta();
+    completeMock.mockResolvedValue({ ...r, text: `${r.text}\nFORMATO: historia` });
+    await expect(generarContenido('tarea')).rejects.toMatchObject({ code: 'FORMATO_INVALIDO' });
+  });
+
+  test('nada se persiste cuando los slides son inválidos', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({ ...r, text: r.text.replace(/SLIDE_3_/g, 'SLIDE_9_') });
+
+    await expect(procesarPieza('tarea')).rejects.toMatchObject({ code: 'SLIDES_INVALIDOS' });
+    expect(await ContentPiece.countDocuments()).toBe(0);
+  });
+});
+
+describe('carruseles — tolerante con la presentación', () => {
+  test('rol ausente o inventado se infiere por posición', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({
+      ...r,
+      text: r.text.replace('SLIDE_2_ROL: desarrollo', 'SLIDE_2_ROL: intermedio')
+                  .replace('SLIDE_3_ROL: cierre\n', ''),
+    });
+
+    const g = await generarContenido('tarea');
+
+    expect(g.slides.map(s => s.rol)).toEqual(['portada', 'desarrollo', 'cierre']);
+  });
+
+  test('acepta rol con mayúsculas y tildes', async () => {
+    const r = respuestaCarrusel(TRES_SLIDES);
+    completeMock.mockResolvedValue({ ...r, text: r.text.replace('SLIDE_1_ROL: portada', 'SLIDE_1_ROL: Portada') });
+    const g = await generarContenido('tarea');
+    expect(g.slides[0].rol).toBe('portada');
+  });
+});
+
+describe('carruseles — el gate sigue de pie', () => {
+  test('infracción SOLO en un slide → alto riesgo y cola de aprobación', async () => {
+    // Pie del post impecable, cifra escondida en el slide 2. Este es el caso que
+    // justifica que el clasificador mire los slides.
+    completeMock.mockResolvedValue(respuestaCarrusel([
+      ['portada',    'Cinco señales de alerta', ''],
+      ['desarrollo', 'Nuestra comisión',        'Solo 2% por operación.'],
+      ['cierre',     'Ante la duda',            'Consultá.'],
+    ], { riesgo: 'bajo', motivo: 'Me parece inofensiva.' }));
+
+    const pieza = await procesarPieza('Generá un carrusel.');
+
+    expect(pieza.autoevaluacionRiesgo).toBe('bajo');   // lo que dijo el modelo
+    expect(pieza.clasificacionFinal).toBe('alto');     // lo que decidió el código
+    expect(pieza.motivosClasificador).toContain(MOTIVOS.CIFRAS);
+    expect(pieza.estado).toBe('pendiente_aprobacion');
+  });
+
+  test('carrusel limpio se persiste con formato y slides', async () => {
+    completeMock.mockResolvedValue(respuestaCarrusel(TRES_SLIDES));
+
+    const pieza = await procesarPieza('Generá un carrusel.');
+
+    expect(pieza.formato).toBe('carrusel');
+    expect(pieza.slides).toHaveLength(3);
+    expect(pieza.slides[0].rol).toBe('portada');
+    expect(pieza.estado).toBe('autopublicado');
+  });
+});
