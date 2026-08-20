@@ -53,6 +53,8 @@ import {
   getMemoryStats,
   resetUserTokenVersion,
   simulateBankQrPayment,
+  listExpiredSep24,
+  cancelExpiredSep24,
 } from '../controllers/adminController.js';
 import adminSSE from './adminSSE.js';
 import {
@@ -248,6 +250,28 @@ router.get('/ledger', getGlobalLedger);
  * Responde: { transactions, pagination, summary }
  */
 router.get('/transactions', listTransactions);
+
+/**
+ * GET /api/v1/admin/transactions/sep24/expired
+ *
+ * Instrucciones SEP-24 pendientes con su evaluación de cierre (safeToCancel +
+ * blockers). Solo lectura. Query: ?includeActive=true para incluir las vigentes.
+ *
+ * IMPORTANTE: debe declararse ANTES de /transactions/:transactionId para que
+ * Express no interprete "sep24" como un transactionId.
+ */
+router.get('/transactions/sep24/expired', listExpiredSep24);
+
+/**
+ * POST /api/v1/admin/transactions/sep24/expired/cancel
+ *
+ * Cierra instrucciones SEP-24 caducadas que nunca recibieron fondos.
+ * Body: { transactionIds: string[], reason: string (mín. 10 chars) }
+ *
+ * No existe modo "cerrar todas": cada instrucción se nombra explícitamente. Los
+ * controles se reevalúan en el servidor y cada cierre queda en AdminAuditLog.
+ */
+router.post('/transactions/sep24/expired/cancel', cancelExpiredSep24);
 
 /**
  * GET /api/v1/admin/transactions/:transactionId
