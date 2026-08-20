@@ -90,9 +90,9 @@
     "semantic_hash": "f40306965065f047cff5b23bca18117d"
   },
   "scripts/checkProduction.js": {
-    "mtime": 1786833246.5127335,
-    "ast_hash": "b6655cea7f2752de6db433bab86c5d95",
-    "semantic_hash": "b6655cea7f2752de6db433bab86c5d95"
+    "mtime": 1787177376.9729884,
+    "ast_hash": "89bf9134a1f57626f93d518507c96217",
+    "semantic_hash": ""
   },
   "scripts/clean-orphan-transactions-staging.mjs": {
     "mtime": 1783904614.1769724,
@@ -485,9 +485,9 @@
     "semantic_hash": "6d2acd9e49c307887b206aa5ddd2b18c"
   },
   "src/controllers/adminController.js": {
-    "mtime": 1786833009.777388,
-    "ast_hash": "3803cbd9bc4207e3416b5cafd6af8f05",
-    "semantic_hash": "3803cbd9bc4207e3416b5cafd6af8f05"
+    "mtime": 1787177225.85058,
+    "ast_hash": "b121e503a367a42c7e64ff584831b125",
+    "semantic_hash": ""
   },
   "src/controllers/adminNotificationsController.js": {
     "mtime": 1775696686.6644955,
@@ -545,9 +545,9 @@
     "semantic_hash": "0b4619d9e47ee720c4e7aa250d6b1b65"
   },
   "src/controllers/ipnController.js": {
-    "mtime": 1786832141.7179804,
-    "ast_hash": "06e853f68d5ebd9e6ca1d76d523ff723",
-    "semantic_hash": "06e853f68d5ebd9e6ca1d76d523ff723"
+    "mtime": 1787177294.7412071,
+    "ast_hash": "c8a977fed9519a8e20f8e4de72ae7cbd",
+    "semantic_hash": ""
   },
   "src/controllers/kybController.js": {
     "mtime": 1781890344.0598776,
@@ -555,9 +555,9 @@
     "semantic_hash": "5aee798a4c41644d1bc47950664a01b0"
   },
   "src/controllers/kycController.js": {
-    "mtime": 1786832141.7179804,
-    "ast_hash": "39dcc05ebd72c6642b6ad99d2d90c530",
-    "semantic_hash": "39dcc05ebd72c6642b6ad99d2d90c530"
+    "mtime": 1787176380.6980882,
+    "ast_hash": "1af0a86d7d6b85247e35f634d902008b",
+    "semantic_hash": ""
   },
   "src/controllers/ledgerAdminController.js": {
     "mtime": 1785369596.3522236,
@@ -580,9 +580,9 @@
     "semantic_hash": "42559821c03971e96bc60061feb01f05"
   },
   "src/controllers/payoutController.js": {
-    "mtime": 1786833062.4137788,
-    "ast_hash": "e2ac30cbfe1b5604d6a395fef7af1b96",
-    "semantic_hash": "e2ac30cbfe1b5604d6a395fef7af1b96"
+    "mtime": 1787177322.5051177,
+    "ast_hash": "8b6247c2b0db1172723fd6a6e5379af7",
+    "semantic_hash": ""
   },
   "src/controllers/qrWalletController.js": {
     "mtime": 1781274666.6058803,
@@ -975,9 +975,9 @@
     "semantic_hash": "85b0bfff7e806e8441cdef9456ab42a2"
   },
   "src/routes/adminRoutes.js": {
-    "mtime": 1786832141.7209804,
-    "ast_hash": "3ed94e4115e284636176ea6e0d10385e",
-    "semantic_hash": "3ed94e4115e284636176ea6e0d10385e"
+    "mtime": 1787177369.4959161,
+    "ast_hash": "ec3b939173bd170f297371c18f32242c",
+    "semantic_hash": ""
   },
   "src/routes/adminSSE.js": {
     "mtime": 1776867930.520375,
@@ -1715,9 +1715,9 @@
     "semantic_hash": "1089abba6d71e4e6741f31cf01f11339"
   },
   "src/middlewares/sandboxOnly.js": {
-    "mtime": 1786833105.7162864,
-    "ast_hash": "2924fa7bdbc136db34f08ce7a8f8d007",
-    "semantic_hash": "2924fa7bdbc136db34f08ce7a8f8d007"
+    "mtime": 1787176193.624471,
+    "ast_hash": "42ff21770023aebf8c19ced26e6bebe2",
+    "semantic_hash": ""
   },
   "src/services/piiCrypto.js": {
     "mtime": 1786474301.8495014,
@@ -1749,9 +1749,24 @@
     "ast_hash": "d88ce0fda902d34829b8dd1c58a04120",
     "semantic_hash": "d88ce0fda902d34829b8dd1c58a04120"
   },
-  "tests/unit/sandboxOnly.test.js": {
-    "mtime": 1786833135.8459482,
-    "ast_hash": "7e4d8d779dcc4daaea7d0a955bc54007",
-    "semantic_hash": "7e4d8d779dcc4daaea7d0a955bc54007"
+  "src/utils/comprobanteDto.js": {
+    "mtime": 1787177268.6819668,
+    "ast_hash": "753255e6dbf915fe78288619382c537e",
+    "semantic_hash": ""
+  },
+  "src/utils/environment.js": {
+    "mtime": 1787177145.7338867,
+    "ast_hash": "ecc6dfbe1c554e5c8520216f7f64a76f",
+    "semantic_hash": ""
+  },
+  "tests/integration/adminForcedActions.test.js": {
+    "mtime": 1787177463.900847,
+    "ast_hash": "ca3800556d728c738c76e61483ebccb1",
+    "semantic_hash": ""
+  },
+  "tests/unit/environmentGuards.test.js": {
+    "mtime": 1787177189.822263,
+    "ast_hash": "55444d91d1e28c148976fa2beb5d42a7",
+    "semantic_hash": ""
   }
 }
