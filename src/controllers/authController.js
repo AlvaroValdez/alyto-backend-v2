@@ -18,6 +18,12 @@ import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { resolveDocumentNumberStorage } from '../utils/clientDocument.js';
+import {
+  isLockedOut,
+  registerFailedAttempt,
+  registerSuccess,
+  registerBlocked,
+}                from '../services/accessLogService.js';
 import WalletBOB    from '../models/WalletBOB.js';
 import WalletUSDC   from '../models/WalletUSDC.js';
 import Transaction  from '../models/Transaction.js';
@@ -460,17 +466,32 @@ export async function loginUser(req, res) {
 
     // Mensaje genérico — no revelar si el email existe (prevención de user enumeration)
     if (!user || !user.password) {
+      // Se deja constancia aunque la cuenta no exista: sin ese rastro no se puede
+      // distinguir un error de tipeo de un barrido de credenciales (Art. 2° inc. d).
+      await registerFailedAttempt({ req, email: normalizedEmail, reason: 'user_not_found', user: null });
+      return res.status(401).json({ error: 'Credenciales inválidas.' });
+    }
+
+    // Bloqueo vigente: se rechaza ANTES de comparar la contraseña, para que no se
+    // pueda sondear el estado de la cuenta midiendo el tiempo de respuesta de bcrypt.
+    if (isLockedOut(user)) {
+      await registerBlocked({ req, email: normalizedEmail, user });
       return res.status(401).json({ error: 'Credenciales inválidas.' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      await registerFailedAttempt({ req, email: normalizedEmail, reason: 'bad_password', user });
       return res.status(401).json({ error: 'Credenciales inválidas.' });
     }
 
     if (!user.isActive) {
+      await registerFailedAttempt({ req, email: normalizedEmail, reason: 'account_inactive', user });
       return res.status(401).json({ error: 'Cuenta suspendida. Contacta soporte.' });
     }
+
+    // Acceso concedido: queda el registro y se limpia la racha de fallos.
+    await registerSuccess({ req, email: normalizedEmail, user });
 
     // lastLoginAt siempre — fire-and-forget, no bloquea la respuesta
     // Re-hash progresivo: si el hash tiene cost > 10, migrar silenciosamente

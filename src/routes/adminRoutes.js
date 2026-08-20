@@ -55,6 +55,7 @@ import {
   simulateBankQrPayment,
   listExpiredSep24,
   cancelExpiredSep24,
+  listAccessLogs,
 } from '../controllers/adminController.js';
 import adminSSE from './adminSSE.js';
 import {
@@ -188,6 +189,15 @@ const proofUpload = multer({
  * Lista todos los usuarios del sistema ordenados por fecha de creación.
  */
 router.get('/users', getAllUsers);
+
+/**
+ * GET /api/v1/admin/access-logs
+ *
+ * Registro de accesos e intentos de acceso (Art. 2° inc. d, Sec. 4 del
+ * Reglamento ETF). Solo lectura — la colección es append-only.
+ * Query: ?outcome= ?email= ?userId= ?days= ?limit=
+ */
+router.get('/access-logs', listAccessLogs);
 
 /**
  * GET /api/v1/admin/users/:userId

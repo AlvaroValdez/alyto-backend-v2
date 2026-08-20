@@ -2468,3 +2468,55 @@ export async function cancelExpiredSep24(req, res) {
     results,
   });
 }
+
+// ─── Registro de accesos ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/access-logs
+ *
+ * Consulta del registro de accesos e intentos de acceso (Art. 2° inc. d, Sec. 4
+ * del Reglamento ETF). Sólo lectura: la colección es append-only y no existe vía
+ * para alterarla.
+ *
+ * Mantener los registros sin poder revisarlos no constituye un control, así que
+ * esta consulta es parte del cumplimiento y no un accesorio.
+ *
+ * Query: ?outcome=success|failed|blocked · ?email= · ?userId= · ?days=N · ?limit=N
+ */
+export async function listAccessLogs(req, res) {
+  const AccessLog = (await import('../models/AccessLog.js')).default;
+
+  const filtro = {};
+  if (['success', 'failed', 'blocked'].includes(req.query.outcome)) {
+    filtro.outcome = req.query.outcome;
+  }
+  if (req.query.email)  filtro.email  = String(req.query.email).toLowerCase().trim();
+  if (req.query.userId) filtro.userId = req.query.userId;
+
+  const days  = Math.min(Math.max(parseInt(req.query.days  ?? '30',  10) || 30,  1), 365);
+  const limit = Math.min(Math.max(parseInt(req.query.limit ?? '100', 10) || 100, 1), 500);
+  filtro.createdAt = { $gte: new Date(Date.now() - days * 86_400_000) };
+
+  try {
+    const [items, resumen] = await Promise.all([
+      AccessLog.find(filtro).sort({ createdAt: -1 }).limit(limit).lean(),
+      AccessLog.aggregate([
+        { $match: filtro },
+        { $group: { _id: '$outcome', n: { $sum: 1 } } },
+      ]),
+    ]);
+
+    return res.json({
+      success:     true,
+      ventanaDias: days,
+      // El total por resultado deja ver de un vistazo si hay una racha de fallos
+      // concentrada, que es la señal que interesa vigilar.
+      resumen: Object.fromEntries(resumen.map((r) => [r._id, r.n])),
+      count:   items.length,
+      items,
+    });
+  } catch (err) {
+    console.error('[Admin listAccessLogs] Error:', err.message);
+    return res.status(500).json({ error: 'Error al consultar el registro de accesos.' });
+  }
+}

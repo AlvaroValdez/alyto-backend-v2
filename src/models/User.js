@@ -391,6 +391,23 @@ const userSchema = new Schema(
       type: Date,
     },
     /**
+     * Fallos de autenticación consecutivos. Se reinicia en cada acceso exitoso.
+     * El historial completo vive en AccessLog; este contador existe sólo para
+     * decidir el bloqueo sin agregar la colección en cada intento.
+     */
+    failedLoginAttempts: {
+      type:    Number,
+      default: 0,
+    },
+    /**
+     * Bloqueo temporal por intentos fallidos (Art. 2° inc. d, Sec. 4 del
+     * Reglamento ETF). Null o fecha pasada significa cuenta habilitada.
+     */
+    lockedUntil: {
+      type:    Date,
+      default: null,
+    },
+    /**
      * Contador monotónico para revocación de JWTs.
      * Se incrementa en logout, password reset, o suspensión admin.
      * El middleware protect() compara decoded.tokenVersion !== user.tokenVersion
