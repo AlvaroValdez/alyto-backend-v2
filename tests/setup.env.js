@@ -14,7 +14,14 @@ process.env.NODE_ENV = 'test';
 // ⚠️ La suite debe ser AUTOCONTENIDA: jamás cargar secretos reales de AWS.
 // Sin esto, un .env local con AWS_SECRETS_NAME hace que importar server.js
 // inyecte los secretos de producción en el entorno de test.
-delete process.env.AWS_SECRETS_NAME;
+//
+// ⚠️ Tiene que asignarse '' y NO `delete`: server.js hace `import 'dotenv/config'`
+// ANTES de llamar a loadSecretsIntoEnv(), y dotenv solo respeta las claves que
+// YA existen en process.env (lib/main.js → hasOwnProperty). Al borrarla, dotenv
+// la repoblaba desde el .env local y awsSecrets.js —que la captura en ámbito de
+// módulo— terminaba trayendo el secret `alyto/production` al proceso de test.
+// Dejarla presente pero vacía es falsy para el guard y sobrevive a dotenv.
+process.env.AWS_SECRETS_NAME = '';
 
 // JWT
 process.env.JWT_SECRET = 'alyto_test_jwt_secret_do_not_use_in_prod';
