@@ -9,7 +9,10 @@ import Stripe          from 'stripe';
 import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { screenUser }   from '../services/sanctionsService.js';
+import { readDocumentNumber } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { approveKycFromSession } from '../webhooks/stripeWebhook.js';
+import { areSimulatorsAllowed } from '../utils/environment.js';
 
 let _stripe = null;
 function getStripe() {
@@ -262,15 +265,24 @@ function runSanctionsScreening(userId, firstName, lastName, documentNumber) {
 
 /**
  * POST /api/v1/kyc/approve-test
- * Solo disponible en NODE_ENV !== 'production'.
  * Aprueba el KYC de un usuario sin pasar por Stripe Identity.
  * Útil para testing de flujos post-KYC sin depender del webhook.
+ *
+ * Doble candado — mismo criterio que las rutas /dev de server.js:
+ *   1. ALYTO_ENABLE_DEV_ROUTES === '1'
+ *   2. entorno donde se permiten simuladores (nunca el VPS de producción)
+ *
+ * ⚠️ Hasta 2026-08-15 el docstring decía "Solo disponible en NODE_ENV !==
+ * 'production'" pero el código NO lo verificaba: el único gate era el flag.
+ * Con el flag encendido en el VPS, esto aprobaba el KYC de cualquier userId
+ * sin biometría, sin motivo y sin AdminAuditLog. La discrepancia doc/código es
+ * lo peligroso: hace que alguien lo crea seguro al leerlo.
  *
  * Body: { userId: string }
  * Respuesta 200: { message, user: { id, email, kycStatus } }
  */
 export async function approveKycTest(req, res) {
-  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') {
+  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1' || !areSimulatorsAllowed()) {
     return res.status(404).json({ error: 'Not found.' });
   }
 
@@ -294,9 +306,13 @@ export async function approveKycTest(req, res) {
     console.info(`[KYC Test] ✅ KYC aprobado manualmente — userId: ${userId}`);
 
     // Screening AML (fire-and-forget) — también en modo test para cubrir el flujo
-    const fullUser = await User.findById(userId).select('firstName lastName identityDocument').lean();
+    const fullUser = await User.findById(userId)
+      .select('firstName lastName identityDocument +identityDocument.numberCiphertext').lean();
     if (fullUser) {
-      runSanctionsScreening(userId, fullUser.firstName, fullUser.lastName, fullUser.identityDocument?.number);
+      if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* cae a solo-nombre */ } }
+      let ci = null;
+      try { ci = readDocumentNumber(fullUser); } catch { ci = null; }
+      runSanctionsScreening(userId, fullUser.firstName, fullUser.lastName, ci);
     }
 
     return res.json({

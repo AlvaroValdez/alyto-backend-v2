@@ -57,14 +57,16 @@ import {
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
 import { mapVitaError }       from '../utils/vitaErrorMapper.js';
-import { resolveClientDocument } from '../utils/clientDocument.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { shouldSimulatePayoutConfirmation } from '../utils/environment.js';
+import { buildSrlComprobanteDTO } from '../utils/comprobanteDto.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
 import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
-import { uploadBuffer, getDownloadUrl } from '../services/storageService.js';
+import { uploadBuffer } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
 import { recordSent }       from './contactsController.js';
 
@@ -682,56 +684,32 @@ async function generateSrlComprobante(transaction) {
     if (transaction.legalEntity !== 'SRL') return;
     if (transaction.boliviaCompliance?.comprobanteUrl) return; // ya generado (idempotente)
 
-    const user = await User.findById(transaction.userId).lean();
+    // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
+    const user = await User.findById(transaction.userId).select('+identityDocument.numberCiphertext').lean();
     if (!user) return;
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* comprobante cae a "En verificación" */ } }
 
     const numeroComprobante = await generarNumeroCorrelativo('BOL');
-    const digital          = transaction.digitalAssetAmount ?? 0;
-    const comisionServicio = transaction.fees?.totalDeducted ?? 0;
-    // Tasa BOB/USDC: usar conversionRate.rate si está guardado (más preciso);
-    // si no, calcular desde netBOB (excluye fees) para no inflar la tasa mostrada.
-    const netBOB = transaction.originalAmount
-      - (transaction.fees?.totalDeducted   ?? 0)
-      - (transaction.fees?.profitRetention ?? 0);
-    const tipoCambio = transaction.conversionRate?.rate
-      ?? (digital > 0 && netBOB > 0
-        ? Number((netBOB / digital).toFixed(6))
-        : 0);
 
-    const clientDoc = resolveClientDocument(user);
+    // DTO desde la fuente única (utils/comprobanteDto.js): las tres vías de
+    // emisión —esta, payoutController y /admin/regenerate-comprobante— tienen
+    // que producir el MISMO documento para un mismo correlativo.
+    const { dto, clientDoc } = buildSrlComprobanteDTO({ transaction, user, numeroComprobante });
     if (clientDoc.ciPending) {
       logger.warn('[Comprobante] CI del cliente aún no capturado — se emite "En verificación"', {
         numeroComprobante, userId: user._id.toString(),
       });
     }
 
-    const dto = {
-      numeroComprobante,
-      nombreCliente:      user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
-      nitOci:             clientDoc.nitOci,
-      tipoDocumento:      clientDoc.tipoDocumento,
-      codigoClienteAlyto: user._id.toString(),
-      fechaHora:          (transaction.createdAt ?? new Date()).toISOString(),
-      tipoOperacion:      'Liquidación de Activo Digital',
-      txid:               transaction.stellarTxId ?? 'PENDIENTE',
-      montoFiatRecibido:  transaction.originalAmount,
-      tipoDeCambio:       tipoCambio,
-      montoActivoEntregado: digital,
-      comisionServicio,
-      totalLiquidado:     transaction.originalAmount - comisionServicio,
-    };
-
     const { buffer, filename } = await generateOfficialReceipt(dto);
     const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`;
-    const { url, key } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
 
-    // Presigned URL de 6 días guardada en BD (max SigV4 = 7 días)
-    const resolvedUrl = await getDownloadUrl(key ?? s3Key, 6 * 24 * 3600).catch(() => null);
-    const storedUrl   = resolvedUrl ?? url;
-
+    // Guardar la REFERENCIA durable (s3key:// o URL pública CDN), NUNCA una
+    // presigned que expira: el serve la re-firma fresca vía resolveComprobanteUrl.
     await Transaction.findByIdAndUpdate(transaction._id, {
       $set: {
-        'boliviaCompliance.comprobanteUrl':        storedUrl,
+        'boliviaCompliance.comprobanteUrl':        url,
         'boliviaCompliance.numeroComprobante':     numeroComprobante,
         'boliviaCompliance.comprobanteGeneratedAt': new Date(),
       },
@@ -1734,10 +1712,38 @@ export async function dispatchPayout(transaction) {
       provider:        providerUsed,
     });
 
-    console.log('[dispatchPayout] VITA_ENVIRONMENT check:', process.env.VITA_ENVIRONMENT);
-    console.log('[dispatchPayout] ¿Es sandbox?:', process.env.VITA_ENVIRONMENT === 'sandbox');
+    // ── Autoconfirmación simulada: SOLO fuera de producción real ─────────────
+    // Esta rama da por CONFIRMADO el payout a los 4 s sin esperar el IPN del
+    // proveedor. Corre DESPUÉS de que el proveedor ya aceptó la orden, así que
+    // en producción real con VITA_ENVIRONMENT mal seteado el payout sí se envía
+    // pero la confirmación es falsa: la tx queda 'completed', se emite el
+    // comprobante y se notifica al usuario aunque el proveedor después falle.
+    //
+    // El template de CLAUDE.md §7 trae VITA_ENVIRONMENT=sandbox, así que es un
+    // pie de fábrica: `areSimulatorsAllowed()` lo neutraliza en el VPS. Caer al
+    // `else` es la conducta conservadora — esperar el IPN real, que es lo que
+    // debe pasar; además los jobs reconcileVitaTransfers/reconcileHarborTransfers
+    // son la red de seguridad si ese IPN se pierde.
+    //
+    // ⚠️ Nota aparte: la var es VITA_ENVIRONMENT pero la rama aplica también a
+    // payouts OwlPay (providerUsed puede ser 'owlPay'). Se respeta el
+    // comportamiento existente; el guard de entorno acota el daño.
+    const simulacionSolicitada = process.env.VITA_ENVIRONMENT === 'sandbox';
+    const simulacionPermitida  = shouldSimulatePayoutConfirmation();
 
-    if (process.env.VITA_ENVIRONMENT === 'sandbox') {
+    if (simulacionSolicitada && !simulacionPermitida) {
+      const aviso = '[dispatchPayout] ⚠️ VITA_ENVIRONMENT=sandbox en producción real — ' +
+        'se IGNORA la autoconfirmación simulada y se espera el IPN del proveedor. ' +
+        'Corregir la variable de entorno (debe ser "production").';
+      console.error(aviso);
+      Sentry.captureMessage(aviso, {
+        level: 'error',
+        tags:  { controller: 'ipnController', fn: 'dispatchPayout', provider: providerUsed },
+        extra: { transactionId: transaction.alytoTransactionId },
+      });
+    }
+
+    if (simulacionPermitida) {
       // ── SANDBOX: simulate production 2-step flow (payout_sent → completed) ────
       // Step 1: payout_sent — same as production
       console.log(`[dispatchPayout] 🧪 Sandbox (${providerUsed}) — step 1: payout_sent`);

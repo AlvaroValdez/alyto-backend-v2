@@ -24,7 +24,9 @@
 import { Router }    from 'express';
 import { protect }   from '../middlewares/authMiddleware.js';
 import { checkAdmin } from '../middlewares/checkAdmin.js';
+import { sandboxOnly } from '../middlewares/sandboxOnly.js';
 import { idempotencyCheck } from '../middlewares/idempotency.js';
+import { recordAdminAction } from '../services/adminAuditService.js';
 import {
   getAllUsers,
   getUser,
@@ -281,8 +283,11 @@ router.patch('/transactions/:transactionId/status', idempotencyCheck, updateTran
 /**
  * POST /api/v1/admin/transactions/:transactionId/simulate-bankqr-payment
  * Simula el webhook IPN del banco para sandbox. Solo transacciones bankQr en payin_pending.
+ * ⚠️ SANDBOX ONLY — acredita saldo sin cobro bancario real y dispara el payout
+ * internacional. `sandboxOnly` lo bloquea con 403 en producción (el handler lo
+ * revalida por su cuenta).
  */
-router.post('/transactions/:transactionId/simulate-bankqr-payment', simulateBankQrPayment);
+router.post('/transactions/:transactionId/simulate-bankqr-payment', sandboxOnly, simulateBankQrPayment);
 
 // ─── Corredores ───────────────────────────────────────────────────────────────
 
@@ -655,7 +660,10 @@ router.post('/wallet/withdrawals/:wtxId/comprobante', proofUpload.single('compro
 router.post('/wallet/withdrawal/confirm',  proofUpload.single('comprobante'), adminConfirmWithdrawal);
 router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
 router.post('/wallet/withdrawal/dispatch', adminDispatchWithdrawal);
-router.post('/wallet/withdrawal/simulate-settle', adminSimulateWithdrawalSettlement);
+// ⚠️ SANDBOX ONLY — cierra un retiro como si el banco lo hubiera liquidado.
+// El handler ya bloquea cuando la dispersión real está activa; `sandboxOnly`
+// cierra el caso restante (producción con dispersión aún manual).
+router.post('/wallet/withdrawal/simulate-settle', sandboxOnly, adminSimulateWithdrawalSettlement);
 
 /**
  * PATCH /api/v1/admin/wallet/:userId/freeze
@@ -804,10 +812,7 @@ router.get('/health/memory', getMemoryStats);
  * Params:
  *   transferId — Harbor transfer UUID (from createHarborTransfer / Transaction.harborTransfer.id)
  */
-router.post('/sandbox/owlpay/simulate/:transferId', async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(403).json({ error: 'Sandbox-only endpoint' });
-  }
+router.post('/sandbox/owlpay/simulate/:transferId', sandboxOnly, async (req, res) => {
   const { transferId } = req.params;
   try {
     const result = await simulateTransferCompleted(transferId);

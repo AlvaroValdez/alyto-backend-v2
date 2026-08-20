@@ -91,6 +91,29 @@ function checkEnvVars() {
       test: v => !!v && /owlpay\.com/.test(v) && !/sandbox/i.test(v),
       hint: 'Debe apuntar a harbor.owlpay.com sin "sandbox" (entorno de producción)',
     },
+    // ⚠️ AWS_SECRETS_NAME es la señal que discrimina "VPS de producción" de
+    // "Render staging" en todo el código (utils/environment.js, y los guards de
+    // proveedores y de DB de server.js — Render staging TAMBIÉN corre
+    // NODE_ENV=production). Si falta, el proceso se autoclasifica como staging.
+    // No abre un bypass (la política sigue siendo fail-closed), pero es un
+    // punto único de fallo silencioso para un control regulatorio:
+    // loadSecretsIntoEnv() solo loguea INFO y sigue.
+    {
+      name: 'AWS_SECRETS_NAME',
+      test: v => !!v,
+      hint: 'Debe estar definida en el VPS (ej. alyto/production) — de ella depende que el código se reconozca como producción real',
+    },
+    // ⚠️ VITA_ENVIRONMENT no es cosmético: con 'sandbox', dispatchPayout entra
+    // en la rama de simulación (ipnController.js) y autocompleta TODO payout Vita
+    // —payout_sent → completed a los 4 s, con email, push y audit trail Stellar—
+    // sin que Vita haya movido un centavo. Es el mismo efecto que los endpoints
+    // simulate*, pero en el camino principal del dinero y sin guard de entorno.
+    // El template de CLAUDE.md §7 trae 'sandbox', así que es un pie de fábrica.
+    {
+      name: 'VITA_ENVIRONMENT',
+      test: v => !!v && v.toLowerCase() !== 'sandbox',
+      hint: 'DEBE ser "production". Con "sandbox", dispatchPayout autocompleta los payouts sin ejecutarlos en Vita',
+    },
     { name: 'VITA_LOGIN',                test: v => !!v, hint: 'x-login de autenticación Vita' },
     { name: 'VITA_TRANS_KEY',            test: v => !!v, hint: 'x-trans-key de autenticación Vita' },
     { name: 'VITA_SECRET',               test: v => !!v, hint: 'Clave HMAC-SHA256 de Vita' },

@@ -34,6 +34,8 @@ import {
 }                         from '../services/vitaWalletService.js';
 import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
+import { denyIfProduction }   from '../middlewares/sandboxOnly.js';
+import { recordAdminAction }  from '../services/adminAuditService.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1874,8 +1876,17 @@ export async function getMemoryStats(req, res) {
  * Simula el webhook IPN del banco para una transacción bankQr en payin_pending.
  * SOLO PARA SANDBOX — confirma el pago sin intervención del banco real.
  * Equivale a lo que haría el IPN de BEC cuando el usuario paga el QR.
+ *
+ * ⚠️ El "SOLO PARA SANDBOX" era hasta 2026-08-15 únicamente documental: sin
+ * guard de entorno, en producción esto acredita saldo BOB de la nada
+ * (confirmBankQrDeposit → $inc balance) o marca payin_confirmed y dispara
+ * dispatchPayout — un payout internacional real contra un ingreso inexistente.
+ * La ruta aplica `sandboxOnly`; aquí se revalida (defensa en profundidad)
+ * porque este handler crea saldo sobre fondos de terceros bajo custodia.
  */
 export async function simulateBankQrPayment(req, res) {
+  if (denyIfProduction(res, 'simulate-bankqr-payment')) return;
+
   const { transactionId } = req.params;
 
   const transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
