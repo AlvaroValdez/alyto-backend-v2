@@ -233,6 +233,17 @@ const boliviaComplianceSchema = new Schema(
     exchangeRateBob: {
       type: Number,
     },
+    /**
+     * Procedencia de `exchangeRateBob` — el Comprobante Oficial tiene valor
+     * regulatorio, así que debe poder demostrarse si la tasa salió de la
+     * cotización bloqueada al despachar el payout o de un override del operador.
+     * El override está acotado y auditado (payoutController.resolveComprobanteRate
+     * + AdminAuditLog 'payout.bolivia.manual_rate_override').
+     */
+    exchangeRateSource: {
+      type: String,
+      enum: ['locked_quote', 'manual_override'],
+    },
   },
   { _id: false },
 );

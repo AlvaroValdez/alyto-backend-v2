@@ -5,12 +5,21 @@
  * Valida que la operación corresponda a AV Finance SRL antes de proceder.
  *
  * Flujo de processBoliviaManualPayout:
- *   1. Buscar la transacción en BD y verificar estado 'in_transit'
- *   2. Validación Multi-Entidad → legalEntity = 'SRL' (jurisdicción Bolivia)
- *   3. Marcar la transacción como 'completed'
- *   4. Generar el Comprobante Oficial de Transacción (PDF)
- *   5. Persistir referencia del comprobante en BD
- *   6. Retornar el PDF al operador o al cliente
+ *   1. Control de acceso: rol admin (la ruta ya aplica protect + requireAdmin)
+ *   2. Buscar la transacción en BD y verificar estado 'in_transit'
+ *   3. Validación Multi-Entidad → legalEntity = 'SRL' (jurisdicción Bolivia)
+ *   4. Resolver el tipo de cambio server-side (override del cliente acotado)
+ *   5. Reclamar la transacción de forma ATÓMICA (in_transit → completed)
+ *   6. Recién entonces consumir el correlativo y emitir el Comprobante Oficial
+ *   7. Persistir referencia del comprobante en BD
+ *   8. Retornar el PDF al operador
+ *
+ * ⚠️ CONTROL PREVENTIVO (cerrado 2026-08-15): antes bastaba un JWT de cualquier
+ * usuario SRL para liquidar una transacción ajena — se completaba la operación,
+ * se quemaba un correlativo oficial y el PDF devuelto exponía el KYC del titular.
+ * Hoy: rol admin (ruta + controlador), reclamo atómico del estado para que dos
+ * llamadas concurrentes no emitan dos comprobantes, y tipo de cambio resuelto
+ * desde la cotización bloqueada — el override manual queda acotado y auditado.
  *
  * SKILL activo: Compliance_Bolivia_Alyto
  * COMPLIANCE: Terminología prohibida ausente.
@@ -20,9 +29,71 @@ import Transaction from '../models/Transaction.js';
 import User        from '../models/User.js';
 import { generateOfficialReceipt } from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo } from '../utils/correlativoService.js';
-import { resolveClientDocument } from '../utils/clientDocument.js';
+import { readDocumentNumber } from '../utils/clientDocument.js';
+import { buildSrlComprobanteDTO } from '../utils/comprobanteDto.js';
+import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { autoGenerateBusinessInvoice } from './businessInvoiceController.js';
 import { uploadBuffer } from '../services/storageService.js';
+import { getBOBRate } from '../services/exchangeRateService.js';
+import { recordAdminAction } from '../services/adminAuditService.js';
+
+/**
+ * Desviación máxima tolerada (%) entre el `tipoCambioManual` que envía el
+ * operador y la tasa de referencia server-side. Leído dentro de la función
+ * (regla 21 de CLAUDE.md: nunca capturar env en el ámbito de módulo).
+ */
+export function maxManualRateDeviationPct() {
+  const raw = process.env.PAYOUT_MANUAL_RATE_MAX_DEVIATION_PCT;
+  // Una var vacía es "sin configurar", no 0 — `Number('')` es 0 y cerraría la
+  // banda en silencio. Cualquier valor no numérico o negativo cae al default.
+  if (raw === undefined || raw === null || String(raw).trim() === '') return 5;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5;
+}
+
+/**
+ * Decide qué tasa BOB/USD se estampa en el Comprobante Oficial.
+ * Lógica pura y testeable: la autoridad es la tasa bloqueada en la cotización;
+ * el override manual solo se acepta dentro de una banda alrededor de la referencia.
+ *
+ * @param {object} p
+ * @param {number|null|undefined} p.manualRate    — tipoCambioManual crudo del body
+ * @param {number|null|undefined} p.lockedRate    — transaction.conversionRate.rate
+ * @param {number|null|undefined} p.fallbackRate  — tasa de mercado (solo si no hay locked)
+ * @param {number} p.maxDeviationPct
+ * @returns {{ ok: true, rate: number, source: 'locked_quote'|'manual_override',
+ *             referenceRate: number, deviationPct: number }
+ *          | { ok: false, code: string, referenceRate: number|null, deviationPct: number|null }}
+ */
+export function resolveComprobanteRate({ manualRate, lockedRate, fallbackRate, maxDeviationPct }) {
+  const locked   = Number(lockedRate);
+  const hasLocked = Number.isFinite(locked) && locked > 0;
+
+  // Sin override: manda la cotización bloqueada al despachar el payout.
+  if (manualRate === undefined || manualRate === null || manualRate === '') {
+    if (!hasLocked) return { ok: false, code: 'NO_RATE_AVAILABLE', referenceRate: null, deviationPct: null };
+    return { ok: true, rate: locked, source: 'locked_quote', referenceRate: locked, deviationPct: 0 };
+  }
+
+  const manual = Number(manualRate);
+  if (!Number.isFinite(manual) || manual <= 0) {
+    return { ok: false, code: 'MANUAL_RATE_INVALID', referenceRate: hasLocked ? locked : null, deviationPct: null };
+  }
+
+  // Referencia: la tasa bloqueada; si la tx no la tiene, la tasa de mercado.
+  const fallback  = Number(fallbackRate);
+  const reference = hasLocked ? locked : (Number.isFinite(fallback) && fallback > 0 ? fallback : null);
+  if (reference === null) {
+    return { ok: false, code: 'NO_REFERENCE_RATE', referenceRate: null, deviationPct: null };
+  }
+
+  const deviationPct = Math.abs(manual - reference) / reference * 100;
+  if (deviationPct > maxDeviationPct) {
+    return { ok: false, code: 'MANUAL_RATE_OUT_OF_BOUNDS', referenceRate: reference, deviationPct };
+  }
+
+  return { ok: true, rate: manual, source: 'manual_override', referenceRate: reference, deviationPct };
+}
 
 // ─── POST /api/v1/payouts/bolivia/manual ────────────────────────────────────
 
@@ -46,6 +117,20 @@ import { uploadBuffer } from '../services/storageService.js';
  */
 export async function processBoliviaManualPayout(req, res) {
   const { transactionId, tipoCambioManual } = req.body;
+
+  // ── 0. Control de acceso — defensa en profundidad ─────────────────────────
+  // La ruta ya aplica protect + requireAdmin; revalidamos aquí para que un
+  // remontaje futuro del router no reabra el agujero en silencio. Emitir un
+  // Comprobante Oficial es una operación de back-office, nunca del titular.
+  if (req.user?.role !== 'admin') {
+    console.warn('[Alyto Payout Bolivia] REJECT: llamada sin rol admin.', {
+      userId: req.user?._id?.toString(), role: req.user?.role, transactionId,
+    });
+    return res.status(403).json({
+      success: false,
+      error:   'Acceso denegado. La liquidación manual Bolivia requiere rol de administrador.',
+    });
+  }
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
   if (!transactionId) {
@@ -84,6 +169,20 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
 
+  // ── 3.b Un comprobante por operación ──────────────────────────────────────
+  // Rechazo temprano y explícito del replay: revertir el estado a 'in_transit'
+  // (posible vía PATCH /admin/transactions/:id/status) no debe habilitar la
+  // emisión de un segundo Comprobante Oficial. El guard duro está en el reclamo
+  // atómico del paso 7; esto solo da un error legible antes de trabajar de más.
+  if (transaction.boliviaCompliance?.numeroComprobante) {
+    return res.status(409).json({
+      success:           false,
+      error:             `La transacción ya tiene un Comprobante Oficial emitido (${transaction.boliviaCompliance.numeroComprobante}). No se emite un segundo correlativo para la misma operación.`,
+      code:              'COMPROBANTE_ALREADY_ISSUED',
+      numeroComprobante: transaction.boliviaCompliance.numeroComprobante,
+    });
+  }
+
   // ── 4. VALIDACIÓN MULTI-ENTIDAD ───────────────────────────────────────────
   // El Corredor Bolivia opera exclusivamente bajo AV Finance SRL.
   // Transacciones de LLC o SpA no pueden liquidarse por este endpoint.
@@ -106,9 +205,11 @@ export async function processBoliviaManualPayout(req, res) {
   }
 
   // ── 5. Cargar usuario para datos KYC del comprobante ─────────────────────
+  // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
   let user;
   try {
-    user = await User.findById(transaction.userId).lean();
+    user = await User.findById(transaction.userId).select('+identityDocument.numberCiphertext').lean();
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* comprobante cae a "En verificación" */ } }
   } catch (err) {
     console.error('[Alyto Payout Bolivia] Error cargando usuario:', {
       transactionId,
@@ -127,50 +228,110 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
 
-  // ── 6. Actualizar la transacción a COMPLETED ──────────────────────────────
-  // Resolver tipo de cambio una sola vez. conversionRate.rate = BOB/USDC
-  // (semántica consistente desde fase 18B). El viejo Transaction.exchangeRate
-  // tiene semántica ambigua según corredor (ver Transaction.js:375 @deprecated).
-  if (!tipoCambioManual && !transaction.conversionRate?.rate) {
-    // Este endpoint solo recibe tx SRL (legalEntity check arriba en línea 88).
-    // Las tx SRL bo-* siempre tienen conversionRate seteado por
-    // ipnController.dispatchPayout (líneas 835/910) antes de llegar aquí.
-    // Si esto se invoca con legalEntity distinta a SRL, el guard de arriba
-    // debería haber rechazado primero. Si no, hay drift en el flow.
+  // ── 6. Resolver el tipo de cambio SERVER-SIDE ─────────────────────────────
+  // La autoridad es conversionRate.rate = BOB/USD bloqueada por
+  // ipnController.dispatchPayout al despachar el payout (semántica consistente
+  // desde fase 18B; el viejo Transaction.exchangeRate es ambiguo — ver
+  // Transaction.js @deprecated). El `tipoCambioManual` del cliente ya NO se
+  // acepta a ciegas: se estampa en un documento con valor regulatorio, así que
+  // solo se admite dentro de una banda alrededor de la referencia y se audita.
+  const lockedRate = transaction.conversionRate?.rate;
+  let fallbackRate = null;
+  if (tipoCambioManual != null && tipoCambioManual !== '' && !(lockedRate > 0)) {
+    // Solo pagamos la latencia de la tasa de mercado si hay override y no hay
+    // tasa bloqueada contra la cual compararlo.
+    try { fallbackRate = await getBOBRate(); } catch { fallbackRate = null; }
+  }
+
+  const rateDecision = resolveComprobanteRate({
+    manualRate:      tipoCambioManual,
+    lockedRate,
+    fallbackRate,
+    maxDeviationPct: maxManualRateDeviationPct(),
+  });
+
+  if (!rateDecision.ok) {
+    const detalle = {
+      NO_RATE_AVAILABLE:        'No se pudo determinar tipo de cambio',
+      NO_REFERENCE_RATE:        'No hay tasa de referencia para validar el tipo de cambio manual',
+      MANUAL_RATE_INVALID:      'tipoCambioManual debe ser un número positivo',
+      MANUAL_RATE_OUT_OF_BOUNDS: 'tipoCambioManual fuera de la banda permitida respecto a la tasa de referencia',
+    }[rateDecision.code] ?? 'Tipo de cambio no válido';
+
+    console.warn('[Alyto Payout Bolivia] REJECT: tipo de cambio no aceptado.', {
+      transactionId, code: rateDecision.code,
+      tipoCambioManual, lockedRate,
+      referenceRate: rateDecision.referenceRate,
+      deviationPct:  rateDecision.deviationPct,
+      adminId:       req.user?._id?.toString(),
+    });
+
     return res.status(422).json({
       success: false,
-      error:  'No se pudo determinar tipo de cambio',
-      detail: `tx ${transaction.alytoTransactionId}: ` +
-              `manualExchangeRate=${tipoCambioManual} ` +
-              `conversionRate.rate=${transaction.conversionRate?.rate} ` +
-              `| legalEntity=${transaction.legalEntity}`,
-      hint:   'Verificar que dispatchPayout haya seteado conversionRate antes de llamar a payout',
+      error:   detalle,
+      code:    rateDecision.code,
+      detail:  `tx ${transaction.alytoTransactionId}: ` +
+               `tipoCambioManual=${tipoCambioManual} ` +
+               `conversionRate.rate=${lockedRate} ` +
+               `| legalEntity=${transaction.legalEntity}`,
+      referenceRate:   rateDecision.referenceRate,
+      deviationPct:    rateDecision.deviationPct != null ? Number(rateDecision.deviationPct.toFixed(4)) : null,
+      maxDeviationPct: maxManualRateDeviationPct(),
+      hint: rateDecision.code === 'NO_RATE_AVAILABLE'
+        ? 'Verificar que dispatchPayout haya seteado conversionRate antes de llamar a payout'
+        : 'Usar la tasa bloqueada en la cotización, o corregir el override dentro de la banda permitida',
     });
   }
-  const tipoCambioBob     = tipoCambioManual ?? transaction.conversionRate.rate;
-  const numeroComprobante = await generarNumeroCorrelativo('BOL');
-  const ahora             = new Date();
 
+  const tipoCambioBob = rateDecision.rate;
+  const ahora         = new Date();
+
+  // ── 7. Reclamo ATÓMICO e IDEMPOTENTE de la transacción ───────────────────
+  // El chequeo de estado del paso 3 es un check-then-act: dos llamadas
+  // concurrentes lo pasaban ambas y emitían DOS comprobantes oficiales con dos
+  // correlativos distintos para la misma operación. El filtro `status:
+  // 'in_transit'` dentro del update hace que solo una gane.
+  //
+  // ⚠️ El filtro por estado solo serializa la concurrencia; NO alcanza para la
+  // idempotencia. `PATCH /admin/transactions/:id/status` acepta 'in_transit'
+  // como destino sin guard de transición, así que un admin puede revertir el
+  // estado y re-liquidar: se quemaría un segundo correlativo y el
+  // `numeroComprobante` anterior quedaría huérfano en la serie oficial
+  // (sobrescrito, sin documento asociado). El guard real es el correlativo:
+  // una transacción que YA tiene comprobante emitido no vuelve a emitir otro.
+  let claimed;
   try {
-    await Transaction.findByIdAndUpdate(transactionId, {
-      $set: {
-        status:      'completed',
-        completedAt: ahora,
-        'boliviaCompliance.comprobanteGeneratedAt': ahora,
-        'boliviaCompliance.clientTaxId':            user.taxId ?? user.identityDocument?.number,
-        'boliviaCompliance.amountBob':              transaction.originalAmount,
-        'boliviaCompliance.exchangeRateBob':        tipoCambioBob,
+    claimed = await Transaction.findOneAndUpdate(
+      {
+        _id:    transactionId,
+        status: 'in_transit',
+        $or: [
+          { 'boliviaCompliance.numeroComprobante': { $exists: false } },
+          { 'boliviaCompliance.numeroComprobante': null },
+          { 'boliviaCompliance.numeroComprobante': '' },
+        ],
       },
-      $push: {
-        providersUsed: 'payout:anchorBolivia',
-        paymentLegs: {
-          stage:       'payout',
-          provider:    'anchorBolivia',
+      {
+        $set: {
           status:      'completed',
           completedAt: ahora,
+          'boliviaCompliance.clientTaxId':        user.taxId ?? readDocumentNumber(user),
+          'boliviaCompliance.amountBob':          transaction.originalAmount,
+          'boliviaCompliance.exchangeRateBob':    tipoCambioBob,
+          'boliviaCompliance.exchangeRateSource': rateDecision.source,
+        },
+        $push: {
+          providersUsed: 'payout:anchorBolivia',
+          paymentLegs: {
+            stage:       'payout',
+            provider:    'anchorBolivia',
+            status:      'completed',
+            completedAt: ahora,
+          },
         },
       },
-    });
+      { returnDocument: 'after' },
+    );
   } catch (err) {
     console.error('[Alyto Payout Bolivia] Error actualizando transacción a completed:', {
       transactionId,
@@ -182,47 +343,81 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
 
-  // ── 7. Generar el Comprobante Oficial de Transacción (PDF) ────────────────
-  // Construimos el DTO completo con todos los datos exigidos por Compliance_Bolivia_Alyto
-  const tipoCambio        = tipoCambioBob;
-  const comisionServicio  = transaction.feeBreakdown?.alytoFee ?? 0;
-  const totalLiquidado    = transaction.originalAmount - comisionServicio;
+  if (!claimed) {
+    // Perdió el reclamo: otra llamada la liquidó, o ya tenía comprobante.
+    // En ningún caso se consumió un correlativo.
+    const actual = await Transaction.findById(transactionId)
+      .select('status boliviaCompliance.numeroComprobante').lean();
+    const yaEmitido = !!actual?.boliviaCompliance?.numeroComprobante;
 
-  // Documento del cliente (fuente única — evita el placeholder crudo y
-  // unifica el fallback 'En verificación' con el otro generador).
-  const clientDoc = resolveClientDocument(user);
+    return res.status(409).json({
+      success: false,
+      error: yaEmitido
+        ? `La transacción ya tiene un Comprobante Oficial emitido (${actual.boliviaCompliance.numeroComprobante}). No se emite un segundo correlativo para la misma operación.`
+        : 'La transacción ya fue liquidada por otra operación en curso.',
+      code:              yaEmitido ? 'COMPROBANTE_ALREADY_ISSUED' : 'ALREADY_SETTLED',
+      numeroComprobante: yaEmitido ? actual.boliviaCompliance.numeroComprobante : undefined,
+      currentStatus:     actual?.status,
+      requiredStatus:    'in_transit',
+    });
+  }
+
+  // El correlativo se consume DESPUÉS de ganar el reclamo: un fallo posterior ya
+  // no quema un número de la serie oficial BOL-YYYYMM-NNNNNN.
+  const numeroComprobante = await generarNumeroCorrelativo('BOL');
+  try {
+    await Transaction.findByIdAndUpdate(transactionId, {
+      $set: {
+        'boliviaCompliance.numeroComprobante':      numeroComprobante,
+        'boliviaCompliance.comprobanteGeneratedAt': ahora,
+      },
+    });
+  } catch (err) {
+    // No crítico: el PDF se genera igual y el correlativo queda en el log.
+    console.warn('[Alyto Payout Bolivia] No se pudo persistir el correlativo:', {
+      transactionId, numeroComprobante, error: err.message,
+    });
+  }
+
+  // Auditoría: un tipo de cambio distinto al bloqueado altera el monto del
+  // Comprobante Oficial — queda registrado quién lo forzó y con qué desviación.
+  if (rateDecision.source === 'manual_override') {
+    await recordAdminAction({
+      req,
+      action:     'payout.bolivia.manual_rate_override',
+      targetType: 'Transaction',
+      targetId:   transactionId,
+      before:     { exchangeRateBob: rateDecision.referenceRate, source: 'locked_quote' },
+      after:      { exchangeRateBob: tipoCambioBob, source: 'manual_override' },
+      metadata:   {
+        alytoTransactionId: transaction.alytoTransactionId,
+        numeroComprobante,
+        deviationPct:       Number(rateDecision.deviationPct.toFixed(4)),
+        maxDeviationPct:    maxManualRateDeviationPct(),
+        usedMarketFallback: !(lockedRate > 0),
+      },
+    }).catch(() => {});   // fire-and-forget: recordAdminAction ya alerta a Sentry
+  }
+
+  // ── 8. Generar el Comprobante Oficial de Transacción (PDF) ────────────────
+  // DTO desde la fuente única (utils/comprobanteDto.js). Antes se construía
+  // acá a mano y leía la comisión de `feeBreakdown.alytoFee`, un sub-esquema
+  // legacy que ningún path escribe → el comprobante salía con comisión 0 y el
+  // total liquidado inflado. El campo canónico es `fees.totalDeducted`.
+  const { dto: comprobanteDTO, clientDoc } = buildSrlComprobanteDTO({
+    transaction,
+    user,
+    numeroComprobante,
+    tipoCambioOverride: tipoCambioBob,   // ya validado contra la banda permitida
+  });
+
   if (clientDoc.ciPending) {
     console.warn('[Comprobante] CI del cliente aún no capturado — se emite "En verificación":', {
       numeroComprobante, userId: user._id.toString(),
     });
   }
 
-  const comprobanteDTO = {
-    // Sección 1 — Cabecera
-    numeroComprobante,
-
-    // Sección 2 — KYC
-    nombreCliente:      user.companyName
-                          ?? `${user.firstName} ${user.lastName}`,
-    nitOci:             clientDoc.nitOci,
-    tipoDocumento:      clientDoc.tipoDocumento,
-    codigoClienteAlyto: user._id.toString(),
-
-    // Sección 3 — Trazabilidad Web3 ← campos críticos del TXID
-    fechaHora:          transaction.createdAt.toISOString(),
-    tipoOperacion:      'Liquidación de Activo Digital',          // Terminología corporativa
-    txid:               transaction.stellarTxId ?? 'PENDIENTE',  // Hash Stellar completo
-
-    // Sección 4 — Desglose Financiero (en BOB)
-    montoFiatRecibido:     transaction.originalAmount,
-    tipoDeCambio:          tipoCambio,
-    montoActivoEntregado:  transaction.digitalAssetAmount ?? (transaction.originalAmount / tipoCambio),
-    comisionServicio,
-    totalLiquidado,
-
-    // Sección 5 — Footer legal (desde .env o placeholder)
-    // textoLegalFooter: omitido → pdfGenerator usa AV_FINANCE_LEGAL_FOOTER del entorno
-  };
+  const totalLiquidado = comprobanteDTO.totalLiquidado;
 
   let pdfBuffer, filename;
   try {
@@ -242,7 +437,7 @@ export async function processBoliviaManualPayout(req, res) {
     });
   }
 
-  // ── 8. Subir comprobante a storage (S3 / local fallback) y persistir URL ──
+  // ── 9. Subir comprobante a storage (S3 / local fallback) y persistir URL ──
   try {
     const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`
     const { url: pdfUrl, storage } = await uploadBuffer(pdfBuffer, s3Key, {
@@ -270,7 +465,7 @@ export async function processBoliviaManualPayout(req, res) {
     stellarTxId:        transaction.stellarTxId,
   });
 
-  // ── 9. Auto-generar factura B2B si el usuario es Business ─────────────────
+  // ── 10. Auto-generar factura B2B si el usuario es Business ────────────────
   if (user.accountType === 'business' && user.businessProfileId) {
     // Recargar transacción fresca (con status: completed) para el generador B2B
     Transaction.findById(transactionId).then(freshTx => {
@@ -278,7 +473,7 @@ export async function processBoliviaManualPayout(req, res) {
     }).catch(err => console.warn('[B2B Invoice] Auto-generation failed:', err.message));
   }
 
-  // ── 10. Retornar el PDF al caller ─────────────────────────────────────────
+  // ── 11. Retornar el PDF al caller ────────────────────────────────────────
   res.setHeader('Content-Type',        'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Length',      pdfBuffer.length);
