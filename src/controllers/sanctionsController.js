@@ -11,9 +11,18 @@
  */
 
 import * as Sentry   from '@sentry/node'
+import mongoose      from 'mongoose'
 import SanctionsList from '../models/SanctionsList.js'
 import User          from '../models/User.js'
 import { screenUser } from '../services/sanctionsService.js'
+import { recordAdminAction } from '../services/adminAuditService.js'
+
+/**
+ * Longitud mínima del motivo para levantar un bloqueo AML. Alineado con
+ * adminController.MIN_REASON_LENGTH: los dos caminos que mutan `sanctionsFlag`
+ * deben exigir lo mismo, o el más laxo se vuelve el bypass del otro.
+ */
+const MIN_CLEAR_NOTE_LENGTH = 10
 
 // ─── GET /api/v1/admin/sanctions ──────────────────────────────────────────────
 
@@ -185,14 +194,69 @@ export async function listFlaggedUsers(req, res) {
 /**
  * Limpia el sanctionsFlag de un usuario tras revisión manual del Oficial de Cumplimiento.
  * Body: { note: string } — motivo de la limpieza (obligatorio para auditoría)
+ *
+ * ⚠️ La `note` se exigía "para auditoría" pero solo iba a console.info: se perdía
+ * con la rotación de logs y no había forma de reconstruir por qué se levantó un
+ * bloqueo AML. Desde 2026-08-15 se persiste en AdminAuditLog (append-only) y el
+ * flag no se limpia si el registro no se puede escribir.
  */
 export async function clearSanctionsFlag(req, res) {
   try {
-    const { userId } = req.params
-    const { note }   = req.body
+    const { note } = req.body
 
-    if (!note?.trim()) {
-      return res.status(400).json({ error: 'El campo note es obligatorio para auditoría.' })
+    // Canonicalizar antes de comparar identidades: ObjectId acepta hex en
+    // mayúsculas y castea al mismo documento, así que comparar strings crudos
+    // dejaría pasar el auto-levantamiento con `/6A80E6…`.
+    if (!mongoose.isValidObjectId(req.params.userId)) {
+      return res.status(400).json({ error: 'userId inválido.' })
+    }
+    const userId = new mongoose.Types.ObjectId(req.params.userId)
+
+    // Mismo umbral que el PATCH de campos sensibles: una "note" de un carácter
+    // no es un motivo. Esta ruta muta el MISMO campo (sanctionsFlag) que
+    // adminController.updateUser — los dos caminos deben pedir lo mismo.
+    if (!note?.trim() || note.trim().length < MIN_CLEAR_NOTE_LENGTH) {
+      return res.status(400).json({
+        error: `El campo note es obligatorio para auditoría y debe tener al menos ${MIN_CLEAR_NOTE_LENGTH} caracteres.`,
+        code:  'REASON_REQUIRED',
+      })
+    }
+
+    // Segregación de funciones: el Oficial de Cumplimiento no se levanta su
+    // propio bloqueo AML. Sin esto, un admin flagueado por el screening
+    // OFAC/ONU/UIF podía limpiarse el flag por esta ruta aunque el PATCH de
+    // /admin/users se lo impidiera.
+    if (userId.equals(req.user?._id)) {
+      console.warn('[Sanctions] REJECT: auto-levantamiento de flag AML.', {
+        userId: String(userId), adminEmail: req.user?.email,
+      })
+      return res.status(403).json({
+        error: 'Un administrador no puede levantar su propio flag de sanciones. Debe hacerlo otro administrador.',
+        code:  'SELF_MUTATION_FORBIDDEN',
+      })
+    }
+
+    const before = await User.findById(userId).select('_id firstName lastName email sanctionsFlag').lean()
+    if (!before) {
+      return res.status(404).json({ error: 'Usuario no encontrado.' })
+    }
+
+    // Auditoría ANTES de mutar: sin registro no se levanta el bloqueo.
+    const log = await recordAdminAction({
+      req,
+      action:     'sanctions.flag_cleared',
+      targetType: 'User',
+      targetId:   userId,
+      before:     { sanctionsFlag: before.sanctionsFlag ?? false },
+      after:      { sanctionsFlag: false },
+      reason:     note.trim(),
+      metadata:   { targetEmail: before.email },
+    })
+    if (!log) {
+      return res.status(500).json({
+        error: 'No se pudo registrar la acción en la auditoría. El flag no se limpió.',
+        code:  'AUDIT_WRITE_FAILED',
+      })
     }
 
     const user = await User.findByIdAndUpdate(
@@ -205,8 +269,8 @@ export async function clearSanctionsFlag(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado.' })
     }
 
-    console.info(`[Sanctions] ✅ Flag limpiado — userId: ${userId} | admin: ${req.user?.email} | note: ${note}`)
-    return res.json({ userId, sanctionsFlag: false, clearedBy: req.user?._id, note })
+    console.info(`[Sanctions] ✅ Flag limpiado — userId: ${userId} | admin: ${req.user?.email} | auditLogId: ${log._id}`)
+    return res.json({ userId, sanctionsFlag: false, clearedBy: req.user?._id, note, auditLogId: String(log._id) })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'sanctionsController', fn: 'clearSanctionsFlag' } })

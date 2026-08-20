@@ -644,9 +644,13 @@ export async function updateTransactionStatus(req, res) {
 
 // ─── CORREDORES ───────────────────────────────────────────────────────────────
 
-// Campos protegidos que no pueden modificarse vía este endpoint
+// Campos protegidos que no pueden modificarse vía este endpoint.
+// ⚠️ 'changeLog' es el historial de cambios de comisiones del corredor — es la
+// evidencia de quién tocó qué fee y cuándo. Sin protegerlo, el bucle de
+// updateCorridor asigna cualquier campo no listado aquí, así que un
+// PATCH {"changeLog": []} borraba el historial completo (cerrado 2026-08-15).
 const CORRIDOR_PROTECTED_FIELDS = new Set([
-  'corridorId', '_id', '__v', 'createdAt', 'updatedAt',
+  'corridorId', '_id', '__v', 'createdAt', 'updatedAt', 'changeLog',
 ]);
 
 // ─── listCorridors ────────────────────────────────────────────────────────────
