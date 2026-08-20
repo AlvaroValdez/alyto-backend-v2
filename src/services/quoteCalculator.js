@@ -91,12 +91,25 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
     : (corridor.fixedFee ?? 0);
   const profitRetention  = amount * ((corridor.profitRetentionPercent  ?? 0) / 100);
 
-  // Step 2 — user-facing total (no hidden retention)
-  const visibleFees      = payinFee + alytoCSpread + fixedFee;
-  const totalDeducted    = round2(visibleFees);
+  // Step 2 — total descontado, íntegro y visible.
+  //
+  // `profitRetention` FORMA PARTE del total que se informa al usuario. Antes no:
+  // se restaba del monto a convertir pero se excluía de `totalDeducted`, de modo
+  // que quien sumaba el desglose no llegaba al monto final. Es un importe detraído
+  // de su dinero que no figuraba como comisión, y frente a un regulador que evalúa
+  // transparencia de precios eso es indefendible — el margen embebido en la TASA sí
+  // es práctica corriente, porque la tasa se informa; un descuento omitido del
+  // desglose, no.
+  //
+  // El margen no se pierde: se declara. Si un corredor necesita más margen, va en
+  // `alytoCSpread`, que el usuario ve.
+  const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
 
-  // Step 3 — internal total (adds hidden retention)
-  const totalDeductedReal = round2(visibleFees + profitRetention);
+  // Step 3 — `totalDeductedReal` se conserva con el MISMO valor, por compatibilidad
+  // con las transacciones ya persistidas y con quienes lo leen (ipnController,
+  // comprobanteDto, analíticas de administración). Ya no existe un total "real"
+  // distinto del informado: esa distinción era justamente el problema.
+  const totalDeductedReal = totalDeducted;
 
   // Step 4 — net BOB for conversion
   const netBOB            = amount - totalDeductedReal;
@@ -167,9 +180,17 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
  * @param {string} destinationCurrency  moneda de la fija del proveedor
  */
 export function toPublicFees(fees, { originCurrency, destinationCurrency } = {}) {
+  // `profitRetention` se suma a la comisión de servicio en lugar de exponerse
+  // como línea propia: al usuario no le aporta nada distinguir entre dos
+  // componentes internos del mismo margen, pero SÍ le importa que las líneas
+  // sumen exactamente el total descontado. Sin esto, `totalDeducted` incluiría
+  // la retención y el desglose no cerraría contra él — que es la misma opacidad
+  // de antes, corrida un renglón.
+  const comisionServicio = (fees?.alytoCSpread ?? 0) + (fees?.profitRetention ?? 0);
+
   return {
     payinFee:      fees?.payinFee     ?? 0,
-    alytoCSpread:  fees?.alytoCSpread ?? 0,
+    alytoCSpread:  round2(comisionServicio),
     fixedFee:      fees?.fixedFee     ?? 0,
     // Ya descontado de destinationAmount y en otra moneda → no sumable aquí.
     payoutFee:     0,

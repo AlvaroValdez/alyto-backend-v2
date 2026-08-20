@@ -1689,8 +1689,9 @@ export async function getCorridorRates(req, res) {
     const alytoCSpread    = amount * ((c.alytoCSpread ?? 0) / 100);
     const fixedFee        = c.fixedFee ?? 0;
     const profitRetention = amount * ((c.profitRetentionPercent ?? 0) / 100);
-    const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee);
-    const totalDeductedReal = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+    // Un solo total: el que se descuenta y el que se informa son el mismo.
+    const totalDeducted     = round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+    const totalDeductedReal = totalDeducted;
     const netAmount         = round2(amount - totalDeductedReal);
 
     // ── Calcular tasa y monto destino ─────────────────────────────────────

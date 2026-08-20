@@ -328,7 +328,8 @@ async function computeQuote(state) {
         alytoCSpread:  round2(alytoCSpread),
         fixedFee:      round2(fixedFee),
         payoutFee:     0,
-        totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
+        // Incluye la retención: el total informado debe igualar al descontado.
+        totalDeducted: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
       },
       quoteExpiresAt,
       // Live quote por WS = rate Vita extrapolado (no llamamos Harbor por

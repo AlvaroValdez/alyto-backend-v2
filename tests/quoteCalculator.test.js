@@ -11,7 +11,7 @@
  * Tests assert the formula, not the illustrative numbers.
  */
 
-import { calculateQuote } from '../src/services/quoteCalculator.js';
+import { calculateQuote, toPublicFees } from '../src/services/quoteCalculator.js';
 
 describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
 
@@ -30,8 +30,22 @@ describe('calculateQuote — SEND_MONEY_FLOW v1.0 compliance', () => {
       providerRate: 4201.32,
     });
 
-    expect(result.totalDeducted).toBeCloseTo(17.70, 2);
+    // El total informado incluye la retención: 2% + Bs 5 + 1% sobre 635 = 24,05.
+    // Antes eran dos números distintos —17,70 informado contra 24,05 descontado— y
+    // esa diferencia era un importe detraído del dinero del cliente que no figuraba
+    // en el desglose.
+    expect(result.totalDeducted).toBeCloseTo(24.05, 2);
     expect(result.totalDeductedReal).toBeCloseTo(24.05, 2);
+
+    // Invariante a preservar: lo informado == lo descontado == lo que sale del monto
+    // a convertir. Si alguien vuelve a separarlos, estas dos afirmaciones fallan.
+    expect(result.totalDeducted).toBe(result.totalDeductedReal);
+    expect(635 - result.totalDeducted).toBeCloseTo(result.digitalAssetAmount * 9.31, 1);
+
+    // Y el desglose itemizado que ve el usuario debe sumar exactamente ese total.
+    const publicas = toPublicFees(result.fees, { originCurrency: 'BOB' });
+    expect(publicas.payinFee + publicas.alytoCSpread + publicas.fixedFee)
+      .toBeCloseTo(publicas.totalDeducted, 2);
     expect(result.digitalAssetAmount).toBeCloseTo(65.62, 2);
     expect(result.destinationAmount).toBeCloseTo(275690.62, 2);
     expect(result.effectiveRate).toBeCloseTo(434.16, 2);

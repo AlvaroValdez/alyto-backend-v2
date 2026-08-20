@@ -984,7 +984,10 @@ export async function initCrossBorderPayment(req, res) {
           alytoCSpread:      spreadFee,
           fixedFee:          fixedFeeVal,
           profitRetention:   profitFee,
-          totalDeducted:     round2(payinFeeVal + spreadFee + fixedFeeVal),
+          // La retención integra el total informado — misma corrección que en
+          // quoteCalculator: un importe detraído del dinero del cliente no puede
+          // quedar fuera del desglose.
+          totalDeducted:     totalDeductedReal,
           totalDeductedReal,
           feeCurrency:       'CLP',
         },
@@ -1459,7 +1462,8 @@ export async function initCrossBorderPayment(req, res) {
         payoutFee,
         profitRetention,
         vitaRateMarkup:    0,   // spec v1.0 §3.5, §6.9 — always zero for new tx
-        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee),
+        // Incluye la retención: el total informado debe igualar al descontado.
+        totalDeducted:     round2(payinFee + alytoCSpread + fixedFee + profitRetention),
         totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
         feeCurrency:       corridor.originCurrency ?? 'USD',
       },
@@ -2339,7 +2343,8 @@ export async function getQuote(req, res) {
         alytoCSpread:  round2(spreadFee),
         fixedFee:      round2(fixedFee),
         payoutFee:     0,
-        totalDeducted: round2(payinFee + spreadFee + fixedFee),
+        // Incluye la retención: el total informado debe igualar al descontado.
+        totalDeducted: totalDeductedReal,
         feeCurrency:   'CLP',
       },
 
@@ -2563,9 +2568,10 @@ export async function getQuote(req, res) {
       alytoCSpread:  round2(alytoCSpread),
       fixedFee:      round2(fixedFee),
       payoutFee:     0,   // fija del proveedor: ya descontada del destino, en otra moneda
-      totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
+      // La línea 2387 resta la retención al monto que se convierte, así que el
+      // total informado debe incluirla o el desglose no cierra contra el destino.
+      totalDeducted: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
       feeCurrency:   corridor.originCurrency,
-      // profitRetention / totalDeductedReal quedan fuera: son internos (regla 11).
     },
     payinMethod:  corridor.payinMethod,
     payoutMethod: corridor.payoutMethod,
