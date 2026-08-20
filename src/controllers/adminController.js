@@ -17,6 +17,7 @@
  * getGlobalAnalytics      → Analytics global: entidades, corredores, volumen.
  */
 
+import mongoose          from 'mongoose';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -95,21 +96,179 @@ const USER_ALLOWED_FIELDS = new Set([
   'accountType', 'legalEntity', 'kycStatus', 'role', 'isActive', 'sanctionsFlag',
 ]);
 
-export async function updateUser(req, res) {
-  const { userId } = req.params;
+/**
+ * Campos que NO son datos operativos sino decisiones de control interno:
+ *   'role'          → escala privilegios (acceso al backoffice completo)
+ *   'kycStatus'     → da por verificada una identidad sin pasar por Stripe Identity
+ *   'sanctionsFlag' → levanta un bloqueo AML puesto por el screening OFAC/ONU/UIF
+ *
+ * Cambiarlos exige: no ser uno mismo, motivo persistido y AdminAuditLog.
+ * (Cerrado 2026-08-15: antes eran editables como cualquier otro campo y no
+ * dejaban ningún rastro — un admin podía auto-promoverse, aprobar KYC o
+ * levantar un flag AML y no quedaba registro de quién ni por qué.)
+ */
+const USER_SENSITIVE_FIELDS = new Set(['role', 'kycStatus', 'sanctionsFlag']);
 
-  const updates = {};
-  for (const [k, v] of Object.entries(req.body)) {
-    if (USER_ALLOWED_FIELDS.has(k)) updates[k] = v;
+/** Longitud mínima del motivo exigido para un cambio sensible. */
+const MIN_REASON_LENGTH = 10;
+
+/**
+ * Estados a los que NO se llega por el flujo normal sin una confirmación
+ * externa (IPN del proveedor, job de conciliación o comprobante). Forzarlos a
+ * mano equivale a afirmar que el dinero se movió: exige motivo y AdminAuditLog,
+ * igual que /admin/vita/force-complete.
+ */
+const FORCED_TERMINAL_STATUSES = new Set(['completed', 'refunded']);
+
+/**
+ * `role` sale de la API por defecto: la promoción a admin se hace con
+ * `npm run seed:admin` (acceso al servidor), no con un PATCH desde el panel.
+ * `ADMIN_ROLE_MUTATION_ENABLED=true` es un break-glass explícito y temporal.
+ * Se lee dentro de la función (regla 21 de CLAUDE.md).
+ */
+export function isRoleMutationEnabled() {
+  return process.env.ADMIN_ROLE_MUTATION_ENABLED === 'true';
+}
+
+/** Normaliza booleanos que llegan como string desde el panel ('false' → false). */
+function normalizeUserField(field, value) {
+  if (field === 'isActive' || field === 'sanctionsFlag') {
+    if (value === true  || value === 'true')  return true;
+    if (value === false || value === 'false') return false;
   }
-  if (Object.keys(updates).length === 0) {
+  return value;
+}
+
+/** Valor actual efectivo de un campo (con el default del schema). */
+function currentUserField(user, field) {
+  const defaults = { role: 'user', isActive: true, sanctionsFlag: false, kycStatus: 'pending' };
+  return user[field] ?? defaults[field] ?? null;
+}
+
+export async function updateUser(req, res) {
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+
+  // ⚠️ CANONICALIZAR el id ANTES de cualquier comparación de identidad.
+  // ObjectId acepta hex en mayúsculas y castea al MISMO documento, pero
+  // `String(req.user._id)` siempre sale en minúsculas: comparar los strings
+  // crudos dejaba pasar `PATCH /admin/users/6A80E6…` como si fuera otro usuario
+  // (auto-promoción y auto-levantamiento de flag AML). Además el targetId del
+  // audit quedaba en mayúsculas y no aparecía al filtrar por el _id normal.
+  if (!mongoose.isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ error: 'userId inválido.' });
+  }
+  const userId = new mongoose.Types.ObjectId(req.params.userId);
+
+  const requested = {};
+  for (const [k, v] of Object.entries(req.body)) {
+    if (USER_ALLOWED_FIELDS.has(k)) requested[k] = normalizeUserField(k, v);
+  }
+  if (Object.keys(requested).length === 0) {
     return res.status(400).json({ error: 'No hay campos válidos para actualizar.' });
   }
 
   try {
+    // ── 1. Pre-imagen: hace falta para el audit y para descartar no-ops ──────
+    // El panel manda el formulario completo en cada guardado, así que un campo
+    // sensible presente pero SIN cambio no debe exigir motivo ni auditarse.
+    const before = await User.findById(userId)
+      .select('firstName lastName email legalEntity kycStatus kybStatus accountType role isActive sanctionsFlag')
+      .lean();
+    if (!before) return res.status(404).json({ error: 'Usuario no encontrado.' });
+
+    const updates = {};
+    for (const [field, value] of Object.entries(requested)) {
+      if (currentUserField(before, field) !== value) updates[field] = value;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.json({ user: before, unchanged: true });
+    }
+
+    const sensitiveChanged = Object.keys(updates).filter(f => USER_SENSITIVE_FIELDS.has(f));
+
+    // ── 2. Validar enums ANTES de auditar ───────────────────────────────────
+    // El audit se escribe antes de mutar (paso 6); sin esto, un valor que el
+    // schema va a rechazar dejaría un registro de un cambio que nunca ocurrió.
+    for (const field of ['role', 'kycStatus', 'legalEntity', 'accountType']) {
+      if (updates[field] === undefined) continue;
+      const allowed = User.schema.path(field)?.enumValues ?? [];
+      if (allowed.length > 0 && !allowed.includes(updates[field])) {
+        return res.status(400).json({
+          error: `Valor inválido para ${field}. Permitidos: ${allowed.join(', ')}.`,
+          field,
+        });
+      }
+    }
+
+    // ── 3. `role`: fuera de la API salvo break-glass explícito ───────────────
+    if (updates.role !== undefined && !isRoleMutationEnabled()) {
+      console.warn('[Admin] REJECT: intento de cambiar role vía API.', {
+        userId, from: currentUserField(before, 'role'), to: updates.role,
+        adminId: String(req.user._id), adminEmail: req.user.email,
+      });
+      return res.status(403).json({
+        error: 'El campo role no es modificable por API. Usar el script seedAdmin (npm run seed:admin).',
+        code:  'ROLE_MUTATION_DISABLED',
+      });
+    }
+
+    // ── 4. Ningún admin se modifica a sí mismo un campo sensible ────────────
+    // Cierra la auto-promoción y el auto-levantamiento de bloqueos AML.
+    if (sensitiveChanged.length > 0 && userId.equals(req.user._id)) {
+      console.warn('[Admin] REJECT: auto-modificación de campos sensibles.', {
+        userId, fields: sensitiveChanged, adminEmail: req.user.email,
+      });
+      return res.status(403).json({
+        error:  'Un administrador no puede modificar su propio rol, estado KYC ni flag de sanciones. Debe hacerlo otro administrador.',
+        code:   'SELF_MUTATION_FORBIDDEN',
+        fields: sensitiveChanged,
+      });
+    }
+
+    // ── 5. Motivo obligatorio y persistido ──────────────────────────────────
+    if (sensitiveChanged.length > 0 && reason.length < MIN_REASON_LENGTH) {
+      return res.status(400).json({
+        error:  `Los cambios de ${sensitiveChanged.join(', ')} exigen un motivo de al menos ${MIN_REASON_LENGTH} caracteres (queda registrado en la auditoría).`,
+        code:   'REASON_REQUIRED',
+        fields: sensitiveChanged,
+      });
+    }
+
+    // ── 6. Auditoría ANTES de mutar ─────────────────────────────────────────
+    // Sin sesión Mongo no hay atomicidad entre el cambio y su registro, así que
+    // se invierte el orden: si el audit no se puede escribir, el cambio no se
+    // aplica. Un registro sin cambio es detectable; un cambio de privilegios sin
+    // registro es exactamente el defecto que se está cerrando.
+    let auditLogId = null;
+    if (sensitiveChanged.length > 0) {
+      const log = await recordAdminAction({
+        req,
+        action:     'user.sensitive_update',
+        targetType: 'User',
+        targetId:   userId,
+        before:     Object.fromEntries(sensitiveChanged.map(f => [f, currentUserField(before, f)])),
+        after:      Object.fromEntries(sensitiveChanged.map(f => [f, updates[f]])),
+        reason,
+        metadata:   {
+          targetEmail:   before.email,
+          allFields:     Object.keys(updates),
+          roleBreakGlass: updates.role !== undefined ? true : undefined,
+        },
+      });
+      if (!log) {
+        return res.status(500).json({
+          error: 'No se pudo registrar la acción en la auditoría. El cambio no se aplicó.',
+          code:  'AUDIT_WRITE_FAILED',
+        });
+      }
+      auditLogId = String(log._id);
+    }
+
+    // ── 7. Aplicar el cambio ────────────────────────────────────────────────
     const setOp = { ...updates, updatedAt: new Date() };
     const incOp = {};
-    if (updates.isActive === false || updates.isActive === 'false') {
+    if (updates.isActive === false) {
       incOp.tokenVersion = 1;
     }
 
@@ -121,13 +280,16 @@ export async function updateUser(req, res) {
 
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
-    if (updates.isActive === false || updates.isActive === 'false') {
-      const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
-      invalidateUserCache(String(userId));
-    }
+    // Un cambio de rol o de estado debe reflejarse ya en el próximo request:
+    // protect() cachea el usuario 10 s.
+    const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
+    invalidateUserCache(String(userId));
 
-    console.info('[Admin] Usuario actualizado:', { userId, fields: Object.keys(updates), adminId: req.user._id });
-    return res.json({ user });
+    console.info('[Admin] Usuario actualizado:', {
+      userId, fields: Object.keys(updates), sensitiveChanged,
+      adminId: String(req.user._id), auditLogId,
+    });
+    return res.json({ user, ...(auditLogId ? { auditLogId } : {}) });
   } catch (err) {
     if (err.name === 'ValidationError') return res.status(400).json({ error: err.message });
     console.error('[Admin] updateUser error:', err.message);
