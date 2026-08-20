@@ -745,6 +745,13 @@ async function startServer() {
       console.info(`[Alyto Server] Entorno: ${process.env.NODE_ENV ?? 'development'}`);
       console.info(`[Alyto Server] Stellar network: ${process.env.STELLAR_NETWORK ?? 'testnet'}`);
 
+      // Precalentar la DEK de cifrado PII si PII_ENCRYPTION_ENABLED está activo
+      // (best-effort; import dinámico para no capturar env pre-secretos — regla 21).
+      import('./services/piiCrypto.js')
+        .then(({ warmupPiiCrypto }) => warmupPiiCrypto())
+        .then((ok) => { if (ok) console.info('[Alyto Server] PII field-encryption: DEK precalentada ✅'); })
+        .catch((e) => console.error('[Alyto Server] PII warmup error:', e.message));
+
       // Stellar keypair availability check (non-fatal — warns but doesn't crash)
       const hasStellarSRL = !!(process.env.STELLAR_SRL_SECRET_KEY ?? process.env.STELLAR_MASTER_SECRET);
       if (!hasStellarSRL) {

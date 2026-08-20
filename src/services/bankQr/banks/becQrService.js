@@ -245,21 +245,47 @@ export async function getPaidQRs(date) {
 }
 
 /**
+ * Verifica el header `Authorization` de un IPN entrante contra el token esperado.
+ *
+ * Esquema confirmado por BANECO (2026-07): el banco autentica cada notificación con
+ * `Authorization: Bearer <token>`, usando un token NO expirable que Alyto le entrega.
+ * El token vive en Secrets Manager como `BEC_IPN_BEARER_TOKEN` (nunca en el repo).
+ * Comparación en tiempo constante para evitar timing attacks.
+ *
+ * @param {import('express').Request} req
+ * @param {string} expectedToken
+ * @returns {boolean}
+ */
+function verifyBearer(req, expectedToken) {
+  const header = String(req.headers['authorization'] ?? '');
+  const match  = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  const a = Buffer.from(match[1].trim());
+  const b = Buffer.from(expectedToken);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
  * Verifica la autenticidad de un IPN entrante de BEC ANTES de acreditar fondos.
  *
  * El endpoint /api/v1/ipn/bec es público (server-to-server, sin JWT), así que el
- * body por sí solo NO es confiable para mover dinero. Dos capas de defensa:
+ * body por sí solo NO es confiable para mover dinero. Tres capas de defensa:
  *
- *   Capa 1 — Firma HMAC-SHA256 sobre el raw body (opcional, gated por BEC_IPN_SECRET).
- *     ⚠️ El esquema/header exacto del webhook BEC se confirma durante el onboarding
- *     de producción del webhook. Cuando se conozca, setear BEC_IPN_SECRET (y ajustar
- *     el header si BEC usa otro nombre). Mientras no esté configurado, esta capa se
- *     omite y la autenticidad recae 100% en la Capa 2.
+ *   Capa 1.A — Token Bearer del webhook (esquema oficial BANECO, gated por
+ *     BEC_IPN_BEARER_TOKEN). BANECO envía `Authorization: Bearer <token>` con un token
+ *     no-expirable que Alyto le entrega. Es el mecanismo de auth acordado con el banco.
+ *
+ *   Capa 1.B — Firma HMAC-SHA256 sobre el raw body (opcional, gated por BEC_IPN_SECRET).
+ *     Se mantiene como compatibilidad/defensa adicional por si el banco firmara el body.
  *
  *   Capa 2 — Reconfirmación autoritativa contra el banco (getQRStatus) por el canal
  *     SALIENTE autenticado con JWT. Nunca confiamos en el body: solo aceptamos si el
  *     banco mismo reporta el QR como 'paid'. Un IPN forjado es inútil porque el
  *     atacante no puede hacer que el banco diga 'paid' sin un pago real.
+ *
+ * En producción, sin NINGÚN mecanismo de Capa 1 configurado (ni Bearer ni HMAC) el IPN
+ * se rechaza (fail-closed): la red de seguridad `reconcileBankQrPayments` confirma el
+ * pago vía polling. Nunca se acredita sobre un IPN no autenticado en prod.
  *
  * @param {import('express').Request} req
  * @returns {Promise<{ ok: boolean, reason: string, payment?: object }>}
@@ -280,8 +306,21 @@ export async function verifyIpn(req) {
     return { ok: true, reason: 'mock' };
   }
 
-  // ── Capa 1: firma HMAC (si BEC_IPN_SECRET está configurado) ──
-  const secret = process.env.BEC_IPN_SECRET;
+  const bearerToken = process.env.BEC_IPN_BEARER_TOKEN;
+  const secret      = process.env.BEC_IPN_SECRET;
+
+  // Producción fail-closed: sin ningún mecanismo de Capa 1, rechazamos el IPN.
+  // El job `reconcileBankQrPayments` confirmará el pago vía polling (Capa 2 diferida).
+  if (process.env.NODE_ENV === 'production' && !bearerToken && !secret) {
+    return { ok: false, reason: 'no-webhook-auth-configured' };
+  }
+
+  // ── Capa 1.A: token Bearer del webhook (esquema oficial BANECO) ──
+  if (bearerToken && !verifyBearer(req, bearerToken)) {
+    return { ok: false, reason: 'bad-bearer' };
+  }
+
+  // ── Capa 1.B: firma HMAC (si BEC_IPN_SECRET está configurado) ──
   if (secret) {
     const provided = String(req.headers['x-bec-signature'] ?? req.headers['x-signature'] ?? '');
     const expected = crypto.createHmac('sha256', secret)
@@ -305,7 +344,8 @@ export async function verifyIpn(req) {
     return { ok: false, reason: `bank-status-${statusInfo.status}` };
   }
 
-  return { ok: true, reason: secret ? 'hmac+bank' : 'bank-confirmed', payment: statusInfo.payment };
+  const authLayer = bearerToken ? 'bearer' : secret ? 'hmac' : 'bank';
+  return { ok: true, reason: `${authLayer}+bank`, payment: statusInfo.payment };
 }
 
 /** Para tests de integración: verifica que nuestro cifrado sea compatible con el banco */
