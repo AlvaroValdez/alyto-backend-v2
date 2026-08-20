@@ -671,6 +671,24 @@ export async function updateTransactionStatus(req, res) {
 
   const previousStatus = transaction.status;
 
+  // ── Estados terminales: motivo reforzado + auditoría ──────────────────────
+  // Forzar a mano 'completed' o 'refunded' es afirmar que el dinero llegó (o
+  // volvió) sin verificación externa: habilita emitir el Comprobante Oficial
+  // vía /admin/regenerate-comprobante y cierra la operación de cara al usuario.
+  // /admin/vita/force-complete exige motivo y AdminAuditLog; sin esto, este
+  // endpoint era el mismo poder con una `note` de un carácter y sin rastro
+  // fuera del ipnLog de la propia transacción (cerrado 2026-08-15).
+  const esForzadoTerminal = FORCED_TERMINAL_STATUSES.has(newStatus)
+    && previousStatus !== newStatus;
+
+  if (esForzadoTerminal && note.trim().length < MIN_REASON_LENGTH) {
+    return res.status(400).json({
+      error: `Llevar una transacción a '${newStatus}' a mano exige un motivo de al menos ${MIN_REASON_LENGTH} caracteres (queda registrado en la auditoría).`,
+      code:  'REASON_REQUIRED',
+      previousStatus,
+    });
+  }
+
   // ── Guard anti-doble-payout: confirmar payin SOLO desde estados pre-payout ──
   // Sin esto, un admin podría regrabar a 'payin_confirmed' una tx ya liquidada
   // (payout_sent/completed) y disparar un SEGUNDO envío de USDC real.
@@ -714,6 +732,31 @@ export async function updateTransactionStatus(req, res) {
     },
     receivedAt: new Date(),
   });
+
+  // Auditoría ANTES de mutar: si no se puede dejar rastro, no se fuerza el estado.
+  if (esForzadoTerminal) {
+    const auditLog = await recordAdminAction({
+      req,
+      action:     'transaction.force_status',
+      targetType: 'Transaction',
+      targetId:   String(transaction._id),
+      before:     { status: previousStatus },
+      after:      { status: newStatus },
+      reason:     note.trim(),
+      metadata:   {
+        alytoTransactionId:  transaction.alytoTransactionId,
+        bankReference:       bankReference?.trim() ?? null,
+        destinationAmount:   transaction.destinationAmount,
+        destinationCurrency: transaction.destinationCurrency,
+      },
+    });
+    if (!auditLog) {
+      return res.status(500).json({
+        error: 'No se pudo registrar la acción en la auditoría. El estado no se modificó.',
+        code:  'AUDIT_WRITE_FAILED',
+      });
+    }
+  }
 
   try {
     await transaction.save();

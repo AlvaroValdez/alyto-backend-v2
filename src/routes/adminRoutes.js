@@ -876,11 +876,24 @@ router.post('/reconcile-vita', async (req, res) => {
  * Usar cuando Vita confirma el pago externamente (panel Vita Business)
  * pero el IPN nunca llegó. Genera audit trail Stellar + comprobante + notificaciones.
  *
- * Body: { transactionId: "ALY-C-..." }
+ * Body: { transactionId: "ALY-C-...", reason: "..." }
+ *
+ * ⚠️ Es una afirmación humana de que el dinero llegó, sin verificación contra
+ * Vita: da por liquidada la operación, emite el comprobante y notifica al
+ * usuario. Por eso exige motivo y deja registro en AdminAuditLog — el mismo
+ * criterio que los campos sensibles del PATCH /admin/users (cerrado 2026-08-15,
+ * antes no dejaba ningún rastro más allá del ipnLog de la propia tx).
  */
 router.post('/vita/force-complete', async (req, res) => {
   const { transactionId } = req.body;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (!transactionId) return res.status(400).json({ error: 'transactionId requerido' });
+  if (reason.length < 10) {
+    return res.status(400).json({
+      error: 'Se requiere un motivo de al menos 10 caracteres (referencia de la confirmación en el panel de Vita). Queda registrado en la auditoría.',
+      code:  'REASON_REQUIRED',
+    });
+  }
 
   try {
     const Transaction = (await import('../models/Transaction.js')).default;
@@ -889,6 +902,30 @@ router.post('/vita/force-complete', async (req, res) => {
     if (tx.status !== 'payout_sent') {
       return res.status(400).json({ error: `Estado actual: ${tx.status} — solo se puede forzar desde payout_sent` });
     }
+
+    // Auditoría ANTES de mutar: sin registro no se fuerza la completación.
+    const auditLog = await recordAdminAction({
+      req,
+      action:     'payout.vita.force_complete',
+      targetType: 'Transaction',
+      targetId:   String(tx._id),
+      before:     { status: tx.status, completedAt: tx.completedAt ?? null },
+      after:      { status: 'completed' },
+      reason,
+      metadata:   {
+        alytoTransactionId: tx.alytoTransactionId,
+        payoutReference:    tx.payoutReference ?? null,
+        destinationAmount:  tx.destinationAmount,
+        destinationCurrency: tx.destinationCurrency,
+      },
+    });
+    if (!auditLog) {
+      return res.status(500).json({
+        error: 'No se pudo registrar la acción en la auditoría. La transacción no se completó.',
+        code:  'AUDIT_WRITE_FAILED',
+      });
+    }
+
     const { generateComprobanteOnCompletion } = await import('../controllers/ipnController.js');
     const { registerAuditTrail }              = await import('../services/stellarService.js');
     const { notify, NOTIFICATIONS }           = await import('../services/notifications.js');
@@ -902,7 +939,13 @@ router.post('/vita/force-complete', async (req, res) => {
       provider:   'vitaWallet',
       eventType:  'payout_completed_admin_forced',
       status:     'completed',
-      rawPayload: { forcedBy: 'admin', forcedAt: new Date(), source: 'POST /admin/vita/force-complete' },
+      rawPayload: {
+        forcedBy:   req.user?.email ?? 'admin',
+        forcedAt:   new Date(),
+        source:     'POST /admin/vita/force-complete',
+        reason,
+        auditLogId: String(auditLog._id),
+      },
       receivedAt: new Date(),
     });
     await tx.save();
@@ -921,7 +964,10 @@ router.post('/vita/force-complete', async (req, res) => {
     )).catch(() => {});
     if (user?.email) sendEmail(...EMAILS.paymentCompleted(user, tx)).catch(() => {});
 
-    res.json({ ok: true, transactionId, stellarTxId: stellarTxId ?? null, completedAt: tx.completedAt });
+    res.json({
+      ok: true, transactionId, stellarTxId: stellarTxId ?? null,
+      completedAt: tx.completedAt, auditLogId: String(auditLog._id),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -935,7 +981,19 @@ router.post('/vita/force-complete', async (req, res) => {
  */
 router.post('/regenerate-comprobante', async (req, res) => {
   const { transactionId } = req.body;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (!transactionId) return res.status(400).json({ error: 'transactionId requerido' });
+
+  // Mismo umbral que /vita/force-complete y que los campos sensibles del PATCH
+  // de usuarios: reemitir un documento con valor regulatorio (y potencialmente
+  // consumir un correlativo de la serie oficial) no puede ser más barato que
+  // cambiar un estado — el camino laxo se vuelve el preferido.
+  if (reason.length < 10) {
+    return res.status(400).json({
+      error: 'Se requiere un motivo de al menos 10 caracteres (por qué se reemite el comprobante). Queda registrado en la auditoría.',
+      code:  'REASON_REQUIRED',
+    });
+  }
 
   try {
     const Transaction = (await import('../models/Transaction.js')).default;
@@ -947,59 +1005,89 @@ router.post('/regenerate-comprobante', async (req, res) => {
     const User = (await import('../models/User.js')).default;
     const { generarNumeroCorrelativo }  = await import('../utils/correlativoService.js');
     const { generateOfficialReceipt }   = await import('../utils/pdfGenerator.js');
-    const { uploadBuffer, getDownloadUrl } = await import('../services/storageService.js');
+    const { uploadBuffer, resolveComprobanteUrl } = await import('../services/storageService.js');
+    const { buildSrlComprobanteDTO }    = await import('../utils/comprobanteDto.js');
+    const { ensureDek, isPiiEncryptionEnabled } = await import('../services/piiCrypto.js');
 
-    const user = await User.findById(tx.userId).lean();
+    // +identityDocument.numberCiphertext (select:false) para descifrar el CI real.
+    const user = await User.findById(tx.userId).select('+identityDocument.numberCiphertext').lean();
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* cae a "En verificación" */ } }
+
+    // ⚠️ Las tx SRL de cuentas business NO llevan un BOL: generateComprobanteOnCompletion
+    // las deriva a autoGenerateBusinessInvoice, que emite un SRV en
+    // `businessInvoice.invoiceNumber` y deja `boliviaCompliance` vacío. Sin este
+    // guard, regenerar sobre una de ellas quemaba un correlativo de la serie BOL
+    // y producía un SEGUNDO documento oficial —de otra serie— para la misma
+    // operación, repetible en cada llamada.
+    const esBusiness = tx.businessInvoice?.invoiceNumber
+      || (user.accountType === 'business' && user.businessProfileId);
+    if (esBusiness) {
+      return res.status(400).json({
+        error: 'Esta transacción es de una cuenta business: su documento es el Comprobante Oficial de Servicio (serie SRV), no un BOL. Usar la regeneración de factura B2B.',
+        code:  'BUSINESS_INVOICE_TRANSACTION',
+        invoiceNumber: tx.businessInvoice?.invoiceNumber ?? null,
+      });
+    }
 
     const numeroComprobante = tx.boliviaCompliance?.numeroComprobante
       ?? await generarNumeroCorrelativo('BOL');
 
-    const digital    = tx.digitalAssetAmount ?? 0;
-    const tipoCambio = digital > 0
-      ? Number((tx.originalAmount / digital).toFixed(6))
-      : (tx.conversionRate?.rate ?? 0);
-    const comisionServicio = tx.feeBreakdown?.alytoFee ?? tx.feeBreakdown?.totalDeducted ?? 0;
-
-    const dto = {
-      numeroComprobante,
-      nombreCliente:        user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
-      nitOci:               user.taxId
-        ?? (user.identityDocument?.number && !/pending|verification/i.test(user.identityDocument.number)
-            ? user.identityDocument.number : null)
-        ?? 'NO REGISTRADO',
-      tipoDocumento:        user.taxId ? 'NIT' : 'CI',
-      codigoClienteAlyto:   user._id.toString(),
-      fechaHora:            (tx.createdAt ?? new Date()).toISOString(),
-      tipoOperacion:        'Liquidación de Activo Digital',
-      txid:                 tx.stellarTxId ?? 'PENDIENTE',
-      montoFiatRecibido:    tx.originalAmount,
-      tipoDeCambio:         tipoCambio,
-      montoActivoEntregado: digital,
-      comisionServicio,
-      totalLiquidado:       tx.originalAmount - comisionServicio,
-    };
+    // ⚠️ REGENERAR debe REPRODUCIR el documento original, no recalcularlo.
+    // El DTO sale de la fuente única (utils/comprobanteDto.js), la misma que usan
+    // ipnController y payoutController. Antes esta ruta construía el suyo y
+    // divergía en tres puntos: leía la comisión de `feeBreakdown` (sub-esquema
+    // legacy que nadie escribe → comisión 0 y total inflado), imprimía
+    // 'NO REGISTRADO' en vez del 'En verificación' de resolveClientDocument, y
+    // recalculaba el tipo de cambio. Como el correlativo se reutiliza y la key
+    // de S3 es determinista, eso dejaba DOS versiones inmutables (Object Lock
+    // COMPLIANCE) del mismo Comprobante N con cifras distintas.
+    const { dto } = buildSrlComprobanteDTO({ transaction: tx, user, numeroComprobante });
 
     const { buffer, filename } = await generateOfficialReceipt(dto);
     const s3Key  = `pdfs/bolivia/${numeroComprobante}_${filename}`;
-    const { url, key } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
+    const { url } = await uploadBuffer(buffer, s3Key, { contentType: 'application/pdf' });
 
-    // Generar presigned URL de 7 días para guardar en BD (no depende de resolución dinámica)
-    const resolvedUrl = await getDownloadUrl(key ?? s3Key, 6 * 24 * 3600);
-    const storedUrl   = resolvedUrl ?? url; // fallback a s3key:// si falla
-
+    // Guardar la REFERENCIA durable (s3key:// o URL pública CDN), NUNCA una
+    // presigned que expira. El serve la re-firma fresca en cada lectura.
     await Transaction.findByIdAndUpdate(tx._id, {
       $set: {
-        'boliviaCompliance.comprobanteUrl':         storedUrl,
+        'boliviaCompliance.comprobanteUrl':         url,
         'boliviaCompliance.numeroComprobante':      numeroComprobante,
         'boliviaCompliance.comprobanteGeneratedAt': new Date(),
       },
     });
 
-    res.json({ ok: true, transactionId, comprobanteUrl: storedUrl, numeroComprobante,
-               resolvedOk: !!resolvedUrl });
+    // Reemitir un documento con valor regulatorio deja rastro: quién, cuándo y
+    // si consumió un correlativo nuevo o reutilizó el existente.
+    await recordAdminAction({
+      req,
+      action:     'comprobante.regenerate',
+      targetType: 'Transaction',
+      targetId:   String(tx._id),
+      before:     {
+        numeroComprobante: tx.boliviaCompliance?.numeroComprobante ?? null,
+        comprobanteUrl:    tx.boliviaCompliance?.comprobanteUrl ?? null,
+      },
+      after:      { numeroComprobante, comprobanteUrl: url },
+      reason,
+      metadata:   {
+        alytoTransactionId: tx.alytoTransactionId,
+        correlativoNuevo:   !tx.boliviaCompliance?.numeroComprobante,
+        tipoDeCambio:       dto.tipoDeCambio,
+        comisionServicio:   dto.comisionServicio,
+      },
+    }).catch(() => {});   // no bloquea la reemisión: recordAdminAction ya alerta a Sentry
+
+    // Devolver al admin una URL usable AHORA (fresca de 1h), no la referencia cruda.
+    const freshUrl = await resolveComprobanteUrl(url);
+    res.json({ ok: true, transactionId, comprobanteUrl: freshUrl, numeroComprobante,
+               resolvedOk: !!freshUrl });
   } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack?.split('\n').slice(0, 5) });
+    // El stack se registra, no se devuelve: exponía rutas del filesystem y la
+    // estructura interna a cualquier cliente del panel.
+    console.error('[Admin regenerate-comprobante] Error:', { transactionId, error: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message });
   }
 });
 
