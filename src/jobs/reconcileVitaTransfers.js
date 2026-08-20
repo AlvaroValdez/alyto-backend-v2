@@ -29,6 +29,7 @@ import { recordSent }                     from '../controllers/contactsControlle
 import { notify, NOTIFICATIONS }         from '../services/notifications.js';
 import { sendEmail, EMAILS }             from '../services/email.js';
 import { sendRawEmail }                  from '../services/email.js';
+import { mapVitaIpnFailure }             from '../utils/vitaErrorMapper.js';
 import { logger }                        from '../utils/logger.js';
 
 const PAYOUT_SENT_AGE_MS       = 15 * 60 * 1000;          // 15 min antes de reconciliar
@@ -37,7 +38,31 @@ const ALERT_THRESHOLD_MS       = 2 * 60 * 60 * 1000;      // 2h → alerta admin
 
 // Mapeo estados Vita → acción
 const VITA_COMPLETED_STATUSES = new Set(['completed']);
-const VITA_FAILED_STATUSES    = new Set(['denied', 'rejected', 'expired', 'cancelled']);
+const VITA_FAILED_STATUSES    = new Set(['denied', 'rejected', 'expired', 'cancelled', 'canceled', 'failed', 'returned']);
+
+/**
+ * Saca los atributos de la transacción de la respuesta de GET /transactions/:id.
+ *
+ * ⚠️ Este job leía `resp.data.transaction ?? resp.data.withdrawal ?? resp.data ?? resp`
+ * y después `vitaData.status`. La forma REAL que devuelve Vita es
+ *   { transaction: { id, type, attributes: { status, included, … } } }
+ * — sin envoltorio `data` y con el status un nivel más adentro. El encadenado caía
+ * siempre en `resp`, cuya única clave es `transaction`, así que `status` era
+ * `undefined` y TODA transacción se clasificaba como "Vita aún trabajando".
+ * La red de seguridad corría cada 15 min sin poder resolver nada: un payout
+ * denegado se quedaba en payout_sent indefinidamente. (Verificado 2026-08-12
+ * contra la respuesta real de api.vitawallet.io para un payout denegado.)
+ *
+ * Se conservan las variantes antiguas como fallback por si Vita cambia la forma.
+ */
+export function extractVitaTxAttributes(resp) {
+  return resp?.transaction?.attributes
+      ?? resp?.data?.transaction?.attributes
+      ?? resp?.data?.transaction
+      ?? resp?.data?.withdrawal
+      ?? resp?.data
+      ?? resp;
+}
 
 /**
  * Finaliza una transacción Vita cuyo IPN llegó tarde (vía reconcile).
@@ -114,9 +139,15 @@ async function finalizeVitaCompleted(transaction) {
 /**
  * Marca una transacción Vita como fallida (payout denegado).
  */
-async function finalizeVitaFailed(transaction, reason) {
+async function finalizeVitaFailed(transaction, reason, mapped = null) {
   transaction.status        = 'failed';
-  transaction.failureReason = reason;
+  transaction.failureReason = mapped?.adminMessage ?? reason;
+  if (mapped) {
+    transaction.userFailureReason = mapped.userMessage;
+    transaction.userFailureAction = mapped.userAction;
+    transaction.failureCategory   = mapped.category;
+    transaction.failureRetryable  = mapped.retryable;
+  }
   transaction.ipnLog = transaction.ipnLog ?? [];
   transaction.ipnLog.push({
     provider:   'vitaWallet',
@@ -240,8 +271,7 @@ async function _reconcileVitaTransfers(stats) {
       let vitaData;
       try {
         const resp = await getVitaTransaction(tx.payoutReference);
-        // Vita puede envolver la tx en data.transaction o data.withdrawal o directamente
-        vitaData = resp?.data?.transaction ?? resp?.data?.withdrawal ?? resp?.data ?? resp;
+        vitaData = extractVitaTxAttributes(resp);
       } catch (err) {
         const httpStatus = err?.response?.status ?? err?.status;
         const isNotFound = httpStatus === 404;
@@ -268,7 +298,12 @@ async function _reconcileVitaTransfers(stats) {
         await finalizeVitaCompleted(tx);
         stats.completed++;
       } else if (VITA_FAILED_STATUSES.has(vitaStatus)) {
-        await finalizeVitaFailed(tx, `Payout denegado por Vita (reconcile): status=${vitaStatus}`);
+        // Se pasa el objeto de Vita al mapper para rescatar reject_motive y demás:
+        // el reconcile es la ÚNICA fuente del motivo cuando el IPN nunca llega.
+        const mapped = mapVitaIpnFailure(vitaData, { stage: 'payout' });
+        await finalizeVitaFailed(
+          tx, `Payout denegado por Vita (reconcile): status=${vitaStatus}`, mapped,
+        );
         stats.failed++;
       } else {
         // pending / processing / desconocido — Vita aún trabajando

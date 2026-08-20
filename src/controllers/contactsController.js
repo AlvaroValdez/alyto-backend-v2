@@ -1,5 +1,34 @@
 import Contact from '../models/Contact.js'
+import TransactionConfig from '../models/TransactionConfig.js'
+import { isEuSepaDestination } from '../routing/euAmountRouter.js'
 import * as Sentry from '@sentry/node'
+
+/**
+ * Corredor activo para un destino, respetando la entidad del usuario.
+ * 'EU' cubre el legacy 'ES' (bo-es migró a destinationCountry='EU').
+ *
+ * ⚠️ MISMO ORDEN que getWithdrawalRulesController: en destinos multi-corredor de
+ * la misma entidad el findOne era no determinista, y para EU (bo-es Vita +
+ * bo-eu-srl Harbor, ambos SRL) llegó a resolver Harbor — contradiciendo la regla
+ * "EU va por Vita" Y el formulario que el propio FE mostró al usuario. La
+ * preferencia debe calzar con la de withdrawal-rules o el formType estampado no
+ * corresponde al form que la persona llenó.
+ */
+async function findActiveCorridor(destinationCountry, legalEntity) {
+  const dest = destinationCountry === 'ES' ? 'EU' : destinationCountry
+  const sortSpec = isEuSepaDestination(dest) ? { payoutMethod: -1 } : { payoutMethod: 1 }
+  const query = { destinationCountry: dest, isActive: true }
+  if (legalEntity) {
+    const c = await TransactionConfig.findOne({ ...query, legalEntity }).sort(sortSpec).lean()
+    if (c) return c
+  }
+  return TransactionConfig.findOne(query).sort(sortSpec).lean()
+}
+
+/** payoutMethod del corredor → formType del contacto. */
+function formTypeForCorridor(corridor) {
+  return corridor?.payoutMethod === 'owlPay' ? 'owlpay' : 'vita'
+}
 
 // GET /api/v1/contacts
 export async function listContacts(req, res) {
@@ -39,6 +68,28 @@ export async function createContact(req, res) {
       })
     }
 
+    // ── Contacto anclado al corredor REAL, no a lo que diga el cliente ────────
+    // Antes se guardaba lo que llegara: países sin corredor activo (GT/HT/SV/IN
+    // desactivados), formType desalineado del proveedor vigente y monedas
+    // inventadas por tablas hardcodeadas del FE (JP quedaba "JPY" cuando el
+    // corredor paga USD; Step3 mandaba ''). El contacto nacía ya roto.
+    // Los formType internos de Bolivia (qr_image/bank_data) no pasan por
+    // corredores cross-border y se dejan tal cual.
+    let effectiveFormType = formType
+    let effectiveCurrency = destinationCurrency ?? ''
+    if (formType === 'vita' || formType === 'owlpay') {
+      const corridor = await findActiveCorridor(destinationCountry, req.user?.legalEntity)
+      if (!corridor) {
+        return res.status(400).json({
+          error: `No hay un corredor activo hacia ${destinationCountry} en este momento — ` +
+                 'no es posible guardar contactos para ese destino.',
+        })
+      }
+      // Se estampa desde el corredor: si el cliente mandó otra cosa, el corredor manda.
+      effectiveFormType = formTypeForCorridor(corridor)
+      effectiveCurrency = corridor.destinationCurrency ?? effectiveCurrency
+    }
+
     // Evitar duplicados por número de cuenta
     // Vita usa beneficiary_account_number; Harbor/OwlPay usa account_number.
     const dedupeAccountNumber =
@@ -62,7 +113,7 @@ export async function createContact(req, res) {
       const existing = await Contact.findOne({
         userId: req.user._id,
         destinationCountry,
-        formType,
+        formType: effectiveFormType,   // el corregido — no el que mandó el cliente
         $or: orClauses,
       })
       if (existing) {
@@ -79,8 +130,8 @@ export async function createContact(req, res) {
       firstName:          firstName || beneficiaryData.beneficiary_first_name || '',
       lastName:           lastName  || beneficiaryData.beneficiary_last_name  || '',
       destinationCountry,
-      destinationCurrency,
-      formType,
+      destinationCurrency: effectiveCurrency,
+      formType:            effectiveFormType,
       beneficiaryData,
       qrImageBase64:   qrImageBase64   || null,
       qrImageMimetype: qrImageMimetype || null,

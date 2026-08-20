@@ -91,6 +91,9 @@ describe('autorización', () => {
     ['POST', '/generar'],
     ['GET',  '/pendientes'],
     ['GET',  '/historial'],
+    ['GET',  '/publicables'],
+    ['POST', '/507f1f77bcf86cd799439099/publicar'],
+    ['POST', '/507f1f77bcf86cd799439099/destrabar'],
     ['POST', '/507f1f77bcf86cd799439099/aprobar'],
     ['POST', '/507f1f77bcf86cd799439099/rechazar'],
   ])('%s %s exige rol admin', async (metodo, ruta) => {
@@ -350,6 +353,39 @@ describe('prohibiciones absolutas: la aprobación se bloquea', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe('GET /publicables', () => {
+  test('lista solo lo aprobado o de bajo riesgo que aún no salió', async () => {
+    await sembrarPieza({ titulo: 'Aprobada',      estado: 'aprobado' });
+    await sembrarPieza({ titulo: 'Bajo riesgo',   estado: 'autopublicado', clasificacionFinal: 'bajo' });
+    await sembrarPieza({ titulo: 'En cola',       estado: 'pendiente_aprobacion' });
+    await sembrarPieza({ titulo: 'Rechazada',     estado: 'rechazado' });
+    await sembrarPieza({ titulo: 'Ya publicada',  estado: 'publicado',
+      publicacion: { postId: '1_2', publicadoEn: new Date() } });
+
+    const res = await request(app).get('/api/v1/admin/marketing/publicables').set(como(ADMIN));
+
+    expect(res.status).toBe(200);
+    expect(res.body.piezas.map(p => p.titulo).sort()).toEqual(['Aprobada', 'Bajo riesgo']);
+  });
+
+  test('marca qué piezas NO se pueden publicar y por qué', async () => {
+    await sembrarPieza({ titulo: 'Facebook', estado: 'aprobado', canal: 'facebook' });
+    await sembrarPieza({ titulo: 'TikTok',   estado: 'aprobado', canal: 'tiktok' });
+    await sembrarPieza({ titulo: 'Trabada',  estado: 'aprobado', canal: 'facebook',
+      publicacion: { enCurso: true } });
+
+    const res = await request(app).get('/api/v1/admin/marketing/publicables').set(como(ADMIN));
+    const porTitulo = Object.fromEntries(res.body.piezas.map(p => [p.titulo, p]));
+
+    expect(porTitulo['Facebook'].publicable).toBe(true);
+    expect(porTitulo['TikTok'].publicable).toBe(false);
+    expect(porTitulo['TikTok'].motivoNoPublicable).toMatch(/solo texto/i);
+    expect(porTitulo['Trabada'].publicable).toBe(false);
+    expect(porTitulo['Trabada'].motivoNoPublicable).toMatch(/sin resolver/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe('evidencia de la revisión humana', () => {
   test('aprobar escribe un AdminAuditLog con actor, estado previo y motivos', async () => {
     const pieza = await sembrarPieza();
@@ -393,6 +429,18 @@ describe('evidencia de la revisión humana', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('GET /estado', () => {
+  test('reporta la salud de la credencial de cada canal, no solo si hay variable', async () => {
+    const res = await request(app).get('/api/v1/admin/marketing/estado').set(como(ADMIN));
+
+    expect(res.status).toBe(200);
+    const fb = res.body.publicacion?.canales?.find(c => c.canal === 'facebook');
+    expect(fb).toBeTruthy();
+    // `credencial` es lo nuevo: un token puede estar presente Y muerto.
+    expect(fb).toHaveProperty('credencial');
+    expect(fb.credencial).toHaveProperty('ok');
+    expect([true, false, null]).toContain(fb.credencial.ok);
+  });
+
   test('reporta flag, modelo y conteo por estado', async () => {
     await sembrarPieza();
     await sembrarPieza();

@@ -22,18 +22,28 @@ import { BoundedCache } from '../utils/boundedCache.js';
 // ─── Configuración ────────────────────────────────────────────────────────────
 
 // Base URL sin versión — cada endpoint incluye /v1/ o /v2/ explícitamente.
-const OWLPAY_BASE_URL = (() => {
-  let baseUrl = (process.env.OWLPAY_BASE_URL
-              ?? process.env.OWLPAY_API_URL
-              ?? 'https://harbor-sandbox.owlpay.com/api').trim();
+// ⚠️ Resolución PEREZOSA + memoizada, NO en ámbito de módulo: server.js inyecta
+// AWS Secrets Manager en process.env con un `await` de nivel superior que, por
+// hoisting de ESM, corre DESPUÉS de evaluarse este módulo. Leer process.env aquí
+// arriba capturaba `undefined` y caía al default SANDBOX aunque el secret tuviera
+// la URL de producción — payouts reales contra harbor-sandbox (audit 2026-07-28).
+let _baseUrl = null;
 
-  baseUrl = baseUrl.replace(/\/$/, '');
-  baseUrl = baseUrl.replace(/\/v\d+$/, '');
-  if (!baseUrl.endsWith('/api')) {
-    baseUrl = `${baseUrl}/api`;
+export function getOwlPayBaseUrl() {
+  if (_baseUrl === null) {
+    let baseUrl = (process.env.OWLPAY_BASE_URL
+                ?? process.env.OWLPAY_API_URL
+                ?? 'https://harbor-sandbox.owlpay.com/api').trim();
+
+    baseUrl = baseUrl.replace(/\/$/, '');
+    baseUrl = baseUrl.replace(/\/v\d+$/, '');
+    if (!baseUrl.endsWith('/api')) {
+      baseUrl = `${baseUrl}/api`;
+    }
+    _baseUrl = baseUrl;
   }
-  return baseUrl;
-})();
+  return _baseUrl;
+}
 
 export function getOwlPayApiKey() {
   const key = process.env.OWLPAY_API_KEY;
@@ -43,12 +53,8 @@ export function getOwlPayApiKey() {
   return key;
 }
 
-export function getOwlPayBaseUrl() {
-  return OWLPAY_BASE_URL;
-}
-
 function isSandbox() {
-  return /sandbox/i.test(OWLPAY_BASE_URL);
+  return /sandbox/i.test(getOwlPayBaseUrl());
 }
 
 /**
@@ -93,7 +99,7 @@ export function getCustomerUuid(legalEntity) {
  */
 async function owlPayRequest(endpoint, options = {}) {
   const apiKey    = getOwlPayApiKey();
-  const url       = `${OWLPAY_BASE_URL}${endpoint}`;
+  const url       = `${getOwlPayBaseUrl()}${endpoint}`;
   const method    = options.method ?? 'GET';
   const timeoutMs = options.timeoutMs ?? 10000;
 

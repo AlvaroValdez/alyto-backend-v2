@@ -34,6 +34,7 @@ import {
   createPayout,
   createVitaSentPayout,
   VITA_SENT_ONLY_COUNTRIES,
+  getVitaSentCountry,
   getPrices,
 } from '../services/vitaWalletService.js';
 import {
@@ -56,11 +57,14 @@ import {
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
-import { mapVitaError }       from '../utils/vitaErrorMapper.js';
+import {
+  mapVitaError,
+  mapVitaIpnFailure,
+  classifyVitaIpnStatus,
+}                             from '../utils/vitaErrorMapper.js';
+import { resolveClientDocument } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
-import { shouldSimulatePayoutConfirmation } from '../utils/environment.js';
-import { buildSrlComprobanteDTO } from '../utils/comprobanteDto.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
@@ -183,6 +187,45 @@ async function appendIpnLog(transaction, eventType, provider, status, rawPayload
       error: err.message,
     });
   }
+}
+
+/**
+ * Registra un IPN de Vita cuyo `status` no reconocemos.
+ *
+ * ⚠️ Antes estos IPN se descartaban en SILENCIO: la transacción se quedaba en su
+ * estado anterior, sin motivo, sin log y sin aviso — indistinguible de "nunca
+ * llegó nada". Un rechazo con una palabra nueva de Vita desaparecía por completo.
+ *
+ * No se toca el `status` (un estado desconocido podría ser intermedio y marcarlo
+ * `failed` sería mentir), pero queda constancia en tres lugares: el ipnLog que ve
+ * el admin en el drawer, Sentry, y un email para que un humano lo revise.
+ *
+ * @param {object} transaction documento Mongoose
+ * @param {string} vitaStatus  estado crudo recibido
+ * @param {object} body        cuerpo completo del IPN
+ * @param {'payin'|'payout'} stage
+ */
+async function recordUnhandledVitaIpn(transaction, vitaStatus, body, stage) {
+  console.error('[Alyto IPN/Vita] Estado de IPN NO reconocido — requiere revisión.', {
+    transactionId: transaction.alytoTransactionId,
+    currentStatus: transaction.status,
+    vitaStatus,
+    stage,
+  });
+
+  Sentry.captureMessage('IPN Vita con status no reconocido', {
+    level: 'warning',
+    extra: {
+      transactionId: transaction.alytoTransactionId,
+      currentStatus: transaction.status,
+      vitaStatus,
+      stage,
+      body,
+    },
+  });
+
+  await appendIpnLog(transaction, 'vita_ipn_unhandled', 'vitaWallet', vitaStatus, body);
+  notifyAdminManualPayout(transaction).catch(() => {});
 }
 
 /**
@@ -690,16 +733,40 @@ async function generateSrlComprobante(transaction) {
     if (isPiiEncryptionEnabled()) { try { await ensureDek(); } catch { /* comprobante cae a "En verificación" */ } }
 
     const numeroComprobante = await generarNumeroCorrelativo('BOL');
+    const digital          = transaction.digitalAssetAmount ?? 0;
+    const comisionServicio = transaction.fees?.totalDeducted ?? 0;
+    // Tasa BOB/USDC: usar conversionRate.rate si está guardado (más preciso);
+    // si no, calcular desde netBOB (excluye fees) para no inflar la tasa mostrada.
+    const netBOB = transaction.originalAmount
+      - (transaction.fees?.totalDeducted   ?? 0)
+      - (transaction.fees?.profitRetention ?? 0);
+    const tipoCambio = transaction.conversionRate?.rate
+      ?? (digital > 0 && netBOB > 0
+        ? Number((netBOB / digital).toFixed(6))
+        : 0);
 
-    // DTO desde la fuente única (utils/comprobanteDto.js): las tres vías de
-    // emisión —esta, payoutController y /admin/regenerate-comprobante— tienen
-    // que producir el MISMO documento para un mismo correlativo.
-    const { dto, clientDoc } = buildSrlComprobanteDTO({ transaction, user, numeroComprobante });
+    const clientDoc = resolveClientDocument(user);
     if (clientDoc.ciPending) {
       logger.warn('[Comprobante] CI del cliente aún no capturado — se emite "En verificación"', {
         numeroComprobante, userId: user._id.toString(),
       });
     }
+
+    const dto = {
+      numeroComprobante,
+      nombreCliente:      user.companyName ?? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
+      nitOci:             clientDoc.nitOci,
+      tipoDocumento:      clientDoc.tipoDocumento,
+      codigoClienteAlyto: user._id.toString(),
+      fechaHora:          (transaction.createdAt ?? new Date()).toISOString(),
+      tipoOperacion:      'Liquidación de Activo Digital',
+      txid:               transaction.stellarTxId ?? 'PENDIENTE',
+      montoFiatRecibido:  transaction.originalAmount,
+      tipoDeCambio:       tipoCambio,
+      montoActivoEntregado: digital,
+      comisionServicio,
+      totalLiquidado:     transaction.originalAmount - comisionServicio,
+    };
 
     const { buffer, filename } = await generateOfficialReceipt(dto);
     const s3Key = `pdfs/bolivia/${numeroComprobante}_${filename}`;
@@ -1578,12 +1645,15 @@ export async function dispatchPayout(transaction) {
         // de lo contrario se hace una llamada fresca.
         if (!sharedLivePrices) await getPrices();
 
-        // GT, SV, ES, PL solo están disponibles vía vita_sent (no en withdrawal rails).
+        // GT, SV, ES, PL, EU solo van vía vita_sent (no en withdrawal rails).
         // Para todos los demás destinos se sigue usando withdrawal (comportamiento original).
         const destCountry = (transaction.destinationCountry ?? '').toUpperCase();
         if (VITA_SENT_ONLY_COUNTRIES.has(destCountry)) {
-          console.info(`[dispatchPayout] ${destCountry} → vita_sent routing`);
-          return createVitaSentPayout(vitaPayload);
+          // Vita no conoce 'EU' como país — la eurozona entra por 'ES' (el IBAN
+          // del beneficiario determina el país final). getVitaSentCountry mapea.
+          const sentCountry = getVitaSentCountry(destCountry);
+          console.info(`[dispatchPayout] ${destCountry} → vita_sent routing (country=${sentCountry})`);
+          return createVitaSentPayout({ ...vitaPayload, country: sentCountry });
         }
         return createPayout(vitaPayload);
       }
@@ -1712,38 +1782,10 @@ export async function dispatchPayout(transaction) {
       provider:        providerUsed,
     });
 
-    // ── Autoconfirmación simulada: SOLO fuera de producción real ─────────────
-    // Esta rama da por CONFIRMADO el payout a los 4 s sin esperar el IPN del
-    // proveedor. Corre DESPUÉS de que el proveedor ya aceptó la orden, así que
-    // en producción real con VITA_ENVIRONMENT mal seteado el payout sí se envía
-    // pero la confirmación es falsa: la tx queda 'completed', se emite el
-    // comprobante y se notifica al usuario aunque el proveedor después falle.
-    //
-    // El template de CLAUDE.md §7 trae VITA_ENVIRONMENT=sandbox, así que es un
-    // pie de fábrica: `areSimulatorsAllowed()` lo neutraliza en el VPS. Caer al
-    // `else` es la conducta conservadora — esperar el IPN real, que es lo que
-    // debe pasar; además los jobs reconcileVitaTransfers/reconcileHarborTransfers
-    // son la red de seguridad si ese IPN se pierde.
-    //
-    // ⚠️ Nota aparte: la var es VITA_ENVIRONMENT pero la rama aplica también a
-    // payouts OwlPay (providerUsed puede ser 'owlPay'). Se respeta el
-    // comportamiento existente; el guard de entorno acota el daño.
-    const simulacionSolicitada = process.env.VITA_ENVIRONMENT === 'sandbox';
-    const simulacionPermitida  = shouldSimulatePayoutConfirmation();
+    console.log('[dispatchPayout] VITA_ENVIRONMENT check:', process.env.VITA_ENVIRONMENT);
+    console.log('[dispatchPayout] ¿Es sandbox?:', process.env.VITA_ENVIRONMENT === 'sandbox');
 
-    if (simulacionSolicitada && !simulacionPermitida) {
-      const aviso = '[dispatchPayout] ⚠️ VITA_ENVIRONMENT=sandbox en producción real — ' +
-        'se IGNORA la autoconfirmación simulada y se espera el IPN del proveedor. ' +
-        'Corregir la variable de entorno (debe ser "production").';
-      console.error(aviso);
-      Sentry.captureMessage(aviso, {
-        level: 'error',
-        tags:  { controller: 'ipnController', fn: 'dispatchPayout', provider: providerUsed },
-        extra: { transactionId: transaction.alytoTransactionId },
-      });
-    }
-
-    if (simulacionPermitida) {
+    if (process.env.VITA_ENVIRONMENT === 'sandbox') {
       // ── SANDBOX: simulate production 2-step flow (payout_sent → completed) ────
       // Step 1: payout_sent — same as production
       console.log(`[dispatchPayout] 🧪 Sandbox (${providerUsed}) — step 1: payout_sent`);
@@ -2116,13 +2158,24 @@ export async function handleVitaIPN(req, res) {
           ).catch(() => {});
         });
 
-      } else if (vitaStatus === 'denied') {
-        transaction.status        = 'failed';
-        transaction.failureReason = 'Payin denegado por Vita Wallet.';
+      } else if (classifyVitaIpnStatus(vitaStatus) === 'failure') {
+        // 'denied' y cualquier otra palabra terminal de Vita. El motivo se extrae
+        // del body del IPN — antes se escribía un string fijo y se descartaba.
+        const mapped = mapVitaIpnFailure(req.body, { stage: 'payin' });
+
+        transaction.status            = 'failed';
+        transaction.failureReason     = mapped.adminMessage;
+        transaction.userFailureReason = mapped.userMessage;
+        transaction.userFailureAction = mapped.userAction;
+        transaction.failureCategory   = mapped.category;
+        transaction.failureRetryable  = mapped.retryable;
         await transaction.save();
 
-        console.info('[Alyto IPN/Vita] Payin denegado por Vita.', {
+        console.info('[Alyto IPN/Vita] Payin rechazado por Vita.', {
           transactionId: transaction.alytoTransactionId,
+          vitaStatus,
+          category: mapped.category,
+          reason:   mapped.reason,
         });
 
         // Notificación push: pago fallido
@@ -2142,8 +2195,16 @@ export async function handleVitaIPN(req, res) {
         } catch (emailErr) {
           console.error('[Alyto IPN/Vita] Error enviando email paymentFailed (payin denied):', emailErr.message);
         }
+
+      } else if (classifyVitaIpnStatus(vitaStatus) === 'progress') {
+        // Estado intermedio ('pending', 'processing'…) → esperar el siguiente IPN.
+        console.info('[Alyto IPN/Vita] Payin en estado intermedio — sin acción.', {
+          transactionId: transaction.alytoTransactionId, vitaStatus,
+        });
+
+      } else {
+        await recordUnhandledVitaIpn(transaction, vitaStatus, req.body, 'payin');
       }
-      // Otros estados de Vita (ej. 'pending') → no hacer nada, esperar siguiente IPN
       return res.status(200).json({ received: true });
     }
 
@@ -2224,15 +2285,30 @@ export async function handleVitaIPN(req, res) {
           console.error('[Email] Error completado:', emailErr.message);
         }
 
-      } else if (vitaStatus === 'denied') {
-        transaction.status        = 'failed';
-        transaction.failureReason = 'Payout (withdrawal bancario) denegado por Vita Wallet.';
+      } else if (classifyVitaIpnStatus(vitaStatus) === 'failure') {
+        // Cubre 'denied' y toda palabra terminal de Vita ('rejected', 'failed',
+        // 'returned'…). Antes SOLO se reconocía 'denied': cualquier otra caía al
+        // return de más abajo sin tocar la transacción — quedaba en payout_sent
+        // para siempre, sin motivo, sin aviso y sin nada visible en el admin.
+        // El motivo sale del body del IPN; si Vita no manda ninguno se guarda el
+        // body crudo acotado, porque perder el motivo es peor que guardar JSON.
+        const mapped = mapVitaIpnFailure(req.body, { stage: 'payout' });
+
+        transaction.status            = 'failed';
+        transaction.failureReason     = mapped.adminMessage;
+        transaction.userFailureReason = mapped.userMessage;
+        transaction.userFailureAction = mapped.userAction;
+        transaction.failureCategory   = mapped.category;
+        transaction.failureRetryable  = mapped.retryable;
         await transaction.save();
 
         await appendIpnLog(transaction, 'payout_denied', 'vitaWallet', 'failed', req.body);
 
-        console.error('[Alyto IPN/Vita] Payout denegado por Vita — requiere revisión manual.', {
+        console.error('[Alyto IPN/Vita] Payout rechazado por Vita — requiere revisión manual.', {
           transactionId: transaction.alytoTransactionId,
+          vitaStatus,
+          category: mapped.category,
+          reason:   mapped.reason,
         });
 
         // Notificar al admin que el payout falló y requiere intervención
@@ -2255,16 +2331,31 @@ export async function handleVitaIPN(req, res) {
         } catch (emailErr) {
           console.error('[Alyto IPN/Vita] Error enviando email paymentFailed (payout denied):', emailErr.message);
         }
+
+      } else if (classifyVitaIpnStatus(vitaStatus) === 'progress') {
+        // Estado intermedio ('pending', 'processing'…) → esperar el siguiente IPN.
+        console.info('[Alyto IPN/Vita] Payout en estado intermedio — sin acción.', {
+          transactionId: transaction.alytoTransactionId, vitaStatus,
+        });
+
+      } else {
+        await recordUnhandledVitaIpn(transaction, vitaStatus, req.body, 'payout');
       }
       return res.status(200).json({ received: true });
     }
 
     // ── Caso D: estado no esperado — loguear y responder 200 ─────────────
-    console.warn('[Alyto IPN/Vita] IPN recibido en estado inesperado — ignorando.', {
-      transactionId: transaction.alytoTransactionId,
-      currentStatus,
-      vitaStatus,
-    });
+    // Un IPN de RECHAZO que cae aquí (la tx no está ni en payin ni en payout_sent)
+    // no puede ignorarse: alguien tiene que mirarlo. El resto solo se loguea.
+    if (classifyVitaIpnStatus(vitaStatus) === 'failure') {
+      await recordUnhandledVitaIpn(transaction, vitaStatus, req.body, 'payout');
+    } else {
+      console.warn('[Alyto IPN/Vita] IPN recibido en estado inesperado — ignorando.', {
+        transactionId: transaction.alytoTransactionId,
+        currentStatus,
+        vitaStatus,
+      });
+    }
 
   } catch (err) {
     // Error interno no manejado — loguear sin reventar el proceso

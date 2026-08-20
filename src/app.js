@@ -1,0 +1,992 @@
+/**
+ * app.js — Aplicación Alyto Backend V2.0 (Express, rutas, jobs, arranque)
+ *
+ * Responsabilidades:
+ *  1. Configurar Express (CORS, JSON, seguridad básica)
+ *  2. Conectar Mongoose a MongoDB
+ *  3. Registrar rutas base
+ *  4. Exponer healthcheck para load balancers y monitoreo
+ *
+ * ⚠️  NO es el entry point: lo importa src/server.js con un `import()` dinámico
+ * DESPUÉS de haber cargado AWS Secrets Manager en process.env. Ver server.js
+ * para el porqué — este módulo y todo su grafo de imports asumen que los
+ * secretos ya están en process.env al evaluarse.
+ *
+ * Los tests importan ESTE archivo (no server.js) para obtener la app Express:
+ * en test el entry point no aporta nada, y los mocks de jest.unstable_mockModule
+ * no alcanzan un grafo cargado por `import()` dinámico.
+ */
+
+// ⚠️  Logger primero — Secrets Manager ya corrió (lo garantiza server.js), así que
+// CloudWatch puede leer AWS_REGION y patchConsole() queda activo antes que Sentry.
+import { logger, patchConsole } from './utils/logger.js';
+patchConsole();
+
+// ⚠️  Sentry debe inicializarse ANTES que cualquier otro módulo de negocio
+import './services/sentry.js';
+import * as Sentry from '@sentry/node';
+
+import { auditSecrets, CRITICAL_SECRETS } from './utils/awsSecrets.js';
+import { checkEnv }  from '../scripts/checkEnv.js';
+import { cleanupOrphanTransactions } from './jobs/cleanupOrphanTransactions.js';
+import { kycIncompleteMonitor }     from './jobs/kycIncompleteMonitor.js';
+import express        from 'express';
+import cors           from 'cors';
+import helmet         from 'helmet';
+import { generalLimiter, paymentsLimiter } from './config/rateLimiters.js';
+import compression    from 'compression';
+import cookieParser   from 'cookie-parser';
+import mongoose       from 'mongoose';
+import { protect }         from './middlewares/authMiddleware.js';
+import { checkAdmin }      from './middlewares/checkAdmin.js';
+import authRoutes          from './routes/authRoutes.js';
+import paymentRoutes       from './routes/paymentRoutes.js';
+import payoutRoutes        from './routes/payoutRoutes.js';
+import institutionalRoutes from './routes/institutionalRoutes.js';
+import userRoutes          from './routes/userRoutes.js';
+import adminRoutes         from './routes/adminRoutes.js';
+import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmin (feature-gated)
+import ledgerAdminRoutes   from './routes/ledgerAdminRoutes.js';   // Libro Mayor reportes (feature-gated)
+import marketingAgentRoutes from './routes/marketingAgentRoutes.js'; // Agente de marketing (feature-gated)
+import regionalRoutes      from './routes/regionalRoutes.js';
+import ipnRoutes           from './routes/ipn.js';
+import internalJobsRoutes  from './routes/internalJobsRoutes.js';
+import waitlistRoutes      from './routes/waitlistRoutes.js';      // landing alyto.io — lista de espera
+import dashboardRoutes     from './routes/dashboardRoutes.js';
+import kycRoutes           from './routes/kycRoutes.js';
+import kybRoutes           from './routes/kybRoutes.js';
+import walletRoutes        from './routes/walletRoutes.js';
+import reclamosRoutes      from './routes/reclamosRoutes.js';
+import contactsRoutes      from './routes/contactsRoutes.js';
+import notificationRoutes  from './routes/notificationRoutes.js';
+import verificationRoutes  from './routes/verificationRoutes.js';
+import supportRoutes        from './routes/supportRoutes.js';          // AWS-4 — Agente IA soporte
+import { sentryContext }   from './middlewares/sentryContext.js';
+import { handleStripeWebhook }     from './webhooks/stripeWebhook.js';
+import { createQuoteSocketServer }  from './services/quoteSocket.js';
+import { getOwlPayBaseUrl } from './services/owlPayService.js';   // ProviderGuard — URL efectiva
+import { getVitaBaseUrl }   from './services/vitaWalletService.js'; // ProviderGuard — URL efectiva
+import User        from './models/User.js';
+import Transaction from './models/Transaction.js';
+import stellarRoutes       from './routes/stellarRoutes.js';          // SEP-10/12/24/31
+import { renderStellarToml } from './controllers/stellarTomlController.js'; // SEP-1
+
+// ─── Configuración ───────────────────────────────────────────────────────────
+
+const PORT        = process.env.PORT        ?? 3000;
+const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://localhost:27017/alyto-v2';
+
+// JWT_SECRET es obligatorio en todos los entornos — fail fast para evitar tokens
+// firmados con secretos conocidos si NODE_ENV está mal configurado.
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret || jwtSecret.length < 32) {
+  console.error('FATAL: JWT_SECRET must be set and at least 32 characters. Refusing to start.');
+  process.exit(1);
+}
+console.log('[JWT] Secret stable, length:', jwtSecret.length);
+
+// ─── Verificación de variables de entorno ────────────────────────────────────
+// En producción, aborta el proceso si faltan variables críticas.
+// En desarrollo, emite warnings y continúa.
+checkEnv({ fatal: process.env.NODE_ENV === 'production' });
+
+if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
+  console.warn('[FCM] FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY not set — push notifications disabled');
+}
+
+// Rate limiters importados desde src/config/rateLimiters.js
+// La configuración es consciente del entorno: solo aplica en producción.
+
+// ─── App Express ─────────────────────────────────────────────────────────────
+
+const app = express();
+
+// AWS-3C — X-Ray: openSegment debe ser el PRIMER middleware (no-op si XRAY_ENABLED!=true)
+const { xrayOpenSegment, xrayCloseSegment } = await import('./utils/xray.js');
+app.use(xrayOpenSegment('alyto-backend'));
+
+// Trust proxy — necesario para que express-rate-limit y otros middlewares
+// lean la IP real del cliente cuando el servidor corre detrás de un proxy
+// (Render, Nginx, AWS ALB). En desarrollo local no hay proxy, el valor '1'
+// es seguro porque solo confía en el primer proxy de la cadena.
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
+// Helmet — headers de seguridad HTTP (CSP, HSTS, X-Frame-Options, etc.)
+// Debe ir ANTES de CORS para que los headers de seguridad se apliquen a toda respuesta.
+const isProd = process.env.NODE_ENV === 'production';
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:  ["'self'"],
+      scriptSrc:   [
+        "'self'",
+        'https://js.fintoc.com',
+        'https://wizard.fintoc.com',
+        'https://js.stripe.com',
+        'https://cdn.jsdelivr.net',
+      ],
+      frameSrc:    [
+        "'self'",
+        'https://wizard.fintoc.com',
+        'https://widget.fintoc.com',
+        'https://js.stripe.com',
+      ],
+      frameAncestors: [
+        "'self'",
+        'https://staging.alyto.app',
+        'https://alyto.app',
+        ...(process.env.EXTRA_FRAME_ANCESTORS ? process.env.EXTRA_FRAME_ANCESTORS.split(',') : []),
+      ],
+      connectSrc:  [
+        "'self'",
+        'https://api.fintoc.com',
+        'https://wizard.fintoc.com',
+        'https://widget.fintoc.com',
+        'https://api.stripe.com',
+        'https://api-staging.alyto.app',
+        'https://api.alyto.app',
+        ...(isProd ? [] : [
+          'wss://192.168.1.94:3000',
+          'ws://192.168.1.94:3000',
+          'https://*.ngrok-free.app',
+          'wss://*.ngrok-free.app',
+        ]),
+      ],
+      imgSrc:      ["'self'", 'data:', 'https:'],
+      styleSrc:    ["'self'"],
+    },
+  },
+}));
+
+// Compression — reduce el tamaño de las respuestas JSON/text (gzip/br)
+app.use(compression());
+
+// CORS — allowlist explícita vía ALLOWED_ORIGINS (comma-separated).
+// Fail-fast en producción si no hay orígenes configurados para evitar wildcard
+// con credentials=true (vulnerabilidad crítica).
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+console.log('[CORS] allowedOrigins:', allowedOrigins);
+console.log('[CORS] AUTH_MODE:', process.env.AUTH_MODE ?? '(not set, default cookie)');
+
+if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
+  console.error('[Alyto Server] FATAL: ALLOWED_ORIGINS no configurado en producción. Abortando.');
+  process.exit(1);
+}
+
+// Rutas de anchor SEP que deben interoperar con wallets externas
+// (demo-wallet.stellar.org, Lobstr, Vibrant, reviewers SCF) Y con la propia app
+// logueada. Tienen CORS DUAL (decidido por Origin), porque conviven dos clientes:
+//   - Wallet externa  → auth Bearer/SEP-10, SIN cookies → `ACAO: *`, credentials:false
+//     (spec SEP-1/10/12/24/31; un Origin desconocido NUNCA debe dar 500).
+//   - App propia (alyto.app) → manda `credentials: 'include'` (cookie) → el navegador
+//     EXIGE `ACAO: <origin exacto>` + `Allow-Credentials: true` (el wildcard lo bloquea
+//     → "Failed to fetch"). Por eso, si el Origin está en la allowlist, reflejamos.
+const ANCHOR_CORS_BASE = {
+  methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'ngrok-skip-browser-warning'],
+  exposedHeaders: ['Content-Disposition', 'Content-Type'],
+};
+
+const isPublicAnchorPath = (path) =>
+  path === '/.well-known/stellar.toml' ||
+  path.startsWith('/api/v1/stellar/');
+
+const STRICT_CORS = {
+  origin(origin, callback) {
+    // Requests sin Origin (curl, health checks, server-to-server, apps nativas): permitidos.
+    if (!origin) return callback(null, true);
+    // Allowlist 100% EXPLÍCITA por entorno vía ALLOWED_ORIGINS. Sin comodines ni
+    // regex que crucen la frontera prod/staging: cada entorno declara exactamente
+    // sus propios orígenes legítimos. Producción NUNCA debe incluir orígenes de
+    // staging (Render, *.onrender.com, staging.alyto.app) ni viceversa.
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn('[CORS] Blocked origin:', origin);
+    return callback(new Error(`CORS: origen no permitido (${origin})`));
+  },
+  credentials:    true,
+  ...ANCHOR_CORS_BASE,
+};
+
+// Delegate: rutas de anchor con CORS dual; resto de la app con allowlist estricta.
+app.use(cors((req, callback) => {
+  if (!isPublicAnchorPath(req.path)) return callback(null, STRICT_CORS);
+  const origin = req.header('Origin');
+  if (origin && allowedOrigins.includes(origin)) {
+    // App propia con cookies → reflejar el origin exacto + credentials.
+    return callback(null, { origin: true, credentials: true, ...ANCHOR_CORS_BASE });
+  }
+  // Wallet externa (Bearer, sin cookies) o sin Origin → wildcard, sin credentials.
+  return callback(null, { origin: '*', credentials: false, ...ANCHOR_CORS_BASE });
+}));
+
+// Rate limiting general — protege todas las rutas contra DDoS/brute-force
+app.use(generalLimiter);
+
+// ⚠️  WEBHOOK: debe registrarse ANTES de express.json() para recibir body raw
+// Stripe requiere el cuerpo sin parsear para verificar la firma HMAC
+app.post(
+  '/api/v1/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  handleStripeWebhook,
+);
+
+// Webhook routes that need rawBody for HMAC verification — MUST run before express.json().
+// Pattern: express.raw() captures Buffer → store as req.rawBody → parse to req.body for handlers.
+function captureRawBodyMiddleware(req, res, next) {
+  express.raw({ type: 'application/json', limit: '1mb' })(req, res, (err) => {
+    if (err) return next(err);
+    if (Buffer.isBuffer(req.body)) {
+      req.rawBody = req.body;
+      try {
+        req.body = JSON.parse(req.body.toString('utf8'));
+      } catch {
+        req.body = {};
+      }
+    }
+    next();
+  });
+}
+
+app.use('/api/v1/ipn',                              captureRawBodyMiddleware);
+
+// Parseo de JSON con límite de payload
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Parser de cookies — necesario para auth vía HttpOnly cookie 'alyto_token'
+app.use(cookieParser());
+
+// NoSQL injection sanitizer — reemplaza claves con $ o . por _ en body/params/query.
+// Implementación propia: express-mongo-sanitize@2.x reasigna req.query, que en
+// Express 5 es un getter read-only y lanza TypeError. Aquí mutamos los objetos
+// in-place recursivamente (sin reasignar la referencia externa), compatible con
+// Express 5.
+app.use((req, res, next) => {
+  const sanitize = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        const safeKey = key.replace(/[$.]/g, '_');
+        const val = obj[key];
+        delete obj[key];
+        obj[safeKey] = val;
+        console.warn(`[SECURITY] Sanitized key "${key}" from ${req.path}`);
+      }
+    }
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object') sanitize(val);
+    }
+  };
+  sanitize(req.body);
+  sanitize(req.params);
+  // req.query es un getter read-only en Express 5 — no podemos reasignar la
+  // propiedad del prototipo, pero sí definir una data-property en la instancia
+  // que sombrea al getter con una versión ya saneada.
+  const sanitizedQuery = { ...req.query };
+  sanitize(sanitizedQuery);
+  Object.defineProperty(req, 'query', {
+    value:        sanitizedQuery,
+    writable:     true,
+    configurable: true,
+    enumerable:   true,
+  });
+  next();
+});
+
+// Request logging — registra método, ruta y latencia de cada petición
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} ${res.statusCode} +${ms}ms`);
+  });
+  next();
+});
+
+// Sentry: enriquece cada request con tags de transacción y corridorId
+app.use(sentryContext);
+
+// ─── Rutas de Redirect Fintoc ────────────────────────────────────────────────
+// Deben registrarse ANTES que cualquier ruta /api/v1 y ANTES del catch-all 404.
+// Fintoc redirige al usuario aquí tras completar o cancelar el pago en el widget.
+
+app.get('/success', (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://alyto-frontend-v2.onrender.com';
+  return res.redirect(302, `${frontendUrl}/payment-success`);
+});
+
+app.get('/cancel', (req, res) => {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://alyto-frontend-v2.onrender.com';
+  return res.redirect(302, `${frontendUrl}/send`);
+});
+
+// ─── Rutas Base ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/health
+ * Healthcheck público para load balancers, uptime monitors y CI/CD pipelines.
+ * Devuelve solo lo necesario para determinar si el servicio responde —
+ * sin detalles de infraestructura (DB driver status, Stellar network,
+ * proveedores externos, versiones de servicios) que faciliten fingerprinting.
+ * Para diagnósticos detallados, usar GET /api/v1/admin/health (auth + admin).
+ */
+app.get('/api/health', (req, res) => {
+  const isHealthy = mongoose.connection.readyState === 1;
+  res.status(isHealthy ? 200 : 503).json({
+    status:    isHealthy ? 'ok' : 'degraded',
+    timestamp: new Date().toISOString(),
+    version:   process.env.npm_package_version ?? '2.0.0',
+  });
+});
+
+// ─── Rutas de la API ─────────────────────────────────────────────────────────
+
+// Alias versionado del healthcheck (para Render y load balancers que prefieren /api/v1/)
+app.get('/api/v1/health', (req, res) => res.redirect(307, '/api/health'));
+
+/**
+ * GET /api/v1/admin/secrets-audit
+ * Diagnóstico de secretos críticos — solo admin autenticado.
+ * Muestra NOMBRES de variables presentes/faltantes, NUNCA valores.
+ */
+app.get('/api/v1/admin/secrets-audit', protect, checkAdmin, (req, res) => {
+  // protect verifica el JWT (firma + usuario activo) y checkAdmin exige role admin.
+  // Antes solo se comprobaba la PRESENCIA de un token (cualquier string) — audit 2026-06-11.
+  const { present, missing } = auditSecrets(CRITICAL_SECRETS);
+  res.json({
+    total:    CRITICAL_SECRETS.length,
+    present:  present.length,
+    missing:  missing.length,
+    ok:       missing.length === 0,
+    source:   process.env.AWS_SECRETS_NAME ? 'secrets-manager' : 'env',
+    secretName: process.env.AWS_SECRETS_NAME ?? null,
+    missingKeys: missing,   // solo nombres, nunca valores
+  });
+});
+
+app.use('/api/v1/auth',          authRoutes);        // limiters por ruta en authRoutes.js
+app.use('/api/v1/dashboard',     dashboardRoutes);
+app.use('/api/v1/payments',      paymentsLimiter, paymentRoutes);
+app.use('/api/v1/payouts',       payoutRoutes);
+app.use('/api/v1/institutional', institutionalRoutes);
+app.use('/api/v1/user',          userRoutes);
+app.use('/api/v1/admin',         adminRoutes);
+app.use('/api/v1/regional',      regionalRoutes);
+app.use('/api/v1/ipn',           ipnRoutes);
+app.use('/api/v1/internal',      internalJobsRoutes);    // AWS-2A — disparo de jobs (token interno)
+app.use('/api/v1/waitlist',      waitlistRoutes);        // landing alyto.io — público, limiter propio
+app.use('/api/v1/kyc',           kycRoutes);
+app.use('/api/v1/kyb',           kybRoutes);
+app.use('/api/v1/wallet',        walletRoutes);         // Fase 25 — Wallet BOB (SRL Bolivia)
+app.use('/api/v1/reclamos',      reclamosRoutes);       // Fase 27 — PRILI Reclamos ASFI
+app.use('/api/v1/contacts',      contactsRoutes);       // Fase 33 — Agenda de Contactos
+app.use('/api/v1/notifications', notificationRoutes);   // Centro de notificaciones
+app.use('/api/v1/verify',        verificationRoutes);   // Verificación pública comprobantes B2B
+app.use('/api/v1/stellar',       stellarRoutes);        // SEP-10/12/24/31 — Stellar Ecosystem Proposals
+app.use('/api/v1/support',       supportRoutes);        // AWS-4 — Agente IA de soporte (Bedrock)
+
+// AnchorAdmin — panel interno de administración del Stellar Anchor. Feature-gated
+// (ANCHOR_ADMIN_ENABLED) para rollback inmediato. Fase 1: observabilidad de solo
+// lectura (listener, tesorería, reconciliación, solvencia).
+if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
+  app.use('/api/v1/admin/anchor', anchorAdminRoutes);
+  console.info('[Alyto Server] AnchorAdmin habilitado → /api/v1/admin/anchor');
+}
+
+// Libro Mayor — reportes contables (Fase 3). Feature-gated por LEDGER_POSTING_ENABLED
+// (mismo flag del posteo). Read-only + POST /sync. Rollback = apagar el flag.
+if (['shadow', 'strict', 'true', '1'].includes((process.env.LEDGER_POSTING_ENABLED ?? '').toLowerCase())) {
+  app.use('/api/v1/admin/ledger', ledgerAdminRoutes);
+  console.info('[Alyto Server] Libro Mayor habilitado → /api/v1/admin/ledger');
+}
+
+// Agente de marketing y educación financiera. Feature-gated (MARKETING_AGENT_ENABLED).
+// Genera contenido con IA, lo clasifica con reglas deterministas y deja las piezas
+// de alto riesgo en cola de aprobación humana. Rollback = apagar el flag.
+if (process.env.MARKETING_AGENT_ENABLED === 'true') {
+  app.use('/api/v1/admin/marketing', marketingAgentRoutes);
+  console.info('[Alyto Server] Agente de marketing habilitado → /api/v1/admin/marketing');
+}
+
+// stellar.toml — SEP-1 generado dinámicamente por entorno (mainnet/testnet,
+// prod/staging). Single source of truth — sin archivos estáticos que se desincronicen.
+app.get('/.well-known/stellar.toml', renderStellarToml);
+
+// ─── Rutas de Desarrollo (opt-in explícito vía ALYTO_ENABLE_DEV_ROUTES=1) ────
+// SECURITY: Never set ALYTO_ENABLE_DEV_ROUTES=1 in production environment.
+// Doble candado: aunque el flag esté en 1, NUNCA se montan con NODE_ENV=production
+// (audit 2026-06-11 — exponían userIds y transacciones SRL sin auth).
+
+if (process.env.ALYTO_ENABLE_DEV_ROUTES === '1' && process.env.NODE_ENV !== 'production') {
+  /**
+   * GET /api/v1/dev/test-user
+   * Devuelve el ID del usuario de prueba sembrado al arrancar.
+   * El frontend lo usa como userId en el flujo de payin.
+   */
+  app.get('/api/v1/dev/test-user', async (req, res) => {
+    const user = await User.findOne({ email: 'dev@alyto.test' }).lean();
+    if (!user) return res.status(404).json({ error: 'Usuario dev no encontrado.' });
+    res.json({ userId: user._id.toString(), email: user.email, legalEntity: user.legalEntity });
+  });
+
+  /**
+   * GET /api/v1/dev/srl-transactions
+   * Devuelve las transacciones SRL in_transit sembradas al arrancar.
+   * El frontend las usa para poblar la SettlementView con IDs reales.
+   */
+  app.get('/api/v1/dev/srl-transactions', async (req, res) => {
+    const txs = await Transaction.find({ legalEntity: 'SRL', status: 'in_transit' })
+      .select('_id alytoTransactionId originalAmount digitalAssetAmount stellarTxId status createdAt exchangeRate')
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ transactions: txs });
+  });
+
+  /**
+   * GET /api/v1/dev/fintoc-success
+   * Simula la pantalla de éxito del widget de Fintoc.
+   * En producción, Fintoc redirige aquí tras el pago real.
+   */
+  app.get('/api/v1/dev/fintoc-success', (req, res) => {
+    const { amount, id } = req.query;
+    res.send(`
+      <!DOCTYPE html><html lang="es"><head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Pago simulado — Alyto Dev</title>
+        <style>
+          body { background:#0F1628; color:#fff; font-family:sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; flex-direction:column; gap:16px; }
+          .card { background:#1A2340; border-radius:20px; padding:32px 40px; text-align:center; max-width:360px; }
+          .check { font-size:3rem; margin-bottom:8px; }
+          h2 { color:#22C55E; margin:0 0 8px; }
+          p  { color:#8A96B8; margin:4px 0; font-size:.875rem; }
+          a  { display:inline-block; margin-top:20px; padding:12px 28px; background:#C4A84F; color:#0F1628; border-radius:12px; font-weight:700; text-decoration:none; }
+        </style>
+      </head><body>
+        <div class="card">
+          <div class="check">✅</div>
+          <h2>Pago autorizado</h2>
+          <p><strong>Monto:</strong> $${Number(amount ?? 0).toLocaleString('es-CL')} CLP</p>
+          <p><strong>ID Fintoc (dev):</strong> ${id ?? 'N/A'}</p>
+          <p style="margin-top:12px;color:#4E5A7A;font-size:.75rem">Ambiente de desarrollo — sin cargo real</p>
+          <a href="http://localhost:5173">← Volver a Alyto</a>
+        </div>
+      </body></html>
+    `);
+  });
+}
+
+// Ruta catch-all — 404 (debe ser la ÚLTIMA ruta registrada)
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint no encontrado.' });
+});
+
+// AWS-3C — X-Ray: closeSegment va DESPUÉS de las rutas, ANTES de los error handlers
+// (no-op si XRAY_ENABLED!=true)
+app.use(xrayCloseSegment());
+
+// Sentry: captura errores de rutas Express antes del handler genérico
+// Debe estar DESPUÉS de todas las rutas y ANTES del error handler propio
+Sentry.setupExpressErrorHandler(app);
+
+// Manejador de errores global — evita que Express crashee el proceso
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  // Rechazo CORS (origen fuera de ALLOWED_ORIGINS): 403 esperado, no 500 ni Sentry.
+  // El navegador igual lo reporta como fallo de red (sin ACAO), pero el server
+  // deja de registrar falsos "Error interno" (ej. app nativa con Origin
+  // https://localhost no incluido en la allowlist del entorno).
+  if (typeof err.message === 'string' && err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: err.message });
+  }
+  console.error('[Alyto Server] Error no manejado:', err.message);
+  // Capturar en Sentry solo errores 5xx (los 4xx son esperados y filtrados en sentry.js)
+  if (!err.status || err.status >= 500) {
+    Sentry.captureException(err);
+  }
+  res.status(500).json({ error: 'Error interno del servidor.' });
+});
+
+// ─── Conexión a MongoDB y arranque ───────────────────────────────────────────
+
+async function resolveMongoUri() {
+  if (process.env.NODE_ENV !== 'production' && !process.env.MONGODB_URI) {
+    const { MongoMemoryServer } = await import('mongodb-memory-server');
+    const mongod = await MongoMemoryServer.create();
+    const uri = mongod.getUri();
+    console.info('[Alyto DB] Usando MongoDB en memoria (desarrollo):', uri);
+
+    process.on('SIGTERM', () => mongod.stop());
+    process.on('SIGINT',  () => mongod.stop());
+
+    return uri;
+  }
+  return MONGODB_URI;
+}
+
+async function seedDevUser() {
+  // Gate principal: solo corre cuando los dev routes están habilitados.
+  if (process.env.ALYTO_ENABLE_DEV_ROUTES !== '1') return;
+
+  // Guard adicional: rehusar si la DB parece ser producción o NODE_ENV=production.
+  // La DB de producción se llama 'alyto-v2' (NO contiene 'prod') — chequeo explícito.
+  const dbName = mongoose.connection.db.databaseName;
+  const looksLikeProd = dbName && (dbName.toLowerCase().includes('prod') || dbName.toLowerCase() === 'alyto-v2');
+  if (looksLikeProd || process.env.NODE_ENV === 'production') {
+    console.error('FATAL: seedDevUser() refused to run against production database.');
+    return;
+  }
+
+  const bcrypt = (await import('bcryptjs')).default;
+  const devPasswordHash = await bcrypt.hash('DevPassword123!', 12);
+
+  // dev@alyto.test: user de prueba local. NUNCA debe llegar a la DB de producción.
+  const existing = await User.findOne({ email: 'dev@alyto.test' });
+  if (existing) return;
+  const user = await User.create({
+    firstName:        'Dev',
+    lastName:         'Alyto',
+    email:            'dev@alyto.test',
+    password:         devPasswordHash,
+    legalEntity:      'SpA',
+    kycStatus:        'pending',
+    residenceCountry: 'CL',
+    preferences:      { currency: 'CLP' },
+    identityDocument: { type: 'rut', number: '12345678-9', issuingCountry: 'CL' },
+    address:          { street: 'Av. Test 123', city: 'Santiago', country: 'CL' },
+    dateOfBirth:      new Date('1990-01-01'),
+  });
+  console.info(`[Alyto Dev] Usuario SpA sembrado — userId: ${user._id}`);
+
+  // Seed usuario SRL (Bolivia) + transacciones en_tránsito para SettlementView
+  const srlUser = await User.create({
+    firstName:        'Operador',
+    lastName:         'Bolivia',
+    email:            'dev-srl@alyto.test',
+    password:         devPasswordHash,
+    legalEntity:      'SRL',
+    kycStatus:        'pending',
+    residenceCountry: 'BO',
+    preferences:      { currency: 'BOB' },
+    taxId:            '1023456789',
+    identityDocument: { type: 'ci_bolivia', number: '7654321', issuingCountry: 'BO' },
+    address:          { street: 'Calle Comercio 456', city: 'La Paz', country: 'BO' },
+    dateOfBirth:      new Date('1985-06-15'),
+  });
+
+  const srlTxBase = {
+    userId:          srlUser._id,
+    legalEntity:     'SRL',
+    operationType:   'crossBorderPayment',
+    routingScenario: 'C',
+    originCurrency:  'CLP',
+    originCountry:   'CL',
+    destinationCountry: 'BO',
+    destinationCurrency: 'BOB',
+    digitalAsset:    'USDC',
+    status:          'in_transit',
+    providersUsed:   ['payin:fintoc', 'transit:stellar'],
+    paymentLegs: [
+      { stage: 'payin',   provider: 'fintoc',  status: 'completed' },
+      { stage: 'transit', provider: 'stellar', status: 'completed' },
+    ],
+    // Seed dev-only — protegido por guard ALYTO_ENABLE_DEV_ROUTES (línea 310).
+    // Valor histórico legacy; el campo está @deprecated. No usar en cálculos
+    // — ver Transaction.js:375.
+    exchangeRate:    6.98,
+  };
+
+  const txSeed = [
+    { ...srlTxBase, originalAmount: 25500, digitalAssetAmount: 25.50, stellarTxId: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2', alytoTransactionId: `ALY-C-${Date.now()}-TX001` },
+    { ...srlTxBase, originalAmount: 51000, digitalAssetAmount: 51.00, stellarTxId: 'b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3', alytoTransactionId: `ALY-C-${Date.now()}-TX002` },
+    { ...srlTxBase, originalAmount: 10200, digitalAssetAmount: 10.20, stellarTxId: 'c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4', alytoTransactionId: `ALY-C-${Date.now()}-TX003` },
+  ];
+
+  const createdTxs = await Transaction.insertMany(txSeed);
+  console.info(`[Alyto Dev] Usuario SRL sembrado — userId: ${srlUser._id}`);
+  console.info(`[Alyto Dev] ${createdTxs.length} transacciones SRL in_transit sembradas.`);
+}
+
+/**
+ * Elimina índices legacy de colecciones V1.0 que no existen en el esquema V2.0
+ * y que causarían conflictos al insertar documentos sin esos campos.
+ * Solo se ejecuta si el índice existe — operación idempotente.
+ */
+async function dropLegacyIndexes() {
+  try {
+    const txCollection = mongoose.connection.collection('transactions');
+    const indexes = await txCollection.indexes();
+    const hasOrderIndex = indexes.some(idx => idx.name === 'order_1');
+    if (hasOrderIndex) {
+      await txCollection.dropIndex('order_1');
+      console.info('[Alyto DB] Índice legacy "order_1" eliminado de transactions.');
+    }
+  } catch (err) {
+    // No bloquear el arranque si falla — el índice puede no existir
+    console.warn('[Alyto DB] No se pudo limpiar índice legacy:', err.message);
+  }
+}
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[MongoDB] Disconnected — attempting reconnect...');
+});
+mongoose.connection.on('reconnected', () => {
+  console.info('[MongoDB] Reconnected successfully');
+});
+mongoose.connection.on('error', (err) => {
+  console.error('[MongoDB] Connection error:', err.message);
+});
+
+async function startServer() {
+  try {
+    const uri = await resolveMongoUri();
+    await mongoose.connect(uri, {
+      maxPoolSize:              10,     // default driver = 100 → exceso memoria en Render small
+      minPoolSize:              2,      // mantener 2 conexiones tibias
+      socketTimeoutMS:          45000,
+      serverSelectionTimeoutMS: 10000,
+      heartbeatFrequencyMS:     30000,
+      retryWrites:              true,
+      retryReads:               true,
+    });
+    console.info('[Alyto DB] MongoDB conectado.');
+
+    // ── Memory monitoring — log cada 5 min; warn si heap > 400MB ──────────
+    setInterval(() => {
+      const mem   = process.memoryUsage();
+      const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
+      const rssMB  = Math.round(mem.rss      / 1024 / 1024);
+      if (heapMB > 400) {
+        console.warn(`[Memory] HIGH: heap=${heapMB}MB rss=${rssMB}MB`);
+      } else {
+        console.log(`[Memory] heap=${heapMB}MB rss=${rssMB}MB`);
+      }
+    }, 5 * 60 * 1000).unref();
+
+    await dropLegacyIndexes();
+
+    await seedDevUser();
+
+    // ── Guard: proveedores de pago apuntando a sandbox/stage en PRODUCCIÓN ──
+    // Los defaults de owlPayService (harbor-sandbox) y vitaWalletService (api.stage)
+    // son deliberadamente sandbox — seguros en dev/staging, catastróficos si llegan
+    // a prod real (payouts contra entornos de prueba).
+    // ⚠️ Discriminador de entorno: Render staging TAMBIÉN corre NODE_ENV=production
+    // (render.yaml) y usa sandbox a propósito. El VPS de producción es el ÚNICO
+    // entorno con AWS Secrets Manager (AWS_SECRETS_NAME) — ese es el gate fatal.
+    // Mismo criterio que ALLOWED_ORIGINS vacío y fallo de Secrets Manager en prod.
+    // Escape hatch consciente: ALYTO_ALLOW_SANDBOX_PROVIDERS=true (solo diagnóstico).
+    // ⚠️ Preguntamos la URL a los propios servicios (getters perezosos) en vez de
+    // re-derivarla del env: si el guard re-derivara podría dar OK mientras el
+    // servicio usa otra URL — exactamente el fallo que este guard debe detectar.
+    if (process.env.NODE_ENV === 'production') {
+      const providerUrls = [
+        ['OWLPAY_BASE_URL/OWLPAY_API_URL', getOwlPayBaseUrl()],
+        ['VITA_API_URL',                   getVitaBaseUrl()],
+      ];
+      const sandboxed = providerUrls.filter(([, url]) => /sandbox|\.stage\./i.test(url));
+      const isRealProd = !!process.env.AWS_SECRETS_NAME; // solo el VPS prod carga Secrets Manager
+
+      if (sandboxed.length > 0) {
+        // En staging (Render) los proveedores sandbox son intencionales: se loguea
+        // a nivel info para no contaminar el stream de errores (Sentry/CloudWatch).
+        // Solo en producción real es un error — y además aborta.
+        for (const [name, url] of sandboxed) {
+          if (isRealProd) {
+            console.error(`[ProviderGuard] ⚠️ ${name} apunta a sandbox/stage en PRODUCCIÓN REAL: ${url}`);
+          } else {
+            console.info(`[ProviderGuard] ℹ️ ${name} apunta a sandbox/stage: ${url} — esperado en staging (sin AWS_SECRETS_NAME).`);
+          }
+        }
+        if (isRealProd && process.env.ALYTO_ALLOW_SANDBOX_PROVIDERS !== 'true') {
+          console.error('[ProviderGuard] FATAL — entorno de producción real (AWS_SECRETS_NAME presente) ' +
+            'con proveedores sandbox. Corrige las env vars o setea ALYTO_ALLOW_SANDBOX_PROVIDERS=true ' +
+            'si es deliberado (solo diagnóstico). Abortando.');
+          process.exit(1);
+        }
+      }
+
+      // ── Guard: base de datos cruzada entre ambientes ─────────────────────
+      // Prod real escribiendo en la BD de staging (o viceversa) mezcla datos
+      // regulados con datos de prueba: las tx "de prod" aparecen en staging.
+      // Mismo discriminador que arriba: solo el VPS prod carga Secrets Manager.
+      // Escape hatch consciente: ALYTO_ALLOW_CROSS_DB=true (solo diagnóstico).
+      const mongoUri     = process.env.MONGODB_URI ?? '';
+      const isStagingDb  = /staging/i.test(mongoUri);
+      const allowCrossDb = process.env.ALYTO_ALLOW_CROSS_DB === 'true';
+      if (isRealProd && isStagingDb && !allowCrossDb) {
+        console.error('[DbGuard] FATAL — producción real (AWS_SECRETS_NAME presente) con MONGODB_URI ' +
+          'apuntando a una base de STAGING. Corrige MONGODB_URI (debe ser alyto-v2) o setea ' +
+          'ALYTO_ALLOW_CROSS_DB=true si es deliberado (solo diagnóstico). Abortando.');
+        process.exit(1);
+      }
+      // Render staging (RENDER=true, sin Secrets Manager) debe usar SIEMPRE la BD staging.
+      if (!isRealProd && process.env.RENDER && mongoUri && !isStagingDb && !allowCrossDb) {
+        console.error('[DbGuard] FATAL — staging (Render) con MONGODB_URI apuntando a una base que ' +
+          'NO es de staging. Corrige MONGODB_URI (debe ser alyto-v2-staging) o setea ' +
+          'ALYTO_ALLOW_CROSS_DB=true si es deliberado. Abortando.');
+        process.exit(1);
+      }
+
+      // ── Guard: orígenes CORS cruzados entre ambientes ────────────────────
+      // Prod NUNCA debe aceptar orígenes de staging (staging.alyto.app,
+      // *.onrender.com) ni staging aceptar el origen de prod (alyto.app):
+      // permitirlo deja que un frontend opere contra el backend del otro
+      // ambiente. Los orígenes de app nativa (https://localhost,
+      // capacitor://localhost) son válidos en ambos y no cuentan como cruce.
+      const allowCrossOrigins = process.env.ALYTO_ALLOW_CROSS_ORIGINS === 'true';
+      const crossOrigins = isRealProd
+        ? allowedOrigins.filter(o => /staging\.alyto\.app|onrender\.com/i.test(o))
+        : (process.env.RENDER
+            ? allowedOrigins.filter(o => /^https:\/\/(www\.)?alyto\.app$/i.test(o))
+            : []);
+      if (crossOrigins.length > 0 && !allowCrossOrigins) {
+        console.error(`[OriginGuard] FATAL — ALLOWED_ORIGINS mezcla ambientes: ${crossOrigins.join(', ')}. ` +
+          'Cada entorno declara SOLO sus propios orígenes (prod: alyto.app; staging: staging.alyto.app / ' +
+          'onrender.com; app nativa: https://localhost). Escape hatch: ALYTO_ALLOW_CROSS_ORIGINS=true. Abortando.');
+        process.exit(1);
+      }
+    }
+
+    // Capturar el servidor HTTP para montar el WebSocket sobre él
+    const httpServer = app.listen(PORT, () => {
+      console.info(`[Alyto Server] Escuchando en http://0.0.0.0:${PORT}`);
+      console.info(`[Alyto Server] Entorno: ${process.env.NODE_ENV ?? 'development'}`);
+      console.info(`[Alyto Server] Stellar network: ${process.env.STELLAR_NETWORK ?? 'testnet'}`);
+
+      // Precalentar la DEK de cifrado PII si PII_ENCRYPTION_ENABLED está activo
+      // (best-effort; import dinámico para no capturar env pre-secretos — regla 21).
+      import('./services/piiCrypto.js')
+        .then(({ warmupPiiCrypto }) => warmupPiiCrypto())
+        .then((ok) => { if (ok) console.info('[Alyto Server] PII field-encryption: DEK precalentada ✅'); })
+        .catch((e) => console.error('[Alyto Server] PII warmup error:', e.message));
+
+      // Stellar keypair availability check (non-fatal — warns but doesn't crash)
+      const hasStellarSRL = !!(process.env.STELLAR_SRL_SECRET_KEY ?? process.env.STELLAR_MASTER_SECRET);
+      if (!hasStellarSRL) {
+        console.warn('[Stellar] ⚠️ No SRL keypair configured. ' +
+          'sendUSDCToHarbor and getStellarUSDCBalance will fail. ' +
+          'Set STELLAR_SRL_SECRET_KEY or STELLAR_MASTER_SECRET.');
+      } else {
+        console.log('[Stellar] ✅ SRL keypair configured');
+      }
+
+      // Gate OWLPAY_USDC_SEND_ENABLED — visible en cada arranque para evitar
+      // sorpresas en producción. Si está OFF y hay tx payout_pending_usdc_send,
+      // correr scripts/resume-usdc-send.mjs --execute tras activar.
+      const usdcSendEnabled = ['true', '1'].includes(process.env.OWLPAY_USDC_SEND_ENABLED ?? '');
+      if (usdcSendEnabled) {
+        console.log('[OwlPay] ✅ OWLPAY_USDC_SEND_ENABLED=1 — envío USDC a Harbor AUTOMÁTICO');
+      } else {
+        console.warn('[OwlPay] ⚠️ OWLPAY_USDC_SEND_ENABLED=0 — envío USDC a Harbor MANUAL. ' +
+          'Las tx Harbor quedarán en payout_pending_usdc_send hasta que admin envíe manualmente. ' +
+          'Activar con OWLPAY_USDC_SEND_ENABLED=1 y correr scripts/resume-usdc-send.mjs --execute.');
+      }
+
+      // Gate STELLAR_CHANNEL_SECRET — requerido para Fee Bump transactions
+      const hasChannelSecret = !!(process.env.STELLAR_CHANNEL_SECRET ?? process.env.STELLAR_MASTER_SECRET);
+      if (!hasChannelSecret) {
+        console.warn('[Stellar] ⚠️ STELLAR_CHANNEL_SECRET no configurado — ' +
+          'buildFeeBumpTransaction fallará. Las trustlines y executeWeb3Transit no funcionarán.');
+      } else {
+        console.log('[Stellar] ✅ Channel account (Fee Bump) configurada');
+      }
+
+      console.log('[Env] NODE_ENV:', process.env.NODE_ENV);
+      console.log('[Env] DISABLE_TOKEN_VERSION_CHECK:',
+        process.env.DISABLE_TOKEN_VERSION_CHECK,
+        '| type:', typeof process.env.DISABLE_TOKEN_VERSION_CHECK);
+      console.log('[Env] Will skip tokenVersion check:',
+        process.env.NODE_ENV !== 'production' ||
+        process.env.DISABLE_TOKEN_VERSION_CHECK === 'true');
+    });
+
+    // AWS-2A — Si un scheduler externo (EventBridge→Lambda) dispara los jobs vía
+    // POST /api/v1/internal/jobs/:name, NO arrancar los setInterval in-process para
+    // evitar doble ejecución. JOBS_EXTERNAL_SCHEDULER!=true → comportamiento histórico.
+    const { isExternalScheduler } = await import('./jobs/jobRegistry.js');
+    const externalScheduler = isExternalScheduler();
+    if (externalScheduler) {
+      console.info('[Server] JOBS_EXTERNAL_SCHEDULER=true — jobs cron los dispara EventBridge→Lambda (setInterval in-process desactivado)');
+    }
+
+    if (!externalScheduler) {
+      // Job de limpieza de transacciones huérfanas (payin_pending expiradas sin comprobante)
+      cleanupOrphanTransactions();
+      setInterval(cleanupOrphanTransactions, 60 * 60 * 1000); // cada 1h
+      console.info('[Server] Cleanup job de huérfanas programado cada 1h');
+
+      // Job de monitoreo KYC incompleto — alerta admin si usuarios no finalizaron KYC en 24h
+      setTimeout(kycIncompleteMonitor, 5 * 60 * 1000);                        // primera corrida 5 min post-start
+      setInterval(kycIncompleteMonitor, 6 * 60 * 60 * 1000);                  // cada 6h
+      console.info('[Server] KYC incomplete monitor job programado cada 6h');
+
+      // Job de reconciliation Harbor — recupera tx en payout_sent atascadas por
+      // webhook perdido. Consulta Harbor API y actualiza status local.
+      const { reconcileHarborTransfers } = await import('./jobs/reconcileHarborTransfers.js');
+      setTimeout(reconcileHarborTransfers, 30 * 1000);                    // primera corrida 30s post-start
+      setInterval(reconcileHarborTransfers, 15 * 60 * 1000);              // cada 15 min
+      console.info('[Server] Reconcile Harbor job programado cada 15 min');
+
+      // Job de reconciliation Vita — recupera tx en payout_sent atascadas por
+      // IPN perdido. Consulta Vita API y finaliza o alerta admin.
+      const { reconcileVitaTransfers } = await import('./jobs/reconcileVitaTransfers.js');
+      setTimeout(reconcileVitaTransfers, 45 * 1000);                    // primera corrida 45s post-start
+      setInterval(reconcileVitaTransfers, 15 * 60 * 1000);              // cada 15 min
+      console.info('[Server] Reconcile Vita job programado cada 15 min');
+
+      // Job de reconciliation Stellar — retry payin_completed sin tránsito +
+      // alertas in_transit >2h + auto-fail >7 días
+      const { reconcileStellarTransits } = await import('./jobs/reconcileStellarTransits.js');
+      setTimeout(reconcileStellarTransits, 2 * 60 * 1000);               // primera corrida 2 min post-start
+      setInterval(reconcileStellarTransits, 15 * 60 * 1000);             // cada 15 min
+      console.info('[Server] Reconcile Stellar transits job programado cada 15 min');
+
+      // Fase 36+ — Monitor heurístico ROS/UIF Bolivia (solo SRL)
+      const { rosMonitor } = await import('./jobs/rosMonitor.js');
+      setTimeout(rosMonitor, 3 * 60 * 1000);                    // primera corrida 3 min post-start
+      setInterval(rosMonitor, 6 * 60 * 60 * 1000);              // cada 6h
+      console.info('[Server] ROS/UIF monitor (Fase 36+) programado cada 6h');
+
+      // P4 — Monitor ROS/UIF sobre transferencias de wallet (P2P BOB+USDC)
+      const { rosMonitorWallet } = await import('./jobs/rosMonitorWallet.js');
+      setTimeout(rosMonitorWallet, 4 * 60 * 1000);              // primera corrida 4 min post-start
+      setInterval(rosMonitorWallet, 6 * 60 * 60 * 1000);        // cada 6h
+      console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
+
+      // Reconciliación QR bancario boliviano — safety net para IPN perdidos
+      const { reconcileBankQrPayments } = await import('./jobs/reconcileBankQrPayments.js');
+      setTimeout(reconcileBankQrPayments, 5 * 60 * 1000);              // primera corrida 5 min post-start
+      setInterval(reconcileBankQrPayments, 30 * 60 * 1000);            // cada 30 min
+      console.info('[Server] Reconcile BankQR payments programado cada 30 min');
+
+      // Red de seguridad de dispersión BANECO (§9) — alerta retiros 'dispatched' sin confirmar
+      const { reconcileBecDisbursements } = await import('./jobs/reconcileBecDisbursements.js');
+      setTimeout(reconcileBecDisbursements, 7 * 60 * 1000);            // primera corrida 7 min post-start
+      setInterval(reconcileBecDisbursements, 30 * 60 * 1000);          // cada 30 min
+      console.info('[Server] Reconcile BEC disbursements programado cada 30 min');
+
+      // Job de actualización automática de tasas BOB/USDT desde Binance P2P
+      const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
+      setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
+      setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
+      console.info('[Server] Refresh exchange rates job programado cada 30 min');
+    }
+
+    // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO
+    // Alerta al admin si el saldo XLM cae bajo el umbral. Corre siempre in-process
+    // (no migra a EventBridge) porque detectar falta de XLM es infraestructura core.
+    const hasStellarChannelForMonitor = !!(
+      process.env.STELLAR_MASTER_PUBLIC     ??
+      process.env.STELLAR_CHANNEL_SECRET    ??
+      process.env.STELLAR_MASTER_SECRET
+    );
+    if (hasStellarChannelForMonitor) {
+      const { monitorChannelXLM } = await import('./jobs/monitorChannelXLM.js');
+      setTimeout(monitorChannelXLM, 90 * 1000);           // primera corrida 90s post-start
+      setInterval(monitorChannelXLM, 60 * 60 * 1000);     // cada 1h
+      console.info('[Server] XLM channel monitor programado cada 1h');
+    } else {
+      console.warn('[Server] STELLAR_MASTER_PUBLIC/STELLAR_CHANNEL_SECRET no configurados — XLM monitor desactivado');
+    }
+
+    // Fase 36 — Monitoreo automático de depósitos USDC vía Horizon polling
+    // Solo activo si STELLAR_SRL_PUBLIC_KEY está configurado
+    if (process.env.STELLAR_SRL_PUBLIC_KEY) {
+      const { monitorUSDCDeposits } = await import('./jobs/monitorUSDCDeposits.js');
+      setTimeout(monitorUSDCDeposits, 60 * 1000);            // primera corrida 60s post-start
+      setInterval(monitorUSDCDeposits, 30 * 1000);           // cada 30s
+      console.info('[Server] USDC deposit monitor (Fase 36) programado cada 30s');
+
+      // H3 (Camino A) — Reconciliación de fondeo de tesorería vía Horizon polling
+      const { reconcileTreasuryFunding } = await import('./jobs/reconcileTreasuryFunding.js');
+      setTimeout(reconcileTreasuryFunding, 90 * 1000);       // primera corrida 90s post-start
+      setInterval(reconcileTreasuryFunding, 2 * 60 * 1000);  // cada 2 min
+      console.info('[Server] Treasury funding reconcile (H3) programado cada 2 min');
+    } else {
+      console.warn('[Server] STELLAR_SRL_PUBLIC_KEY no configurado — USDC monitor desactivado');
+    }
+
+    // AnchorAdmin (Bloque 2) — alertas activas: listener caído + descuadre de
+    // reconciliación. In-process (infra core, como monitorChannelXLM). Gated por
+    // ANCHOR_ADMIN_ENABLED. El chequeo del listener corre agresivo; la
+    // reconciliación se autolimita a su sub-cadencia dentro del job.
+    if (process.env.ANCHOR_ADMIN_ENABLED === 'true') {
+      const { anchorAdminAlerts } = await import('./jobs/anchorAdminAlerts.js');
+      const alertIntervalMs = parseInt(process.env.ANCHOR_ALERT_INTERVAL_MS ?? String(2 * 60 * 1000), 10);
+      setTimeout(anchorAdminAlerts, 2 * 60 * 1000);          // primera corrida 2 min post-start
+      setInterval(anchorAdminAlerts, alertIntervalMs);        // default cada 2 min
+      console.info(`[Server] AnchorAdmin alerts programado cada ${Math.round(alertIntervalMs / 1000)}s`);
+    }
+
+    // Libro Mayor (Fase 2, shadow) — proyecta WalletTransaction al GL. Gated por
+    // LEDGER_POSTING_ENABLED. Idempotente y cursor-based; NO toca los flujos de
+    // dinero. No-op si el flag está apagado o falta el asiento de apertura.
+    if (['shadow', 'strict', 'true', '1'].includes((process.env.LEDGER_POSTING_ENABLED ?? '').toLowerCase())) {
+      const { runLedgerSyncJob } = await import('./services/ledgerSync.js');
+      const ledgerIntervalMs = parseInt(process.env.LEDGER_SYNC_INTERVAL_MS ?? String(5 * 60 * 1000), 10);
+      setTimeout(runLedgerSyncJob, 60 * 1000);                  // primera corrida 1 min post-start
+      setInterval(runLedgerSyncJob, ledgerIntervalMs);          // default cada 5 min
+      console.info(`[Server] Libro Mayor sync programado cada ${Math.round(ledgerIntervalMs / 1000)}s (shadow)`);
+    }
+
+    // AWS-2B — Consumer SQS de webhooks IPN (no-op si SQS_ENABLED!=true)
+    const { startIpnConsumerJob } = await import('./jobs/ipnQueueConsumer.js');
+    startIpnConsumerJob();
+    console.info('[Server] IPN SQS consumer (AWS-2B) inicializado');
+
+    // WebSocket de cotizaciones en tiempo real — montado sobre el mismo puerto HTTP
+    const wss = createQuoteSocketServer(httpServer);
+
+    // Guardar referencias para el shutdown graceful
+    app._httpServer = httpServer;
+    app._wss        = wss;
+
+  } catch (error) {
+    console.error('[Alyto Server] Error al iniciar:', error.message);
+    process.exit(1);
+  }
+}
+
+// ─── Red de seguridad de proceso (audit 2026-06-11) ─────────────────────────
+// En Node ≥15 una promesa rechazada sin handler CRASHEA el proceso — a mitad de
+// un payout en vuelo. Sentry.setupExpressErrorHandler solo cubre rutas Express;
+// jobs, WebSocket y fire-and-forget quedaban fuera.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('[Alyto Server] ⚠️ unhandledRejection (proceso sigue vivo):', err.message);
+  Sentry.captureException(err, { tags: { handler: 'unhandledRejection' } });
+});
+
+process.on('uncaughtException', (err) => {
+  // Estado del proceso indefinido tras una excepción síncrona no capturada:
+  // reportar, drenar Sentry y salir — Docker/Render reinician el contenedor.
+  console.error('[Alyto Server] 💥 uncaughtException — cerrando proceso:', err.message);
+  Sentry.captureException(err, { tags: { handler: 'uncaughtException' } });
+  Sentry.flush(2000).finally(() => process.exit(1));
+});
+
+// Manejo de señales de cierre graceful (Docker, PM2, K8s)
+process.on('SIGTERM', async () => {
+  console.info('[Alyto Server] SIGTERM recibido. Cerrando conexiones...');
+  if (app._wss) app._wss.close();
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.info('[Alyto Server] SIGINT recibido. Cerrando conexiones...');
+  if (app._wss) app._wss.close();
+  await mongoose.connection.close();
+  process.exit(0);
+});
+
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+export default app;

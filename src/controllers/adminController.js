@@ -32,6 +32,7 @@ import {
   getDeposits,
   getCryptoPrices,
   VITA_SENT_ONLY_COUNTRIES,
+  getVitaSentCountry,
 }                         from '../services/vitaWalletService.js';
 import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
@@ -1699,7 +1700,10 @@ export async function getCorridorRates(req, res) {
     let rateBreakdown      = null;
 
     if (vitaAttrs) {
-      const destKey = c.destinationCountry.toLowerCase();
+      // Países vita_sent usan su clave propia (EU → 'es'); el resto, ISO minúsculas.
+      const destKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
+        ? getVitaSentCountry(destUpper).toLowerCase()
+        : c.destinationCountry.toLowerCase();
 
       if (destKey === 'bo' && c.originCurrency === 'CLP') {
         // CLP→BOB: tasa compuesta via Vita CLP→USD × BOB_USD_RATE

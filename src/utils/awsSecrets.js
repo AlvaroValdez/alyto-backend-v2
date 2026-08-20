@@ -8,8 +8,17 @@
  * Los secretos se inyectan en process.env para que todo el código existente
  * (requireEnvSecret, process.env.X) funcione sin cambios — cero breaking changes.
  *
- * Llamar loadSecretsIntoEnv() UNA SOLA VEZ al arrancar el servidor,
- * ANTES de cualquier otro import que lea process.env.
+ * ⚠️  ORDEN DE ARRANQUE — loadSecretsIntoEnv() se llama UNA SOLA VEZ, y solo desde
+ * src/server.js. No basta con ponerlo "arriba de todo": en ESM los `import`
+ * estáticos se evalúan ANTES del cuerpo del módulo, así que un módulo importado
+ * estáticamente NUNCA vería estos secretos. Por eso server.js es un bootstrap
+ * mínimo que hace `await loadSecretsIntoEnv()` y recién entonces carga la app con
+ * un `import()` DINÁMICO (ver el encabezado de server.js).
+ *
+ * Corolario para código nuevo: leer process.env dentro de funciones, no en ámbito
+ * de módulo. Un `const X = process.env.X ?? default` en el top-level de un módulo
+ * es seguro hoy solo porque app.js se carga después de los secretos — pero deja
+ * de serlo si ese módulo se importa desde el bootstrap.
  *
  * NUNCA loguear valores de secretos — solo nombres y metadatos no sensibles.
  */

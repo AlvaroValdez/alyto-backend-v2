@@ -34,7 +34,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import multer               from 'multer';
-import { calculateQuote, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
+import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -56,6 +56,7 @@ import {
   createPayin,
   VITA_SENT_ONLY_COUNTRIES,
   getVitaCountryKey,
+  getVitaSentCountry,
 }                              from '../services/vitaWalletService.js';
 import {
   getHarborQuote,
@@ -69,11 +70,12 @@ import { resolveComprobanteUrl } from '../services/storageService.js';
 import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.js';
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
+import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
-import { resolveEuCorridorByAmount, isEuSepaDestination } from '../routing/euAmountRouter.js';
+import { resolveEuCorridor, isEuSepaDestination } from '../routing/euAmountRouter.js';
 
 // ─── POST /api/v1/payments/payin/fintoc ──────────────────────────────────────
 
@@ -643,17 +645,20 @@ export async function getWithdrawalRulesController(req, res) {
       corridor = await TransactionConfig.findOne({ corridorId: corridorIdParam, isActive: true }).lean();
     }
     // Destinos multi-corredor (EU: bo-eu-srl owlPay + bo-es vitaWallet): sin
-    // corridorId el findOne era no determinista. sort por payoutMethod asc
-    // ('owlPay' < 'vitaWallet') prefiere Harbor — proveedor primario del
-    // auto-router EU y el formulario que guardan los contactos.
+    // corridorId el findOne era no determinista. Orden de preferencia:
+    //   - EU/SEPA → vitaWallet (regla fija "EU siempre Vita", euAmountRouter.js):
+    //     el formulario correcto es el IBAN de Vita, no el SWIFT/WIRE de Harbor.
+    //   - resto → payoutMethod asc ('owlPay' < 'vitaWallet'), Harbor primario.
+    const preferVita = isEuSepaDestination(countryCode);
+    const sortSpec   = preferVita ? { payoutMethod: -1 } : { payoutMethod: 1 };
     if (!corridor) {
       const query = { destinationCountry: countryCode, isActive: true };
       if (legalEntity) query.legalEntity = legalEntity;
-      corridor = await TransactionConfig.findOne(query).sort({ payoutMethod: 1 }).lean();
+      corridor = await TransactionConfig.findOne(query).sort(sortSpec).lean();
     }
     if (!corridor && legalEntity) {
       corridor = await TransactionConfig.findOne({ destinationCountry: countryCode, isActive: true })
-        .sort({ payoutMethod: 1 }).lean();
+        .sort(sortSpec).lean();
     }
   } catch (err) {
     console.warn('[Alyto WithdrawalRules] Error resolviendo corredor:', err.message);
@@ -832,7 +837,9 @@ export async function initCrossBorderPayment(req, res) {
   }
 
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
-  const minAmount = await resolveMinAmountOrigin(corridor, req.user?.accountType);
+  // Mínimo EFECTIVO (incluye el guard de piso del proveedor) — misma fuente que
+  // el quote, así no se puede crear una transacción que el payout va a rechazar.
+  const { min: minAmount } = await resolveEffectiveMinimum(corridor, req.user?.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
       error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
@@ -1672,23 +1679,50 @@ export async function initCrossBorderPayment(req, res) {
  * @returns {{ rate: number, fixedCost: number, validUntil: string|null } | null}
  */
 async function extractVitaPricing(vitaPricesResponse, originCurrency, destinationCountry) {
-  // GT, SV, ES, PL only exist in vita_sent table — fall back to it for pricing.
-  // All other countries use withdrawal table (original behavior).
   const destUpper  = destinationCountry.toUpperCase();
-  const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? vitaPricesResponse?.vita_sent?.prices?.attributes
-    : vitaPricesResponse?.withdrawal?.prices?.attributes;
+  const isVitaSent = VITA_SENT_ONLY_COUNTRIES.has(destUpper);
 
-  const attrs = attrsSource ?? vitaPricesResponse?.withdrawal?.prices?.attributes;
-  if (!attrs) return null;
-
-  // vita_sent (ES/PL/GT/SV): las claves ISO directas existen en la tabla — no mapear.
+  // vita_sent (ES/PL/GT/SV/EU): claves ISO directas en la tabla, con EU→'es'
+  // (getVitaSentCountry — la eurozona entra por España, el IBAN fija el país).
   // withdrawal (todos los demás): CA→'causd', HK→'hkusd', etc.
-  const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? destinationCountry.toLowerCase()
+  const countryKey = isVitaSent
+    ? getVitaSentCountry(destUpper).toLowerCase()
     : getVitaCountryKey(destinationCountry);
   const origin     = originCurrency.toUpperCase();
   let rate;
+
+  // ── Países vita_sent con origen USD/USDC/BOB: tasa desde usd.vita_sent ──────
+  // Es el MISMO rail que ejecuta el dispatch (createVitaSentPayout) y es
+  // autosuficiente: NO depende de la sección CLP, por eso va ANTES del gate de
+  // attrs (que apunta a la sección CLP y no aplica aquí).
+  if (isVitaSent && (origin === 'USD' || origin === 'USDC' || origin === 'BOB')) {
+    const sentAttrs = vitaPricesResponse?.usd?.vita_sent?.prices?.attributes;
+    const sentRate  = Number(sentAttrs?.usd_sell?.[countryKey] ?? NaN);
+    if (isFinite(sentRate) && sentRate > 0) {
+      const fixedCost  = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
+      const validUntil = sentAttrs?.valid_until ?? null;
+      if (origin === 'BOB') {
+        const BOB_USD_RATE = await getBOBRate();
+        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil };
+      }
+      return { rate: sentRate, fixedCost, validUntil };
+    }
+  }
+
+  // ── Sección CLP (tasas cross-rate / origen CLP) ──────────────────────────────
+  // La API de Vita anida las tablas por moneda de origen (clp.withdrawal,
+  // clp.vita_sent, usd.withdrawal, ...). Se conservan las rutas top-level como
+  // primer intento por compatibilidad con la forma antigua de la respuesta.
+  const attrsSource = isVitaSent
+    ? (vitaPricesResponse?.vita_sent?.prices?.attributes
+        ?? vitaPricesResponse?.clp?.vita_sent?.prices?.attributes)
+    : (vitaPricesResponse?.withdrawal?.prices?.attributes
+        ?? vitaPricesResponse?.clp?.withdrawal?.prices?.attributes);
+
+  const attrs = attrsSource
+    ?? vitaPricesResponse?.withdrawal?.prices?.attributes
+    ?? vitaPricesResponse?.clp?.withdrawal?.prices?.attributes;
+  if (!attrs) return null;
 
   // ── Destino Bolivia (BO): Vita no tiene clp_sell['bo'] — derivar via BOB_USD_RATE ──
   // AV Finance SRL es el anchor manual: paga en BOB directamente.
@@ -1737,7 +1771,8 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     rate = clpToDest / clpToUsd;
   } else if (origin === 'BOB') {
     // Bolivia: Vita no tiene bob_sell. Dos pasos:
-    //   PASO 1 — tasa USD→destino (USD directo o cross-rate CLP)
+    //   PASO 1 — tasa USD→destino (USD directo o cross-rate CLP; vita_sent ya
+    //            se resolvió arriba antes del gate)
     //   PASO 2 — dividir por BOB_USD_RATE (desde MongoDB o .env)
     const BOB_USD_RATE  = await getBOBRate();
     const usdAttrs      = vitaPricesResponse?.usd?.withdrawal?.prices?.attributes;
@@ -1964,7 +1999,12 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
       bobPerUsdc,
       usdcToDestRate:      selected.exchangeRate,
       harborPaymentMethod: selected.paymentMethod,
-      fees: { ...quote.fees, alytoProfitUSDC },
+      // alytoProfitUSDC (margen de Alyto) se re-agregaba DESPUÉS de toPublicFees,
+      // anulando el filtro. Va solo al console.info de arriba.
+      fees: toPublicFees(quote.fees, {
+        originCurrency:      corridor.originCurrency,
+        destinationCurrency: corridor.destinationCurrency,
+      }),
       payinMethod:     corridor.payinMethod,
       payoutMethod:    corridor.payoutMethod,
       entity:          'SRL',
@@ -1977,7 +2017,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   }
 
   // ── Vita / anchorBolivia ──────────────────────────────────────────────────
-  let usdToDestRate, validUntil, providerMeta;
+  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta;
 
   {
     let vitaResponse;
@@ -1999,6 +2039,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     }
 
     usdToDestRate = vitaPricingUSD.rate;
+    vitaFixedCost = vitaPricingUSD.fixedCost;
     validUntil    = vitaPricingUSD.validUntil;
     providerMeta  = { providerQuoteId: null, rateSource: 'vita', rateExpiresAt: null, rateConfidence: 'estimated' };
   }
@@ -2007,8 +2048,11 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   try {
     quote = calculateQuote({
       amount, corridor, bobPerUsdc,
-      providerRate: usdToDestRate,
-      accountType:  req.user?.accountType,
+      providerRate:     usdToDestRate,
+      // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
+      // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
+      providerFixedFee: vitaFixedCost,
+      accountType:      req.user?.accountType,
     });
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
@@ -2024,7 +2068,7 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     / bobPerUsdc,
   );
 
-  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate, '| provider:', providerMeta.rateSource);
+  console.log('[Quote BOB] rate USD→' + dest + ':', usdToDestRate, '| fixedCost:', vitaFixedCost, '| provider:', providerMeta.rateSource);
   console.log('[Quote BOB] effectiveRate BOB→' + dest + ':', quote.effectiveRate);
   console.log('[Quote BOB] netBOB:', amount - quote.totalDeductedReal, '| usdcTransit:', quote.digitalAssetAmount, '| dest:', quote.destinationAmount);
 
@@ -2051,10 +2095,13 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     harborPaymentMethod: providerMeta.rateSource?.startsWith('harbor:')
       ? providerMeta.rateSource.replace('harbor:', '')
       : null,
-    fees: {
-      ...quote.fees,
-      alytoProfitUSDC,
-    },
+    // alytoProfitUSDC y profitRetention NO viajan al usuario (regla 11 CLAUDE.md):
+    // esta ruta hacía `...quote.fees` y los exponía junto con la fija en moneda
+    // destino. toPublicFees es lista blanca — ver quoteCalculator.js.
+    fees: toPublicFees(quote.fees, {
+      originCurrency:      corridor.originCurrency,
+      destinationCurrency: corridor.destinationCurrency,
+    }),
     payinMethod:   corridor.payinMethod,
     payoutMethod:  corridor.payoutMethod,
     entity:        'SRL',
@@ -2121,9 +2168,9 @@ export async function getQuote(req, res) {
     } else {
       const origin = originCountry.toUpperCase();
       const dest   = destinationCountry.toUpperCase();
-      // Router EU por monto: si destino es EU/SEPA y existen corredores Vita+Harbor,
-      // elegir proveedor según monto (≥ umbral USD → Harbor; si no → Vita).
-      corridor = await resolveEuCorridorByAmount(origin, dest, amount);
+      // EU/SEPA → SIEMPRE Vita (regla fija en código, ver euAmountRouter.js).
+      // Si no hay corredor Vita para ese origen, cae al lookup normal.
+      corridor = await resolveEuCorridor(origin, dest);
       if (!corridor) {
         corridor = await TransactionConfig.findOne({
           originCountry:      origin,
@@ -2171,9 +2218,26 @@ export async function getQuote(req, res) {
     });
   }
 
-  // Validar monto mínimo del corredor
-  const minAmountOrigin = await resolveMinAmountOrigin(corridor, req.user?.accountType);
+  // Precios de Vita: se piden UNA sola vez por cotización y se reusan tanto para
+  // el piso del mínimo como para la tasa más abajo (getPrices cachea, pero pedirlo
+  // dos veces en el mismo request es ruido innecesario).
+  let vitaResponse = null;
+  if (corridor.payoutMethod === 'vitaWallet') {
+    vitaResponse = await getPrices().catch(() => null);   // el 503 se decide más abajo
+  }
+
+  // Validar monto mínimo del corredor — mínimo EFECTIVO: el configurado, elevado
+  // si hiciera falta para que el NETO (post-fees) alcance el piso del proveedor.
+  // Sin esto el usuario cotizaba y pagaba, y el payout moría después en Vita/Harbor
+  // (ver corridorMinimums.js).
+  const { min: minAmountOrigin, raisedBy, floorUSD } =
+    await resolveEffectiveMinimum(corridor, req.user?.accountType, vitaResponse);
   if (amount < minAmountOrigin) {
+    if (raisedBy) {
+      console.info('[Alyto Quote] mínimo elevado por piso del proveedor', {
+        corridorId: corridor.corridorId, minAmountOrigin, floorUSD,
+      });
+    }
     return res.status(400).json({
       error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
       min:    minAmountOrigin,
@@ -2268,17 +2332,15 @@ export async function getQuote(req, res) {
       isManualCorridor:       true,
       paymentRef,
 
+      // El comentario decía "NO visible al usuario" pero profitRetention y
+      // totalDeductedReal iban en el body de la respuesta igual. Fuera.
       fees: {
-        // Visible al usuario (total sin profitRetention — regla CLAUDE.md)
-        payinFee:          round2(payinFee),
-        alytoCSpread:      round2(spreadFee),
-        fixedFee:          round2(fixedFee),
-        payoutFee:         0,
-        totalDeducted:     round2(payinFee + spreadFee + fixedFee),
-        feeCurrency:       'CLP',
-        // BD interna — auditoría (NO visible al usuario)
-        profitRetention:   profitFee,
-        totalDeductedReal,
+        payinFee:      round2(payinFee),
+        alytoCSpread:  round2(spreadFee),
+        fixedFee:      round2(fixedFee),
+        payoutFee:     0,
+        totalDeducted: round2(payinFee + spreadFee + fixedFee),
+        feeCurrency:   'CLP',
       },
 
       payinInstructions: {
@@ -2323,16 +2385,19 @@ export async function getQuote(req, res) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
 
-  let vitaResponse;
-  try {
-    vitaResponse = await getPrices();
-  } catch (err) {
-    console.error('[Alyto Quote] Vita /prices no disponible:', {
-      corridorId: corridor.corridorId, userId, error: err.message,
-    });
-    return res.status(503).json({
-      error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
-    });
+  // Si ya se obtuvieron arriba (corredor Vita) se reusan; si no, o si aquel intento
+  // falló, se piden aquí — este es el punto donde la falta de tasas SÍ es un 503.
+  if (!vitaResponse) {
+    try {
+      vitaResponse = await getPrices();
+    } catch (err) {
+      console.error('[Alyto Quote] Vita /prices no disponible:', {
+        corridorId: corridor.corridorId, userId, error: err.message,
+      });
+      return res.status(503).json({
+        error: 'Servicio de tasas no disponible. Intenta nuevamente en unos momentos.',
+      });
+    }
   }
 
   // ── 3a. Corredores manuales (SRL Bolivia): BOB → USDC → destino ────────────
@@ -2359,7 +2424,7 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdcToDestRate, validUntil } = vitaPricingUSD;
+    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
 
     // ── Quote unificado — canonical formula (spec v1.0 §3.2) ─────────────────
     let quote;
@@ -2368,8 +2433,10 @@ export async function getQuote(req, res) {
         amount,
         corridor,
         bobPerUsdc,
-        providerRate: usdcToDestRate,
-        accountType: req.user?.accountType,
+        providerRate:     usdcToDestRate,
+        // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
+        providerFixedFee: vitaFixedCost,
+        accountType:      req.user?.accountType,
       });
     } catch (err) {
       console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);
@@ -2425,10 +2492,12 @@ export async function getQuote(req, res) {
       usdcTransitAmount:    quote.digitalAssetAmount,
       bobPerUsdc,
       usdcToDestRate,
-      fees: {
-        ...quote.fees,
-        alytoProfitUSDC,
-      },
+      // alytoProfitUSDC (margen de Alyto) se re-agregaba DESPUÉS de toPublicFees,
+      // anulando el filtro. Va solo al console.info de arriba.
+      fees: toPublicFees(quote.fees, {
+        originCurrency:      corridor.originCurrency,
+        destinationCurrency: corridor.destinationCurrency,
+      }),
       quoteExpiresAt,
       payinMethod:  corridor.payinMethod,
       payoutMethod: corridor.payoutMethod,
@@ -2490,13 +2559,13 @@ export async function getQuote(req, res) {
     destinationCurrency: corridor.destinationCurrency,
     exchangeRate,
     fees: {
-      payinFee:          round2(payinFee),
-      alytoCSpread:      round2(alytoCSpread),
-      fixedFee:          round2(fixedFee),
-      payoutFee:         0,           // vita fixedCost ya descontado de destinationAmount (en moneda destino)
-      profitRetention:   round2(profitRetention),
-      totalDeducted:     round2(payinFee + alytoCSpread + fixedFee),
-      totalDeductedReal: round2(payinFee + alytoCSpread + fixedFee + profitRetention),
+      payinFee:      round2(payinFee),
+      alytoCSpread:  round2(alytoCSpread),
+      fixedFee:      round2(fixedFee),
+      payoutFee:     0,   // fija del proveedor: ya descontada del destino, en otra moneda
+      totalDeducted: round2(payinFee + alytoCSpread + fixedFee),
+      feeCurrency:   corridor.originCurrency,
+      // profitRetention / totalDeductedReal quedan fuera: son internos (regla 11).
     },
     payinMethod:  corridor.payinMethod,
     payoutMethod: corridor.payoutMethod,
@@ -2726,13 +2795,15 @@ export async function getTransactionStatus(req, res) {
     destinationCountry,
     // Rate dest/origin desde amounts — fuente única (ver utils/rateDisplay.js).
     exchangeRate:        getDisplayRate(transaction),
+    // profitRetention NO va aquí: esta ruta es del USUARIO (protect, no admin) y
+    // la regla 11 prohíbe mostrarle la retención interna. Estaba expuesta igual
+    // que en el quote, misma familia de fuga.
     fees: f
       ? {
           alytoCSpread:    f.alytoCSpread    ?? 0,
           fixedFee:        f.fixedFee        ?? 0,
           payinFee:        f.payinFee        ?? 0,
           payoutFee:       f.payoutFee       ?? 0,
-          profitRetention: f.profitRetention ?? 0,
           totalDeducted:   f.totalDeducted   ?? 0,
           feeCurrency:     f.feeCurrency     ?? transaction.originCurrency ?? 'USD',
         }
@@ -2794,7 +2865,9 @@ export async function getTransactionStatus(req, res) {
       reason:         h.reason,
     })),
     // ── Detalle de fallo user-facing (NO exponer failureReason técnico) ─────
-    failure: transaction.status === 'failed' ? {
+    // 'refunded' también lo lleva: si no, marcar una tx como reembolsada le BORRA
+    // al usuario la explicación de qué pasó, justo cuando más contexto necesita.
+    failure: ['failed', 'refunded'].includes(transaction.status) ? {
       reason:    transaction.userFailureReason ?? null,
       action:    transaction.userFailureAction ?? null,
       category:  transaction.failureCategory   ?? null,
@@ -3235,12 +3308,30 @@ export async function getAvailableCorridors(req, res) {
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 
+  // Mínimo EFECTIVO por corredor — el mismo que valida el quote (incluye el guard
+  // de piso del proveedor). Se calcula acá para que lo que el usuario VE en el
+  // selector coincida con lo que el backend EXIGE: antes el listado mostraba el
+  // mínimo configurado y el quote rechazaba con otro número (o peor, aceptaba y
+  // el payout moría en el proveedor). Las tasas y /prices están cacheadas.
+  const vitaPricesForMins = corridors.some(c => c.payoutMethod === 'vitaWallet')
+    ? await getPrices().catch(() => null)
+    : null;
+  const effMins = new Map();
+  await Promise.all(corridors.map(async (c) => {
+    try {
+      effMins.set(c.corridorId, await resolveEffectiveMinimum(
+        { ...c, originCurrency: userOriginCurrency }, req.user?.accountType, vitaPricesForMins,
+        { forDisplay: true },   // muestra con colchón; el quote exige el piso exacto
+      ));
+    } catch { /* fail-open: se usa el configurado */ }
+  }));
+
   // Agrupar por (destinationCountry + destinationCurrency). Cuando un destino EU/SEPA
-  // tiene MÚLTIPLES proveedores (Harbor + Vita, ej. bo-eu-srl + bo-es), se colapsa en
-  // UNA sola entrada "auto-ruteada": el backend elige proveedor por monto y el frontend
-  // NO envía corridorId. Casos como bo-cn (CNY) vs bo-cn-usd (USD) NO se colapsan
-  // (distinta moneda → entradas separadas).
+  // tiene MÚLTIPLES proveedores (Harbor + Vita, ej. bo-eu-srl + bo-es) se expone solo
+  // el de Vita (regla "EU siempre Vita", euAmountRouter.js). Casos como bo-cn (CNY) vs
+  // bo-cn-usd (USD) NO se colapsan (distinta moneda → entradas separadas).
   const mapCorridor = (c, extra = {}) => {
+    const eff = effMins.get(c.corridorId);
     const meta = COUNTRY_META[c.destinationCountry] ?? {};
     return {
       corridorId:              c.corridorId,
@@ -3251,9 +3342,14 @@ export async function getAvailableCorridors(req, res) {
       payinMethod:             c.payinMethod,
       payinMethodLabel:        PAYIN_METHOD_LABELS[c.payinMethod] ?? c.payinMethod,
       payoutMethod:            c.payoutMethod,
-      minAmountOrigin:         c.minAmountOrigin         ?? 0,
-      minAmountUSD:            c.minAmountUSD            ?? null,
+      // Mínimo efectivo (ya incluye el piso del proveedor). Fallback al configurado
+      // si el cálculo falló — nunca dejamos el campo vacío.
+      minAmountOrigin:         eff?.min    ?? c.minAmountOrigin ?? 0,
+      minAmountUSD:            eff?.minUSD ?? c.minAmountUSD    ?? null,
       minAmountUSDBusiness:    c.minAmountUSDBusiness    ?? null,
+      // Señal de por qué el mínimo es más alto que el configurado (diagnóstico/UI).
+      minRaisedBy:             eff?.raisedBy ?? null,
+      providerFloorUSD:        eff?.floorUSD ?? null,
       autoRouted:              false,
       ...extra,
     };
@@ -3274,20 +3370,17 @@ export async function getAvailableCorridors(req, res) {
     }
     // Múltiples corredores mismo país+moneda.
     if (isEuSepaDestination(group[0].destinationCountry)) {
-      // Auto-ruteado: una sola entrada, mínimo = el más bajo del grupo (piso real),
-      // sin corridorId (el quote lo resuelve por monto). payoutMethod='auto'.
-      const minRetail = Math.min(...group.map(c => c.minAmountUSD         ?? Infinity));
-      const minBiz    = Math.min(...group.map(c => c.minAmountUSDBusiness ?? Infinity));
-      const minOrigin = Math.min(...group.map(c => c.minAmountOrigin      ?? Infinity));
-      result.push(mapCorridor(group[0], {
-        corridorId:           null,                 // auto-ruteado: frontend NO envía corridorId
-        payoutMethod:         'auto',
-        minAmountUSD:         Number.isFinite(minRetail) ? minRetail : null,
-        minAmountUSDBusiness: Number.isFinite(minBiz)    ? minBiz    : null,
-        minAmountOrigin:      Number.isFinite(minOrigin) ? minOrigin : 0,
-        autoRouted:           true,
-        providers:            group.map(c => c.payoutMethod),
-      }));
+      // EU/SEPA → SIEMPRE Vita (regla fija, ver euAmountRouter.js). Se expone UNA
+      // entrada: el corredor Vita real, con su corridorId y sus propios mínimos
+      // (nada de 'auto'/autoRouted — el frontend envía el corridorId y Step3
+      // resuelve el formulario por payoutMethod, camino estándar).
+      // Si el grupo no tuviera Vita (config anómala) se mantienen explícitos.
+      const vita = group.find(c => c.payoutMethod === 'vitaWallet');
+      if (vita) {
+        result.push(mapCorridor(vita));
+      } else {
+        for (const c of group) result.push(mapCorridor(c));
+      }
     } else {
       // Multi-proveedor sin auto-router → no colapsar (mantener explícitos para no
       // romper la resolución por corridorId). Defensivo: hoy no ocurre fuera de EU.

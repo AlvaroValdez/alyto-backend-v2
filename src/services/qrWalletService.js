@@ -17,11 +17,38 @@ import QRCode  from 'qrcode';
 // del JWT_SECRET (domain separation) en vez de reusarlo crudo — comprometer un
 // dominio ya no compromete el otro (audit 2026-06-11). Configurar QR_HMAC_SECRET
 // en producción sigue siendo lo recomendado.
-const QR_SECRET = process.env.QR_HMAC_SECRET
-  ?? crypto.createHmac('sha256', process.env.JWT_SECRET ?? '').update('alyto-qr-wallet-v1').digest('hex');
+//
+// ⚠️ Resolución PEREZOSA + memoizada, NO en ámbito de módulo: server.js inyecta
+// AWS Secrets Manager en process.env con un `await` de nivel superior que, por
+// hoisting de ESM, corre DESPUÉS de evaluarse este módulo. Leerlo aquí arriba
+// ignoraba QR_HMAC_SECRET si vivía solo en Secrets Manager y firmaba con la clave
+// derivada — además de emitir el warning en falso (audit 2026-07-28).
+let _qrSecret = null;
 
-if (!process.env.QR_HMAC_SECRET) {
-  console.warn('[QRWallet] ⚠️ QR_HMAC_SECRET no configurado — usando clave derivada de JWT_SECRET. Configurar QR_HMAC_SECRET en producción.');
+function deriveSecretFromJwt() {
+  return crypto.createHmac('sha256', process.env.JWT_SECRET ?? '')
+    .update('alyto-qr-wallet-v1')
+    .digest('hex');
+}
+
+function getQrSecret() {
+  if (_qrSecret === null) {
+    _qrSecret = process.env.QR_HMAC_SECRET ?? deriveSecretFromJwt();
+    if (!process.env.QR_HMAC_SECRET) {
+      console.warn('[QRWallet] ⚠️ QR_HMAC_SECRET no configurado — usando clave derivada de JWT_SECRET. Configurar QR_HMAC_SECRET en producción.');
+    }
+  }
+  return _qrSecret;
+}
+
+/** Compara una firma hex contra el HMAC esperado en tiempo constante. */
+function matchesSignature(sig, data, secret) {
+  const expected = crypto.createHmac('sha256', secret).update(data).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+  } catch {
+    return false; // Buffer de distinto tamaño → firma claramente inválida
+  }
 }
 
 // TTL por defecto en segundos por tipo (configurable via env)
@@ -82,7 +109,7 @@ export async function generateQR({
   // Firma HMAC-SHA256 sobre el payload sin `sig`
   const dataToSign = JSON.stringify(payload);
   const signature  = crypto
-    .createHmac('sha256', QR_SECRET)
+    .createHmac('sha256', getQrSecret())
     .update(dataToSign)
     .digest('hex');
 
@@ -133,20 +160,20 @@ export function verifyQR(rawQrContent) {
   if (!sig) return { valid: false, error: 'QR sin firma HMAC.' };
 
   // Verificar firma en tiempo constante (previene timing attacks)
-  const expected = crypto
-    .createHmac('sha256', QR_SECRET)
-    .update(JSON.stringify(dataWithoutSig))
-    .digest('hex');
+  const dataToVerify = JSON.stringify(dataWithoutSig);
+  let isValid = matchesSignature(sig, dataToVerify, getQrSecret());
 
-  let isValid = false;
-  try {
-    isValid = crypto.timingSafeEqual(
-      Buffer.from(sig,      'hex'),
-      Buffer.from(expected, 'hex'),
-    );
-  } catch {
-    // Buffer de distinto tamaño → firma claramente inválida
-    return { valid: false, error: 'Firma QR inválida.' };
+  // Escape hatch de migración: los QR de depósito NO expiran, así que los emitidos
+  // antes del fix de resolución perezosa quedaron firmados con la clave derivada
+  // del JWT. Solo si el entorno lo habilita explícitamente aceptamos esa firma
+  // legacy — apagar en cuanto los QR de depósito estén reemitidos.
+  if (!isValid
+      && process.env.QR_HMAC_SECRET
+      && process.env.QR_HMAC_ACCEPT_DERIVED_LEGACY === 'true') {
+    isValid = matchesSignature(sig, dataToVerify, deriveSecretFromJwt());
+    if (isValid) {
+      console.warn('[QRWallet] QR validado con la clave derivada legacy (QR_HMAC_ACCEPT_DERIVED_LEGACY). Reemitir el QR.');
+    }
   }
 
   if (!isValid) return { valid: false, error: 'Firma QR inválida.' };

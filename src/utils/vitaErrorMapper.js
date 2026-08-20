@@ -162,3 +162,144 @@ export function mapVitaError(err) {
     retryable:    true,
   };
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * RECHAZOS QUE LLEGAN POR IPN (no por la respuesta HTTP del dispatch)
+ *
+ * Vita puede aceptar el payout (200 al crearlo) y rechazarlo DESPUÉS, avisando
+ * por webhook. Ese camino perdía el motivo: el handler solo reconocía 'denied' y
+ * escribía un string fijo, descartando el body; cualquier otra palabra
+ * ('rejected', 'failed', …) no hacía absolutamente nada y la transacción quedaba
+ * en payout_sent sin estado, sin razón y sin aviso a nadie.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** Estados de IPN que significan "esto ya no se va a completar". */
+export const VITA_IPN_FAILURE_STATUSES = new Set([
+  'denied', 'rejected', 'failed', 'failure', 'error', 'canceled', 'cancelled',
+  'declined', 'returned', 'reversed', 'refunded', 'expired',
+]);
+
+/** Estados de IPN intermedios: informativos, se espera otro IPN después. */
+export const VITA_IPN_PROGRESS_STATUSES = new Set([
+  'pending', 'processing', 'in_process', 'in_progress', 'created', 'initiated',
+  'sent', 'approved', 'accepted',
+]);
+
+/**
+ * @param {string} status estado crudo del IPN
+ * @returns {'success'|'failure'|'progress'|'unknown'}
+ */
+export function classifyVitaIpnStatus(status) {
+  const s = String(status ?? '').trim().toLowerCase();
+  if (s === 'completed' || s === 'complete') return 'success';
+  if (VITA_IPN_FAILURE_STATUSES.has(s))      return 'failure';
+  if (VITA_IPN_PROGRESS_STATUSES.has(s))     return 'progress';
+  return 'unknown';
+}
+
+// Claves donde Vita (o cualquier pasarela) suele poner el motivo. Orden = prioridad.
+const REASON_KEYS = [
+  // reject_motive es el campo canónico de Vita (visto en included.withdrawal de
+  // GET /transactions/:id). Va primero: es el que de verdad usan.
+  'reject_motive',
+  'rejection_reason', 'denial_reason', 'reject_reason', 'failure_reason',
+  'status_detail', 'status_description', 'reason', 'motivo',
+  'observation', 'observacion', 'error_message', 'error_description',
+  'description', 'detail', 'message', 'error',
+];
+
+const CODE_KEYS = ['rejection_code', 'error_code', 'status_code', 'code'];
+
+/** Busca UNA clave concreta en todo el árbol, hasta 3 niveles. */
+function findKey(node, key, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 3) return null;
+  const v = node[key];
+  if (typeof v === 'string' && v.trim()) return v.trim();
+  if (typeof v === 'number') return String(v);
+  for (const child of Object.values(node)) {
+    if (child && typeof child === 'object') {
+      const found = findKey(child, key, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Primera clave CON CONTENIDO respetando el orden de prioridad de `keys`.
+ *
+ * Se recorre clave por clave sobre todo el árbol, no nivel por nivel: si no, un
+ * `message` genérico en la raíz le ganaría a un `reject_motive` anidado, que es
+ * justo el dato específico que se quiere. La prioridad la define la lista.
+ */
+function pickByKeys(body, keys) {
+  for (const k of keys) {
+    const found = findKey(body, k);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Último recurso: el body crudo acotado. Guardar JSON feo es mejor que perder el motivo. */
+function compactBody(body, max = 400) {
+  let json;
+  try { json = JSON.stringify(body); } catch { return '(body no serializable)'; }
+  if (!json || json === '{}') return '(Vita no envió motivo)';
+  return json.length > max ? `${json.slice(0, max)}…` : json;
+}
+
+/**
+ * Traduce un IPN de rechazo de Vita a la misma forma que mapVitaError, para que
+ * el admin vea el motivo REAL y el usuario un mensaje accionable.
+ *
+ * Delega la clasificación en mapVitaError: si el IPN trae `details.field` o un
+ * texto reconocible, el usuario recibe exactamente el mismo mensaje que si el
+ * rechazo hubiera ocurrido en el dispatch — un solo lugar que mantener.
+ *
+ * @param {object} body   cuerpo del IPN tal cual lo mandó Vita
+ * @param {{stage?: 'payin'|'payout'}} [opts]
+ * @returns {MappedError & { vitaStatus: string, vitaCode: string|null, reason: string|null }}
+ */
+export function mapVitaIpnFailure(body, { stage = 'payout' } = {}) {
+  const rawStatus = String(body?.status ?? 'desconocido');
+  const reason    = pickByKeys(body, REASON_KEYS);
+  const code      = pickByKeys(body, CODE_KEYS);
+  const etapa     = stage === 'payin' ? 'Payin' : 'Payout';
+
+  const base = mapVitaError({ message: reason ?? '', data: { ...(body ?? {}) } });
+
+  const detalle = reason ?? compactBody(body);
+  const adminMessage =
+    `${etapa} rechazado por Vita (status="${rawStatus}"` +
+    `${code != null ? `, code=${code}` : ''}): ${detalle}`;
+
+  // ⚠️ Vita rechazó SIN decir por qué (reject_motive null, que es lo habitual).
+  // El fallback de mapVitaError dice "no pudimos completar con los datos
+  // ingresados · verifica los datos del beneficiario": culpa a la usuaria de algo
+  // que NO sabemos que hizo mal, y la invita a reintentar un envío que volverá a
+  // fallar por la misma causa desconocida. Visto en vivo con
+  // ALY-C-1786548682442-NE1YVC. Sin motivo no se acusa a nadie: se dice la verdad,
+  // que el rechazo vino del proveedor, y se deriva a soporte.
+  const sinDiagnostico = !reason && base.category === 'VITA_UNKNOWN';
+  const userFacing = sinDiagnostico
+    ? {
+        userMessage: 'Nuestro proveedor de pagos rechazó la transferencia y el dinero no llegó al destinatario.',
+        userAction:  'No es necesario que hagas nada: nuestro equipo ya fue notificado y revisará tu caso. ' +
+                     'Si quieres apurarlo, escríbenos a soporte@alyto.app.',
+        retryable:   false,   // no hay nada que la usuaria pueda corregir
+      }
+    : {};
+
+  return {
+    ...base,
+    ...userFacing,
+    // Si no se pudo clasificar, la categoría al menos nombra el estado real de Vita.
+    category: base.category === 'VITA_UNKNOWN'
+      ? `VITA_IPN_${rawStatus.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`
+      : base.category,
+    adminMessage,
+    vitaStatus: rawStatus,
+    vitaCode:   code ?? null,
+    reason:     reason ?? null,
+  };
+}

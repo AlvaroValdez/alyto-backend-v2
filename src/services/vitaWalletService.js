@@ -29,10 +29,22 @@ import crypto from 'crypto';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
-if (!process.env.VITA_API_URL) {
-  console.warn('[Vita] ⚠️ VITA_API_URL no definida — usando sandbox por defecto. Configurar en producción.');
+// ⚠️ Resolución PEREZOSA + memoizada, NO en ámbito de módulo: server.js inyecta
+// AWS Secrets Manager en process.env con un `await` de nivel superior que, por
+// hoisting de ESM, corre DESPUÉS de evaluarse este módulo. Leer process.env aquí
+// arriba capturaba `undefined` y caía al default SANDBOX aunque el secret tuviera
+// la URL de producción — payouts reales contra api.stage (audit 2026-07-28).
+let _baseUrl = null;
+
+export function getVitaBaseUrl() {
+  if (_baseUrl === null) {
+    if (!process.env.VITA_API_URL) {
+      console.warn('[Vita] ⚠️ VITA_API_URL no definida — usando sandbox por defecto. Configurar en producción.');
+    }
+    _baseUrl = `${process.env.VITA_API_URL || 'https://api.stage.vitawallet.io'}/api/businesses`;
+  }
+  return _baseUrl;
 }
-const VITA_BASE_URL = `${process.env.VITA_API_URL || 'https://api.stage.vitawallet.io'}/api/businesses`;
 
 // ─── HMAC-SHA256 — Generación de firma (portado de V1.5 vitaClient.js) ────────
 
@@ -221,7 +233,7 @@ async function vitaRequest(method, path, body = null) {
     'Authorization': `V2-HMAC-SHA256, Signature: ${signature}`,
   };
 
-  const url        = `${VITA_BASE_URL}${path}`;
+  const url        = `${getVitaBaseUrl()}${path}`;
   const timeoutMs  = getTimeout(path);
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
@@ -328,9 +340,34 @@ export function getPaymentMethods(countryIso) {
  *     y tiene form via clave 'eu' (IBAN/SWIFT). Pendiente migración de form frontend
  *     antes de cambiar a withdrawal — mantenemos vita_sent por ahora.
  *
- * ES removido 2026-05-10 — corredor bo-es desactivado, tráfico EUR en bo-eu-srl (Harbor SEPA).
+ * ⚠️ ES/EU NO van aquí — se intentó el 2026-08-12 y se revirtió el mismo día.
+ * La idea era usar vita_sent['es'] porque cotiza mejor que withdrawal['eu']
+ * (0.8676 vs 0.8524, sin la fija de 5 EUR). Tres hechos lo desmienten:
+ *   1. vita_sent es la RED INTERNA de Vita (ver createVitaSentPayout), no un rail
+ *      bancario — no entrega a un IBAN italiano.
+ *   2. Sus precios no son por país: attributes = { valid_until, usd_sell,
+ *      fixed_cost, fixed_cost_usd }. No existe min_amount['es'] ni sell_prices['es'];
+ *      la "mejor tasa" era la tasa plana del rail, comparada contra otra cosa.
+ *   3. En producción NUNCA se ejecutó una sola transacción vita_sent (4 transacciones
+ *      históricas en la cuenta, todas withdrawal).
+ * ES salió de este set el 2026-05-10 (commit acc8e62) al mover el tráfico EUR;
+ * volver a meterlo resucitaba un camino retirado a propósito y sin uso real.
+ * EU se paga por withdrawal['eu'], que sí tiene form (16 campos, IBAN + SWIFT),
+ * mínimo ($10) y fija (5 EUR) declarados — esa fija ahora se descuenta del monto
+ * prometido, que era el problema de fondo.
  */
 export const VITA_SENT_ONLY_COUNTRIES = new Set(['GT', 'SV', 'PL']);
+
+/**
+ * País que entiende el rail vita_sent. Hoy es la identidad — se mantiene como
+ * punto único por si algún destino necesitara traducción (ver historia de 'EU').
+ *
+ * @param {string} countryCode ISO alpha-2
+ * @returns {string} país para payload/pricing de vita_sent
+ */
+export function getVitaSentCountry(countryCode) {
+  return (countryCode ?? '').toUpperCase();
+}
 
 /**
  * Vita no usa códigos ISO alpha-2 puro para todos los países.

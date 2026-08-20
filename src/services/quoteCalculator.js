@@ -47,6 +47,11 @@ export function getEffectiveSpreadPct(corridor, user) {
  * @param {object}  input.corridor      TransactionConfig doc or plain config
  * @param {number}  input.bobPerUsdc    BOB → USDC rate (admin-configured or env fallback)
  * @param {number}  input.providerRate   USDC → destination currency rate (raw from provider, no markup)
+ * @param {number}  [input.providerFixedFee] Comisión FIJA del proveedor en moneda DESTINO
+ *                                      (ej. fixed_cost de Vita /prices). Si > 0, GANA sobre
+ *                                      corridor.payoutFeeFixed — es lo que el proveedor
+ *                                      descuenta de verdad al ejecutar; sin esto el quote
+ *                                      promete más de lo que el beneficiario recibe.
  * @param {string}  [input.accountType] 'business' applies businessAlytoCSpread when set
  * @returns {{
  *   originAmount:       number,
@@ -60,7 +65,7 @@ export function getEffectiveSpreadPct(corridor, user) {
  *   digitalAsset:       string
  * }}
  */
-export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, accountType = 'personal' }) {
+export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, providerFixedFee = null, accountType = 'personal' }) {
   if (!amount || amount <= 0) {
     throw new Error('calculateQuote: amount must be positive');
   }
@@ -100,8 +105,11 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, acc
   const usdcTransitAmount = round2(netBOB / bobPerUsdc);
 
   // Step 6 — destination amount using RAW provider rate (no markup — spec §1.2, §6.1)
-  // payoutFeeFixed is stored in destination currency — do NOT multiply by providerRate
-  const payoutFeeInDest   = corridor.payoutFeeFixed ?? 0;
+  // Comisión fija en moneda DESTINO — do NOT multiply by providerRate.
+  // Prioridad: la fija REAL del proveedor (fixed_cost live de Vita) sobre la
+  // configurada en el corredor — mismo criterio que la rama CLP del WS y el
+  // getQuote no-manual (`vitaFixedCost > 0 ? vitaFixedCost : payoutFeeFixed`).
+  const payoutFeeInDest   = (providerFixedFee > 0) ? providerFixedFee : (corridor.payoutFeeFixed ?? 0);
   const destinationAmount = round2((usdcTransitAmount * providerRate) - payoutFeeInDest);
 
   // Step 7 — effective rate for display (6 decimales para preservar rates < 1)
@@ -136,4 +144,41 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, acc
   };
 }
 
-export default { calculateQuote };
+/**
+ * Convierte los fees internos al shape PÚBLICO que consume el frontend.
+ *
+ * ⚠️ `payoutFee` sale en 0 A PROPÓSITO: está en moneda DESTINO y ya viene
+ * descontado de `destinationAmount`. El frontend suma los fees para mostrar
+ * "Costo del envío" en moneda ORIGEN (Step1Amount / Step4Confirm), así que
+ * incluirlo mezclaría unidades y mostraría un total absurdo (ej. sumar 3495 COP
+ * a Bs 21.34 → "Bs 3.516"). Es la misma convención que ya usaban las rutas CLP.
+ *
+ * La fija real del proveedor se expone aparte y ETIQUETADA con su moneda, para
+ * que el frontend pueda mostrarla si algún día se quiere ser explícito.
+ *
+ * ⚠️ LISTA BLANCA, no `...fees`. Esta función se escribió spreando el objeto
+ * interno y eso dejaba viajar al usuario `profitRetention`, `totalDeductedReal`,
+ * `vitaRateMarkup` y `alytoProfitUSDC` — el margen de Alyto, que la regla 11 de
+ * CLAUDE.md prohíbe mostrar. Al ser lista blanca, un campo interno nuevo en
+ * calculateQuote NO se filtra solo: hay que agregarlo aquí a propósito.
+ *
+ * @param {object} fees                 quote.fees de calculateQuote
+ * @param {string} originCurrency       moneda en la que están los fees sumables
+ * @param {string} destinationCurrency  moneda de la fija del proveedor
+ */
+export function toPublicFees(fees, { originCurrency, destinationCurrency } = {}) {
+  return {
+    payinFee:      fees?.payinFee     ?? 0,
+    alytoCSpread:  fees?.alytoCSpread ?? 0,
+    fixedFee:      fees?.fixedFee     ?? 0,
+    // Ya descontado de destinationAmount y en otra moneda → no sumable aquí.
+    payoutFee:     0,
+    totalDeducted: fees?.totalDeducted ?? 0,
+    feeCurrency:   originCurrency ?? null,
+    // Transparencia: la fija del proveedor, etiquetada con SU moneda.
+    providerFixedFee:         fees?.payoutFee ?? 0,
+    providerFixedFeeCurrency: destinationCurrency ?? null,
+  };
+}
+
+export default { calculateQuote, toPublicFees };

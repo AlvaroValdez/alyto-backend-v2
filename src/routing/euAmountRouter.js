@@ -1,34 +1,49 @@
 /**
- * euAmountRouter.js — Selección automática de proveedor para destinos EU/SEPA por monto.
+ * euAmountRouter.js — Resolución de proveedor para destinos EU/SEPA.
  *
- * Destinos EU/SEPA cubiertos por DOS corredores en paralelo:
- *   - OwlPay Harbor (destinationCountry='EU', ej. bo-eu-srl): mejor FX y más rápido
- *     (SEPA, 0-1 día). Harbor SOLO procesa montos en [30, 9998] USD (límites reales
- *     de la API, confirmados 2026-05-30 contra prod).
- *   - Vita Wallet (destinationCountry específico, ej. bo-es): cubre montos FUERA del
- *     rango Harbor (< $30 o > $9998).
+ * DECISIÓN 2026-08-12 — **EU va SIEMPRE por Vita**, rail withdrawal['eu'].
+ * Ya no se elige proveedor por monto.
  *
- * Regla: dentro del rango Harbor → Harbor (mejor FX en todo el rango); fuera → Vita.
- * Solo aplica cuando NO se pasó corridorId explícito y existen AMBOS corredores activos.
+ * Por qué (medido en vivo contra Vita prod + Harbor, 18.24 USDC / 236 BOB):
+ *   - Vita withdrawal['eu']: tasa 0.8524, fija 5 EUR → 10.55 EUR   ← el que se usa
+ *   - Harbor SEPA          : tasa 0.8650, fee ~0.3%  → 15.4x EUR   (DESHABILITADO: bug SWIFT_CODE)
+ *   - Harbor WIRE          : tasa 0.8650, fija ~17.5 →  9.36 EUR   (único rail Harbor operativo hoy)
+ * Además Harbor RECHAZA montos < 31 USD ("source.amount must be between 31 and 9998"),
+ * dejando fuera el ticket retail típico de Bolivia.
  *
- * Compartido por el quote REST (paymentController) y el quote WebSocket (quoteSocket)
+ * ⚠️ La fija de 5 EUR pesa muchísimo en ticket chico — casi la mitad de lo
+ * entregado en el ejemplo de arriba. Ahora al menos se descuenta del monto
+ * PROMETIDO en vez de aparecer como sorpresa, pero el mínimo del corredor merece
+ * una decisión de producto: el piso del proveedor ($10) no protege de una oferta
+ * mala, solo de una que el proveedor rechace.
+ *
+ * Se evaluó vita_sent['es'] (mejor tasa, sin fija) y NO sirve: es la red interna
+ * de Vita, no un rail bancario. Ver VITA_SENT_ONLY_COUNTRIES.
+ *
+ * La regla vive en CÓDIGO (no en un toggle de admin) para que no dependa de que
+ * alguien desactive el corredor Harbor: mientras exista un corredor Vita EUR para
+ * el origen, ese gana. Si NO hay Vita (ej. us-eu, cl-eu que son Harbor-only), se
+ * devuelve null y el lookup normal resuelve como siempre.
+ *
+ * Compartido por el quote REST (paymentController) y el WebSocket (quoteSocket)
  * para garantizar la MISMA decisión en ambos paths. Documentado en CLAUDE.md §12.
  */
 
 import TransactionConfig from '../models/TransactionConfig.js';
-import { convertOriginToUSD } from '../services/exchangeRateService.js';
 
 export const EU_SEPA_DESTINATIONS = new Set([
   'ES', 'EU', 'DE', 'FR', 'IT', 'NL', 'PT', 'IE', 'AT', 'BE',
   'GR', 'FI', 'LU', 'SK', 'SI', 'EE', 'LV', 'LT', 'CY', 'MT', 'PL',
 ]);
 
-// Límites reales de Harbor confirmados contra la API: source.amount ∈ [30, 9998] USD.
-export const HARBOR_MIN_USD = Number(process.env.HARBOR_MIN_USD ?? 30);
+// Límites reales de Harbor confirmados contra la API: source.amount ∈ [31, 9998] USD.
+// Ya NO se usan para elegir proveedor en EU (Vita siempre gana); siguen vigentes como
+// guard de ejecución en dispatchPayout para los corredores que SÍ usan Harbor.
+export const HARBOR_MIN_USD = Number(process.env.HARBOR_MIN_USD ?? 31);
 export const HARBOR_MAX_USD = Number(process.env.HARBOR_MAX_USD ?? 9998);
 
 /**
- * ¿El destino es EU/SEPA elegible para ruteo automático por monto?
+ * ¿El destino es EU/SEPA (elegible para la regla "EU → Vita")?
  * @param {string} dest - ISO alpha-2 destino (o 'EU')
  * @returns {boolean}
  */
@@ -37,41 +52,30 @@ export function isEuSepaDestination(dest) {
 }
 
 /**
- * Resuelve el corredor EU óptimo por monto.
- * @param {string} origin        - ISO alpha-2 origen (ej. 'BO')
- * @param {string} dest          - ISO alpha-2 destino (ej. 'ES', 'EU')
- * @param {number} amountOrigin  - Monto en moneda origen
- * @returns {Promise<object|null>} corredor TransactionConfig (lean) o null si no aplica
- *   (destino no-EU, falta uno de los dos proveedores, o monto no convertible).
+ * Resuelve el corredor EU: Vita si existe para ese origen, si no null.
+ *
+ * @param {string} origin - ISO alpha-2 origen (ej. 'BO')
+ * @param {string} dest   - ISO alpha-2 destino (ej. 'ES', 'EU')
+ * @returns {Promise<object|null>} corredor Vita (lean) o null si el destino no es
+ *   EU/SEPA o no hay corredor Vita EUR para ese origen (→ lookup normal).
  */
-export async function resolveEuCorridorByAmount(origin, dest, amountOrigin) {
+export async function resolveEuCorridor(origin, dest) {
   const ORIGIN = (origin ?? '').toUpperCase();
   const DEST   = (dest ?? '').toUpperCase();
   if (!EU_SEPA_DESTINATIONS.has(DEST)) return null;
 
-  const candidates = await TransactionConfig.find({
+  const vita = await TransactionConfig.findOne({
     originCountry:       ORIGIN,
     destinationCountry:  { $in: [DEST, 'EU'] },
     destinationCurrency: 'EUR',
+    payoutMethod:        'vitaWallet',
     isActive:            true,
   }).lean();
 
-  const harbor = candidates.find(c => c.payoutMethod === 'owlPay');
-  const vita   = candidates.find(c => c.payoutMethod === 'vitaWallet');
-  if (!harbor || !vita) return null;   // sin ambos, no hay decisión por monto
+  if (!vita) return null;   // sin corredor Vita (ej. us-eu/cl-eu) → lookup normal (Harbor)
 
-  const amountUSD     = await convertOriginToUSD(amountOrigin, harbor.originCurrency);
-  const harborMinUSD  = harbor.minAmountUSD ?? HARBOR_MIN_USD;
-  const inHarborRange = amountUSD >= harborMinUSD && amountUSD <= HARBOR_MAX_USD;
-  const chosen        = inHarborRange ? harbor : vita;   // Harbor mejor FX en rango; Vita fuera
-
-  console.info('[Alyto Router/EU] Selección por monto', {
-    origin: ORIGIN,
-    dest:   DEST,
-    amountUSD:   Math.round(amountUSD),
-    harborRange: `${harborMinUSD}-${HARBOR_MAX_USD}`,
-    chosen:      chosen.corridorId,
-    payout:      chosen.payoutMethod,
+  console.info('[Alyto Router/EU] EU → Vita (regla fija, sin ruteo por monto)', {
+    origin: ORIGIN, dest: DEST, chosen: vita.corridorId,
   });
-  return chosen;
+  return vita;
 }

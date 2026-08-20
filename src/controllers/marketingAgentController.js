@@ -18,7 +18,11 @@ import mongoose from 'mongoose';
 import * as Sentry from '@sentry/node';
 import ContentPiece from '../models/ContentPiece.js';
 import { procesarPieza, isMarketingAgentEnabled } from '../services/marketingAgentService.js';
-import { verificarProhibiciones } from '../services/riskClassifier.js';
+import { verificarProhibiciones, textoPublicable } from '../services/riskClassifier.js';
+import {
+  publicarPieza, destrabarPieza, isPublishEnabled, estadoCanalesVerificado,
+} from '../services/marketingPublishService.js';
+import { canalesSoportados } from '../services/publishers/publisherRegistry.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
 import { logger } from '../utils/logger.js';
 
@@ -33,8 +37,22 @@ const ERRORES_UPSTREAM = {
 
 const PAGE_LIMIT_MAX = 100;
 
-/** Texto publicable de una pieza: lo mismo que analiza el clasificador. */
-const textoDe = (p) => [p.titulo, p.cuerpo, p.sugerenciaVisual].filter(Boolean).join('\n');
+// Errores de publicación → HTTP. Cada uno pide una acción distinta del admin,
+// así que colapsarlos en un 500 le quitaría la única pista que tiene.
+const HTTP_PUBLICACION = {
+  NO_ENCONTRADA:            404,
+  YA_PUBLICADA:             409,  // idempotencia: no se reintenta
+  INTENTO_EN_CURSO:         409,  // hay que mirar la red antes de tocar nada
+  ESTADO_NO_PUBLICABLE:     409,
+  CONTENIDO_PROHIBIDO:      422,  // nunca publicable
+  CANAL_SIN_PUBLICADOR:     501,  // la red no acepta este tipo de contenido
+  PUBLICADOR_NO_CONFIGURADO:503,  // falta configuración del despliegue
+  PUBLICACION_DESHABILITADA:503,
+  PUBLICADOR_RECHAZO:       502,  // la red dijo que no
+  PUBLICADOR_SIN_RESPUESTA: 504,  // no sabemos si salió
+  PUBLICADOR_RESPUESTA_RARA:502,
+  NO_TRABADA:               409,
+};
 
 /** Paginación saneada desde query params. */
 function paginacion(query) {
@@ -109,7 +127,7 @@ export async function listarPendientes(req, res) {
     // en vez de dejar que el admin haga clic y reciba un 422. Un gate que rebota
     // sin explicar de antemano entrena a ignorar los errores.
     const conVeto = piezas.map(p => {
-      const veto = verificarProhibiciones(textoDe(p));
+      const veto = verificarProhibiciones(textoPublicable(p));
       return veto.ok ? { ...p, prohibida: false }
                      : { ...p, prohibida: true, motivoProhibicion: veto.motivo, coincidencia: veto.coincidencia };
     });
@@ -120,6 +138,49 @@ export async function listarPendientes(req, res) {
     });
   } catch (err) {
     return fail(res, err, 'listarPendientes', 'No se pudo obtener la cola de aprobación.');
+  }
+}
+
+// ─── GET /api/v1/admin/marketing/publicables ─────────────────────────────────
+
+/**
+ * Lo que está listo para salir al aire: aprobadas o de bajo riesgo, todavía sin
+ * publicar. Espejo de /pendientes — juntas cubren las dos colas de trabajo del
+ * admin (revisar y publicar).
+ */
+export async function listarPublicables(req, res) {
+  try {
+    const { page, limit, skip } = paginacion(req.query);
+
+    const filtro = {
+      estado: { $in: ['aprobado', 'autopublicado'] },
+      'publicacion.postId': null,
+    };
+
+    const [piezas, total] = await Promise.all([
+      ContentPiece.find(filtro).sort({ createdAt: 1 }).skip(skip).limit(limit).lean(),
+      ContentPiece.countDocuments(filtro),
+    ]);
+
+    // Se marca por qué una pieza no se puede publicar, para que el panel lo
+    // muestre en vez de ofrecer un botón que va a rebotar.
+    const canalesConPublicador = new Set(canalesSoportados());
+    const conEstado = piezas.map(p => ({
+      ...p,
+      publicable: canalesConPublicador.has(p.canal) && !p.publicacion?.enCurso,
+      motivoNoPublicable: !canalesConPublicador.has(p.canal)
+        ? `${p.canal} no acepta publicaciones de solo texto por API`
+        : p.publicacion?.enCurso
+          ? 'Hay un intento de publicación sin resolver'
+          : null,
+    }));
+
+    return res.status(200).json({
+      piezas: conEstado,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    return fail(res, err, 'listarPublicables', 'No se pudo obtener la lista de publicables.');
   }
 }
 
@@ -181,7 +242,7 @@ async function resolver(req, res, { estadoNuevo, accionAudit, fn, bloquearProhib
       const candidata = await ContentPiece.findById(id).lean();
       if (!candidata) return res.status(404).json({ error: 'Pieza no encontrada.' });
 
-      const veto = verificarProhibiciones(textoDe(candidata));
+      const veto = verificarProhibiciones(textoPublicable(candidata));
       if (!veto.ok) {
         logger.warn('[marketingAgent] aprobación bloqueada por prohibición absoluta', {
           piezaId: id, actor, motivo: veto.motivo, coincidencia: veto.coincidencia,
@@ -271,12 +332,96 @@ export async function estadoModulo(_req, res) {
       habilitado: isMarketingAgentEnabled(),
       modelo: process.env.MARKETING_AGENT_MODEL || 'claude-sonnet-4-6',
       piezas: Object.fromEntries(porEstado.map(e => [e._id, e.total])),
+      publicacion: {
+        habilitada: isPublishEnabled(),
+        // Verificado contra Meta, no solo "hay una variable seteada": un token
+        // puede estar presente y muerto, y eso hoy solo se descubría al publicar.
+        canales:    await estadoCanalesVerificado(),
+      },
     });
   } catch (err) {
     return fail(res, err, 'estadoModulo', 'No se pudo obtener el estado del módulo.');
   }
 }
 
+// ─── POST /api/v1/admin/marketing/:id/publicar ───────────────────────────────
+
+/** Publica una pieza aprobada en su red. Acción irreversible desde acá. */
+export async function publicar(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Identificador de pieza inválido.' });
+  }
+
+  const actor = req.user?.email || String(req.user?._id || 'admin');
+
+  try {
+    const pieza = await publicarPieza(id, { actor });
+
+    recordAdminAction({
+      req,
+      action:     'marketing.piece.publish',
+      targetType: 'ContentPiece',
+      targetId:   id,
+      before:     { estado: 'aprobado/autopublicado', publicado: false },
+      after:      { estado: 'publicado', postId: pieza.publicacion?.postId },
+      metadata:   { canal: pieza.canal, url: pieza.publicacion?.url },
+    }).catch(() => {});
+
+    return res.status(200).json({ pieza });
+  } catch (err) {
+    const status = HTTP_PUBLICACION[err.code];
+    if (status) {
+      // Un fallo al publicar también se audita: importa saber que se intentó.
+      if (status >= 500) {
+        recordAdminAction({
+          req,
+          action:     'marketing.piece.publish',
+          targetType: 'ContentPiece',
+          targetId:   id,
+          result:     'failure',
+          errorMessage: err.message,
+        }).catch(() => {});
+      }
+      return res.status(status).json({
+        error: err.message, code: err.code,
+        ...(err.postId ? { postId: err.postId, url: err.url } : {}),
+      });
+    }
+    return fail(res, err, 'publicar', 'No se pudo publicar la pieza.');
+  }
+}
+
+// ─── POST /api/v1/admin/marketing/:id/destrabar ──────────────────────────────
+
+/** Libera una pieza trabada por un intento que no cerró. Requiere criterio humano. */
+export async function destrabar(req, res) {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: 'Identificador de pieza inválido.' });
+  }
+
+  try {
+    const pieza = await destrabarPieza(id, { actor: req.user?.email || 'admin' });
+
+    recordAdminAction({
+      req,
+      action:     'marketing.piece.unlock',
+      targetType: 'ContentPiece',
+      targetId:   id,
+      reason:     typeof req.body?.motivo === 'string' ? req.body.motivo : '',
+      metadata:   { intentos: pieza.publicacion?.intentos },
+    }).catch(() => {});
+
+    return res.status(200).json({ pieza });
+  } catch (err) {
+    const status = HTTP_PUBLICACION[err.code];
+    if (status) return res.status(status).json({ error: err.message, code: err.code });
+    return fail(res, err, 'destrabar', 'No se pudo destrabar la pieza.');
+  }
+}
+
 export default {
-  generar, listarPendientes, listarHistorial, aprobar, rechazar, estadoModulo,
+  generar, listarPendientes, listarPublicables, listarHistorial,
+  aprobar, rechazar, estadoModulo, publicar, destrabar,
 };
