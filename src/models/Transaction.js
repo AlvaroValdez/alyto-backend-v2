@@ -13,6 +13,8 @@
 
 import mongoose from 'mongoose';
 
+import { buildStatusEntry } from '../utils/statusTrail.js';
+
 const { Schema } = mongoose;
 
 // ─── Sub-esquema: Fees Granulares por Corredor ───────────────────────────────
@@ -694,6 +696,21 @@ const transactionSchema = new Schema(
       type:    String,
       default: null,
     },
+    /**
+     * Sucesión cronológica de cambios de estado. Aditiva: se agrega, nunca se
+     * reescribe. La alimenta el hook `pre('save')` del final del archivo; ver allí
+     * el fundamento y el alcance.
+     */
+    statusHistory: {
+      type: [new Schema({
+        from:     { type: String, default: null },
+        to:       { type: String, required: true },
+        at:       { type: Date,   default: Date.now },
+        reason:   { type: String, default: '' },
+        category: { type: String, default: null },
+      }, { _id: false })],
+      default: [],
+    },
     /** Quote ID de OwlPay Harbor usado para el payout off-ramp */
     payoutQuoteId: {
       type:    String,
@@ -900,6 +917,46 @@ transactionSchema.index({ corridorId: 1, createdAt: -1 });
 transactionSchema.index({ createdAt: -1 });
 transactionSchema.index({ stellarTxId: 1 }, { sparse: true });
 transactionSchema.index({ alytoTransactionId: 1 }, { unique: true, sparse: true });
+
+
+// ─── Sucesión cronológica de estados ─────────────────────────────────────────
+//
+// Antes se podía establecer cuándo se completó cada etapa (`paymentLegs.completedAt`)
+// y cuándo llegó cada aviso de proveedor (`ipnLog.receivedAt`), pero NO cuándo el
+// campo `status` pasó de un valor a otro ni por qué: `updatedAt` se sobrescribe en
+// cada guardado. Reconstruir el recorrido exigía cruzar dos fuentes y suponer.
+//
+// Se captura en el MODELO y no en cada punto de llamada a propósito: el estado se
+// muta en decenas de sitios, y cualquiera que se olvidara de registrar la transición
+// dejaría un hueco silencioso en la trazabilidad. Acá no hay nada que recordar —
+// basta con guardar.
+//
+// ⚠️ Alcance: cubre los guardados de documento (`doc.save()`). Las actualizaciones
+// directas por consulta (`updateOne`, `findOneAndUpdate`) NO pasan por el middleware
+// de documento y no quedan registradas; para esos casos hay que empujar la entrada
+// explícitamente. Está declarado así en el informe técnico en lugar de afirmar una
+// cobertura total que no existe.
+
+transactionSchema.post('init', function () {
+  this.$locals.prevStatus = this.status;
+});
+
+transactionSchema.pre('save', function () {
+  const entrada = buildStatusEntry({
+    isNew:      this.isNew,
+    prevStatus: this.$locals.prevStatus,
+    nextStatus: this.status,
+    reason:     this.statusReason ?? this.failureReason ?? '',
+    category:   this.failureCategory ?? null,
+  });
+
+  if (entrada) {
+    if (this.isNew) this.statusHistory = [entrada];
+    else            this.statusHistory.push(entrada);
+  }
+
+  this.$locals.prevStatus = this.status;
+});
 
 
 const Transaction = mongoose.model('Transaction', transactionSchema);

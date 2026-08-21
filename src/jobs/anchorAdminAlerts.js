@@ -7,8 +7,18 @@
  *   - Horizon inalcanzable
  *   - Descuadre en la reconciliación del dual ledger
  *
+ *   - Sub-colateralización de la tesorería (solvencia agregada no cubierta)
+ *   - Solvencia no verificable (algún fetch on-chain falló → cobertura sin confirmar)
+ *   - Cuenta caliente por debajo del mínimo operativo
+ *
  * NO duplica el saldo XLM bajo del channel account (ya lo alerta monitorChannelXLM).
- * NO alerta solvencia (identidad contable sin confirmar — solo endpoint de lectura).
+ *
+ * ⚠️ Esta cabecera decía "NO alerta solvencia — solo endpoint de lectura". Quedó
+ * desactualizada al cablearse la solvencia y contradecía al código de abajo, que sí
+ * emite `solvency-uncovered`, `solvency-unreliable` y `treasury-hot-low`, con pruebas
+ * en `anchorAdmin.test.js`. Un comentario que miente sobre el control que documenta es
+ * peor que no tenerlo: se leyó como evidencia de que el control faltaba, y estuvo a
+ * punto de declararse una brecha inexistente ante el regulador.
  *
  * Cadencia: el chequeo del listener es barato y corre en cada ciclo (agresivo, §4.2).
  * La reconciliación es O(wallets) contra Horizon, así que se limita a una sub-cadencia
