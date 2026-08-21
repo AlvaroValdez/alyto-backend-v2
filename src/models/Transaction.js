@@ -657,7 +657,20 @@ const transactionSchema = new Schema(
     userFailureAction: {
       type: String,
     },
-    /** Categoría del error (INVALID_POSTAL_CODE, INVALID_CPF, etc.) — para analytics/UI */
+    /**
+     * Categoría del error — catálogo canónico en `utils/failureTaxonomy.js`.
+     *
+     * Era un `String` sin catálogo: los dos mappers de proveedor escribían su
+     * etiqueta y cinco sitios más inventaban la suya en línea, de modo que un tipeo
+     * creaba una categoría nueva en silencio y el conteo por causa dejaba de cuadrar
+     * sin que nadie lo notara. Con el catálogo la etiqueta es estable y agrupable,
+     * que es la condición para informar incidencias por causa (Art. 13° inc. e).
+     *
+     * NO se valida con `enum` a propósito: una etiqueta desconocida debe
+     * PERSISTIRSE, no rechazarse. Perder el registro de un fallo por no saber nombrar
+     * su causa sería peor que registrarlo sin clasificar. `classifyFailure` la
+     * resuelve a UNKNOWN con `recognized:false`, que es una señal accionable.
+     */
     failureCategory: {
       type: String,
     },
