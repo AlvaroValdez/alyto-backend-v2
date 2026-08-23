@@ -37,11 +37,29 @@
 
 import mongoose from 'mongoose';
 
-const CORREDORES_A_DESACTIVAR = ['bo-br-llc', 'bo-mx-llc', 'bo-eu'];
+// Instrucción 8 — corredores de origen Bolivia bajo entidad LLC.
+const CORREDORES_OTRA_ENTIDAD = ['bo-br-llc', 'bo-mx-llc', 'bo-eu'];
+
+// Instrucción 10 — los cuatro que explican la diferencia entre los 27 activos y los
+// 23 declarados en el apdo. 4.7. No es una decisión nueva: las notas internas del
+// Protocolo ya los marcaban. Lo que faltó fue ejecutarla en producción.
+//
+//   bo-cn      duplica China    — bo-cn-usd ya la cubre por la red latinoamericana
+//   bo-eu-srl  duplica Eurozona — bo-es ya la cubre por la red latinoamericana
+//   bo-hk      sin canal de liquidación viable
+//   bo-pl      sin canal de liquidación viable
+//
+// Los dos primeros caen en la regla de un proveedor por destino del apdo. 4.7.1; los
+// dos últimos en la exclusión por ausencia de canal viable. Son las dos causales con
+// que el apdo. 4.7.0 reconcilia la reducción de 29 a 23.
+const CORREDORES_EXCEDENTES = ['bo-cn', 'bo-eu-srl', 'bo-hk', 'bo-pl'];
+
+const CORREDORES_A_DESACTIVAR = [...CORREDORES_OTRA_ENTIDAD, ...CORREDORES_EXCEDENTES];
 
 const MOTIVO_CORREDORES =
-  'Aplicación de la regla de un proveedor por destino declarada ante ASFI, trámite ' +
-  'T-2201402987. Destinos atendidos por corredores del perímetro declarado.';
+  'Aplicación de la regla de un proveedor por destino y exclusión de destinos sin ' +
+  'canal de liquidación viable, conforme al perímetro declarado ante ASFI, trámite ' +
+  'T-2201402987.';
 
 const USUARIO_ADMIN   = 'v.alvaro.r@gmail.com';
 const ENTIDAD_CORRECTA = 'SRL';
