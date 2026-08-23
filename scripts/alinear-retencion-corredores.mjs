@@ -40,18 +40,35 @@ import mongoose from 'mongoose';
 // discusión. Los demás valores alinean la estructura de cobros con la del resto de
 // corredores (6,5% retail / 4% business, Bs 6 / Bs 10).
 //
-// ⚠️ Ajustar acá si la decisión comercial fuera otra. Cambiar sólo la retención a cero
-// y dejar el spread como está también cierra el 5.4, pero baja el precio efectivo.
 
-const OBJETIVO = {
-  profitRetentionPercent: 0,
-  alytoCSpread:           6.5,
-  businessAlytoCSpread:   4,
-  fixedFee:               6,
-  businessFixedFee:       10,
+// La retención se PLIEGA dentro del spread: el consumidor paga exactamente lo mismo
+// que hoy, y desaparece el importe que se descontaba sin informarse. Decisión del
+// representante legal el 2026-08-23.
+//
+//   bo-au        1,5 % spread + 0,8 % retención  →  2,3 % spread, retención 0
+//   bo-cn-usd    2,0 % spread + 1,0 % retención  →  3,0 % spread, retención 0
+//                0,5 % business + 1,0 % retención →  1,5 % business
+//
+// La retención NO está segmentada por tipo de cuenta —`profitRetentionPercent` se
+// aplica igual a retail y a business—, así que al plegarla hay que sumarla a AMBOS
+// spreads donde el business esté configurado. En `bo-au` el spread business es 0 y
+// cae por defecto al retail, de modo que plegar el retail alcanza.
+//
+// Las comisiones fijas no se tocan: no participan de la retención.
+
+const OBJETIVO_POR_CORREDOR = {
+  'bo-au': {
+    profitRetentionPercent: 0,
+    alytoCSpread:           2.3,
+  },
+  'bo-cn-usd': {
+    profitRetentionPercent: 0,
+    alytoCSpread:           3,
+    businessAlytoCSpread:   1.5,
+  },
 };
 
-const CORREDORES = ['bo-au', 'bo-cn-usd'];
+const CORREDORES = Object.keys(OBJETIVO_POR_CORREDOR);
 
 // ── Argumentos ─────────────────────────────────────────────────────────────────
 
@@ -114,7 +131,8 @@ for (const corridorId of CORREDORES) {
   const c = await col.findOne({ corridorId });
   if (!c) { console.log(`  ⚠️  ${corridorId}: no existe\n`); continue; }
 
-  const diffs = Object.entries(OBJETIVO)
+  const objetivo = OBJETIVO_POR_CORREDOR[corridorId];
+  const diffs = Object.entries(objetivo)
     .filter(([campo, nuevo]) => Number(c[campo] ?? 0) !== Number(nuevo))
     .map(([campo, nuevo]) => ({ campo, anterior: c[campo] ?? 0, nuevo }));
 
@@ -127,7 +145,7 @@ for (const corridorId of CORREDORES) {
   }
 
   const antes    = todoIncluido(c);
-  const despues  = todoIncluido({ ...c, ...OBJETIVO });
+  const despues  = todoIncluido({ ...c, ...objetivo });
   console.log(`     ${'costo sobre Bs 1.000'.padEnd(24)} ${antes.toFixed(2).padStart(6)} → ${despues.toFixed(2).padStart(6)}  (${(despues - antes >= 0 ? '+' : '')}${(despues - antes).toFixed(2)})`);
 
   if (!COMMIT) { console.log(''); continue; }
@@ -144,7 +162,7 @@ for (const corridorId of CORREDORES) {
 
   const r = await col.updateOne(
     { corridorId },
-    { $set: { ...OBJETIVO, updatedAt: ahora }, $push: { changeLog: { $each: entradas } } },
+    { $set: { ...objetivo, updatedAt: ahora }, $push: { changeLog: { $each: entradas } } },
   );
 
   if (r.modifiedCount === 1) { cambios++; console.log(`     ✓ aplicado · ${entradas.length} entrada(s) en changeLog\n`); }
