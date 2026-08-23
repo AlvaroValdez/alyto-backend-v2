@@ -169,5 +169,14 @@ export function aadForDocumentNumber(userId) {
   return `${String(userId)}:identityDocument.number`;
 }
 
+/**
+ * AAD canónico para el secreto TOTP del segundo factor. Ata el ciphertext al
+ * usuario y al campo: un secreto copiado a otra cuenta con acceso directo a la
+ * base falla la verificación GCM en vez de conceder acceso con privilegios.
+ */
+export function aadForTotpSecret(userId) {
+  return `${String(userId)}:twoFactor.secret`;
+}
+
 export const PII_ENCRYPTED_MARKER = ENCRYPTED_MARKER;
 export const PII_KMS_ENCRYPTION_CONTEXT = KMS_ENC_CONTEXT;

@@ -59,16 +59,40 @@ export function isLockedOut(user, now = new Date()) {
  */
 export function nextLockoutState(previousStreak, now = new Date()) {
   const streak = Math.max(0, Number(previousStreak) || 0) + 1
-  if (streak < maxFailedAttempts()) return { streak, lockedUntil: null }
-  return { streak, lockedUntil: new Date(now.getTime() + lockoutMinutes() * 60_000) }
+  return { streak, lockedUntil: lockoutUntilFor(streak, now) }
 }
 
-/** Extrae IP y agente sin depender de la forma exacta del request. */
+/**
+ * ¿Hasta cuándo hay que bloquear una cuenta que acumula esta racha?
+ *
+ * Toma la racha YA incrementada, que es lo que devuelve el `$inc` atómico de
+ * `registerFailedAttempt`. `nextLockoutState` es la misma decisión expresada
+ * sobre la racha anterior, y se conserva porque es la forma que resulta natural
+ * de probar la política aislada.
+ *
+ * @param {number} streak
+ * @param {Date}   [now]
+ * @returns {Date|null}
+ */
+export function lockoutUntilFor(streak, now = new Date()) {
+  const s = Math.max(0, Number(streak) || 0)
+  if (s < maxFailedAttempts()) return null
+  return new Date(now.getTime() + lockoutMinutes() * 60_000)
+}
+
+/**
+ * Extrae IP y agente sin depender de la forma exacta del request.
+ *
+ * Se usa `req.ip`, NO el primer elemento de `x-forwarded-for`. La aplicación
+ * corre con `trust proxy = 1` (app.js), de modo que Express ya resuelve el origen
+ * real descartando lo que el cliente haya puesto de más en esa cabecera. Leerla a
+ * mano tomaba el primer valor, que lo escribe quien llama: cualquiera podía
+ * sembrar el registro de accesos con orígenes inventados. Como este registro es
+ * la evidencia del Art. 2° inc. d, un origen falsificable la vuelve inservible
+ * justo para lo que existe — investigar quién intentó entrar.
+ */
 function requestContext(req) {
-  const ip = req?.headers?.['x-forwarded-for']?.split(',')[0]?.trim()
-    ?? req?.ip
-    ?? req?.connection?.remoteAddress
-    ?? null
+  const ip = req?.ip ?? req?.connection?.remoteAddress ?? null
   const ua = req?.headers?.['user-agent'] ?? null
   return { ip, userAgent: ua ? String(ua).slice(0, 300) : null }
 }
@@ -79,18 +103,20 @@ function requestContext(req) {
  * @param {object} p
  * @param {object} [p.req]
  * @param {string} p.email
- * @param {'success'|'failed'|'blocked'} p.outcome
+ * @param {'success'|'pending_2fa'|'failed'|'blocked'} p.outcome
  * @param {string|null} [p.reason]
  * @param {object|null} [p.user]         — documento del usuario, si se resolvió
  * @param {number} [p.failedStreak]
+ * @param {'password'|'totp'|'recovery_code'} [p.factor]
  */
-export async function recordAccess({ req, email, outcome, reason = null, user = null, failedStreak = 0 }) {
+export async function recordAccess({ req, email, outcome, reason = null, user = null, failedStreak = 0, factor = 'password' }) {
   try {
     const { ip, userAgent } = requestContext(req)
     await AccessLog.create({
       userId: user?._id ?? null,
       email:  String(email ?? '').toLowerCase().trim(),
       outcome,
+      factor,
       reason,
       role:   user?.role ?? null,
       ip,
@@ -109,29 +135,52 @@ export async function recordAccess({ req, email, outcome, reason = null, user = 
 /**
  * Registra un intento fallido y actualiza el contador de la cuenta.
  *
+ * El segundo factor comparte esta misma función a propósito: la norma exige la
+ * misma política de intentos y bloqueo en ambos puntos, y compartir el contador
+ * es lo único que garantiza que sean la misma política y no dos parecidas. Un
+ * contador propio del segundo factor abriría el hueco de probar códigos sin
+ * tope mientras el de contraseña permanece limpio.
+ *
  * @returns {Promise<{ streak: number, lockedUntil: Date|null }>}
  */
-export async function registerFailedAttempt({ req, email, reason, user }) {
+export async function registerFailedAttempt({ req, email, reason, user, factor = 'password' }) {
   let state = { streak: 0, lockedUntil: null }
 
   if (user?._id) {
-    state = nextLockoutState(user.failedLoginAttempts ?? 0)
     try {
-      await User.updateOne(
+      // El incremento lo hace la base, no el proceso, y la racha con la que se
+      // decide el bloqueo es la que devuelve esa misma escritura.
+      //
+      // Leer la racha del documento cargado al principio del request y escribir
+      // `racha + 1` parece equivalente y no lo es: N peticiones simultáneas leen
+      // todas el mismo valor y todas escriben el mismo, así que el contador
+      // avanza uno por más intentos que entren y el bloqueo no llega nunca. En el
+      // punto de contraseña el coste de bcrypt disimulaba el problema; en el del
+      // segundo factor la comprobación es barata y este contador es la ÚNICA
+      // defensa por cuenta contra la prueba sistemática de seis dígitos.
+      const actualizado = await User.findOneAndUpdate(
         { _id: user._id },
-        { $set: { failedLoginAttempts: state.streak, lockedUntil: state.lockedUntil } },
-      )
+        { $inc: { failedLoginAttempts: 1 } },
+        { new: true, projection: { failedLoginAttempts: 1 } },
+      ).lean()
+
+      const streak = actualizado?.failedLoginAttempts ?? 1
+      state = { streak, lockedUntil: lockoutUntilFor(streak) }
+
+      if (state.lockedUntil) {
+        await User.updateOne({ _id: user._id }, { $set: { lockedUntil: state.lockedUntil } })
+      }
     } catch (err) {
       logger.error('[accessLog] No se pudo actualizar el contador de fallos', { error: err.message })
     }
   }
 
-  await recordAccess({ req, email, outcome: 'failed', reason, user, failedStreak: state.streak })
+  await recordAccess({ req, email, outcome: 'failed', reason, user, failedStreak: state.streak, factor })
   return state
 }
 
 /** Registra un acceso exitoso y limpia el contador de fallos. */
-export async function registerSuccess({ req, email, user }) {
+export async function registerSuccess({ req, email, user, factor = 'password' }) {
   if (user?._id && ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil)) {
     try {
       await User.updateOne(
@@ -142,18 +191,32 @@ export async function registerSuccess({ req, email, user }) {
       logger.error('[accessLog] No se pudo limpiar el contador de fallos', { error: err.message })
     }
   }
-  await recordAccess({ req, email, outcome: 'success', user, failedStreak: 0 })
+  await recordAccess({ req, email, outcome: 'success', user, failedStreak: 0, factor })
+}
+
+/**
+ * Registra que el primer factor fue válido pero la sesión NO se emitió, a la
+ * espera del segundo. No limpia el contador de fallos: la racha se cierra
+ * recién cuando el acceso se concede de verdad.
+ */
+export async function registerPendingSecondFactor({ req, email, user, reason = null }) {
+  await recordAccess({
+    req, email, outcome: 'pending_2fa', reason, user,
+    failedStreak: user?.failedLoginAttempts ?? 0,
+    factor: 'password',
+  })
 }
 
 /** Registra un intento rechazado por bloqueo vigente. */
-export async function registerBlocked({ req, email, user }) {
+export async function registerBlocked({ req, email, user, factor = 'password' }) {
   await recordAccess({
-    req, email, outcome: 'blocked', reason: 'locked_out', user,
+    req, email, outcome: 'blocked', reason: 'locked_out', user, factor,
     failedStreak: user?.failedLoginAttempts ?? 0,
   })
 }
 
 export default {
   recordAccess, registerFailedAttempt, registerSuccess, registerBlocked,
+  registerPendingSecondFactor,
   isLockedOut, nextLockoutState, maxFailedAttempts, lockoutMinutes,
 }

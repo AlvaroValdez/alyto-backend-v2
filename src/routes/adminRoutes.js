@@ -57,6 +57,10 @@ import {
   cancelExpiredSep24,
   listAccessLogs,
 } from '../controllers/adminController.js';
+import {
+  status as twoFactorStatus,
+  reset  as resetTwoFactor,
+} from '../controllers/adminTwoFactorController.js';
 import adminSSE from './adminSSE.js';
 import {
   createFunding,
@@ -198,6 +202,24 @@ router.get('/users', getAllUsers);
  * Query: ?outcome= ?email= ?userId= ?days= ?limit=
  */
 router.get('/access-logs', listAccessLogs);
+
+/**
+ * GET /api/v1/admin/2fa/status
+ *
+ * Estado de alta del segundo factor en el conjunto de cuentas con privilegios
+ * (Art. 2° inc. c, Sec. 4). Es lo que permite decidir cuándo exigirlo en
+ * producción sin dejar a ningún operador fuera del panel.
+ */
+router.get('/2fa/status', twoFactorStatus);
+
+/**
+ * POST /api/v1/admin/users/:userId/2fa/reset
+ *
+ * Restablece el segundo factor de otro operador. Acción sensible del apdo. 7.4.2:
+ * motivo obligatorio persistido, con autor y momento en la bitácora.
+ * Body: { reason }
+ */
+router.post('/users/:userId/2fa/reset', resetTwoFactor);
 
 /**
  * GET /api/v1/admin/users/:userId

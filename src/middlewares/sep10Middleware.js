@@ -12,6 +12,7 @@
 import jwt  from 'jsonwebtoken';
 import User from '../models/User.js';
 import { logger } from '../utils/logger.js';
+import { isScopedToken } from '../services/authTokenService.js';
 
 /**
  * Middleware que acepta tokens JWT Alyto (SEP-10 verify) o tokens SEP-10 puros.
@@ -27,6 +28,14 @@ export async function sep10Protect(req, res, next) {
 
     const token = authHeader.slice(7);
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Una credencial de propósito acotado no es una sesión. La intermedia del
+    // segundo factor lleva el mismo `id` que una sesión real: sin este rechazo,
+    // quien acertó la contraseña de un administrador entraría por aquí a las
+    // rutas del anchor sin haber presentado nunca el segundo factor.
+    if (isScopedToken(decoded)) {
+      return res.status(401).json({ error: 'Second factor verification not completed' });
+    }
 
     // Token con userId (usuario Alyto registrado)
     if (decoded.id) {

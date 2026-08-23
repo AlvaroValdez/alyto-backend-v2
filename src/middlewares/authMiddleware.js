@@ -18,6 +18,8 @@ import jwt  from 'jsonwebtoken';
 import User from '../models/User.js';
 import { setSentryUser } from './sentryContext.js';
 import { BoundedCache } from '../utils/boundedCache.js';
+import { checkAdmin } from './checkAdmin.js';
+import { isScopedToken } from '../services/authTokenService.js';
 
 // ─── Cache de usuarios autenticados ──────────────────────────────────────────
 // Evita una query MongoDB en cada request autenticado.
@@ -82,6 +84,21 @@ export async function protect(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Una credencial con propósito declarado NO es una sesión. Hoy la única es la
+    // intermedia del segundo factor, que se emite cuando la contraseña ya se
+    // validó pero el acceso todavía no se concedió. Sin este rechazo esa
+    // credencial sería una sesión con otro nombre y el segundo factor no
+    // impediría nada. La sesión legítima no lleva `purpose`, de modo que las ya
+    // emitidas siguen valiendo.
+    if (isScopedToken(decoded)) {
+      console.warn('[Protect] REJECT: token de propósito acotado usado como sesión |',
+        'purpose:', decoded.purpose, '| path:', req.path);
+      return res.status(401).json({
+        error: 'No autorizado. La verificación de acceso no se completó.',
+        code:  'SECOND_FACTOR_REQUIRED',
+      });
+    }
+
     // Cargar usuario desde cache o DB.
     // Cache TTL 2 min — acota la ventana de revocación por tokenVersion.
     let user = getCachedUser(decoded.id);
@@ -134,6 +151,9 @@ export async function protect(req, res, next) {
     }
 
     req.user = user;
+    // Reclamaciones del token, para los guardas que necesitan saber CÓMO se
+    // acreditó la sesión y no sólo quién es su titular (ver checkAdmin).
+    req.authClaims = decoded;
     // .lean() devuelve POJO sin el getter virtual `id` de Mongoose.
     // Lo añadimos manualmente para compatibilidad con controllers que usen req.user.id
     if (user._id && !user.id) {
@@ -178,19 +198,11 @@ export async function protect(req, res, next) {
  *   router.get('/users', protect, requireAdmin, handler);
  */
 export function requireAdmin(req, res, next) {
-  if (!req.user) {
-    return res.status(401).json({
-      error: 'No autorizado. Middleware protect() no ejecutado.',
-    });
-  }
-
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({
-      error: 'Acceso denegado. Se requiere rol de administrador.',
-    });
-  }
-
-  next();
+  // Delega en checkAdmin en vez de repetir la comprobación. Son dos nombres para
+  // el mismo guarda —histórico— y mantenerlos como dos implementaciones dejaría
+  // que una exigencia agregada a uno no alcanzara al otro: la liquidación manual
+  // de Bolivia cuelga de éste, no de aquél.
+  return checkAdmin(req, res, next);
 }
 
 // ─── requireKycApproved ───────────────────────────────────────────────────────

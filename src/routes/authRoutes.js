@@ -10,6 +10,7 @@
  *   POST /reset-password  → resetPasswordLimiter   (5 intentos / hora / IP)
  *   GET  /me              → sin limiter propio (solo general limiter del servidor)
  *   POST /fcm-token       → sin limiter propio (requiere JWT válido)
+ *   POST /2fa/*           → twoFactorLimiter      (5 intentos / 15 min / IP)
  */
 
 import { Router } from 'express';
@@ -26,12 +27,19 @@ import {
   deleteAccount,
 } from '../controllers/authController.js';
 import { protect } from '../middlewares/authMiddleware.js';
+import { requireTwoFactorChallenge } from '../middlewares/twoFactorChallenge.js';
+import {
+  enroll  as enrollTwoFactor,
+  confirm as confirmTwoFactor,
+  verify  as verifyTwoFactor,
+} from '../controllers/adminTwoFactorController.js';
 import {
   loginLimiter,
   registerLimiter,
   forgotPasswordLimiter,
   resetPasswordLimiter,
   emailVerifyLimiter,
+  twoFactorLimiter,
 } from '../config/rateLimiters.js';
 
 const router = Router();
@@ -68,6 +76,37 @@ router.post('/verify-email', protect, emailVerifyLimiter, verifyEmail);
  * Reenvía el código de verificación (cooldown 60s por usuario).
  */
 router.post('/resend-verification', protect, emailVerifyLimiter, resendVerification);
+
+// ─── Segundo factor de autenticación (accesos con privilegios) ────────────────
+//
+// Las tres rutas se alcanzan sólo con la credencial intermedia que emite el
+// login: requireTwoFactorChallenge, NO protect. Una sesión no entra aquí.
+//
+// Todas usan `twoFactorLimiter`: los MISMOS umbrales que el punto de contraseña
+// (5 por cuarto de hora y origen), en su propio cupo. La política que se comparte
+// de verdad es la que la norma exige replicar —el contador de fallos y el bloqueo
+// por cuenta de accessLogService, que es el mismo objeto para ambos puntos—; el
+// cupo por origen se separa porque un acceso con segundo factor gasta dos
+// peticiones y el alta tres, y compartirlo dejaría al operador sin cupo por un
+// error de tecleo.
+
+/**
+ * POST /api/v1/auth/2fa/enroll
+ * Genera el secreto y lo devuelve como QR y como cadena manual. No activa nada.
+ */
+router.post('/2fa/enroll', twoFactorLimiter, requireTwoFactorChallenge, enrollTwoFactor);
+
+/**
+ * POST /api/v1/auth/2fa/confirm
+ * Body: { code } — activa el factor y entrega los códigos de recuperación.
+ */
+router.post('/2fa/confirm', twoFactorLimiter, requireTwoFactorChallenge, confirmTwoFactor);
+
+/**
+ * POST /api/v1/auth/2fa/verify
+ * Body: { code } | { recoveryCode } — único punto que emite sesión con privilegios.
+ */
+router.post('/2fa/verify', twoFactorLimiter, requireTwoFactorChallenge, verifyTwoFactor);
 
 /**
  * POST /api/v1/auth/forgot-password

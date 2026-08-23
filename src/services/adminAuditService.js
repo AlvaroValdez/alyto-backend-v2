@@ -18,11 +18,20 @@ import * as Sentry   from '@sentry/node'
 // LÓGICA PURA (testeable sin DB)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Substrings de nombre de campo que NUNCA deben persistirse en el audit. */
+/**
+ * Substrings de nombre de campo que NUNCA deben persistirse en el audit.
+ *
+ * La última línea corresponde al segundo factor. `secretCiphertext` ya caía por
+ * 'secret' y por 'ciphertext', pero el alcance de la depuración es por
+ * denominación del campo (apdo. 7.8): dejarlo dependiendo de que el nombre
+ * elegido contenga por casualidad una de las palabras anteriores sería confiar
+ * en una coincidencia. Los nombres del control se enumeran explícitamente.
+ */
 const SENSITIVE_KEY_PATTERNS = [
   'secret', 'password', 'passwd', 'token', 'aeskey', 'aes_key', 'apikey', 'api_key',
   'privatekey', 'private_key', 'seed', 'mnemonic', 'ciphertext', 'jwt', 'signingkey',
   'signing_key', 'credential',
+  'totp', 'otpauth', 'twofactor', 'two_factor', '2fa', 'recoverycode', 'recovery_code',
 ]
 
 function isSensitiveKey(key) {

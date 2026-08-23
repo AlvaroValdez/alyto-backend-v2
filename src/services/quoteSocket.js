@@ -22,6 +22,7 @@
 import { WebSocketServer } from 'ws';
 import jwt                 from 'jsonwebtoken';
 import User                from '../models/User.js';
+import { isScopedToken }   from './authTokenService.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey, getVitaSentCountry } from './vitaWalletService.js';
@@ -813,6 +814,16 @@ export function createQuoteSocketServer(httpServer) {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Una credencial de propósito acotado no es una sesión (ver
+        // authTokenService.isScopedToken). La intermedia del segundo factor
+        // lleva el mismo `id`; sin este rechazo abriría la conexión de
+        // cotizaciones con la contraseña sola.
+        if (isScopedToken(decoded)) {
+          console.warn('[WS] REJECT: token de propósito acotado usado como sesión');
+          return callback(false, 401, 'Unauthorized: second factor not completed');
+        }
+
         // Adjuntar datos al request para consumirlos en el handler de 'connection'
         info.req.authenticatedUserId       = decoded.id;
         info.req.authenticatedTokenVersion = decoded.tokenVersion ?? 0;

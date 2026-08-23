@@ -33,10 +33,20 @@ const CW_ENABLED = IS_PROD && !!process.env.CLOUDWATCH_LOG_GROUP;
 
 // Filtro de seguridad: elimina cualquier campo que parezca un secreto
 const sanitizeFields = winston.format((info) => {
-  const FORBIDDEN = ['secret', 'privatekey', 'private_key', 'password', 'token', 'seed', 'mnemonic', 'apikey', 'api_key'];
+  // La comparación normaliza guiones y guiones bajos, igual que la depuración
+  // del audit (adminAuditService.redactSensitive). Sin normalizar, 'recovery_code'
+  // se depuraba y 'recoveryCode' no —o al revés— según cómo se hubiera escrito el
+  // campo en el punto de llamada: justo el tipo de cobertura parcial que el
+  // apartado 7.8 obliga a declarar en vez de aparentar.
+  const FORBIDDEN = [
+    'secret', 'privatekey', 'password', 'token', 'seed', 'mnemonic', 'apikey',
+    // Segundo factor de los accesos con privilegios.
+    'totp', 'otpauth', 'twofactor', '2fa', 'recoverycode',
+  ];
+  const normalize = s => String(s).toLowerCase().replace(/[_-]/g, '');
   const sanitized = { ...info };
   for (const key of Object.keys(sanitized)) {
-    if (FORBIDDEN.some(f => key.toLowerCase().includes(f))) {
+    if (FORBIDDEN.some(f => normalize(key).includes(f))) {
       sanitized[key] = '[REDACTED]';
     }
   }

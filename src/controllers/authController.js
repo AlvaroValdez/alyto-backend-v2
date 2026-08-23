@@ -23,7 +23,16 @@ import {
   registerFailedAttempt,
   registerSuccess,
   registerBlocked,
+  registerPendingSecondFactor,
 }                from '../services/accessLogService.js';
+import {
+  requiresTwoFactor,
+  hasConfirmedSecondFactor,
+}                from '../services/adminTwoFactorService.js';
+import {
+  generateChallengeToken,
+  AMR_PASSWORD,
+}                from '../services/authTokenService.js';
 import WalletBOB    from '../models/WalletBOB.js';
 import WalletUSDC   from '../models/WalletUSDC.js';
 import Transaction  from '../models/Transaction.js';
@@ -74,12 +83,57 @@ const ENTITY_DEFAULT_DOC = {
  * @param {string}          [expiresIn]  — sobreescribe JWT_EXPIRES_IN del entorno
  * @returns {string} Token JWT
  */
-function generateToken(userId, tokenVersion, expiresIn) {
+function generateToken(userId, tokenVersion, expiresIn, amr) {
   return jwt.sign(
-    { id: userId, tokenVersion: tokenVersion ?? 0 },
+    {
+      id: userId,
+      tokenVersion: tokenVersion ?? 0,
+      // Métodos que acreditó la sesión. Sin segundo factor exigido queda sólo
+      // 'pwd'; con él, la sesión lleva además la marca del factor que la
+      // habilitó y `checkAdmin` la exige para entrar al panel.
+      amr: amr ?? [AMR_PASSWORD],
+    },
     process.env.JWT_SECRET,
     { expiresIn: expiresIn ?? process.env.JWT_EXPIRES_IN ?? '24h' },
   );
+}
+
+/**
+ * Emite la sesión y la devuelve junto al perfil básico. Extraído de loginUser
+ * porque ahora hay dos puntos que conceden acceso —el login directo y la
+ * verificación del segundo factor— y la sesión tiene que salir idéntica de los
+ * dos. Duplicar el armado invitaría a que uno de ellos se quedara atrás.
+ *
+ * @param {import('express').Response} res
+ * @param {object} user
+ * @param {object} [opts]
+ * @param {boolean} [opts.rememberMe]
+ * @param {string[]} [opts.amr]
+ */
+export function issueSession(res, user, { rememberMe = false, amr } = {}) {
+  const jwtExpiry = rememberMe ? '7d' : '24h';
+  const token     = generateToken(user._id, user.tokenVersion, jwtExpiry, amr);
+
+  if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
+
+  return {
+    token,
+    user: {
+      id:          user._id,
+      email:       user.email,
+      firstName:   user.firstName,
+      lastName:    user.lastName,
+      legalEntity: user.legalEntity,
+      kycStatus:           user.kycStatus,
+      kybStatus:           user.kybStatus,
+      accountType:         user.accountType,
+      emailVerified:       user.emailVerified === true,
+      kycProfileCompleted: !!user.kycProfileCompletedAt,
+      role:                user.role,
+      country:             user.country,
+      avatarUrl:           user.avatarUrl ?? null,
+    },
+  };
 }
 
 /**
@@ -490,6 +544,32 @@ export async function loginUser(req, res) {
       return res.status(401).json({ error: 'Cuenta suspendida. Contacta soporte.' });
     }
 
+    // ── Segundo factor para accesos con privilegios ──────────────────────────
+    // Contraseña correcta ya no equivale a acceso concedido: la sesión no se
+    // emite hasta que el código sea válido. Lo que se devuelve aquí es una
+    // credencial intermedia que sólo sirve para presentar ese código.
+    if (requiresTwoFactor(user)) {
+      const enrollmentRequired = !hasConfirmedSecondFactor(user);
+
+      await registerPendingSecondFactor({
+        req, email: normalizedEmail, user,
+        // Un operador sin factor configurado no es un fallo suyo, pero sí un
+        // estado que tiene que ser visible mientras dure el despliegue.
+        reason: enrollmentRequired ? 'totp_not_enrolled' : null,
+      });
+
+      return res.status(200).json({
+        twoFactorRequired: true,
+        enrollmentRequired,
+        challengeToken: generateChallengeToken({
+          userId: user._id, tokenVersion: user.tokenVersion, enrollmentRequired,
+        }),
+        message: enrollmentRequired
+          ? 'Configura tu segundo factor de autenticación para continuar.'
+          : 'Ingresa el código de tu aplicación de autenticación.',
+      });
+    }
+
     // Acceso concedido: queda el registro y se limpia la racha de fallos.
     await registerSuccess({ req, email: normalizedEmail, user });
 
@@ -513,34 +593,10 @@ export async function loginUser(req, res) {
 
     // rememberMe: true → 7 días; false/ausente → 24 horas (reducido desde 30d/7d)
     const rememberMe = req.body.rememberMe === true;
-    const jwtExpiry  = rememberMe ? '7d' : '24h';
-
-    const token = generateToken(user._id, user.tokenVersion, jwtExpiry);
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
 
-    if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
-
-    const responseBody = {
-      token,
-      user: {
-        id:          user._id,
-        email:       user.email,
-        firstName:   user.firstName,
-        lastName:    user.lastName,
-        legalEntity: user.legalEntity,
-        kycStatus:           user.kycStatus,
-        kybStatus:           user.kybStatus,
-        accountType:         user.accountType,
-        emailVerified:       user.emailVerified === true,
-        kycProfileCompleted: !!user.kycProfileCompletedAt,
-        role:                user.role,
-        country:             user.country,
-        avatarUrl:           user.avatarUrl ?? null,
-      },
-    };
-
-    return res.json(responseBody);
+    return res.json(issueSession(res, user, { rememberMe }));
 
   } catch (err) {
     console.error('[Auth] Error en loginUser:', err.message);

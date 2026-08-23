@@ -109,6 +109,58 @@ const stellarAccountSchema = new Schema(
   { _id: false },
 );
 
+// ─── Sub-esquema: Segundo factor de autenticación (TOTP) ─────────────────────
+// Exigido para todo acceso con privilegios de administración (Art. 2°, inc. c,
+// Sec. 4 del Reglamento para ETF: identificación y autenticación robusta).
+//
+// El secreto NUNCA se persiste en claro: vive cifrado en `secretCiphertext` con
+// la misma infraestructura de sobre que el documento de identidad (DEK envuelta
+// por el servicio de claves — services/piiCrypto.js), con contexto autenticado
+// atado al usuario y al campo. No existe camino de escritura en texto plano.
+
+const recoveryCodeSchema = new Schema(
+  {
+    /** Hash bcrypt del código. Mismo tratamiento de un solo sentido que la contraseña. */
+    hash:   { type: String, required: true },
+    /** Momento de consumo. Un código con fecha ya no sirve. */
+    usedAt: { type: Date, default: null },
+  },
+  { _id: false },
+);
+
+const twoFactorSchema = new Schema(
+  {
+    /**
+     * true sólo tras confirmar un código válido en el alta. Un secreto generado y
+     * no confirmado no habilita nada: sin esto, una interrupción a mitad del alta
+     * dejaría la cuenta con un factor que el operador no tiene en su teléfono.
+     */
+    enabled: { type: Boolean, default: false },
+
+    /** Ciphertext AES-256-GCM del secreto base32 (esquema `v1:` de piiCrypto). */
+    secretCiphertext: { type: String, select: false },
+
+    /** Momento del alta (generación del secreto) y de su confirmación. */
+    enrolledAt:  { type: Date, default: null },
+    confirmedAt: { type: Date, default: null },
+
+    /**
+     * Último paso de tiempo consumido. Prevención de reutilización: sólo se acepta
+     * un código cuyo paso sea ESTRICTAMENTE mayor. Un código ya usado queda fuera
+     * durante el resto de su vigencia, y no se puede retroceder a uno anterior.
+     */
+    lastUsedStep: { type: Number, default: 0, select: false },
+
+    /** Códigos de recuperación de un solo uso, generados en el alta. */
+    recoveryCodes: { type: [recoveryCodeSchema], default: [], select: false },
+
+    /** Trazabilidad del último restablecimiento administrativo. */
+    resetAt:   { type: Date, default: null },
+    resetBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  },
+  { _id: false },
+);
+
 // ─── Esquema Principal: User ─────────────────────────────────────────────────
 
 const userSchema = new Schema(
@@ -417,6 +469,17 @@ const userSchema = new Schema(
       type:     Number,
       default:  0,
       required: true,
+    },
+
+    // ── Segundo factor de autenticación ──────────────────────────────────────
+    /**
+     * Segundo factor TOTP. Obligatorio para los accesos con privilegios de
+     * administración cuando `ADMIN_2FA_ENABLED` está activo; el consumidor
+     * financiero no lo requiere en esta etapa.
+     */
+    twoFactor: {
+      type:    twoFactorSchema,
+      default: () => ({}),
     },
 
     // ── Reset de contraseña ──────────────────────────────────────────────────

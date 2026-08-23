@@ -43,15 +43,35 @@ const accessLogSchema = new mongoose.Schema(
 
     /**
      * Resultado del intento.
-     *   success  — credenciales válidas y cuenta habilitada
-     *   failed   — credenciales inválidas, cuenta inexistente o suspendida
-     *   blocked  — rechazado por bloqueo temporal tras intentos fallidos
+     *   success     — acceso concedido: la sesión SE EMITIÓ
+     *   pending_2fa — primer factor válido, sesión NO emitida a la espera del segundo
+     *   failed      — credenciales inválidas, cuenta inexistente o suspendida
+     *   blocked     — rechazado por bloqueo temporal tras intentos fallidos
+     *
+     * `pending_2fa` existe porque, con segundo factor exigido, validar la
+     * contraseña dejó de ser un acceso. Anotarlo como 'success' afirmaría que se
+     * entró cuando no se entró; anotarlo como 'failed' ocultaría que la
+     * contraseña sí era correcta, que es justo el dato que interesa al
+     * investigar una credencial sustraída.
      */
     outcome: {
       type:     String,
-      enum:     ['success', 'failed', 'blocked'],
+      enum:     ['success', 'pending_2fa', 'failed', 'blocked'],
       required: true,
       index:    true,
+    },
+
+    /**
+     * Factor que produjo el asiento. Separa, dentro de una misma cuenta, lo que
+     * ocurrió en el punto de contraseña de lo que ocurrió en el de segundo
+     * factor. Los registros anteriores a su incorporación lo tienen en null, que
+     * se lee como 'password'.
+     */
+    factor: {
+      type:    String,
+      enum:    ['password', 'totp', 'recovery_code', null],
+      default: null,
+      index:   true,
     },
 
     /**
@@ -59,10 +79,20 @@ const accessLogSchema = new mongoose.Schema(
      * cliente: la respuesta de login es genérica a propósito, para no revelar
      * si una cuenta existe. Esta precisión es para el operador, no para quien
      * intenta entrar.
+     *
+     * Los cuatro últimos corresponden al segundo factor:
+     *   totp_invalid       — código que no coincide con ningún paso de la ventana
+     *   totp_replayed      — código correcto pero ya consumido durante su vigencia
+     *   totp_not_enrolled  — cuenta con privilegios sin segundo factor configurado
+     *   recovery_invalid   — código de recuperación inexistente o ya gastado
      */
     reason: {
       type: String,
-      enum: ['bad_password', 'user_not_found', 'account_inactive', 'locked_out', null],
+      enum: [
+        'bad_password', 'user_not_found', 'account_inactive', 'locked_out',
+        'totp_invalid', 'totp_replayed', 'totp_not_enrolled', 'recovery_invalid',
+        null,
+      ],
       default: null,
     },
 

@@ -82,6 +82,23 @@ export const loginLimiter = makeLimiter({
   message:       'Demasiados intentos de inicio de sesión. Espera 15 minutos e intenta de nuevo.',
 });
 
+// Segundo factor de accesos con privilegios (Art. 2° inc. c, Sec. 4).
+//
+// MISMOS umbrales que loginLimiter — es la política de intentos que la norma
+// manda replicar en este punto—, pero en su PROPIO cupo, deliberadamente.
+// Compartir la instancia parecía más fiel a "la misma política" y es peor: el
+// acceso con segundo factor gasta dos peticiones (credencial y código) y el alta
+// tres, de modo que un solo error de tecleo dejaría al operador sin cupo y con el
+// panel cerrado por límite de origen, no por el control. La política que de
+// verdad se comparte es la que importa: el contador de fallos y el bloqueo por
+// cuenta de accessLogService, que sí es el mismo objeto para ambos puntos.
+export const twoFactorLimiter = makeLimiter({
+  windowMs:      15 * 60 * 1000,
+  max:           5,
+  maxPermissive: 50,
+  message:       'Demasiados intentos de verificación. Espera 15 minutos e intenta de nuevo.',
+});
+
 export const registerLimiter = makeLimiter({
   windowMs:      60 * 60 * 1000,
   max:           5,
