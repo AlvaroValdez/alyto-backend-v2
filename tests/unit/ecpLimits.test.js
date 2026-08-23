@@ -9,13 +9,13 @@
 import { evaluateEcpLimits, ecpViolationMessage } from '../../src/services/ecpLimits.js';
 
 const LIMITS = {
-  perOperationMaxBOB: 20_000,
-  dailyAmountBOB:     26_000,
-  dailyOperations:    45,
-  monthlyAmountBOB:   480_000,
-  periodAmountBOB:    3_500_000,
-  periodOperations:   4_500,
-  maxConsumers:       600,
+  perOperationMaxBOB: 120_000,
+  dailyAmountBOB:     170_000,
+  dailyOperations:    0,          // el Protocolo vigente no declara tope de conteo diario
+  monthlyAmountBOB:   0,          // ni tope mensual
+  periodAmountBOB:    8_000_000,
+  periodOperations:   6_000,
+  maxConsumers:       630,
 };
 
 /** Consumo en cero, para partir de un estado limpio en cada caso. */
@@ -35,65 +35,55 @@ describe('evaluateEcpLimits — los seis límites agregados', () => {
 
   // ── Por operación ────────────────────────────────────────────────────────────
   it('rechaza por encima del máximo por operación', () => {
-    const r = evaluateEcpLimits({ amountBOB: 20_001, usage: sinConsumo(), limits: LIMITS });
+    const r = evaluateEcpLimits({ amountBOB: 120_001, usage: sinConsumo(), limits: LIMITS });
     expect(r.allowed).toBe(false);
     expect(r.violation.code).toBe('ECP_OPERATION_LIMIT');
-    expect(r.violation.limit).toBe(20_000);
+    expect(r.violation.limit).toBe(120_000);
   });
 
   it('admite exactamente el máximo por operación (el límite es inclusivo)', () => {
-    const r = evaluateEcpLimits({ amountBOB: 20_000, usage: sinConsumo(), limits: LIMITS });
+    const r = evaluateEcpLimits({ amountBOB: 120_000, usage: sinConsumo(), limits: LIMITS });
     expect(r.allowed).toBe(true);
   });
 
   // ── Diario, en monto ─────────────────────────────────────────────────────────
   it('rechaza cuando la operación haría exceder el acumulado diario', () => {
     const usage = sinConsumo();
-    usage.day = { amount: 20_000, count: 3 };
-    // 20.000 consumidos + 6.001 = 26.001 > 26.000
-    const r = evaluateEcpLimits({ amountBOB: 6_001, usage, limits: LIMITS });
+    usage.day = { amount: 100_000, count: 3 };
+    // 100.000 consumidos + 70.001 = 170.001 > 170.000
+    const r = evaluateEcpLimits({ amountBOB: 70_001, usage, limits: LIMITS });
     expect(r.allowed).toBe(false);
     expect(r.violation.code).toBe('ECP_DAILY_AMOUNT_LIMIT');
-    expect(r.violation.remaining).toBe(6_000);
+    expect(r.violation.remaining).toBe(70_000);
   });
 
   it('admite la operación que agota exactamente el acumulado diario', () => {
     const usage = sinConsumo();
-    usage.day = { amount: 20_000, count: 3 };
-    const r = evaluateEcpLimits({ amountBOB: 6_000, usage, limits: LIMITS });
+    usage.day = { amount: 100_000, count: 3 };
+    const r = evaluateEcpLimits({ amountBOB: 70_000, usage, limits: LIMITS });
     expect(r.allowed).toBe(true);
   });
 
-  // ── Diario, en número ────────────────────────────────────────────────────────
-  it('rechaza la operación número 46 del día aunque el monto sea mínimo', () => {
+  // ── Conteo diario y tope mensual: desactivados en el Protocolo vigente ───────
+  it('no aplica tope de conteo diario, porque el Protocolo no lo declara', () => {
     const usage = sinConsumo();
-    usage.day = { amount: 1_000, count: 45 };
-    const r = evaluateEcpLimits({ amountBOB: 400, usage, limits: LIMITS });
-    expect(r.allowed).toBe(false);
-    expect(r.violation.code).toBe('ECP_DAILY_COUNT_LIMIT');
-    expect(r.violation.unit).toBe('operaciones');
-  });
-
-  it('admite la operación número 45 del día', () => {
-    const usage = sinConsumo();
-    usage.day = { amount: 1_000, count: 44 };
+    usage.day = { amount: 1_000, count: 500 };
     const r = evaluateEcpLimits({ amountBOB: 400, usage, limits: LIMITS });
     expect(r.allowed).toBe(true);
   });
 
-  // ── Mensual y período ────────────────────────────────────────────────────────
-  it('rechaza por el acumulado mensual', () => {
+  it('no aplica tope mensual, porque el Protocolo no lo declara', () => {
     const usage = sinConsumo();
-    usage.day   = { amount: 0,       count: 0 };
-    usage.month = { amount: 479_000, count: 300 };
+    usage.month = { amount: 5_000_000, count: 300 };
     const r = evaluateEcpLimits({ amountBOB: 2_000, usage, limits: LIMITS });
-    expect(r.allowed).toBe(false);
-    expect(r.violation.code).toBe('ECP_MONTHLY_AMOUNT_LIMIT');
+    expect(r.allowed).toBe(true);
   });
+
+  // ── Período ──────────────────────────────────────────────────────────────────
 
   it('rechaza por el acumulado del período', () => {
     const usage = sinConsumo();
-    usage.period = { amount: 3_499_000, count: 4_000 };
+    usage.period = { amount: 7_999_000, count: 4_000 };
     const r = evaluateEcpLimits({ amountBOB: 2_000, usage, limits: LIMITS });
     expect(r.allowed).toBe(false);
     expect(r.violation.code).toBe('ECP_PERIOD_AMOUNT_LIMIT');
@@ -101,7 +91,7 @@ describe('evaluateEcpLimits — los seis límites agregados', () => {
 
   it('rechaza por el número de operaciones del período', () => {
     const usage = sinConsumo();
-    usage.period = { amount: 1_000, count: 4_500 };
+    usage.period = { amount: 1_000, count: 6_000 };
     const r = evaluateEcpLimits({ amountBOB: 400, usage, limits: LIMITS });
     expect(r.allowed).toBe(false);
     expect(r.violation.code).toBe('ECP_PERIOD_COUNT_LIMIT');
@@ -110,10 +100,10 @@ describe('evaluateEcpLimits — los seis límites agregados', () => {
   // ── Precedencia ──────────────────────────────────────────────────────────────
   it('informa el límite por operación antes que los acumulados', () => {
     // Excede los cuatro a la vez: debe reportarse el más específico.
-    const usage = { day:    { amount: 25_000, count: 44 },
-                    month:  { amount: 479_000, count: 300 },
-                    period: { amount: 3_499_000, count: 4_499 } };
-    const r = evaluateEcpLimits({ amountBOB: 50_000, usage, limits: LIMITS });
+    const usage = { day:    { amount: 169_000, count: 44 },
+                    month:  { amount: 0, count: 0 },
+                    period: { amount: 7_999_000, count: 5_999 } };
+    const r = evaluateEcpLimits({ amountBOB: 500_000, usage, limits: LIMITS });
     expect(r.violation.code).toBe('ECP_OPERATION_LIMIT');
   });
 
@@ -129,7 +119,7 @@ describe('evaluateEcpLimits — los seis límites agregados', () => {
   // ── Invariante: el remanente informado nunca es negativo ─────────────────────
   it('no informa remanente negativo aunque el consumo ya exceda el límite', () => {
     const usage = sinConsumo();
-    usage.day   = { amount: 30_000, count: 5 };   // ya por encima de 26.000
+    usage.day   = { amount: 180_000, count: 5 };  // ya por encima de 170.000
     const r = evaluateEcpLimits({ amountBOB: 400, usage, limits: LIMITS });
     expect(r.allowed).toBe(false);
     expect(r.violation.remaining).toBe(0);
@@ -140,10 +130,10 @@ describe('ecpViolationMessage — el mensaje no filtra el agregado de la platafo
 
   it('no revela el consumo ni el límite en el texto', () => {
     const violation = { code: 'ECP_DAILY_AMOUNT_LIMIT', scope: 'diario', unit: 'BOB',
-                        limit: 26_000, used: 25_800, requested: 400, remaining: 200 };
+                        limit: 170_000, used: 169_800, requested: 400, remaining: 200 };
     const msg = ecpViolationMessage(violation);
-    expect(msg).not.toMatch(/26.?000/);
-    expect(msg).not.toMatch(/25.?800/);
+    expect(msg).not.toMatch(/170.?000/);
+    expect(msg).not.toMatch(/169.?800/);
     expect(msg).toMatch(/diario/);
   });
 

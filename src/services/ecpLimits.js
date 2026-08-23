@@ -5,11 +5,18 @@
  * sistema aplicaba dos —mínimo y máximo por operación, por corredor— y los seis
  * agregados no existían en ninguna parte:
  *
- *     por operación   mín Bs 400 · máx Bs 20.000          ← ya existía (TransactionConfig)
- *     diario          Bs 26.000 · 45 operaciones          ← NO existía
- *     mensual         Bs 480.000                          ← NO existía
- *     período         Bs 3.500.000 · 4.500 operaciones    ← NO existía
- *     consumidores    600                                 ← NO existía
+ *     por operación   mín Bs 400 · máx Bs 120.000        ← ya existía (TransactionConfig)
+ *     diario          Bs 170.000                         ← NO existía
+ *     período         Bs 8.000.000 · 6.000 operaciones   ← NO existía
+ *     consumidores    630                                ← NO existía
+ *
+ * El máximo diario se fija por DEBAJO de la capacidad diaria de adquisición de activo
+ * digital (Bs 174.000), que es la restricción operativa efectiva del servicio: un tope
+ * superior admitiría operaciones cobradas que no se podrían liquidar en plazo.
+ *
+ * Conteo diario y tope mensual quedan en 0 —desactivados— porque el Protocolo vigente
+ * no los declara. `evaluateEcpLimits` ignora todo límite en 0, así que reactivarlos es
+ * cambiar el valor, sin tocar la lógica.
  *
  * Por qué importa: el Art. 13° inc. f de la Sección 5 hace del EXCESO DE LÍMITES una
  * causal de rechazo del servicio, y el Art. 8° exige que las pruebas se realicen en
@@ -56,13 +63,13 @@ function envInt(name, fallback) {
  */
 export function getEcpLimits() {
   return {
-    perOperationMaxBOB: envInt('ECP_MAX_PER_OPERATION_BOB', 20_000),
-    dailyAmountBOB:     envInt('ECP_MAX_DAILY_BOB',         26_000),
-    dailyOperations:    envInt('ECP_MAX_DAILY_OPS',              45),
-    monthlyAmountBOB:   envInt('ECP_MAX_MONTHLY_BOB',      480_000),
-    periodAmountBOB:    envInt('ECP_MAX_PERIOD_BOB',     3_500_000),
-    periodOperations:   envInt('ECP_MAX_PERIOD_OPS',         4_500),
-    maxConsumers:       envInt('ECP_MAX_CONSUMERS',            600),
+    perOperationMaxBOB: envInt('ECP_MAX_PER_OPERATION_BOB', 120_000),
+    dailyAmountBOB:     envInt('ECP_MAX_DAILY_BOB',         170_000),
+    dailyOperations:    envInt('ECP_MAX_DAILY_OPS',                0),  // sin tope de conteo diario
+    monthlyAmountBOB:   envInt('ECP_MAX_MONTHLY_BOB',              0),  // el Protocolo no declara tope mensual
+    periodAmountBOB:    envInt('ECP_MAX_PERIOD_BOB',       8_000_000),
+    periodOperations:   envInt('ECP_MAX_PERIOD_OPS',           6_000),
+    maxConsumers:       envInt('ECP_MAX_CONSUMERS',              630),
   };
 }
 
