@@ -64,6 +64,13 @@ try {
   await mongoose.disconnect();
 }
 
+// Salida explícita. En producción el registro estructurado agrega un transporte
+// hacia el servicio de observabilidad que mantiene un temporizador de descarga
+// abierto, y eso basta para que el proceso no termine nunca por sí solo: el
+// script quedaba colgado justo en el entorno donde tiene que correr. En
+// desarrollo no se nota, porque ese transporte no se activa.
+process.exit(process.exitCode ?? 0);
+
 // ─── Modos ────────────────────────────────────────────────────────────────────
 
 async function mostrarEstado() {
