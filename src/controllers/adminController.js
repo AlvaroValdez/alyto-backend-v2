@@ -122,9 +122,15 @@ const MIN_REASON_LENGTH = 10;
 const FORCED_TERMINAL_STATUSES = new Set(['completed', 'refunded']);
 
 /**
- * `role` sale de la API por defecto: la promoción a admin se hace con
- * `npm run seed:admin` (acceso al servidor), no con un PATCH desde el panel.
- * `ADMIN_ROLE_MUTATION_ENABLED=true` es un break-glass explícito y temporal.
+ * `role` sale de la API por defecto: escalar privilegios no debe ser una edición
+ * más del panel. `ADMIN_ROLE_MUTATION_ENABLED=true` es un break-glass explícito
+ * y temporal — se enciende, se hace el cambio con su motivo, y se apaga.
+ *
+ * ⚠️ NO usar `npm run seed:admin` para promover a una persona: ese script hace
+ * `deleteOne` y recrea el usuario desde cero (nuevo identificador, contraseña
+ * reemplazada, datos personales pisados) y no deja asiento en la bitácora. Sirve
+ * para sembrar un admin de pruebas en un entorno limpio, no para elevar a nadie.
+ *
  * Se lee dentro de la función (regla 21 de CLAUDE.md).
  */
 export function isRoleMutationEnabled() {
@@ -208,8 +214,16 @@ export async function updateUser(req, res) {
         userId, from: currentUserField(before, 'role'), to: updates.role,
         adminId: String(req.user._id), adminEmail: req.user.email,
       });
+      // El mensaje NO debe remitir a `npm run seed:admin`. Ese script borra y
+      // recrea el usuario: aplicado a una persona real le cambia el
+      // identificador, la contraseña y los datos personales, y no escribe ningún
+      // asiento. Es decir, ante el bloqueo de este control el sistema estaba
+      // sugiriendo el único camino que destruye el rastro que el control existe
+      // para producir — y un operador apurado lo sigue sin advertirlo.
       return res.status(403).json({
-        error: 'El campo role no es modificable por API. Usar el script seedAdmin (npm run seed:admin).',
+        error: 'El cambio de rol está fuera de la API por seguridad. Requiere habilitación temporal '
+             + 'de la mutación de rol (ADMIN_ROLE_MUTATION_ENABLED) por quien administre el servidor, '
+             + 'y se ejecuta desde este panel consignando el motivo, que queda en la bitácora.',
         code:  'ROLE_MUTATION_DISABLED',
       });
     }

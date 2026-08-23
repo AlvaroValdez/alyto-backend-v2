@@ -6,6 +6,26 @@
  * Crea (o recrea) el usuario admin con rol 'admin'.
  * Si el usuario ya existe lo elimina primero para garantizar un estado limpio.
  *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ⚠️  DESTRUYE DATOS Y NO DEJA ASIENTO EN LA BITÁCORA.
+ *
+ * NO sirve para promover a una persona. Hace `deleteOne` sobre el correo
+ * indicado y crea un usuario nuevo: identificador distinto, contraseña
+ * reemplazada, nombre y documento pisados por valores de siembra. Aplicado a
+ * una cuenta real le destruye la identidad y deja su historial colgando de un
+ * identificador que ya no existe.
+ *
+ * Tampoco escribe `AdminAuditLog`. El apartado 7.4.2 del Informe Técnico
+ * declara que todo cambio de rol queda asentado con autor, momento y motivo;
+ * una elevación hecha por acá no deja ninguno de los tres.
+ *
+ * Para elevar a alguien: habilitar temporalmente `ADMIN_ROLE_MUTATION_ENABLED`
+ * y hacer el cambio desde el panel consignando el motivo. Ésa es la vía
+ * auditada, y es la única que produce el rastro que el expediente declara.
+ *
+ * Uso legítimo: sembrar un administrador de PRUEBAS en un entorno limpio.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
  * ⚠️ Seguridad (audit 2026-06-11):
  *  - La password NUNCA va hardcodeada — se exige vía SEED_ADMIN_PASSWORD.
  *  - Rehúsa correr contra la DB de producción (alyto-v2) o con NODE_ENV=production,
