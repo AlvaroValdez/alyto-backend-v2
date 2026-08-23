@@ -199,10 +199,15 @@ export async function verify(req, res) {
 
     if (!hasConfirmedSecondFactor(user)) {
       await registerFailedAttempt({ req, email: user.email, reason: 'totp_not_enrolled', user, factor });
-      return res.status(403).json({
-        error: 'Debes configurar tu segundo factor de autenticación antes de continuar.',
-        code:  'ENROLLMENT_REQUIRED',
-      });
+      // Respuesta genérica, idéntica a la de un código inválido o ya consumido:
+      // los tres casos se responden igual para no revelar el estado del factor de
+      // una cuenta. Es el mismo criterio de respuesta uniforme con el que el punto
+      // de contraseña evita la enumeración de cuentas.
+      //
+      // El alta forzada NO depende de esta respuesta: quien debe darse de alta lo
+      // sabe por `enrollmentRequired` en el acceso, que llega después de validar
+      // la contraseña y por tanto no informa a un tercero.
+      return res.status(401).json({ error: GENERIC_2FA_ERROR });
     }
 
     const result = usaRecuperacion

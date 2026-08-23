@@ -231,8 +231,11 @@ describe('alta del segundo factor', () => {
 
     const res = await post2fa('verify', l.challengeToken, { code: codigoSiguiente(secreto) });
 
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ENROLLMENT_REQUIRED');
+    // Respuesta genérica: los tres motivos de rechazo del segundo factor
+    // —código inválido, código ya consumido y factor no configurado— se
+    // responden igual, para no revelar el estado del factor de una cuenta.
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBeUndefined();
     expect(res.body.token).toBeUndefined();
 
     const asiento = await AccessLog.findOne({ reason: 'totp_not_enrolled', factor: 'totp' }).lean();
