@@ -20,6 +20,7 @@
 
 import { logger }        from '../utils/logger.js';
 import { plazoLiquidacion } from '../utils/ecpTramos.js';
+import { evaluateCorridorAccess, corridorAccessDenialBody } from '../utils/corridorAccess.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -826,15 +827,14 @@ export async function initCrossBorderPayment(req, res) {
     return res.status(404).json({ error: `Corredor '${corridorId}' no encontrado o inactivo.` });
   }
 
-  // Validar que el usuario tiene acceso al país de origen del corredor
-  const ENTITY_COUNTRY_MAP_CBP = { SpA: 'CL', SRL: 'BO', LLC: 'US' };
-  const userOriginCountryCBP   = ENTITY_COUNTRY_MAP_CBP[req.user?.legalEntity] ?? req.user?.residenceCountry ?? 'CL';
-  if (corridor.originCountry !== userOriginCountryCBP) {
-    return res.status(403).json({
-      error: 'No tienes acceso a este corredor.',
-      userOriginCountry:     userOriginCountryCBP,
-      corridorOriginCountry: corridor.originCountry,
-    });
+  // Validar que el consumidor tiene acceso al corredor: país de origen Y entidad.
+  // Comparar sólo el país dejaba pasar corredores de origen Bolivia bajo otra entidad
+  // — ver utils/corridorAccess.js.
+  const accesoCrear = evaluateCorridorAccess({ corridor, user: req.user });
+  if (!accesoCrear.allowed) {
+    console.warn('[CrossBorder] Acceso a corredor denegado:', accesoCrear.reason,
+      '| corredor:', corridor.corridorId, '| entidad usuario:', req.user?.legalEntity);
+    return res.status(403).json(corridorAccessDenialBody(accesoCrear));
   }
 
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
@@ -2247,15 +2247,12 @@ export async function getQuote(req, res) {
     });
   }
 
-  // Verificar que el usuario tiene acceso al país de origen del corredor
-  const ENTITY_COUNTRY_MAP = { SpA: 'CL', SRL: 'BO', LLC: 'US' };
-  const userOriginCountry  = ENTITY_COUNTRY_MAP[req.user?.legalEntity] ?? req.user?.residenceCountry ?? 'CL';
-  if (corridor.originCountry !== userOriginCountry) {
-    return res.status(403).json({
-      error: 'No tienes acceso a este corredor.',
-      userOriginCountry,
-      corridorOriginCountry: corridor.originCountry,
-    });
+  // Mismo control que en la creación, misma función: país de origen Y entidad.
+  const accesoQuote = evaluateCorridorAccess({ corridor, user: req.user });
+  if (!accesoQuote.allowed) {
+    console.warn('[Quote] Acceso a corredor denegado:', accesoQuote.reason,
+      '| corredor:', corridor.corridorId, '| entidad usuario:', req.user?.legalEntity);
+    return res.status(403).json(corridorAccessDenialBody(accesoQuote));
   }
 
   // Precios de Vita: se piden UNA sola vez por cotización y se reusan tanto para
