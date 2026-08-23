@@ -52,21 +52,56 @@ export function isExternalScheduler() {
 /**
  * Ejecuta un job por nombre. Devuelve un resultado estructurado; nunca lanza.
  */
-export async function runJob(name) {
+/**
+ * Persiste la ejecución. Best-effort deliberado: el job YA corrió, y su resultado no
+ * puede perderse por un problema de telemetría. Un fallo acá se anota en bitácora y
+ * no se propaga.
+ */
+async function recordRun(entry) {
+  try {
+    const { default: JobRun } = await import('../models/JobRun.js');
+    await JobRun.create(entry);
+  } catch (err) {
+    logger.warn('[jobs] No se pudo registrar la ejecución', { name: entry.name, error: err.message });
+  }
+}
+
+/**
+ * Ejecuta un job por nombre y deja constancia de la corrida.
+ *
+ * El registro es lo que permite distinguir un proceso que corrió y no tenía nada que
+ * hacer de uno que dejó de correr. Sin él, un job caído **no produce ningún síntoma**:
+ * los descuadres simplemente dejan de detectarse, en silencio. Es exactamente lo que
+ * un supervisor necesita poder descartar.
+ *
+ * @param {string} name
+ * @param {{trigger?: 'scheduler'|'interval'|'manual'}} [opts]
+ */
+export async function runJob(name, { trigger = 'scheduler' } = {}) {
   const loader = JOBS[name];
   if (!loader) {
     return { ok: false, name, error: 'unknown_job', known: jobNames() };
   }
+  const started   = new Date();
   const startedAt = Date.now();
   try {
-    const fn = await loader();
-    await fn();
-    const ms = Date.now() - startedAt;
-    logger.info('[jobs] Job ejecutado on-demand', { name, ms });
-    return { ok: true, name, ms };
+    const fn  = await loader();
+    const res = await fn();
+    const ms  = Date.now() - startedAt;
+    // Volumen procesado, cuando el job lo informa: distingue "no había nada que
+    // hacer" de "no hizo lo que debía", que sin este dato se ven idénticos.
+    const processed = typeof res === 'number'          ? res
+                    : Number.isFinite(res?.processed)  ? res.processed
+                    : null;
+    logger.info('[jobs] Job ejecutado', { name, ms, trigger, processed });
+    await recordRun({ name, trigger, startedAt: started, finishedAt: new Date(),
+                      durationMs: ms, ok: true, processed });
+    return { ok: true, name, ms, processed };
   } catch (err) {
     const ms = Date.now() - startedAt;
-    logger.error('[jobs] Job falló', { name, ms, error: err.message });
+    logger.error('[jobs] Job falló', { name, ms, trigger, error: err.message });
+    await recordRun({ name, trigger, startedAt: started, finishedAt: new Date(),
+                      durationMs: ms, ok: false, error: err.message });
     return { ok: false, name, ms, error: err.message };
   }
 }

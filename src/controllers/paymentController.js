@@ -19,6 +19,7 @@
  */
 
 import { logger }        from '../utils/logger.js';
+import { plazoLiquidacion } from '../utils/ecpTramos.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -894,6 +895,32 @@ export async function initCrossBorderPayment(req, res) {
     }
   }
 
+  // ── Límites agregados del Entorno Controlado de Pruebas (ASFI) ─────────────
+  // El Protocolo declara ocho límites; hasta acá sólo se verificaron los DOS por
+  // operación. Los seis agregados —diario, mensual, de período, en monto y en
+  // número— se verifican en `ecpLimits`.
+  //
+  // A diferencia del límite Business de arriba, este bloque NO traga el error:
+  // el Art. 13° inc. f hace del exceso de límites una causal de rechazo del
+  // servicio, así que la imposibilidad de verificar bloquea. Ver ecpLimits.js.
+  if (req.user?.legalEntity === 'SRL' && corridor.originCurrency === 'BOB') {
+    const { checkEcpLimits, ecpViolationMessage } = await import('../services/ecpLimits.js');
+    const ecp = await checkEcpLimits({ amountBOB: amount });
+
+    if (!ecp.allowed) {
+      console.warn('[ECP] Operación rechazada por límite agregado:', ecp.violation?.code,
+        '| solicitado:', amount, '| límite:', ecp.violation?.limit, '| consumido:', ecp.violation?.used);
+      return res.status(409).json({
+        error:     ecpViolationMessage(ecp.violation),
+        code:      ecp.violation?.code,
+        scope:     ecp.violation?.scope,
+        limit:     ecp.violation?.limit,
+        remaining: ecp.violation?.remaining,
+        currency:  ecp.violation?.unit === 'BOB' ? 'BOB' : undefined,
+      });
+    }
+  }
+
   // ── Payin manual SRL: el comprobante se sube DESPUÉS (spec §2.3) ───────────
   // La tx se crea sin comprobante en status 'payin_pending'. El usuario navega
   // a Step 3 (/send/payment/:txId) donde sube el comprobante vía
@@ -1443,6 +1470,15 @@ export async function initCrossBorderPayment(req, res) {
       originCountry:       corridor.originCountry,
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
+      // Tramo del Protocolo y plazo comprometido. Se persiste el que estaba vigente
+      // al crear la operación: es el que se informó al consumidor antes de confirmar,
+      // y es contra ese compromiso que se mide el cumplimiento del plazo.
+      ...(corridor.legalEntity === 'SRL' && corridor.originCurrency === 'BOB'
+        ? (() => {
+            const r = plazoLiquidacion({ amountBOB: amount });
+            return r ? { ecpTramo: r.tramo.id, plazoLiquidacionHasta: r.venceAt } : {};
+          })()
+        : {}),
       // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
       ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
       // usdcTransitAmount: calculado server-side (sección 3c). El valor del body

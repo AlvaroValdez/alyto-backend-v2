@@ -1,4 +1,7 @@
 node_modules/
+# Sin barra: un enlace simbólico llamado node_modules es un ARCHIVO, no un
+# directorio, y `node_modules/` no lo cubre. Así entró al índice en 39e4f15.
+node_modules
 .env
 .env.local
 .env.production
