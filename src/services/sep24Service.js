@@ -32,6 +32,7 @@ import WalletUSDC        from '../models/WalletUSDC.js';
 import { calculateQuote } from './quoteCalculator.js';
 import { logger }         from '../utils/logger.js';
 import { ASSETS }         from '../config/stellar.js';
+import { resolveWithdrawFeePercent, computeFee } from './sep24Fees.js';
 
 const randomId = () => Math.random().toString(36).substring(2, 10).toUpperCase();
 
@@ -41,8 +42,14 @@ const FRONTEND_URL = process.env.FRONTEND_URL ?? 'https://alyto-frontend-v2.onre
 
 /**
  * Retorna los activos y operaciones soportadas como anchor SEP-24.
+ *
+ * La comisión de retiro se resuelve desde el tarifario (`sep24Fees`) y no está fija
+ * acá: antes este `/info` publicaba 6,5% mientras `/fee` calculaba con 0,065 por
+ * separado, de modo que un cambio en el tarifario no alcanzaba a ninguno de los dos.
  */
 export async function getAnchorInfo() {
+  const withdrawFeePercent = await resolveWithdrawFeePercent();
+
   return {
     deposit: {
       USDC: {
@@ -67,7 +74,7 @@ export async function getAnchorInfo() {
         min_amount:   10,
         max_amount:   9998,
         fee_fixed:    0,
-        fee_percent:  6.5,
+        fee_percent:  withdrawFeePercent,
         types: {
           bank_account: {
             fields: {
@@ -309,9 +316,10 @@ export async function getFee({ query }) {
     return { fee: '0' };
   }
 
-  const usdAmount = parseFloat(amount) || 0;
-  const feePercent = operation === 'withdraw' ? 0.065 : 0;
-  const fee = (usdAmount * feePercent).toFixed(2);
+  // Misma fuente que `/info`: ambos derivan de `resolveWithdrawFeePercent`, así que
+  // no pueden divergir. La conversión de unidad ocurre en un solo lugar.
+  const feePercent = operation === 'withdraw' ? await resolveWithdrawFeePercent() : 0;
+  const fee = computeFee({ amount: parseFloat(amount), feePercent }).toFixed(2);
 
   return { fee };
 }

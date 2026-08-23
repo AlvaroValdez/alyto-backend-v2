@@ -17,6 +17,8 @@
  * and docs/CHANGELOG_FLOWS.md first.
  */
 
+import { tramoPublico } from '../utils/ecpTramos.js';
+
 const round2 = n => Math.round(n * 100) / 100;
 // FX rates necesitan 6 decimales: rates < 1 (ej. BOB→USD ≈ 0.107) pierden ~95% de la
 // info con round2. round2 sigue siendo correcto para amounts en moneda fiat.
@@ -128,11 +130,24 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
   // Step 7 — effective rate for display (6 decimales para preservar rates < 1)
   const effectiveRate     = round6(destinationAmount / amount);
 
+  // Step 8 — tramo y plazo de liquidación comprometido.
+  //
+  // Va en el resultado de la cotización porque el Art. 9° Sec. 5 exige informarlo
+  // ANTES de confirmar: es lo que hace admisible el ticket máximo de Bs 120.000. Un
+  // plazo diferenciado que el consumidor descubre después de transferir no es
+  // información previa, es una condición sobreviniente.
+  //
+  // `null` cuando el importe cae fuera de los tramos declarados. No se acomoda al
+  // tramo más cercano a propósito: un importe fuera de rango lo rechaza el control
+  // de límites (`ecpLimits`), no lo absorbe el cálculo.
+  const tramo = tramoPublico(amount);
+
   return {
     originAmount:      amount,
     totalDeducted,
     destinationAmount,
     effectiveRate,
+    ...(tramo ?? {}),
 
     totalDeductedReal,
     fees: {
