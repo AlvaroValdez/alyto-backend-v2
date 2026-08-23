@@ -161,7 +161,7 @@ export async function registerFailedAttempt({ req, email, reason, user, factor =
       const actualizado = await User.findOneAndUpdate(
         { _id: user._id },
         { $inc: { failedLoginAttempts: 1 } },
-        { new: true, projection: { failedLoginAttempts: 1 } },
+        { returnDocument: 'after', projection: { failedLoginAttempts: 1 } },
       ).lean()
 
       const streak = actualizado?.failedLoginAttempts ?? 1
