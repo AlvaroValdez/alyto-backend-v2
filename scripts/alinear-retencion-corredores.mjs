@@ -66,6 +66,14 @@ const OBJETIVO_POR_CORREDOR = {
     alytoCSpread:           3,
     businessAlytoCSpread:   1.5,
   },
+  // Inactivo y fuera de los 23 corredores declarados, pero su prefijo lo identifica
+  // como corredor de la sociedad boliviana. Un revisor que consulte la configuración
+  // conforme al Art. 10° inc. e encontraría retención no informada en un corredor de
+  // la entidad, y eso obliga a explicar una excepción evitable. Se pliega igual.
+  'bo-za': {
+    profitRetentionPercent: 0,
+    alytoCSpread:           3,     // 2 % spread + 1 % retención
+  },
 };
 
 const CORREDORES = Object.keys(OBJETIVO_POR_CORREDOR);
