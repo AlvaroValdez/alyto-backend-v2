@@ -19,6 +19,7 @@
  */
 
 import { logger }        from '../utils/logger.js';
+import { plazoLiquidacion } from '../utils/ecpTramos.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
@@ -1469,6 +1470,15 @@ export async function initCrossBorderPayment(req, res) {
       originCountry:       corridor.originCountry,
       destinationCountry:  corridor.destinationCountry,
       destinationCurrency: corridor.destinationCurrency,
+      // Tramo del Protocolo y plazo comprometido. Se persiste el que estaba vigente
+      // al crear la operación: es el que se informó al consumidor antes de confirmar,
+      // y es contra ese compromiso que se mide el cumplimiento del plazo.
+      ...(corridor.legalEntity === 'SRL' && corridor.originCurrency === 'BOB'
+        ? (() => {
+            const r = plazoLiquidacion({ amountBOB: amount });
+            return r ? { ecpTramo: r.tramo.id, plazoLiquidacionHasta: r.venceAt } : {};
+          })()
+        : {}),
       // Activo de tránsito en Stellar (USDC para corredores SRL Bolivia)
       ...(corridor.legalEntity === 'SRL' ? { digitalAsset: 'USDC' } : {}),
       // usdcTransitAmount: calculado server-side (sección 3c). El valor del body

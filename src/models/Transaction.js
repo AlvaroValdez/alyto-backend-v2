@@ -697,6 +697,26 @@ const transactionSchema = new Schema(
       default: null,
     },
     /**
+     * Tramo del Protocolo de Pruebas al que corresponde el importe, y plazo de
+     * liquidación comprometido. Se persisten porque el plazo se informó al consumidor
+     * ANTES de confirmar (Art. 9° Sec. 5): el compromiso es el que estaba vigente al
+     * crear la operación, no el que resultaría de recalcularlo después si los tramos
+     * cambiaran.
+     */
+    ecpTramo: {
+      type:    String,
+      enum:    ['estandar', 'ampliado', 'corporativo', null],
+      default: null,
+      index:   true,
+    },
+    /** Fecha límite de liquidación comprometida al consumidor. */
+    plazoLiquidacionHasta: {
+      type:    Date,
+      default: null,
+      index:   true,
+    },
+
+    /**
      * Sucesión cronológica de cambios de estado. Aditiva: se agrega, nunca se
      * reescribe. La alimenta el hook `pre('save')` del final del archivo; ver allí
      * el fundamento y el alcance.

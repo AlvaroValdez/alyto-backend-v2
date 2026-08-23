@@ -232,6 +232,33 @@ export async function checkEcpLimits({ amountBOB, now = new Date() }) {
   return { allowed, violation, limits, usage };
 }
 
+/**
+ * Tope de consumidores financieros del período.
+ *
+ * Se evalúa en el alta —no al operar—, porque el límite es sobre cuántos consumidores
+ * participan del Entorno Controlado, no sobre cuántos transan. Un consumidor ya
+ * habilitado no debe quedar bloqueado por el ingreso de otros.
+ *
+ * FAIL-CLOSED, igual que el resto: si no se puede contar, no se habilita.
+ *
+ * @returns {Promise<{allowed:boolean, count:number|null, limit:number}>}
+ */
+export async function checkConsumerLimit() {
+  const limit = getEcpLimits().maxConsumers;
+  if (!ecpLimitsEnabled() || !(limit > 0)) return { allowed: true, count: null, limit };
+
+  try {
+    const { default: User } = await import('../models/User.js');
+    const count = await User.countDocuments({ legalEntity: 'SRL', kycStatus: 'approved' });
+    return { allowed: count < limit, count, limit };
+  } catch (err) {
+    logger?.error?.('[ECP] No se pudo contar consumidores — se deniega el alta por defecto', {
+      err: err.message,
+    });
+    return { allowed: false, count: null, limit };
+  }
+}
+
 /** Mensaje al consumidor. No expone el consumo agregado de la plataforma. */
 export function ecpViolationMessage(violation) {
   if (!violation) return null;
@@ -246,6 +273,7 @@ export function ecpViolationMessage(violation) {
 
 export default {
   getEcpLimits,
+  checkConsumerLimit,
   ecpLimitsEnabled,
   ecpPeriodStart,
   getEcpUsage,
