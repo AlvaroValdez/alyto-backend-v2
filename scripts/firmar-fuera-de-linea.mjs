@@ -22,9 +22,14 @@
 import { readFileSync } from 'node:fs';
 import { Transaction, Keypair, Networks } from '@stellar/stellar-sdk';
 
-const archivo = process.argv[2];
+const argv = process.argv.slice(2);
+// Bandera explícita para los sobres que SÍ deben mover fondos —las pruebas de
+// firma del esquema 2 de 3—. Sin ella, un pago aborta: es lo correcto para el
+// acto de constitución, que nunca debe mover fondos.
+const pagoEsperado = argv.includes('--pago-esperado');
+const archivo = argv.find(a => !a.startsWith('--'));
 if (!archivo) {
-  console.error('\n  Uso: node scripts/firmar-fuera-de-linea.mjs <archivo-con-el-XDR>\n');
+  console.error('\n  Uso: node scripts/firmar-fuera-de-linea.mjs <archivo-con-el-XDR> [--pago-esperado]\n');
   process.exit(1);
 }
 
@@ -51,6 +56,16 @@ if (!xdr) {
   console.error(`\n  x No se encontro ningun sobre XDR valido en ${archivo}\n`);
   process.exit(1);
 }
+
+// Firmantes que el propio sobre declara aceptar. En un esquema de firma múltiple
+// el firmante NO es la cuenta de origen: es uno de los firmantes adicionales. Por
+// eso el sobre lista las claves públicas esperadas, y el guard comprueba
+// pertenencia a esa lista en vez de igualdad con el origen. Sin esta línea —el
+// acto de constitución— se cae al criterio anterior: la llave debe ser el origen.
+const lineaEsperados = crudo.split('\n').find(l => /Firmantes?\s+esperad[oa]s?\s*:/i.test(l));
+const firmantesEsperados = lineaEsperados
+  ? (lineaEsperados.match(/G[A-Z2-7]{55}/g) ?? [])
+  : [];
 
 
 // ── Mostrar qué se va a firmar ────────────────────────────────────────────────
@@ -84,11 +99,26 @@ console.log(`   Vence            ${vence.toISOString()}  ${restan > 0 ? `(en ${M
 console.log(`\n   ${tx.operations.length} operaciones:\n`);
 tx.operations.forEach((op, i) => console.log(`     ${i + 1}. ${resumen(op)}`));
 
-const peligrosas = tx.operations.filter(o => ['payment', 'accountMerge', 'pathPaymentStrictSend', 'pathPaymentStrictReceive'].includes(o.type));
-if (peligrosas.length) {
-  console.log('\n   ⛔ EL SOBRE MUEVE FONDOS. El acto de constitución NO debe hacerlo.');
+// Fusión de cuenta y pagos por ruta jamás son esperados: destruyen la cuenta o
+// mueven valor de formas difíciles de leer. Se abortan siempre, sin excepción.
+const nuncaEsperadas = tx.operations.filter(o => ['accountMerge', 'pathPaymentStrictSend', 'pathPaymentStrictReceive'].includes(o.type));
+if (nuncaEsperadas.length) {
+  console.log('\n   ⛔ EL SOBRE CONTIENE UNA OPERACIÓN QUE NUNCA DEBE FIRMARSE (fusión de cuenta o pago por ruta).');
   console.log('      No firmes. Avisá antes de continuar.\n');
   process.exit(1);
+}
+
+// Un pago simple mueve fondos. Se permite SÓLO con la bandera explícita —las
+// pruebas de firma—. Sin ella se aborta, protegiendo el acto de constitución.
+const pagos = tx.operations.filter(o => o.type === 'payment');
+if (pagos.length && !pagoEsperado) {
+  console.log('\n   ⛔ EL SOBRE MUEVE FONDOS y no se pasó --pago-esperado.');
+  console.log('      El acto de constitución NO debe mover fondos: si esto era la constitución,');
+  console.log('      no firmes y avisá. Si es una prueba de firma, volvé a correr con --pago-esperado.\n');
+  process.exit(1);
+}
+if (pagos.length && pagoEsperado) {
+  console.log('\n   ⚠️  Este sobre mueve fondos (prueba de firma). Revisá el importe y el destino arriba.');
 }
 if (restan <= 0) {
   console.log('\n   ⚠️ El sobre está vencido: la red lo rechazaría. Pedí uno nuevo.\n');
@@ -182,11 +212,20 @@ let kp;
 try { kp = Keypair.fromSecret(secreta); }
 catch { console.error('\n   ✗ La clave secreta no es válida. Revisá la transcripción del papel.\n'); process.exit(1); }
 
-if (kp.publicKey() !== tx.source) {
-  console.error('\n   ✗ Esa llave NO corresponde a la cuenta de origen del sobre.');
-  console.error(`      El sobre espera : ${tx.source}`);
+const aceptadas = firmantesEsperados.length ? firmantesEsperados : [tx.source];
+if (!aceptadas.includes(kp.publicKey())) {
+  console.error('\n   ✗ Esa llave NO es una de las que este sobre espera.');
+  console.error(`      El sobre acepta : ${aceptadas.join(', ')}`);
   console.error(`      La llave es de  : ${kp.publicKey()}`);
   console.error('      No se firmó nada.\n');
+  process.exit(1);
+}
+
+// En un sobre de dos firmas, la primera llave ya dejó su firma. Avisar si esta
+// llave ya firmó, para no gastar el turno del segundo firmante por error.
+if (tx.signatures.some(s => s.hint().equals(kp.signatureHint()))) {
+  console.error('\n   ⚠️ Esta llave YA firmó este sobre. No se agrega una firma repetida.');
+  console.error('      Si falta la otra firma, que la ponga el otro firmante.\n');
   process.exit(1);
 }
 

@@ -52,14 +52,31 @@ const armar = (secuencia, etiqueta) => {
   return tx.toXDR();
 };
 
+// Claves públicas de los firmantes del esquema. Son públicas y específicas de esta
+// reserva; se listan en la cabecera de cada sobre para que el firmador acepte la
+// llave correcta (en multifirma el firmante NO es la cuenta de origen).
+const PUB = {
+  A: 'GD75CJAAEXEGMTGPERIE7Y3JOJIMCLBWXYWUNFKUXGN4D56Y7RTDJUA7',   // Álvaro
+  B: 'GCMKZUUECQFP7GFELLUSNZFZXHN7BLOKFDLYZZWM65MXPQCSEGXZHNKF',   // David
+  C: 'GCMOIPORCIVVYTZGO6YA6WA4NGGDBNDENVEBAZX4SDD63GM3C6MXNRLJ',   // custodia
+};
+
 const PRUEBAS = [
   { n: 1, firman: 'A + B',  claves: 'A (Álvaro) y B (David)', espera: 'ACEPTADA',  ev: 'evidencia 3',
-    seq: seq,     memo: 'prueba-2-firmas' },
+    seq: seq,     memo: 'prueba-2-firmas',    esperados: [PUB.A, PUB.B] },
   { n: 2, firman: 'solo A', claves: 'únicamente A (Álvaro)',  espera: 'RECHAZADA', ev: 'evidencia 4',
-    seq: seq + 1n, memo: 'prueba-1-firma' },
+    seq: seq + 1n, memo: 'prueba-1-firma',    esperados: [PUB.A] },
   { n: 3, firman: 'B + C',  claves: 'B (David) y C (custodia)', espera: 'ACEPTADA', ev: 'recuperación',
-    seq: seq + 1n, memo: 'prueba-recuperacion' },
+    seq: seq + 1n, memo: 'prueba-recuperacion', esperados: [PUB.B, PUB.C] },
 ];
+
+// Cada prueba se escribe en su PROPIO archivo, además de imprimirse. El firmador
+// se queda con la última línea XDR válida del archivo que le pasan: un archivo con
+// las tres juntas haría que siempre firme la tercera. Un archivo por prueba evita
+// ese error, y deja que cada firmante abra exactamente el sobre que le toca.
+const { writeFileSync, mkdirSync } = await import('node:fs');
+const DIR = new URL('../docs/evidencia/', import.meta.url).pathname;
+mkdirSync(DIR, { recursive: true });
 
 console.log('');
 console.log('  ══ Tres actos de prueba · SIN FIRMAR ══');
@@ -73,10 +90,22 @@ console.log('  ⚠️ ENVIAR EN ORDEN 1 → 2 → 3. Fuera de orden ninguna func
 console.log('');
 
 for (const p of PRUEBAS) {
+  const xdr = armar(p.seq, p.memo);
+  const archivo = `${DIR}prueba-${p.n}-sin-firmar.txt`;
+  const cabecera =
+    `Prueba ${p.n} de firma del esquema 2 de 3 — AV Finance S.R.L. · Trámite T-2201402987\n` +
+    `Firmar con: ${p.claves}\n` +
+    `Firmantes esperados: ${p.esperados.join(' ')}\n` +
+    `Resultado esperado: ${p.espera}   ·   ${p.ev}\n` +
+    `Origen (reserva): ${fria}\n` +
+    `Destino (operativa): ${operativa}\n\n`;
+  writeFileSync(archivo, cabecera + xdr + '\n', 'utf8');
+
   console.log(`  ── Prueba ${p.n} · firman ${p.firman} · se espera ${p.espera} · ${p.ev} ──`);
   console.log(`     Firmar con: ${p.claves}`);
+  console.log(`     Archivo   : docs/evidencia/prueba-${p.n}-sin-firmar.txt`);
   console.log('');
-  console.log(armar(p.seq, p.memo));
+  console.log(xdr);
   console.log('');
 }
 
