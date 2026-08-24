@@ -3,27 +3,36 @@
  *
  * Uso: SEED_ADMIN_EMAIL=admin@... SEED_ADMIN_PASSWORD='...' node scripts/seedAdmin.js
  *
- * Crea (o recrea) el usuario admin con rol 'admin'.
- * Si el usuario ya existe lo elimina primero para garantizar un estado limpio.
+ * Siembra un usuario administrador en un entorno LIMPIO. Ése es su único uso.
  *
  * ═══════════════════════════════════════════════════════════════════════════
- * ⚠️  DESTRUYE DATOS Y NO DEJA ASIENTO EN LA BITÁCORA.
+ * ⚠️  NO SIRVE PARA PROMOVER A UNA PERSONA.
  *
- * NO sirve para promover a una persona. Hace `deleteOne` sobre el correo
- * indicado y crea un usuario nuevo: identificador distinto, contraseña
- * reemplazada, nombre y documento pisados por valores de siembra. Aplicado a
- * una cuenta real le destruye la identidad y deja su historial colgando de un
- * identificador que ya no existe.
+ * Crea un usuario nuevo con valores de siembra. Para elevar a alguien que ya
+ * tiene cuenta: habilitar temporalmente `ADMIN_ROLE_MUTATION_ENABLED` y hacer
+ * el cambio desde el panel consignando el motivo. Ésa es la vía auditada, y es
+ * la única que produce el rastro que el apartado 7.4.2 del Informe Técnico
+ * declara que el sistema produce: autor, momento y motivo.
  *
- * Tampoco escribe `AdminAuditLog`. El apartado 7.4.2 del Informe Técnico
- * declara que todo cambio de rol queda asentado con autor, momento y motivo;
- * una elevación hecha por acá no deja ninguno de los tres.
+ * ── Por qué dejó de ser destructivo incondicional (23/08/2026) ──────────────
  *
- * Para elevar a alguien: habilitar temporalmente `ADMIN_ROLE_MUTATION_ENABLED`
- * y hacer el cambio desde el panel consignando el motivo. Ésa es la vía
- * auditada, y es la única que produce el rastro que el expediente declara.
+ * Hasta esta corrección, el script hacía `deleteOne` sobre el correo indicado
+ * antes de crear: identificador distinto, contraseña reemplazada, nombre y
+ * documento pisados. Aplicado a una cuenta real le destruía la identidad y
+ * dejaba su historial colgando de un identificador que ya no existe — y sin
+ * asiento, porque tampoco escribía en la bitácora.
  *
- * Uso legítimo: sembrar un administrador de PRUEBAS en un entorno limpio.
+ * Un modo destructivo incondicional, disponible en el entorno de trabajo, es un
+ * riesgo por sí mismo: elimina precisamente el rastro que el expediente declara.
+ * Ahora:
+ *
+ *   · Sobre una cuenta con ROL DE ADMINISTRACIÓN → rehúsa, sin excepción.
+ *     No hay variable que lo habilite: esa cuenta se toca por la vía auditada.
+ *   · Sobre cualquier otra cuenta existente → rehúsa, salvo `SEED_ADMIN_RECREATE=1`
+ *     explícito. En un entorno limpio no hay cuenta previa, así que el camino
+ *     legítimo nunca necesita la variable.
+ *   · Al crear, deja asiento `admin.seeded` en la bitácora de acciones
+ *     administrativas, para que la aparición de un administrador no sea invisible.
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ⚠️ Seguridad (audit 2026-06-11):
@@ -36,6 +45,8 @@ import 'dotenv/config';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import User from '../src/models/User.js';
+import AdminAuditLog from '../src/models/AdminAuditLog.js';
+import { decideSeedAction } from './seedAdminGuard.js';
 
 // ─── Configuración del admin a crear ─────────────────────────────────────────
 
@@ -71,11 +82,32 @@ async function seedAdmin() {
     process.exit(1);
   }
 
-  // ── Limpiar usuario previo ────────────────────────────────────────────────
+  // ── Rehusar operar sobre una cuenta existente ─────────────────────────────
+  //
+  // El orden importa: primero el rol de administración, que no admite override,
+  // y recién después el caso general. Así una cuenta con privilegios nunca cae
+  // en la rama que una variable de entorno puede abrir.
   const existing = await User.findOne({ email: ADMIN_EMAIL });
-  if (existing) {
+  const decision = decideSeedAction(existing, process.env.SEED_ADMIN_RECREATE === '1');
+
+  if (decision.reason === 'ADMIN_ACCOUNT_EXISTS') {
+    console.error(`[seedAdmin] REHÚSA: ${ADMIN_EMAIL} ya existe y tiene rol de administración.`);
+    console.error('[seedAdmin] Este script NO opera sobre cuentas con privilegios. No hay override.');
+    console.error('[seedAdmin] Para modificarla, usar la vía auditada: ADMIN_ROLE_MUTATION_ENABLED');
+    console.error('[seedAdmin] habilitada de forma temporal y el cambio hecho desde el panel con motivo.');
+    await mongoose.connection.close();
+    process.exit(1);
+  }
+  if (decision.reason === 'ACCOUNT_EXISTS') {
+    console.error(`[seedAdmin] REHÚSA: ${ADMIN_EMAIL} ya existe (rol '${existing.role}').`);
+    console.error('[seedAdmin] Recrearla destruye su identidad y deja su historial huérfano.');
+    console.error('[seedAdmin] Si el entorno es de pruebas y eso es lo buscado: SEED_ADMIN_RECREATE=1');
+    await mongoose.connection.close();
+    process.exit(1);
+  }
+  if (decision.action === 'recreate') {
     await User.deleteOne({ email: ADMIN_EMAIL });
-    console.log(`[seedAdmin] Usuario previo (${ADMIN_EMAIL}) eliminado para test limpio.`);
+    console.log(`[seedAdmin] Usuario previo (${ADMIN_EMAIL}, rol '${existing.role}') eliminado por SEED_ADMIN_RECREATE=1.`);
   }
 
   // ── Hash de contraseña (mismo cost factor que authController) ────────────
@@ -98,6 +130,32 @@ async function seedAdmin() {
       issuingCountry: 'US',
     },
   });
+
+  // ── Asiento en la bitácora ────────────────────────────────────────────────
+  //
+  // No hay actor humano: la siembra la ejecuta el script. Se consigna así, en
+  // lugar de omitir el asiento, para que la aparición de una cuenta con
+  // privilegios no sea invisible en el registro que el apdo. 7.4.2 declara.
+  try {
+    await AdminAuditLog.create({
+      actorId:    null,
+      actorEmail: `script:seedAdmin (${process.env.USER ?? 'desconocido'})`,
+      actorRole:  'script',
+      action:     'admin.seeded',
+      targetType: 'User',
+      targetId:   String(admin._id),
+      before:     null,
+      after:      { email: admin.email, role: admin.role, legalEntity: admin.legalEntity },
+      reason:     'Siembra de administrador en entorno limpio mediante scripts/seedAdmin.js',
+      metadata:   { database: dbName, recreated: process.env.SEED_ADMIN_RECREATE === '1' },
+      userAgent:  'script:seedAdmin',
+      result:     'success',
+    });
+    console.log('[seedAdmin] Asiento `admin.seeded` registrado en la bitácora.');
+  } catch (err) {
+    console.warn(`[seedAdmin] ⚠️  No se pudo registrar el asiento: ${err.message}`);
+    console.warn('[seedAdmin] El administrador quedó creado SIN rastro en la bitácora. Revisar.');
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   console.log('\n✅  Usuario admin creado exitosamente');

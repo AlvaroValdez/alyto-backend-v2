@@ -126,10 +126,10 @@ const FORCED_TERMINAL_STATUSES = new Set(['completed', 'refunded']);
  * más del panel. `ADMIN_ROLE_MUTATION_ENABLED=true` es un break-glass explícito
  * y temporal — se enciende, se hace el cambio con su motivo, y se apaga.
  *
- * ⚠️ NO usar `npm run seed:admin` para promover a una persona: ese script hace
- * `deleteOne` y recrea el usuario desde cero (nuevo identificador, contraseña
- * reemplazada, datos personales pisados) y no deja asiento en la bitácora. Sirve
- * para sembrar un admin de pruebas en un entorno limpio, no para elevar a nadie.
+ * ⚠️ `npm run seed:admin` no promueve a nadie: crea un usuario nuevo con valores
+ * de siembra. Desde el 23/08 rehúsa operar sobre una cuenta existente, y sobre una
+ * con rol de administración rehúsa sin excepción posible — antes hacía `deleteOne`
+ * incondicional y sin asiento. Ésta es la única vía para elevar a alguien.
  *
  * Se lee dentro de la función (regla 21 de CLAUDE.md).
  */
