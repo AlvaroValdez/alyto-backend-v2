@@ -271,6 +271,43 @@ describe('alta del segundo factor', () => {
     expect((await User.findById(admin._id).lean()).twoFactor.enabled).toBe(false);
   });
 
+  test('el alta deja asiento en la bitácora, venga del panel o de la consola', async () => {
+    // El asiento vivía en el controlador, así que las altas por consola —las
+    // primeras de la entidad, hechas durante el despliegue— no dejaban ninguno.
+    // La declaración "toda incorporación de un autenticador es detectable" era
+    // falsa para el único camino disponible antes de tener interfaz. Se prueban
+    // los DOS caminos: un asiento que existe según por dónde entró la petición
+    // no sirve como evidencia, porque basta usar el otro para no aparecer.
+    const { confirmEnrollment, beginEnrollment } =
+      await import('../../src/services/adminTwoFactorService.js');
+
+    // ── Camino web ──────────────────────────────────────────────────────────
+    const porPanel = await crearAdmin();
+    await darDeAlta(porPanel);
+
+    const asientoPanel = await AdminAuditLog.findOne({
+      action: 'admin_2fa.enrolled', targetId: String(porPanel._id),
+    }).lean();
+    expect(asientoPanel).toBeTruthy();
+    expect(asientoPanel.actorEmail).toBe(porPanel.email);
+    expect(asientoPanel.after.enabled).toBe(true);
+    expect(asientoPanel.metadata.via).toBe('panel');
+
+    // ── Camino consola: se invoca el servicio directo, sin request ──────────
+    const porConsola = await crearAdmin();
+    const { secret } = await beginEnrollment({ userId: porConsola._id });
+    const res = await confirmEnrollment({ userId: porConsola._id, code: generateTotp(secret) });
+    expect(res.ok).toBe(true);
+
+    const asientoConsola = await AdminAuditLog.findOne({
+      action: 'admin_2fa.enrolled', targetId: String(porConsola._id),
+    }).lean();
+    expect(asientoConsola).toBeTruthy();
+    expect(asientoConsola.actorEmail).toBe(porConsola.email);
+    expect(asientoConsola.metadata.via).toBe('cli');
+    expect(asientoConsola.createdAt).toBeInstanceOf(Date);
+  });
+
   test('una cuenta ya confirmada no puede rehacerse el alta por esta vía', async () => {
     // Si pudiera, el restablecimiento con motivo del apdo. 7.4.2 tendría un
     // camino paralelo que no deja registro.

@@ -131,7 +131,10 @@ export async function confirm(req, res) {
       return res.status(401).json({ error: GENERIC_2FA_ERROR, code: 'LOCKED_OUT' });
     }
 
-    const result = await confirmEnrollment({ userId: user._id, code: req.body?.code });
+    // El asiento del alta lo escribe `confirmEnrollment`, no este controlador:
+    // el alta también ocurre por consola durante el despliegue inicial, y un
+    // asiento que dependa del transporte deja sin registrar justamente esas.
+    const result = await confirmEnrollment({ userId: user._id, code: req.body?.code, req, via: 'panel' });
 
     if (!result.ok) {
       await registerFailedAttempt({ req, email: user.email, reason: result.reason, user, factor: 'totp' });
@@ -139,25 +142,6 @@ export async function confirm(req, res) {
     }
 
     await registerSuccess({ req, email: user.email, user, factor: 'totp' });
-
-    // El alta queda asentada en la bitácora de administración, no sólo en el
-    // registro de accesos. Importa por lo que el alta acredita realmente: se
-    // confirma con el primer factor, así que quien tenga la contraseña de una
-    // cuenta SIN factor configurado puede darse de alta el suyo. Ese estado no es
-    // hipotético —lo produce a propósito cada restablecimiento del apdo. 7.4.2, y
-    // también el alta de un operador nuevo—, de modo que la defensa disponible es
-    // que el hecho quede registrado y se pueda contrastar contra el
-    // restablecimiento que lo precede.
-    await recordAdminAction({
-      req,
-      actor:      { _id: user._id, email: user.email, role: user.role },
-      action:     'admin_2fa.enrolled',
-      targetType: 'User',
-      targetId:   String(user._id),
-      after:      { enabled: true },
-      reason:     'Alta de segundo factor confirmada por el titular',
-      metadata:   { afterReset: !!user.twoFactor?.resetAt },
-    });
 
     const session = issueSession(res, user, { amr: [AMR_PASSWORD, AMR_OTP] });
 

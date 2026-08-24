@@ -37,6 +37,7 @@ import mongoose from 'mongoose';
 
 import User from '../models/User.js';
 import { logger } from '../utils/logger.js';
+import { recordAdminAction } from './adminAuditService.js';
 import {
   ensureDek, encryptField, decryptField, aadForTotpSecret,
 } from './piiCrypto.js';
@@ -174,9 +175,9 @@ function issuerName() {
  * @param {string} p.code
  * @returns {Promise<{ ok: true, recoveryCodes: string[] } | { ok: false, reason: string }>}
  */
-export async function confirmEnrollment({ userId, code }) {
+export async function confirmEnrollment({ userId, code, req = null, via = 'cli' }) {
   const user = await User.findById(userId)
-    .select('email role twoFactor.enabled twoFactor.confirmedAt +twoFactor.secretCiphertext +twoFactor.lastUsedStep')
+    .select('email role twoFactor.enabled twoFactor.confirmedAt twoFactor.resetAt +twoFactor.secretCiphertext +twoFactor.lastUsedStep')
     .lean();
   if (!user) throw Object.assign(new Error('Usuario no encontrado.'), { code: 'USER_NOT_FOUND' });
 
@@ -206,7 +207,27 @@ export async function confirmEnrollment({ userId, code }) {
     },
   );
 
-  logger.info('[2fa] Alta confirmada — segundo factor activo', { userId: String(user._id) });
+  // El asiento se escribe ACÁ, no en el controlador. El alta ocurre por dos
+  // caminos —el panel y la consola durante el despliegue inicial— y ponerlo en
+  // el transporte dejaba sin registrar justamente las de consola, que son las
+  // primeras de la entidad. Un asiento que existe según por dónde entró la
+  // petición no sirve como evidencia de que "toda incorporación de un
+  // autenticador es detectable": basta usar el otro camino para no aparecer.
+  //
+  // `via` deja constancia de cuál se usó, que es dato de auditoría por sí mismo:
+  // un alta por consola implica acceso al servidor, no sólo la contraseña.
+  await recordAdminAction({
+    req,
+    actor:      { _id: user._id, email: user.email, role: user.role },
+    action:     'admin_2fa.enrolled',
+    targetType: 'User',
+    targetId:   String(user._id),
+    after:      { enabled: true },
+    reason:     'Alta de segundo factor confirmada por el titular',
+    metadata:   { via, afterReset: !!user.twoFactor?.resetAt },
+  });
+
+  logger.info('[2fa] Alta confirmada — segundo factor activo', { userId: String(user._id), via });
   return { ok: true, recoveryCodes: plain };
 }
 
