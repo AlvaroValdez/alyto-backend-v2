@@ -163,16 +163,24 @@ add('Habilitación de cambio de rol (break-glass)', roleMut ? ACTIVO : INACTIVO,
 
 let firmaMultiple = { estado: NO, evidencia: 'no verificable desde acá' };
 try {
-  const pub = process.env.STELLAR_SRL_PUBLIC_KEY;
+  // La firma múltiple vive en la cuenta de RESERVA (fría), no en la operativa: es
+  // el error que hay que evitar al leer este estado. La operativa firma sola a
+  // propósito, para poder liquidar automáticamente.
+  const pub = process.env.STELLAR_SRL_COLD_PUBLIC_KEY;
   const horizon = process.env.STELLAR_HORIZON_URL ?? 'https://horizon.stellar.org';
-  const r = await fetch(`${horizon}/accounts/${pub}`);
-  const a = await r.json();
-  const firmantes = (a.signers ?? []).length;
-  const umbral    = a.thresholds?.med_threshold ?? 0;
-  firmaMultiple = {
-    estado: firmantes >= 3 && umbral >= 2 ? ACTIVO : NO,
-    evidencia: `cuenta de tesorería: ${firmantes} firmante(s), umbral medio ${umbral}`,
-  };
+  if (!pub) {
+    firmaMultiple = { estado: NO, evidencia: 'STELLAR_SRL_COLD_PUBLIC_KEY ausente — reserva no configurada' };
+  } else {
+    const a = await (await fetch(`${horizon}/accounts/${pub}`)).json();
+    const maestra   = a.signers?.find(s => s.key === pub)?.weight ?? 0;
+    const adicionales = (a.signers ?? []).filter(s => s.key !== pub && s.weight > 0).length;
+    const umbral    = a.thresholds?.med_threshold ?? 0;
+    const bien = maestra === 0 && adicionales >= 3 && umbral >= 2;
+    firmaMultiple = {
+      estado: bien ? ACTIVO : NO,
+      evidencia: `reserva ${pub.slice(0, 8)}…: ${adicionales} firmantes peso 1, maestra ${maestra}, umbral medio ${umbral}`,
+    };
+  }
 } catch (err) {
   firmaMultiple.evidencia = `consulta al libro distribuido falló: ${err.message}`;
 }
