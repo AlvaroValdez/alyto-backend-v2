@@ -212,6 +212,32 @@ afterAll(async () => {
 
 // ─── Tests: Vita IPN ──────────────────────────────────────────────────────────
 
+
+/**
+ * Espera a que la transacción satisfaga una condición, en vez de dormir un plazo
+ * fijo. El procesamiento del aviso es fire-and-forget: con una pausa fija, bajo
+ * carga paralela la transacción todavía estaba en `payin_pending` cuando se
+ * afirmaba sobre ella, y la prueba fallaba de forma intermitente.
+ *
+ * Al fallar informa el último estado observado, que es lo que hace falta para
+ * distinguir "tardó de más" de "quedó en el estado equivocado".
+ */
+async function esperarTx(id, condicion, { timeoutMs = 5000, intervaloMs = 15, obligatorio = true } = {}) {
+  const limite = Date.now() + timeoutMs;
+  let ultima = null;
+  for (;;) {
+    ultima = await Transaction.findById(id);
+    if (ultima && condicion(ultima)) return ultima;
+    if (Date.now() >= limite) {
+      if (!obligatorio) return ultima;
+      throw new Error(
+        `La transacción no alcanzó la condición esperada en ${timeoutMs} ms. ` +
+        `Último estado observado: ${ultima?.status ?? 'documento inexistente'}`);
+    }
+    await new Promise(r => setTimeout(r, intervaloMs));
+  }
+}
+
 describe('POST /api/v1/ipn/vita — firma y validación', () => {
 
   test('401 — sin firma (Authorization header ausente)', async () => {
@@ -265,9 +291,8 @@ describe('POST /api/v1/ipn/vita — flujo payin → anchorBolivia', () => {
     expect(res.status).toBe(200);
 
     // Esperar breve para que el fire-and-forget procese
-    await new Promise(r => setTimeout(r, 50));
-
-    const updatedTx = await Transaction.findById(tx._id);
+    const updatedTx = await esperarTx(tx._id, t => ['payin_confirmed', 'processing', 'payout_pending'].includes(t.status),
+      { obligatorio: false });
     // anchorBolivia sets status to 'payout_pending' (manual admin payout)
     expect(['payin_confirmed', 'processing', 'payout_pending']).toContain(updatedTx.status);
     expect(updatedTx.payinReference).toBe('vita_wallet_uuid_test');
@@ -284,9 +309,7 @@ describe('POST /api/v1/ipn/vita — flujo payin → anchorBolivia', () => {
     const res = await sendVitaIPN(app, body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updatedTx = await Transaction.findById(tx._id);
+    const updatedTx = await esperarTx(tx._id, t => t.status === 'failed');
     expect(updatedTx.status).toBe('failed');
   });
 
@@ -299,9 +322,7 @@ describe('POST /api/v1/ipn/vita — flujo payin → anchorBolivia', () => {
     };
 
     await sendVitaIPN(app, body);
-    await new Promise(r => setTimeout(r, 50));
-
-    const updatedTx = await Transaction.findById(tx._id);
+    const updatedTx = await esperarTx(tx._id, t => t.ipnLog?.length > 0);
     expect(updatedTx.ipnLog.length).toBeGreaterThan(0);
     expect(updatedTx.ipnLog[0].provider).toBe('vitaWallet');
   });
@@ -325,9 +346,7 @@ describe('POST /api/v1/ipn/vita — flujo payout_sent → completed', () => {
     const res = await sendVitaIPN(app, body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updatedTx = await Transaction.findById(tx._id);
+    const updatedTx = await esperarTx(tx._id, t => t.status === 'completed');
     expect(updatedTx.status).toBe('completed');
   });
 
@@ -458,9 +477,8 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     const res = await sendVitaIPN(app, ipnBody);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 200));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'payout_pending_usdc_send',
+      { obligatorio: false });
     expect(['payout_pending_usdc_send', 'payin_confirmed']).toContain(updated.status);
     if (updated.status === 'payout_pending_usdc_send') {
       expect(updated.harborTransfer?.transferId).toBeTruthy();
@@ -501,9 +519,8 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     };
     await sendVitaIPN(app, ipnBody);
 
-    await new Promise(r => setTimeout(r, 200));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'payout_sent',
+      { obligatorio: false });
     expect(['payout_sent', 'payin_confirmed']).toContain(updated.status);
     if (updated.status === 'payout_sent') {
       expect(updated.stellarTxHash).toBe('abc123stellar');
@@ -526,9 +543,8 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     };
     await sendVitaIPN(app, ipnBody);
 
-    await new Promise(r => setTimeout(r, 200));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => ['pending_funding', 'failed'].includes(t.status),
+      { obligatorio: false });
     // Either pending_funding (success path) or failed (if error propagated) or payin_confirmed
     expect(['pending_funding', 'failed', 'payin_confirmed']).toContain(updated.status);
   });
@@ -549,9 +565,8 @@ describe('dispatchPayout — OwlPay v2 orchestration (SRL)', () => {
     };
     await sendVitaIPN(app, ipnBody);
 
-    await new Promise(r => setTimeout(r, 200));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'failed',
+      { obligatorio: false });
     expect(['failed', 'payin_confirmed']).toContain(updated.status);
     if (updated.status === 'failed') {
       expect(updated.failureReason).toContain('OwlPay');
@@ -749,9 +764,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
     expect(res.status).toBe(200);
     expect(res.body.received).toBe(true);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'completed');
     expect(updated.status).toBe('completed');
     expect(updated.completedAt).toBeTruthy();
     expect(updated.ipnLog.some(e => e.provider === 'owlPay')).toBe(true);
@@ -773,9 +786,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
     const res = await sendOwlPayWebhook(body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'failed');
     expect(updated.status).toBe('failed');
     expect(updated.failureReason).toContain('Bank account not found');
   });
@@ -795,9 +806,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
     const res = await sendOwlPayWebhook(body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'failed');
     expect(updated.status).toBe('failed');
     expect(updated.failureReason).toContain('expired');
   });
@@ -819,9 +828,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
     const res = await sendOwlPayWebhook(body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'payout_sent');
     expect(updated.status).toBe('payout_sent');
   });
 
@@ -839,7 +846,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
 
     // First call
     await sendOwlPayWebhook(body);
-    await new Promise(r => setTimeout(r, 50));
+    await esperarTx(tx._id, t => t.status === 'completed');
 
     // Second call — same transfer_id + status
     const res2 = await sendOwlPayWebhook(body);
@@ -862,9 +869,7 @@ describe('POST /api/v1/ipn/owlpay — Harbor webhook', () => {
     const res = await sendOwlPayWebhook(body);
     expect(res.status).toBe(200);
 
-    await new Promise(r => setTimeout(r, 50));
-
-    const updated = await Transaction.findById(tx._id);
+    const updated = await esperarTx(tx._id, t => t.status === 'completed');
     expect(updated.status).toBe('completed');
   });
 
