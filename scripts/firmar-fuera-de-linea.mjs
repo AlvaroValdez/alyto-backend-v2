@@ -20,7 +20,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
 import { Transaction, Keypair, Networks } from '@stellar/stellar-sdk';
 
 const archivo = process.argv[2];
@@ -32,19 +31,27 @@ if (!archivo) {
 // El archivo de evidencia trae texto explicativo además del sobre. Se busca la
 // línea que sea XDR: larga, en base64, y que empiece como una transacción v1.
 const crudo = readFileSync(archivo, 'utf8');
-const xdr = crudo.split('\n')
-  .map(l => l.trim())
-  .filter(l => l.length > 200 && /^[A-Za-z0-9+/=]+$/.test(l))
-  .pop();
+
+// El archivo de evidencia trae texto explicativo ademas del sobre. Se detecta por
+// PARSEO, no por longitud: se prueba cada linea que parezca base64 y se toma la
+// ultima que resulte ser una transaccion valida. Un umbral de caracteres deja
+// afuera los sobres cortos, que es justo lo que paso al probarlo.
+let xdr = null;
+let tx = null;
+for (const linea of crudo.split('\n')) {
+  const cand = linea.trim();
+  if (cand.length < 40 || !/^[A-Za-z0-9+/=]+$/.test(cand)) continue;
+  try {
+    const t = new Transaction(cand, Networks.PUBLIC);
+    xdr = cand; tx = t;                       // se queda con la ultima valida
+  } catch { /* no era un sobre */ }
+}
 
 if (!xdr) {
-  console.error(`\n  ✗ No se encontró ningún sobre XDR en ${archivo}\n`);
+  console.error(`\n  x No se encontro ningun sobre XDR valido en ${archivo}\n`);
   process.exit(1);
 }
 
-let tx;
-try { tx = new Transaction(xdr, Networks.PUBLIC); }
-catch (err) { console.error(`\n  ✗ El sobre no es una transacción válida: ${err.message}\n`); process.exit(1); }
 
 // ── Mostrar qué se va a firmar ────────────────────────────────────────────────
 
@@ -90,47 +97,81 @@ if (restan <= 0) {
 
 // ── Confirmación y firma ──────────────────────────────────────────────────────
 
-const rl = createInterface({ input: process.stdin, output: process.stdout });
-const preguntar = q => new Promise(r => rl.question(q, r));
+/**
+ * Lee una linea de la entrada estandar. Con `oculto`, no la muestra en pantalla.
+ *
+ * Dos cosas que costaron una corrida fallida cada una:
+ *
+ *   1. **Un solo mecanismo.** La primera version mezclaba `readline` con lectura
+ *      en crudo: `rl.pause()` dejaba la entrada detenida y el segundo prompt no
+ *      recibia nada.
+ *   2. **Hay que guardar el sobrante.** La entrada puede llegar en una sola tanda
+ *      —al pegar, o por tuberia— con las dos respuestas juntas. Si al cortar en el
+ *      salto de linea se descarta el resto, la segunda lectura se queda esperando
+ *      para siempre datos que ya habian llegado.
+ */
+let pendiente = '';
 
-/** Lee sin mostrar en pantalla. Evita que la secreta quede a la vista. */
-function preguntarOculto(q) {
+function leerLinea(prompt, { oculto = false } = {}) {
   return new Promise(resolve => {
-    process.stdout.write(q);
-    const stdin = process.stdin;
-    const eraRaw = stdin.isRaw;
-    if (stdin.isTTY) stdin.setRawMode(true);
-    let valor = '';
-    const onData = ch => {
-      const c = ch.toString('utf8');
-      if (c === '\r' || c === '\n' || c === '') {
-        if (stdin.isTTY) stdin.setRawMode(eraRaw);
-        stdin.removeListener('data', onData);
-        process.stdout.write('\n');
-        resolve(valor);
-      } else if (c === '') {           // Ctrl-C
-        process.stdout.write('\n  cancelado\n');
-        process.exit(1);
-      } else if (c === '' || c === '\b') {
-        valor = valor.slice(0, -1);
-      } else {
+    process.stdout.write(prompt);
+
+    // Si el sobrante ya contiene una linea entera, no hace falta tocar la entrada.
+    const corte = pendiente.indexOf('\n');
+    if (corte >= 0) {
+      const linea = pendiente.slice(0, corte).replace(/\r$/, '');
+      pendiente = pendiente.slice(corte + 1);
+      process.stdout.write('\n');
+      return resolve(linea);
+    }
+
+    const stdin   = process.stdin;
+    const enCrudo = oculto && stdin.isTTY;
+    const eraRaw  = Boolean(stdin.isRaw);
+    if (enCrudo) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+
+    let valor = pendiente;
+    pendiente = '';
+
+    const terminar = resto => {
+      pendiente = resto;
+      stdin.removeListener('data', onData);
+      stdin.removeListener('end', onEnd);
+      if (enCrudo) stdin.setRawMode(eraRaw);
+      stdin.pause();
+      process.stdout.write('\n');
+    };
+
+    const onData = trozo => {
+      for (let i = 0; i < trozo.length; i++) {
+        const c = trozo[i];
+        if (c === '\n' || c === '\r') {
+          terminar(trozo.slice(i + 1));
+          return resolve(valor);
+        }
+        if (c === '\u0003') { terminar(''); console.log('  cancelado'); process.exit(1); }
+        if (c === '\u0004') { terminar(''); return resolve(valor); }
+        if (c === '\u007f' || c === '\b') { valor = valor.slice(0, -1); continue; }
         valor += c;
       }
     };
+
+    const onEnd = () => { terminar(''); resolve(valor); };
+
     stdin.on('data', onData);
+    stdin.on('end', onEnd);
   });
 }
 
-const conf = (await preguntar('\n   ¿Coincide con lo que esperabas? Escribí FIRMAR para continuar: ')).trim();
+const conf = (await leerLinea('\n   Coincide con lo que esperabas? Escribi FIRMAR para continuar: ')).trim();
 if (conf !== 'FIRMAR') {
-  console.log('\n   No se firmó nada.\n');
-  rl.close();
+  console.log('\n   No se firmo nada.\n');
   process.exit(1);
 }
 
-rl.pause();
-const secreta = (await preguntarOculto('   Clave secreta (no se muestra ni se guarda): ')).trim();
-rl.close();
+const secreta = (await leerLinea('   Clave secreta (no se muestra ni se guarda): ', { oculto: true })).trim();
 
 if (!secreta.startsWith('S')) {
   console.error('\n   ✗ Una clave secreta empieza con S. Revisá lo que copiaste.\n');

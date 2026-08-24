@@ -125,7 +125,7 @@ if (tiene('--armar')) {
   }));
 
   // Ventana amplia: la ceremonia de firma fuera de línea lleva su tiempo.
-  const tx = tb.setTimeout(3600).build();
+  const tx = tb.setTimeout(21600).build();   // 6 horas: la ceremonia fuera de línea no debe correr contra el reloj
 
   console.log('\n  ══ Acto de constitución · SIN FIRMAR ══\n');
   console.log(`  Cuenta de reserva : ${reserva}`);
@@ -133,7 +133,7 @@ if (tiene('--armar')) {
   console.log(`  Firmante B        : ${B}`);
   console.log(`  Recuperación C    : ${C}`);
   console.log(`  Operaciones       : ${tx.operations.length}  (1 línea de confianza + 3 altas + 1 de umbrales)`);
-  console.log(`  Vence             : en 1 hora`);
+  console.log(`  Vence             : ${new Date(Number(tx.timeBounds.maxTime) * 1000).toISOString()}`);
   console.log('\n  XDR a firmar fuera de línea con la llave MAESTRA de la reserva:\n');
   console.log(tx.toXDR());
   console.log('\n  Firmado el sobre, enviarlo con:  --enviar "<XDR firmado>"\n');
