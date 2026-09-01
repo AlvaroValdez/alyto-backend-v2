@@ -265,30 +265,34 @@ function captureRes() {
   return { res, out }
 }
 
-/** ¿La conversión BOB→USDC califica para auto (sin admin)? Gated + umbral + sin flag AML. */
+/** ¿La conversión BOB→USDC califica para auto (sin admin)? Gated + umbral + sin flag AML.
+ *
+ *  Reactivado 2026-09-01 (antes: `return false` fijo por la demo ASFI de 2026-07).
+ *  Sigue siendo opt-in por entorno y NO se enciende solo: requiere
+ *  USDC_AUTO_CONVERT_ENABLED=true **y** un umbral USDC_AUTO_CONVERT_MAX_BOB > 0.
+ *  Sin ambas, se cae al camino de confirmación admin de siempre.
+ *
+ *  El checkpoint humano se sustituye por tres condiciones verificables en código:
+ *  gate de entorno, ausencia de flag AML, y monto bajo el umbral. El pre-check de
+ *  liquidez de tesorería corre igual dentro del confirm (no se saltea por ser auto).
+ */
 function isBOBtoUSDCAutoEligible(user, bobAmount) {
-  // ASFI demo (2026-07): modo MANUAL forzado — toda conversión pasa por
-  // confirmación admin (checkpoint humano). Para reactivar el auto-convert
-  // gateado por env, restaurar el cuerpo original:
-  //   if (process.env.USDC_AUTO_CONVERT_ENABLED !== 'true') return false
-  //   if (user.sanctionsFlag) return false
-  //   const max = Number(process.env.USDC_AUTO_CONVERT_MAX_BOB ?? 0)
-  //   return max > 0 && bobAmount <= max
-  return false
+  if (process.env.USDC_AUTO_CONVERT_ENABLED !== 'true') return false
+  if (user?.sanctionsFlag) return false
+  const max = Number(process.env.USDC_AUTO_CONVERT_MAX_BOB ?? 0)
+  return max > 0 && bobAmount <= max
 }
 
 /** ¿La conversión USDC→BOB califica para auto? Gated + umbral + sin flag AML.
  *  (USDC→BOB recibe el activo escaso y acredita BOB ledger → sin riesgo de
  *   sub-colateralización; el guard de liquidez BOB corre igual dentro del confirm.) */
 function isUSDCtoBOBAutoEligible(user, usdcAmount) {
-  // ASFI demo (2026-07): modo MANUAL forzado — toda conversión pasa por
-  // confirmación admin (checkpoint humano). Para reactivar el auto-convert
-  // gateado por env, restaurar el cuerpo original:
-  //   if (process.env.USDC_TO_BOB_AUTO_ENABLED !== 'true') return false
-  //   if (user.sanctionsFlag) return false
-  //   const max = Number(process.env.USDC_TO_BOB_AUTO_MAX_USDC ?? 0)
-  //   return max > 0 && usdcAmount <= max
-  return false
+  // Reactivado 2026-09-01 (antes: `return false` fijo por la demo ASFI de 2026-07).
+  // Opt-in por entorno: requiere USDC_TO_BOB_AUTO_ENABLED=true y umbral > 0.
+  if (process.env.USDC_TO_BOB_AUTO_ENABLED !== 'true') return false
+  if (user?.sanctionsFlag) return false
+  const max = Number(process.env.USDC_TO_BOB_AUTO_MAX_USDC ?? 0)
+  return max > 0 && usdcAmount <= max
 }
 
 // ─── FUNCIÓN 3: POST /api/v1/wallet/usdc/convert-bob ─────────────────────────
@@ -498,9 +502,18 @@ export async function adminConfirmBOBtoUSDC(req, res) {
     // La conversión BOB→USDC acredita USDC respaldado por la TESORERÍA (el usuario paga
     // BOB; el USDC sale del pool de tesorería, no de una cuenta custodial). No acreditar
     // más de lo que la tesorería puede respaldar: saldo on-chain − en vuelo ≥ monto.
-    // Gated por USDC_CONVERT_LIQUIDITY_GUARD (activo salvo ='false'). Fail-open ante un
-    // error de lectura on-chain (Horizon caído NO debe tumbar la confirmación), pero un
-    // déficit confirmado SÍ la bloquea.
+    // Gated por USDC_CONVERT_LIQUIDITY_GUARD (activo salvo ='false'). Un déficit
+    // confirmado SIEMPRE bloquea.
+    //
+    // Ante un ERROR DE LECTURA on-chain el comportamiento depende de quién confirma:
+    //   • admin (note ≠ 'auto') → fail-OPEN: hay un humano mirando y Horizon caído no
+    //     debe tumbar una confirmación que esa persona ya evaluó.
+    //   • auto  (note = 'auto') → fail-CLOSED: no hay checkpoint humano, así que no se
+    //     puede acreditar USDC sin comprobar el respaldo. Cae a la cola admin ('pending'),
+    //     que es exactamente el camino manual de antes. Se pospone, no se pierde.
+    // Sin esta distinción, activar la auto-conversión convertía una caída de Horizon en
+    // acreditación de USDC sin verificar colateral y sin que nadie lo revise.
+    const isAutoConfirm = note === 'auto'
     if (process.env.USDC_CONVERT_LIQUIDITY_GUARD !== 'false') {
       try {
         const { getUSDCAvailableNow } = await import('../services/treasuryLiquidity.js')
@@ -515,8 +528,17 @@ export async function adminConfirmBOBtoUSDC(req, res) {
           })
         }
       } catch (guardErr) {
-        // fail-open: un error transitorio de lectura on-chain no debe bloquear la confirmación.
-        console.warn('[WalletUSDC] guard liquidez tesorería fail-open:', guardErr.message)
+        if (isAutoConfirm) {
+          // Sin humano en el circuito no se acredita a ciegas: queda 'pending' para el admin.
+          await session.abortTransaction()
+          console.warn('[WalletUSDC] guard liquidez tesorería fail-closed (auto):', guardErr.message)
+          return res.status(409).json({
+            error: 'No se pudo verificar la liquidez de la tesorería. La conversión queda pendiente de confirmación manual.',
+            code:  'TREASURY_CHECK_UNAVAILABLE',
+          })
+        }
+        // Confirmación de admin: fail-open, hay un humano evaluando la operación.
+        console.warn('[WalletUSDC] guard liquidez tesorería fail-open (admin):', guardErr.message)
       }
     }
 
