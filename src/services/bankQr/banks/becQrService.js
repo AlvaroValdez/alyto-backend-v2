@@ -354,7 +354,13 @@ export async function verifyCipher(plaintext) {
   const url = `${cfg.baseUrl()}/api/authentication/decrypt?text=${encodeURIComponent(encrypted)}&aesKey=${encodeURIComponent(cfg.aesKey())}`;
   const res  = await fetch(url);
   const text = await res.text();
-  const match = text.trim() === plaintext;
+  // El endpoint /decrypt del banco devuelve el valor como string JSON entre comillas
+  // (p.ej. `"1234"`); hay que desenvolverlo antes de comparar o da falso negativo.
+  let decrypted = text.trim();
+  if (decrypted.startsWith('"') && decrypted.endsWith('"')) {
+    try { decrypted = JSON.parse(decrypted); } catch { decrypted = decrypted.slice(1, -1); }
+  }
+  const match = decrypted === plaintext;
   logger.info(`[BEC] verifyCipher: '${plaintext}' → match=${match}`);
-  return { encrypted, decrypted: text.trim(), match };
+  return { encrypted, decrypted, match };
 }
