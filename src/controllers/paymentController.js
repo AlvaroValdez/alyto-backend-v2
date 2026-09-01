@@ -1572,14 +1572,21 @@ export async function initCrossBorderPayment(req, res) {
   let paymentQR      = null;
   let paymentQRStatic = [];   // QR estáticos subidos por el admin (Tigo Money, Banco, etc.)
 
-  // bankQr: el QR ya fue generado por el banco — solo persistirlo en paymentQR
+  // bankQr: el QR ya fue generado por el banco — solo persistirlo en paymentQR.
+  // ⚠️ La asignación a `paymentQR` va ANTES del save: el QR ya existe y es pagable,
+  // así que un fallo de persistencia NO debe dejar al usuario sin nada que escanear
+  // (antes quedaba null y el frontend mostraba "No se pudo cargar el QR").
   if (corridor.payinMethod === 'bankQr' && bankQrMeta && transaction) {
+    paymentQR = bankQrMeta.qrImage;
     try {
       transaction.paymentQR = bankQrMeta.qrImage;
       await transaction.save();
-      paymentQR = bankQrMeta.qrImage;
     } catch (saveErr) {
       logger.error('[CrossBorder] Error guardando qrImage del banco:', saveErr.message);
+      Sentry.captureException(saveErr, {
+        tags:  { component: 'initCrossBorderPayment', payinMethod: 'bankQr' },
+        extra: { alytoTransactionId, qrId: bankQrMeta.qrId },
+      });
     }
   }
 
@@ -3065,12 +3072,20 @@ export async function getTransactionQR(req, res) {
     return res.status(404).json({ error: 'Transacción no encontrada.' });
   }
 
-  if (transaction.paymentInstructions == null) {
+  // Las tx de payinMethod='bankQr' NO tienen paymentInstructions (el QR del banco
+  // reemplaza las instrucciones de transferencia), pero SÍ tienen un QR que mostrar.
+  // Sin esta excepción el endpoint devolvía 404 y el usuario que recargaba la página
+  // del pago se quedaba sin QR que escanear.
+  const isBankQrTx = !!transaction.bankQr?.qrId;
+  if (transaction.paymentInstructions == null && !isBankQrTx) {
     return res.status(404).json({ error: 'Esta transacción no requiere pago manual.' });
   }
 
-  // Si no hay QR guardado (tx antigua), generarlo y persistirlo
-  if (!transaction.paymentQR) {
+  // Si no hay QR guardado (tx antigua), generarlo y persistirlo.
+  // ⚠️ Solo para el flujo manual: generatePaymentQR codifica los datos bancarios de
+  // la SRL. Aplicarlo a una tx bankQr produciría un QR que el banco NO reconoce como
+  // el cobro — impagable y engañoso. Ahí el QR autoritativo es el del banco.
+  if (!transaction.paymentQR && !isBankQrTx) {
     try {
       const { qrBase64 } = await generatePaymentQR(transaction);
       transaction.paymentQR = qrBase64;
@@ -3079,6 +3094,9 @@ export async function getTransactionQR(req, res) {
       console.error('[QR] Error generando QR para tx antigua:', err.message);
       return res.status(500).json({ error: 'Error generando código QR.' });
     }
+  }
+  if (!transaction.paymentQR && isBankQrTx) {
+    return res.status(404).json({ error: 'El QR bancario de esta transacción no está disponible.' });
   }
 
   // Incluir QR estáticos del admin (Tigo Money, Banco Económico, etc.)
