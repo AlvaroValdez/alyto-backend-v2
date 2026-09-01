@@ -218,10 +218,13 @@ export async function getQRStatus(qrId) {
   const data = await apiFetch(`/api/qrsimple/v2/statusQR/${encodeURIComponent(qrId)}`);
   if (data.responseCode !== 0) throw new Error(`BEC statusQR error: ${data.message}`);
 
-  // API: statusQRCode 0=activo pendiente, 1=pagado, 9=anulado
+  // API: statusQrCode 0=activo pendiente, 1=pagado, 9=anulado
+  // ⚠️ El campo es `statusQrCode` (Q mayúscula, r minúscula), verificado contra el
+  // gateway de producción 2026-09-01. Un typo `statusQRCode` deja el status en 'unknown'
+  // y rompe la confirmación de pagos (verifyIpn Capa 2 + reconcileBankQrPayments).
   const STATUS_MAP = { 0: 'pending', 1: 'paid', 9: 'cancelled' };
   return {
-    status:  STATUS_MAP[data.statusQRCode] ?? 'unknown',
+    status:  STATUS_MAP[data.statusQrCode] ?? 'unknown',
     payment: Array.isArray(data.payment) ? data.payment[0] ?? null : data.payment ?? null,
   };
 }
