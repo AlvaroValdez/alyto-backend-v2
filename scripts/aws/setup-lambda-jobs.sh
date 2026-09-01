@@ -165,6 +165,8 @@ RULES=(
   "alyto-cron-reconcile-stellar|rate(15 minutes)|reconcile-stellar"
   "alyto-cron-ros-monitor|rate(6 hours)|ros-monitor"
   "alyto-cron-ros-monitor-wallet|rate(6 hours)|ros-monitor-wallet"
+  "alyto-cron-reconcile-bank-qr|rate(30 minutes)|reconcile-bank-qr"
+  "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
 )
 

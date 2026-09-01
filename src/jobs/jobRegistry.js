@@ -37,6 +37,15 @@ const JOBS = {
     import('./rosMonitor.js').then((m) => m.rosMonitor),
   'ros-monitor-wallet': () =>
     import('./rosMonitorWallet.js').then((m) => m.rosMonitorWallet),
+  // Red de seguridad del QR bancario boliviano (BEC/BANECO) ante IPN perdidos, y
+  // alerta de retiros 'dispatched' sin confirmar. Ambos se programan dentro del gate
+  // `if (!externalScheduler)` de app.js: sin esta entrada quedaban HUÉRFANOS en
+  // producción — setInterval apagado por JOBS_EXTERNAL_SCHEDULER=true y Lambda
+  // respondiendo 'unknown_job'. Es decir, no corrían por ningún lado.
+  'reconcile-bank-qr': () =>
+    import('./reconcileBankQrPayments.js').then((m) => m.reconcileBankQrPayments),
+  'reconcile-bec-disbursements': () =>
+    import('./reconcileBecDisbursements.js').then((m) => m.reconcileBecDisbursements),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
 };
