@@ -165,7 +165,12 @@ RULES=(
   "alyto-cron-reconcile-stellar|rate(15 minutes)|reconcile-stellar"
   "alyto-cron-ros-monitor|rate(6 hours)|ros-monitor"
   "alyto-cron-ros-monitor-wallet|rate(6 hours)|ros-monitor-wallet"
-  "alyto-cron-reconcile-bank-qr|rate(30 minutes)|reconcile-bank-qr"
+  # 2 min y no 30: el webhook de BANECO no está llegando (verificado con un pago
+  # real el 2026-09-07), así que este job es HOY el único camino de confirmación.
+  # Cuesta 2 llamadas por corrida (paidQR de ayer + hoy) contra un endpoint que el
+  # banco declaró sin límite de operaciones, y baja la demora de acreditación de
+  # media hora a un par de minutos. Volver a 30 min cuando el IPN funcione.
+  "alyto-cron-reconcile-bank-qr|rate(2 minutes)|reconcile-bank-qr"
   "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
 )

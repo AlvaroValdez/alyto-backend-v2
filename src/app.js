@@ -49,7 +49,7 @@ import anchorAdminRoutes   from './routes/anchorAdminRoutes.js';   // AnchorAdmi
 import ledgerAdminRoutes   from './routes/ledgerAdminRoutes.js';   // Libro Mayor reportes (feature-gated)
 import marketingAgentRoutes from './routes/marketingAgentRoutes.js'; // Agente de marketing (feature-gated)
 import regionalRoutes      from './routes/regionalRoutes.js';
-import ipnRoutes           from './routes/ipn.js';
+import ipnRoutes, { becAliasRouter } from './routes/ipn.js';
 import internalJobsRoutes  from './routes/internalJobsRoutes.js';
 import waitlistRoutes      from './routes/waitlistRoutes.js';      // landing alyto.io — lista de espera
 import dashboardRoutes     from './routes/dashboardRoutes.js';
@@ -254,6 +254,9 @@ function captureRawBodyMiddleware(req, res, next) {
 }
 
 app.use('/api/v1/ipn',                              captureRawBodyMiddleware);
+// Alias del webhook BEC en la ruta del manual del banco (§7.5) — mismo trato de
+// raw body que el resto de IPN, y por eso va acá y no junto a las demás rutas.
+app.use('/api/qrsimple',                            captureRawBodyMiddleware);
 
 // Parseo de JSON con límite de payload
 app.use(express.json({ limit: '1mb' }));
@@ -379,6 +382,7 @@ app.use('/api/v1/user',          userRoutes);
 app.use('/api/v1/admin',         adminRoutes);
 app.use('/api/v1/regional',      regionalRoutes);
 app.use('/api/v1/ipn',           ipnRoutes);
+app.use('/api/qrsimple',         becAliasRouter);   // alias §7.5 del manual BANECO
 app.use('/api/v1/internal',      internalJobsRoutes);    // AWS-2A — disparo de jobs (token interno)
 app.use('/api/v1/waitlist',      waitlistRoutes);        // landing alyto.io — público, limiter propio
 app.use('/api/v1/kyc',           kycRoutes);

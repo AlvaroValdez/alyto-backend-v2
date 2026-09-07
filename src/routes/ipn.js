@@ -141,3 +141,29 @@ router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
 router.post('/bec-disbursement', captureRawBody, handleBecDisbursementIPN);
 
 export default router;
+
+// ─── Alias: la ruta de notificación que documenta el manual de BANECO ─────────
+
+/**
+ * El manual "Api Market Baneco v1.3.0" §7.5 especifica el endpoint del comercio
+ * como `http://[dominio]:[puerto]/api/qrsimple/notifyPaymentQR`. Nuestra ruta
+ * canónica es `/api/v1/ipn/bec`, que es la que se le entregó al banco el 20/07.
+ *
+ * Este alias cubre la hipótesis de que el sistema de BANECO arme la URL como
+ * dominio + esa ruta fija en vez de usar la registrada: en ese caso hoy estaría
+ * llamando a una ruta inexistente y el pago nunca se confirmaría por webhook.
+ * Es lo que se observó en el primer pago real (2026-09-07): el banco marcó el QR
+ * como pagado pero no llegó NINGUNA petición a nuestro endpoint.
+ *
+ * Apunta al MISMO handler, así que hereda las dos capas de autenticidad (token
+ * Bearer + reconfirmación contra el banco). Abrir esta ruta no agrega superficie
+ * de ataque: un IPN forjado sigue siendo inútil porque el atacante no puede hacer
+ * que el banco declare pagado un QR que no lo está.
+ *
+ * Se monta como router aparte para NO exponer el resto de webhooks (vita, fintoc,
+ * owlpay, dispersión) bajo el prefijo /api/qrsimple.
+ */
+export const becAliasRouter = Router();
+
+becAliasRouter.get('/notifyPaymentQR',  webhookPingOk('bec-alias'));
+becAliasRouter.post('/notifyPaymentQR', captureRawBody, handleBankQrIPN('bec'));
