@@ -37,7 +37,10 @@ import Sentry              from './sentry.js';
 
 const REFRESH_INTERVAL_MS          = parseInt(process.env.QUOTE_REFRESH_INTERVAL_MS    ?? '60000', 10);
 const RATE_CHANGE_THRESHOLD        = parseFloat(process.env.QUOTE_RATE_CHANGE_THRESHOLD ?? '0.005');
-const CACHE_REFRESH_BEFORE_EXPIRY  = parseInt(process.env.QUOTE_CACHE_REFRESH_BEFORE_MS ?? '120000', 10);
+// Margen para re-pedir /prices antes de que expire la ventana de Vita. Vita
+// garantiza sus precios ~120 s, así que este valor DEBE quedar bien por debajo:
+// con 120000 el cache nacía stale y se refrescaba en cada cotización.
+const CACHE_REFRESH_BEFORE_EXPIRY  = parseInt(process.env.QUOTE_CACHE_REFRESH_BEFORE_MS ?? '30000', 10);
 const QUOTE_VALIDITY_MS            = parseInt(process.env.QUOTE_VALIDITY_MS             ?? '360000', 10); // 6 min
 const VITA_CACHE_DEFAULT_TTL_MS    = parseInt(process.env.VITA_CACHE_TTL_MS             ?? '600000', 10); // 10 min
 const MAX_CONNECTIONS_PER_USER     = 3;
@@ -110,20 +113,41 @@ function isCacheStale() {
  *
  * @returns {Promise<boolean>} true si el refresh fue exitoso
  */
+let refreshInFlight = null;
+
 async function refreshVitaCache() {
+  // Con la ventana real de Vita (~2 min) el cache queda stale seguido y N
+  // conexiones simultáneas dispararían N llamadas a /prices. Compartimos una.
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    try {
+      const data        = await getPrices();
+      vitaCache.prices    = data;
+      vitaCache.fetchedAt = new Date();
+      // ⚠️ /prices viene anidado por moneda: { clp:{...}, usd:{...}, usdc, usdt, cop }.
+      // La ruta sin moneda no existe — leerla dejaba validUntil en el fallback de
+      // 10 min mientras Vita solo garantiza ~2, así que el cache no se refrescaba
+      // y las cotizaciones salían con un quoteExpiresAt ya vencido.
+      // Mismo patrón que paymentController.js:1764 (sin-moneda ?? clp).
+      const vitaValidUntil =
+        data?.withdrawal?.prices?.attributes?.valid_until
+        ?? data?.clp?.withdrawal?.prices?.attributes?.valid_until
+        ?? data?.usd?.withdrawal?.prices?.attributes?.valid_until;
+      vitaCache.validUntil = vitaValidUntil
+        ? new Date(vitaValidUntil)
+        : new Date(Date.now() + VITA_CACHE_DEFAULT_TTL_MS);
+      return true;
+    } catch (err) {
+      console.warn('[Alyto WS] No se pudo refrescar el cache de precios Vita:', err.message);
+      return false;
+    }
+  })();
+
   try {
-    const data        = await getPrices();
-    vitaCache.prices    = data;
-    vitaCache.fetchedAt = new Date();
-    // valid_until está en withdrawal.prices.attributes.valid_until (no en raíz)
-    const vitaValidUntil = data?.withdrawal?.prices?.attributes?.valid_until;
-    vitaCache.validUntil = vitaValidUntil
-      ? new Date(vitaValidUntil)
-      : new Date(Date.now() + VITA_CACHE_DEFAULT_TTL_MS);
-    return true;
-  } catch (err) {
-    console.warn('[Alyto WS] No se pudo refrescar el cache de precios Vita:', err.message);
-    return false;
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
 }
 
@@ -139,10 +163,15 @@ async function refreshVitaCache() {
  */
 function extractPricing(originCurrency, destinationCountry) {
   const destUpper  = destinationCountry.toUpperCase();
+  // Sección CLP — ver nota de anidamiento por moneda en refreshVitaCache().
   const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? vitaCache.prices?.vita_sent?.prices?.attributes
-    : vitaCache.prices?.withdrawal?.prices?.attributes;
-  const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
+    ? (vitaCache.prices?.vita_sent?.prices?.attributes
+        ?? vitaCache.prices?.clp?.vita_sent?.prices?.attributes)
+    : (vitaCache.prices?.withdrawal?.prices?.attributes
+        ?? vitaCache.prices?.clp?.withdrawal?.prices?.attributes);
+  const attrs = attrsSource
+    ?? vitaCache.prices?.withdrawal?.prices?.attributes
+    ?? vitaCache.prices?.clp?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
   // Países vita_sent usan su clave propia (EU → 'es'); el resto, ISO minúsculas.
@@ -226,11 +255,15 @@ function extractPricingUSD(destinationCountry) {
     }
   }
 
-  // Fallback: cross-rate via sección CLP
+  // Fallback: cross-rate via sección CLP (anidada por moneda — ver refreshVitaCache)
   const attrsSource = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
-    ? vitaCache.prices?.vita_sent?.prices?.attributes
-    : vitaCache.prices?.withdrawal?.prices?.attributes;
-  const attrs = attrsSource ?? vitaCache.prices?.withdrawal?.prices?.attributes;
+    ? (vitaCache.prices?.vita_sent?.prices?.attributes
+        ?? vitaCache.prices?.clp?.vita_sent?.prices?.attributes)
+    : (vitaCache.prices?.withdrawal?.prices?.attributes
+        ?? vitaCache.prices?.clp?.withdrawal?.prices?.attributes);
+  const attrs = attrsSource
+    ?? vitaCache.prices?.withdrawal?.prices?.attributes
+    ?? vitaCache.prices?.clp?.withdrawal?.prices?.attributes;
   if (!attrs) return null;
 
   const countryKey = VITA_SENT_ONLY_COUNTRIES.has(destUpper)
@@ -580,6 +613,15 @@ function scheduleRefresh(ws) {
   const state = ws.quoteState;
   if (state.refreshTimer) clearTimeout(state.refreshTimer);
 
+  // El refresh debe llegar ANTES de que expire la cotización vigente. La ventana
+  // de Vita (~2 min, y tan corta como ~30 s al final del ciclo de cache) puede ser
+  // menor que REFRESH_INTERVAL_MS: con un intervalo fijo de 60 s el usuario veía
+  // 0:00 mientras llenaba los datos del beneficiario, esperando el próximo push.
+  const msToCurrentExpiry = state.quoteExpiresAt
+    ? new Date(state.quoteExpiresAt).getTime() - Date.now()
+    : Infinity;
+  const delay = Math.max(5_000, Math.min(REFRESH_INTERVAL_MS, msToCurrentExpiry - 15_000));
+
   state.refreshTimer = setTimeout(async () => {
     if (ws.readyState !== ws.OPEN) return;
 
@@ -637,7 +679,7 @@ function scheduleRefresh(ws) {
     }
 
     scheduleRefresh(ws);
-  }, REFRESH_INTERVAL_MS);
+  }, delay);
 }
 
 // ─── Handlers de Mensajes ─────────────────────────────────────────────────────
