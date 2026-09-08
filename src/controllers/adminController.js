@@ -1666,8 +1666,12 @@ export async function getCorridorRates(req, res) {
   }
 
   const BOB_USD_RATE       = await getBOBRate();
-  const vitaAttrsWithdrawal = vitaPrices?.withdrawal?.prices?.attributes ?? null;
-  const vitaAttrsSent       = vitaPrices?.vita_sent?.prices?.attributes  ?? null;
+  // /prices viene anidado por moneda ({ clp, usd, usdc, … }); la ruta sin moneda
+  // no existe y dejaba ambos en null → el panel mostraba los corredores sin tasa.
+  const vitaAttrsWithdrawal = vitaPrices?.withdrawal?.prices?.attributes
+    ?? vitaPrices?.clp?.withdrawal?.prices?.attributes ?? null;
+  const vitaAttrsSent       = vitaPrices?.vita_sent?.prices?.attributes
+    ?? vitaPrices?.clp?.vita_sent?.prices?.attributes  ?? null;
 
   const result = corridors.map((c) => {
     const amount = referenceAmount;
@@ -1877,9 +1881,13 @@ export async function vitaDiagnostic(req, res) {
     const raw = pricesRes.value?.data ?? pricesRes.value ?? {};
 
     // Extraer los attrs de cada sección relevante
+    // Anidado por moneda — sin el segmento `clp` ambas quedaban undefined y el
+    // bucle de abajo hacía `continue`, devolviendo una cobertura vacía.
     const sections = {
-      withdrawal: raw?.withdrawal?.prices?.attributes,
-      vita_sent:  raw?.vita_sent?.prices?.attributes,
+      withdrawal: raw?.withdrawal?.prices?.attributes
+        ?? raw?.clp?.withdrawal?.prices?.attributes,
+      vita_sent:  raw?.vita_sent?.prices?.attributes
+        ?? raw?.clp?.vita_sent?.prices?.attributes,
     };
 
     coverage = {};
