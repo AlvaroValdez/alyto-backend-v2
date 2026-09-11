@@ -46,15 +46,68 @@ const EXPIRY_GRACE_MS    = 60 * 60 * 1000;          // 1 hora
 // igual para no acumular zombies (mismo umbral que Harbor/Vita).
 const HARD_GIVEUP_MS     = 7 * 24 * 60 * 60 * 1000; // 7 días
 const SWEEP_LIMIT        = 50;                       // máx tx por corrida (límite API)
+// Tolerancia al comparar importes — el banco redondea a 2 decimales.
+const AMOUNT_TOLERANCE   = 0.02;
 
 // Guard de overlap: dos corridas solapadas podrían confirmar/cancelar la misma tx.
 let _isRunning = false;
 
 /**
+ * ¿El importe que reporta el banco difiere del esperado?
+ *
+ * El QR se emite con `modifyAmount:false`, así que el banco debería rechazar de
+ * plano un pago por un importe distinto. Aun así comparamos antes de acreditar,
+ * por dos razones:
+ *
+ *   1. El camino del IPN ya hacía esta comparación (ipnController), y este job
+ *      acredita exactamente lo mismo. Que un camino valide y el otro no es una
+ *      asimetría, no una decisión.
+ *   2. Hoy el webhook de BANECO no está llegando, así que TODA confirmación en
+ *      producción entra por este job. Sin esta guarda, el control de importe
+ *      sencillamente no corre nunca.
+ *
+ * Si el banco no informa importe no bloqueamos (preserva el comportamiento
+ * anterior): `modifyAmount:false` sigue siendo la garantía de fondo.
+ *
+ * @returns {boolean} true si hay descalce y NO se debe acreditar
+ */
+function hasAmountMismatch(expected, payment, bankId, ref) {
+  const received = Number(payment?.amount);
+  if (!Number.isFinite(received)) {
+    logger.warn('[reconcileBankQr] El banco no informó importe — se acredita el esperado', { bankId, ref, expected });
+    return false;
+  }
+  if (Math.abs(received - expected) <= AMOUNT_TOLERANCE) return false;
+
+  logger.warn(`[reconcileBankQr] Importe ${received} ≠ esperado ${expected} — NO se acredita`, {
+    bankId, ref, qrId: payment?.qrId,
+  });
+  Sentry.captureMessage(`BankQr reconciliation amount mismatch [${bankId}]`, {
+    level: 'warning',
+    extra: { ref, qrId: payment?.qrId, expected, received, sender: payment?.senderName },
+  });
+  return true;
+}
+
+/**
  * Confirma una tx bankQr (payin recibido) y dispara el payout.
  * Centraliza la lógica usada por FASE A, FASE B y — en el camino feliz — el IPN.
+ *
+ * @returns {Promise<boolean>} false si se abortó por descalce de importe.
  */
 async function confirmBankQrTx(tx, payment, bankId, source) {
+  if (hasAmountMismatch(tx.originalAmount, payment, bankId, tx.alytoTransactionId)) {
+    tx.ipnLog.push({
+      provider:   'bankQr',
+      eventType:  'bankqr_amount_mismatch',
+      status:     tx.status,
+      rawPayload: { payment, bankId, source },
+      receivedAt: new Date(),
+    });
+    await tx.save().catch(() => {});
+    return false;
+  }
+
   const bankPaidAt = payment?.paymentDate && payment?.paymentTime
     ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
     : new Date();
@@ -91,6 +144,8 @@ async function confirmBankQrTx(tx, payment, bankId, source) {
       extra: { alytoTransactionId: tx.alytoTransactionId, bankId },
     });
   });
+
+  return true;
 }
 
 /** Marca una tx bankQr vencida como fallida (soft-delete para auditoría ASFI). */
@@ -160,8 +215,7 @@ async function reconcilePaidQRs() {
             status:        'payin_pending',
           });
           if (tx) {
-            await confirmBankQrTx(tx, payment, bankId, 'reconciliation_job');
-            fixed++;
+            if (await confirmBankQrTx(tx, payment, bankId, 'reconciliation_job')) fixed++;
             continue;
           }
           // ¿Carga de Wallet BOB con IPN perdido?
@@ -171,6 +225,7 @@ async function reconcilePaidQRs() {
             status:        'pending',
           });
           if (!wtx) continue;  // ya confirmada por IPN o inexistente
+          if (hasAmountMismatch(wtx.amount, payment, bankId, wtx.wtxId)) continue;
           const r = await confirmBankQrDeposit(wtx, payment, bankId, 'reconciliation_job');
           if (r.ok) fixed++;
         } catch (err) {
@@ -227,8 +282,9 @@ async function sweepExpiredQRs() {
 
       if (statusInfo.status === 'paid' && statusInfo.payment) {
         // Pagado pero la FASE A no lo listó (fuera de ventana, lag del banco) → confirmar.
-        await confirmBankQrTx(tx, statusInfo.payment, bankId, 'sweep');
-        handled++;
+        // Un descalce de importe deja la tx intacta: se revisa a mano, no se archiva
+        // como vencida (el dinero entró, aunque por un monto que no cuadra).
+        if (await confirmBankQrTx(tx, statusInfo.payment, bankId, 'sweep')) handled++;
         continue;
       }
 
@@ -291,6 +347,8 @@ async function sweepExpiredWalletQRs() {
 
       if (statusInfo.status === 'paid' && statusInfo.payment) {
         // Pagado fuera de la ventana de FASE A → acreditar.
+        // Con descalce de importe no se acredita ni se archiva: queda para revisión.
+        if (hasAmountMismatch(wtx.amount, statusInfo.payment, bankId, wtx.wtxId)) continue;
         const r = await confirmBankQrDeposit(wtx, statusInfo.payment, bankId, 'sweep');
         if (r.ok) handled++;
         continue;
