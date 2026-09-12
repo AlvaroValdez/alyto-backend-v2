@@ -112,19 +112,152 @@ export function __resetCacheVerificacion() {
   cacheVerificacion = null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Carrusel (post multi-foto)
+//
+// Meta no tiene "publicar carrusel" en un solo pedido. Son dos fases:
+//
+//   1. Subir cada imagen a /{page-id}/photos con published=false → media_fbid.
+//      Las fotos quedan en la página pero INVISIBLES.
+//   2. Crear el post en /{page-id}/feed con attached_media[i]={media_fbid}.
+//
+// Esa forma decide la semántica de fallo, y es distinta de la del post de texto:
+//
+//   Falla en la fase 1 → NO hay post. Da igual si fue rechazo o timeout: nada
+//     salió al aire, así que la pieza se puede destrabar sin riesgo. Lo peor que
+//     queda son fotos invisibles huérfanas, que se intentan borrar.
+//   Falla en la fase 2 sin respuesta → mismo caso que el post de texto: no
+//     sabemos si salió, la pieza queda TRABADA para que un humano mire.
+//
+// Por eso los errores de subida llevan código propio (SUBIDA_FALLIDA): el
+// servicio lo usa para decidir si traba o no. Colapsarlo con el genérico haría
+// que cada timeout subiendo una foto exija destrabar a mano sin motivo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TIMEOUT_SUBIDA_MS = 30_000;   // 200KB por slide; 30s es de sobra
+const TIMEOUT_FEED_MS   = 20_000;
+
 /**
- * Publica una pieza como post de texto en la página.
+ * Sube un PNG como foto no publicada y devuelve su media_fbid.
+ * @throws {Error & {code:'SUBIDA_FALLIDA'}}
+ */
+async function subirFoto(png, nombre, { pageId, token }) {
+  const form = new FormData();
+  form.append('published', 'false');
+  form.append('access_token', token);
+  form.append('source', new Blob([png], { type: 'image/png' }), nombre);
+
+  let resp;
+  try {
+    resp = await fetch(`${GRAPH()}/${pageId}/photos`, {
+      method: 'POST', body: form, signal: AbortSignal.timeout(TIMEOUT_SUBIDA_MS),
+    });
+  } catch (err) {
+    const e = new Error(`No se pudo subir ${nombre}: ${err.message}`);
+    e.code = 'SUBIDA_FALLIDA';
+    throw e;
+  }
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.id) {
+    const e = new Error(`Meta rechazó la imagen ${nombre}: ${data?.error?.message || `HTTP ${resp.status}`}`);
+    e.code = 'SUBIDA_FALLIDA';
+    e.metaCode = data?.error?.code ?? null;
+    throw e;
+  }
+  return data.id;
+}
+
+/**
+ * Borra fotos subidas que nunca llegaron a publicarse.
  *
- * El cuerpo se envía tal cual, con el título como primera línea: Facebook no
- * tiene campo de título separado, así que la pieza se lee como un solo post.
+ * Best-effort y silencioso a propósito: son invisibles, así que no borrarlas no
+ * rompe nada. Pero sin esto cada reintento fallido deja basura acumulada en la
+ * página, y con los intentos suficientes eso sí se nota.
+ */
+async function borrarHuerfanas(ids, { token }) {
+  await Promise.allSettled(ids.map(id =>
+    fetch(`${GRAPH()}/${id}?access_token=${encodeURIComponent(token)}`,
+      { method: 'DELETE', signal: AbortSignal.timeout(10_000) }),
+  ));
+}
+
+/**
+ * Publica un carrusel: sube las imágenes y las adjunta a un post.
  *
  * @param {{titulo:string, cuerpo:string}} pieza
+ * @param {Array<{orden:number, png:Buffer}>} imagenes  ya renderizadas, en orden
+ */
+async function publicarCarrusel({ titulo, cuerpo }, imagenes, { pageId, token }) {
+  const message = [titulo, cuerpo].filter(Boolean).join('\n\n');
+
+  // Fase 1 — en serie, no en paralelo: Meta limita la tasa de subida por página,
+  // y 10 subidas simultáneas se ganan un 429 que aborta el carrusel entero.
+  const mediaIds = [];
+  try {
+    for (const { orden, png } of imagenes) {
+      mediaIds.push(await subirFoto(png, `slide-${orden}.png`, { pageId, token }));
+    }
+  } catch (err) {
+    await borrarHuerfanas(mediaIds, { token });
+    throw err;   // SUBIDA_FALLIDA — nada se publicó, la pieza no queda trabada
+  }
+
+  // Fase 2 — el post. attached_media va como campos indexados, no como JSON:
+  // la Graph API no acepta un array anidado en un cuerpo JSON.
+  const cuerpoForm = new URLSearchParams({ message, access_token: token });
+  mediaIds.forEach((id, i) => cuerpoForm.append(`attached_media[${i}]`, JSON.stringify({ media_fbid: id })));
+
+  let resp;
+  try {
+    resp = await fetch(`${GRAPH()}/${pageId}/feed`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    cuerpoForm,
+      signal:  AbortSignal.timeout(TIMEOUT_FEED_MS),
+    });
+  } catch (err) {
+    // No se limpian las huérfanas acá: si el post SÍ salió, borrarlas lo
+    // destrozaría. La pieza queda trabada y lo resuelve un humano mirando.
+    const e = new Error(`No se pudo contactar a Meta al crear el post: ${err.message}`);
+    e.code = 'PUBLICADOR_SIN_RESPUESTA';
+    throw e;
+  }
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.id) {
+    await borrarHuerfanas(mediaIds, { token });
+    const e = new Error(`Meta rechazó el carrusel: ${data?.error?.message || `HTTP ${resp.status}`}`);
+    e.code   = 'PUBLICADOR_RECHAZO';
+    e.status = resp.status;
+    e.metaCode = data?.error?.code ?? null;
+    throw e;
+  }
+
+  return { postId: data.id, url: await permalink(data.id, token), raw: data };
+}
+
+/**
+ * Publica una pieza en la página.
+ *
+ * Un post de texto lleva el título como primera línea del mensaje: Facebook no
+ * tiene campo de título separado, así que la pieza se lee como un solo post.
+ * Un carrusel usa el mismo mensaje como pie y adjunta las imágenes.
+ *
+ * @param {{titulo:string, cuerpo:string}} pieza
+ * @param {{imagenes?: Array<{orden:number, png:Buffer}>}} [opts]
+ *   `imagenes` las renderiza quien llama (marketingPublishService): este
+ *   adaptador habla con Meta y no sabe dibujar.
  * @returns {Promise<{postId:string, url:string|null, raw:object}>}
  * @throws {Error & {code:string, status?:number}}
  */
-export async function publicar({ titulo, cuerpo }) {
+export async function publicar({ titulo, cuerpo }, opts = {}) {
   const pageId = process.env.FACEBOOK_PAGE_ID;
   const token  = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+
+  if (opts.imagenes?.length) {
+    return publicarCarrusel({ titulo, cuerpo }, opts.imagenes, { pageId, token });
+  }
 
   const message = [titulo, cuerpo].filter(Boolean).join('\n\n');
 

@@ -370,3 +370,179 @@ describe('salud de la credencial', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Carruseles — dos fases, dos semánticas de fallo
+//
+// Publicar un carrusel no es un pedido sino dos: subir cada imagen (invisible) y
+// recién después crear el post. Lo que se fija acá es que fallar en la primera
+// fase NO trabe la pieza —nada salió al aire— y que fallar sin respuesta en la
+// segunda SÍ la trabe, igual que un post de texto.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SLIDES = [
+  { orden: 1, rol: 'portada',    titulo: 'Cinco señales', texto: '' },
+  { orden: 2, rol: 'desarrollo', titulo: 'Te apuran',     texto: 'La urgencia es señal de alerta.' },
+  { orden: 3, rol: 'cierre',     titulo: 'Ante la duda',  texto: 'Consultá antes de mover tu dinero.' },
+]
+
+const sembrarCarrusel = (over = {}) => sembrar({ formato: 'carrusel', slides: SLIDES, ...over })
+
+/**
+ * Mockea las tres clases de llamada de un carrusel: subir foto (POST /photos),
+ * crear el post (POST /feed) y pedir el permalink (GET).
+ */
+function mockCarrusel({ subir = null, feed = null } = {}) {
+  const n = { subidas: 0, posts: 0, borrados: 0 }
+  fetchMock.mockImplementation(async (url, opts) => {
+    const u = String(url)
+    if (opts?.method === 'DELETE') { n.borrados++; return { ok: true, status: 200, json: async () => ({ success: true }) } }
+    if (opts?.method === 'POST' && u.includes('/photos')) {
+      n.subidas++
+      return subir ? subir(n.subidas) : { ok: true, status: 200, json: async () => ({ id: `media_${n.subidas}` }) }
+    }
+    if (opts?.method === 'POST' && u.includes('/feed')) {
+      n.posts++
+      return feed ? feed() : okMeta('999_carrusel')
+    }
+    return { ok: true, status: 200, json: async () => ({ permalink_url: 'https://fb.com/p/1' }) }
+  })
+  return n
+}
+
+describe('carrusel — camino feliz', () => {
+  test('sube una imagen por slide y después crea el post', async () => {
+    const pieza = await sembrarCarrusel()
+    const n = mockCarrusel()
+
+    const r = await publicarPieza(pieza._id.toString(), { actor: 'admin@alyto.app' })
+
+    expect(n.subidas).toBe(3)
+    expect(n.posts).toBe(1)
+    expect(r.estado).toBe('publicado')
+    expect(r.publicacion.postId).toBe('999_carrusel')
+  })
+
+  test('adjunta los media_fbid en orden', async () => {
+    const pieza = await sembrarCarrusel()
+    mockCarrusel()
+
+    await publicarPieza(pieza._id.toString(), { actor: 'a' })
+
+    const feed = fetchMock.mock.calls.find(([u, o]) => o?.method === 'POST' && String(u).includes('/feed'))
+    const enviado = feed[1].body.toString()
+    expect(enviado).toContain('attached_media%5B0%5D')
+    expect(decodeURIComponent(enviado)).toContain('{"media_fbid":"media_1"}')
+    expect(decodeURIComponent(enviado)).toContain('{"media_fbid":"media_3"}')
+  })
+
+  test('las imágenes se suben como no publicadas', async () => {
+    const pieza = await sembrarCarrusel()
+    mockCarrusel()
+    await publicarPieza(pieza._id.toString(), { actor: 'a' })
+
+    const subida = fetchMock.mock.calls.find(([u, o]) => o?.method === 'POST' && String(u).includes('/photos'))
+    expect(subida[1].body.get('published')).toBe('false')
+  })
+})
+
+describe('carrusel — fallar subiendo NO traba la pieza', () => {
+  test('si una imagen es rechazada, la pieza queda libre para reintentar', async () => {
+    const pieza = await sembrarCarrusel()
+    const n = mockCarrusel({ subir: (i) => (i === 2 ? errorMeta('Image too large', 400, 1) : okMeta(`media_${i}`)) })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' }))
+      .rejects.toMatchObject({ code: 'SUBIDA_FALLIDA' })
+
+    const tras = await ContentPiece.findById(pieza._id).lean()
+    expect(tras.publicacion.enCurso).toBe(false)   // nada salió al aire
+    expect(tras.publicacion.postId).toBeNull()
+    expect(n.posts).toBe(0)
+  })
+
+  test('borra las imágenes que ya había subido', async () => {
+    const pieza = await sembrarCarrusel()
+    const n = mockCarrusel({ subir: (i) => (i === 3 ? errorMeta('boom', 400, 1) : okMeta(`media_${i}`)) })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' })).rejects.toThrow()
+
+    expect(n.borrados).toBe(2)   // las dos que sí subieron
+  })
+
+  test('un timeout subiendo tampoco traba: el post no existe', async () => {
+    const pieza = await sembrarCarrusel()
+    mockCarrusel({ subir: () => { throw new Error('fetch failed') } })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' }))
+      .rejects.toMatchObject({ code: 'SUBIDA_FALLIDA' })
+
+    expect((await ContentPiece.findById(pieza._id).lean()).publicacion.enCurso).toBe(false)
+  })
+})
+
+describe('carrusel — fallar creando el post SÍ traba', () => {
+  test('sin respuesta al crear el post → pieza trabada', async () => {
+    const pieza = await sembrarCarrusel()
+    mockCarrusel({ feed: () => { throw new Error('socket hang up') } })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' }))
+      .rejects.toMatchObject({ code: 'PUBLICADOR_SIN_RESPUESTA' })
+
+    const tras = await ContentPiece.findById(pieza._id).lean()
+    expect(tras.publicacion.enCurso).toBe(true)   // no sabemos si salió
+  })
+
+  test('no borra las imágenes si no sabe si el post salió', async () => {
+    // Borrarlas destrozaría un carrusel que sí se publicó.
+    const pieza = await sembrarCarrusel()
+    const n = mockCarrusel({ feed: () => { throw new Error('socket hang up') } })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' })).rejects.toThrow()
+
+    expect(n.borrados).toBe(0)
+  })
+
+  test('rechazo explícito de Meta → no traba y limpia', async () => {
+    const pieza = await sembrarCarrusel()
+    const n = mockCarrusel({ feed: () => errorMeta('Invalid attachment', 400, 100) })
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' }))
+      .rejects.toMatchObject({ code: 'PUBLICADOR_RECHAZO' })
+
+    expect((await ContentPiece.findById(pieza._id).lean()).publicacion.enCurso).toBe(false)
+    expect(n.borrados).toBe(3)
+  })
+})
+
+describe('carrusel — el render falla antes de tocar nada', () => {
+  test('un titular que no entra da 422 sin consumir intento ni trabar', async () => {
+    const pieza = await sembrarCarrusel({
+      slides: [
+        { orden: 1, rol: 'portada',    titulo: 'Una portada con un titular tan largo que no entra jamás en tres líneas de noventa y seis píxeles', texto: '' },
+        { orden: 2, rol: 'cierre',     titulo: 'Ante la duda', texto: 'Consultá.' },
+      ],
+    })
+    const n = mockCarrusel()
+
+    await expect(publicarPieza(pieza._id.toString(), { actor: 'a' }))
+      .rejects.toMatchObject({ code: 'RENDER_FALLIDO' })
+
+    const tras = await ContentPiece.findById(pieza._id).lean()
+    expect(tras.publicacion.enCurso).toBe(false)
+    expect(tras.publicacion.intentos).toBe(0)   // ni siquiera se reclamó
+    expect(n.subidas).toBe(0)
+  })
+})
+
+describe('un post de texto sigue publicándose igual', () => {
+  test('no sube imágenes ni cambia de camino', async () => {
+    const pieza = await sembrar()   // formato 'post' por defecto
+    const n = mockCarrusel()
+
+    const r = await publicarPieza(pieza._id.toString(), { actor: 'a' })
+
+    expect(n.subidas).toBe(0)
+    expect(n.posts).toBe(1)
+    expect(r.estado).toBe('publicado')
+  })
+})

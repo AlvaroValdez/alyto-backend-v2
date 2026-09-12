@@ -25,6 +25,7 @@ import * as Sentry from '@sentry/node';
 import ContentPiece from '../models/ContentPiece.js';
 import { verificarProhibiciones, textoPublicable } from './riskClassifier.js';
 import { getPublisher, estadoPublicadores, verificarCanales } from './publishers/publisherRegistry.js';
+import { renderCarrusel } from './marketing/slideRenderer.js';
 
 /** Estados desde los que una pieza puede salir al aire. */
 const PUBLICABLES = ['aprobado', 'autopublicado'];
@@ -41,6 +42,9 @@ export function estadoCanales() {
 export function estadoCanalesVerificado() {
   return verificarCanales();
 }
+
+/** ¿La pieza necesita imágenes para publicarse? */
+const reclamadaEsCarrusel = (p) => p?.formato === 'carrusel' && (p.slides?.length ?? 0) > 0;
 
 function error(codigo, mensaje, extra = {}) {
   const e = new Error(mensaje);
@@ -115,6 +119,21 @@ export async function publicarPieza(id, opts = {}) {
       { motivo: veto.motivo, coincidencia: veto.coincidencia });
   }
 
+  // Las imágenes se renderizan ANTES de reclamar la pieza, no después. Un texto
+  // que no entra en el lienzo es un problema de contenido, no de publicación:
+  // que consuma un intento o deje la pieza trabada sería castigar al operador
+  // por algo que se arregla acortando el titular.
+  let imagenes;
+  if (reclamadaEsCarrusel(pieza)) {
+    try {
+      imagenes = renderCarrusel(pieza);
+    } catch (err) {
+      throw error('RENDER_FALLIDO',
+        `No se pudieron generar las imágenes del carrusel: ${err.message}`,
+        { slide: err.slide, causa: err.code });
+    }
+  }
+
   // Reclamo atómico: solo una llamada puede quedarse con la pieza. La condición
   // repite postId:null y enCurso:false para cerrar la ventana entre la lectura
   // de arriba y este update — dos admins apretando a la vez no duplican el post.
@@ -135,10 +154,10 @@ export async function publicarPieza(id, opts = {}) {
   }
 
   try {
-    const { postId, url } = await publicador.publicar({
-      titulo: reclamada.titulo,
-      cuerpo: reclamada.cuerpo,
-    });
+    const { postId, url } = await publicador.publicar(
+      { titulo: reclamada.titulo, cuerpo: reclamada.cuerpo },
+      { imagenes },
+    );
 
     const publicada = await ContentPiece.findByIdAndUpdate(id, {
       $set: {
@@ -159,22 +178,28 @@ export async function publicarPieza(id, opts = {}) {
 
     return publicada;
   } catch (err) {
-    // Distinción crítica: si el publicador nunca llegó a Meta (fallo de red),
-    // no sabemos si el post salió → la pieza queda TRABADA para que un humano
-    // mire antes de reintentar. Si Meta rechazó explícitamente, no hay post y se
-    // puede desbloquear sin riesgo.
-    const meLlegoRespuesta = err.code === 'PUBLICADOR_RECHAZO';
+    // Distinción crítica: si no sabemos si el post salió, la pieza queda TRABADA
+    // para que un humano mire antes de reintentar. Solo se destraba sola cuando
+    // hay certeza de que NADA se publicó:
+    //
+    //   PUBLICADOR_RECHAZO → Meta rechazó explícitamente. No hay post.
+    //   SUBIDA_FALLIDA     → falló subiendo imágenes, antes de crear el post.
+    //                        Las fotos ya subidas son invisibles y se borraron.
+    //
+    // Todo lo demás —incluido un timeout al crear el post— traba. Un carrusel
+    // duplicado es peor que un bloqueo visible.
+    const nadaSePublico = ['PUBLICADOR_RECHAZO', 'SUBIDA_FALLIDA'].includes(err.code);
 
     await ContentPiece.findByIdAndUpdate(id, {
       $set: {
-        'publicacion.enCurso':     !meLlegoRespuesta,
+        'publicacion.enCurso':     !nadaSePublico,
         'publicacion.ultimoError': err.message?.slice(0, 500) ?? String(err),
       },
     });
 
     logger.error('[marketing-publish] falló la publicación', {
       piezaId: id, canal: reclamada.canal, code: err.code,
-      quedaTrabada: !meLlegoRespuesta, error: err.message,
+      quedaTrabada: !nadaSePublico, error: err.message,
     });
     Sentry.captureException(err, { tags: { service: 'marketingPublishService', canal: reclamada.canal } });
 

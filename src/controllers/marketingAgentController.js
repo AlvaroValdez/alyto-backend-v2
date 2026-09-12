@@ -45,10 +45,12 @@ const HTTP_PUBLICACION = {
   INTENTO_EN_CURSO:         409,  // hay que mirar la red antes de tocar nada
   ESTADO_NO_PUBLICABLE:     409,
   CONTENIDO_PROHIBIDO:      422,  // nunca publicable
+  RENDER_FALLIDO:           422,  // el texto no entra en el lienzo → hay que acortarlo
   CANAL_SIN_PUBLICADOR:     501,  // la red no acepta este tipo de contenido
   PUBLICADOR_NO_CONFIGURADO:503,  // falta configuración del despliegue
   PUBLICACION_DESHABILITADA:503,
   PUBLICADOR_RECHAZO:       502,  // la red dijo que no
+  SUBIDA_FALLIDA:           502,  // falló subiendo imágenes; nada se publicó
   PUBLICADOR_SIN_RESPUESTA: 504,  // no sabemos si salió
   PUBLICADOR_RESPUESTA_RARA:502,
   NO_TRABADA:               409,
