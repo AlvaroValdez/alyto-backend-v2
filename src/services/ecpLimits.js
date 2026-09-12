@@ -125,7 +125,7 @@ export async function getEcpUsage({ now = new Date() } = {}) {
     createdAt:      { $gte: periodStart },
   };
 
-  const sum = { $sum: { $ifNull: ['$originAmount', 0] } };
+  const sum = { $sum: { $ifNull: ['$originalAmount', 0] } };
 
   const [facet] = await Transaction.aggregate([
     { $match: base },
