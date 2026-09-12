@@ -879,6 +879,14 @@ async function startServer() {
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
       setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
       console.info('[Server] Refresh exchange rates job programado cada 30 min');
+
+      // Red de seguridad del sello on-chain — re-sella operaciones completadas que
+      // quedaron sin stellarTxId por un fallo transitorio de Horizon. Garantiza que
+      // ninguna operación completada quede sin su sello de existencia (ASFI).
+      const { resealAuditTrails } = await import('./jobs/resealAuditTrails.js');
+      setTimeout(resealAuditTrails, 6 * 60 * 1000);                       // primera corrida 6 min post-start
+      setInterval(resealAuditTrails, 30 * 60 * 1000);                     // cada 30 min
+      console.info('[Server] Reseal audit trails job programado cada 30 min');
     }
 
     // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO

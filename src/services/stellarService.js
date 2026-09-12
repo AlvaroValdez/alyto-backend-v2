@@ -401,6 +401,62 @@ export async function executeStellarPayment({
 // ─── 6. Audit Trail — Registro inmutable de transacciones Alyto en Stellar ───
 
 /**
+ * isRetriableStellarError(error)
+ *
+ * Clasifica un fallo de envío a Horizon como TRANSITORIO (vale reintentar en el acto)
+ * o PERMANENTE (reintentar en el acto no cambia el resultado). Endurece el audit trail:
+ * un timeout o un `tx_bad_seq` no debe dejar una operación completada sin sello.
+ *
+ * Transitorio: sin respuesta HTTP (timeout/red), 429, 5xx, o result_codes de
+ * secuencia/expiración/fee. Permanente: `tx_bad_auth`, operaciones malformadas, y la
+ * falta de saldo (que no se resuelve reintentando en milisegundos — de eso se ocupa el
+ * job de re-sellado, con su cadencia y su cooldown).
+ */
+export function isRetriableStellarError(error) {
+  if (!error) return false;
+  const status = error.response?.status;
+  if (status == null) {
+    // Error de red/transporte: no llegó respuesta de Horizon.
+    const code = String(error.code ?? '');
+    return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNABORTED/i.test(code)
+        || /timeout|network|socket hang up/i.test(String(error.message ?? ''));
+  }
+  if (status === 429 || status >= 500) return true;
+  const txCode = error.response?.data?.extras?.result_codes?.transaction;
+  return ['tx_bad_seq', 'tx_too_late', 'tx_insufficient_fee'].includes(txCode);
+}
+
+/**
+ * submitWithRetry(attemptFn, opts)
+ *
+ * Ejecuta `attemptFn(attempt)` con reintentos y backoff exponencial ante errores
+ * transitorios. Reintenta el ACTO COMPLETO (recargar cuenta + construir + firmar +
+ * enviar), no sólo el envío, para que un `tx_bad_seq` tome una secuencia fresca.
+ *
+ * Pura respecto de Stellar: `sleep` e `isRetriable` se inyectan, así se prueba sin red
+ * ni temporizadores reales. Repropaga el último error tras agotar los intentos o ante
+ * un error permanente — el llamador decide qué hacer (registerAuditTrail lo traga).
+ */
+export async function submitWithRetry(attemptFn, {
+  maxAttempts = Number(process.env.STELLAR_AUDIT_MAX_ATTEMPTS) || 3,
+  baseDelayMs = 400,
+  isRetriable = isRetriableStellarError,
+  sleep       = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await attemptFn(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxAttempts || !isRetriable(err)) throw err;
+      await sleep(baseDelayMs * 2 ** (attempt - 1));   // 400ms · 800ms · 1600ms …
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * registerAuditTrail(transaction)
  *
  * Registra el alytoTransactionId en Stellar como evidencia inmutable de que
@@ -441,24 +497,30 @@ export async function registerAuditTrail(transaction) {
     console.log('[Stellar Audit] Registrando audit trail:', alytoTxId,
       '| entidad:', entity, '| red:', NETWORK_INFO.name);
 
-    const account = await horizonServer.loadAccount(sourcePublicKey);
+    // Reintenta el acto completo ante fallos transitorios (timeout, 5xx, tx_bad_seq):
+    // recarga la cuenta en cada intento para tomar una secuencia fresca. Así un blip
+    // de Horizon no deja la operación completada sin sello. Los fallos persistentes
+    // (sin XLM, config) los recoge el job resealAuditTrails con su cadencia.
+    const result = await submitWithRetry(async () => {
+      const account = await horizonServer.loadAccount(sourcePublicKey);
 
-    const auditTx = new TransactionBuilder(account, {
-      fee:               BASE_FEE_STROOPS,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(
-        Operation.manageData({
-          name:  'alyto_tx',
-          value: alytoTxId,          // máx 64 bytes — IDs Alyto son ~26 chars
-        }),
-      )
-      .addMemo(Memo.text(alytoTxId.slice(0, 28)))  // memo text: máx 28 bytes
-      .setTimeout(TX_TIMEOUT_SECONDS)
-      .build();
+      const auditTx = new TransactionBuilder(account, {
+        fee:               BASE_FEE_STROOPS,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          Operation.manageData({
+            name:  'alyto_tx',
+            value: alytoTxId,          // máx 64 bytes — IDs Alyto son ~26 chars
+          }),
+        )
+        .addMemo(Memo.text(alytoTxId.slice(0, 28)))  // memo text: máx 28 bytes
+        .setTimeout(TX_TIMEOUT_SECONDS)
+        .build();
 
-    auditTx.sign(sourceKeypair);
-    const result = await horizonServer.submitTransaction(auditTx);
+      auditTx.sign(sourceKeypair);
+      return horizonServer.submitTransaction(auditTx);
+    });
 
     console.log('[Stellar Audit] ✅ Registrado:', result.hash,
       '| alytoTxId:', alytoTxId);

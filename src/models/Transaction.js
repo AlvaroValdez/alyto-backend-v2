@@ -498,6 +498,17 @@ const transactionSchema = new Schema(
     },
 
     /**
+     * Bookkeeping del re-sellado on-chain (job resealAuditTrails).
+     * Cuando el sello inicial de una operación 'completed' falla (Horizon caído, sin
+     * XLM, etc.), la tx queda sin `stellarTxId`; el job la reintenta con cadencia y
+     * cooldown. Estos campos acotan los reintentos y hacen visible el estado "pendiente
+     * de sello", de modo que ninguna operación completada quede silenciosamente sin él.
+     */
+    stellarAuditAttempts:      { type: Number, default: 0 },
+    stellarAuditLastAttemptAt: { type: Date },
+    stellarAuditLastError:     { type: String, trim: true },
+
+    /**
      * Conversión de moneda aplicada en el payout (solo corredores SRL/BOB).
      * Registra la tasa BOB→USD utilizada al momento del payout a Vita.
      */

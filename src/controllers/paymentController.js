@@ -910,6 +910,11 @@ export async function initCrossBorderPayment(req, res) {
     if (!ecp.allowed) {
       console.warn('[ECP] Operación rechazada por límite agregado:', ecp.violation?.code,
         '| solicitado:', amount, '| límite:', ecp.violation?.limit, '| consumido:', ecp.violation?.used);
+      // Deja asiento consultable del rechazo (límite, consumo previo, remanente) —
+      // acredita ante ASFI que el rechazo queda "en el sistema", no sólo en logs.
+      // No bloquea la respuesta: el recorder nunca lanza.
+      const { recordEcpRejection } = await import('../services/limitRejectionService.js');
+      await recordEcpRejection({ req, violation: ecp.violation, amountBOB: amount, corridor });
       return res.status(409).json({
         error:     ecpViolationMessage(ecp.violation),
         code:      ecp.violation?.code,

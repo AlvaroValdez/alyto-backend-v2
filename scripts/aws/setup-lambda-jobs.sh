@@ -173,6 +173,10 @@ RULES=(
   "alyto-cron-reconcile-bank-qr|rate(2 minutes)|reconcile-bank-qr"
   "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
+  # Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
+  # sin stellarTxId por un fallo transitorio de Horizon (garantía ASFI de sello por
+  # operación completada). Ver src/jobs/resealAuditTrails.js.
+  "alyto-cron-reseal-audit-trails|rate(30 minutes)|reseal-audit-trails"
 )
 
 for entry in "${RULES[@]}"; do

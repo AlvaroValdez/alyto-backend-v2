@@ -48,6 +48,12 @@ const JOBS = {
     import('./reconcileBecDisbursements.js').then((m) => m.reconcileBecDisbursements),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
+  // Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
+  // sin `stellarTxId` (Horizon caído al completar). Sin esta entrada quedaría huérfano
+  // en producción (setInterval apagado por JOBS_EXTERNAL_SCHEDULER + Lambda respondería
+  // 'unknown_job'). Ver resealAuditTrails.js.
+  'reseal-audit-trails': () =>
+    import('./resealAuditTrails.js').then((m) => m.resealAuditTrails),
 };
 
 export function jobNames() {
