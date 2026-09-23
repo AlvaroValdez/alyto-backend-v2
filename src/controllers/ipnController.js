@@ -3109,73 +3109,90 @@ export function handleBankQrIPN(bankId) {
   };
 }
 
-// ─── handleBecDisbursementIPN ─────────────────────────────────────────────────
+// ─── handleBankDisbursementIPN ────────────────────────────────────────────────
 
 /**
- * IPN de confirmación de estado de dispersión bancaria (BANECO §9.2 notifyStatus).
+ * Factory del IPN de confirmación de dispersión bancaria, por proveedor.
  *
- * El banco hace POST a POST /api/v1/ipn/bec-disbursement por cada pago del detalle
- * de la planilla, con su estado final. Liquidamos el retiro asociado:
- *   ACEP → completa el retiro (debita saldo + libera reserva)
- *   RECH → rechaza el retiro (libera reserva, no debita)
+ * El proveedor hace POST a su endpoint (BANECO §9.2 notifyStatus →
+ * POST /api/v1/ipn/bec-disbursement) por cada pago del detalle, con su estado final.
+ * Liquidamos el retiro asociado:
+ *   aceptado  → completa el retiro (debita saldo + libera reserva)
+ *   rechazado → rechaza el retiro (libera reserva, no debita)
  *
- * Payload §9.2 (notifyStatus): {
+ * Payload BANECO §9.2 (notifyStatus): {
  *   bankBatchId, batchId, batchDetailId, status ('ACEP'|'RECH'),
  *   descriptionStatus, transactionIdDebit, transactionIdCredit
  * }
  * Mapeamos por batchDetailId/batchId == wtxId (lo enviamos como ID externo).
+ * La autenticación y el mapeo de estados los aporta el adapter del proveedor, no
+ * este handler: un proveedor nuevo es un endpoint con su `provider` y nada más.
  *
- * Responde 200 { responseCode: 0 } siempre, para evitar reintentos del banco ante
+ * Responde 200 { responseCode: 0 } siempre, para evitar reintentos del proveedor ante
  * errores internos nuestros (el job reconcileBecDisbursements es la red de seguridad).
+ *
+ * @param {string} provider — clave del adapter en `bankRegistry` (ej. 'baneco').
  */
-export async function handleBecDisbursementIPN(req, res) {
-  const OK = { responseCode: 0, message: '' };
-  const b  = req.body ?? {};
-  const wtxId = b.batchDetailId ?? b.batchId;
+export function handleBankDisbursementIPN(provider) {
+  const tag = `${provider} Disbursement IPN`;
 
-  logger.info('[BEC Disbursement IPN] Confirmación recibida', {
-    wtxId, status: b.status, bankBatchId: b.bankBatchId,
-  });
+  return async function bankDisbursementIPNHandler(req, res) {
+    const OK = { responseCode: 0, message: '' };
+    const b  = req.body ?? {};
+    const wtxId = b.batchDetailId ?? b.batchId;
 
-  if (!wtxId || !b.status) {
-    logger.warn('[BEC Disbursement IPN] Payload sin batchDetailId/status', { body: b });
-    return res.status(200).json(OK);
-  }
-
-  // ── Gate de autenticidad (HMAC opcional + validación estructural) ──
-  let verifyNotifyStatus, mapNotifyStatus;
-  try {
-    ({ verifyNotifyStatus, mapNotifyStatus } = await import('../services/bank/becDisbursementService.js'));
-  } catch (err) {
-    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' } });
-    return res.status(200).json(OK);
-  }
-
-  const auth = verifyNotifyStatus(req);
-  if (!auth.ok) {
-    logger.warn('[BEC Disbursement IPN] No autenticado — ignorando', { wtxId, reason: auth.reason });
-    Sentry.captureMessage(`BEC Disbursement IPN rejected: ${auth.reason}`, {
-      level: 'warning', extra: { wtxId, status: b.status },
+    logger.info(`[${tag}] Confirmación recibida`, {
+      wtxId, status: b.status, bankBatchId: b.bankBatchId,
     });
+
+    if (!wtxId || !b.status) {
+      logger.warn(`[${tag}] Payload sin batchDetailId/status`, { body: b });
+      return res.status(200).json(OK);
+    }
+
+    // ── Gate de autenticidad (lo define el adapter del proveedor) ──
+    let disbursement;
+    try {
+      const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js');
+      disbursement = getDisbursementAdapter(provider)?.disbursement;
+    } catch (err) {
+      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider } });
+      return res.status(200).json(OK);
+    }
+    if (!disbursement) {
+      logger.warn(`[${tag}] Sin adapter de dispersión — ignorando`, { wtxId });
+      return res.status(200).json(OK);
+    }
+
+    const auth = disbursement.verifyNotifyStatus(req);
+    if (!auth.ok) {
+      logger.warn(`[${tag}] No autenticado — ignorando`, { wtxId, reason: auth.reason });
+      Sentry.captureMessage(`${tag} rejected: ${auth.reason}`, {
+        level: 'warning', extra: { wtxId, status: b.status, provider },
+      });
+      return res.status(200).json(OK);
+    }
+
+    const outcome = disbursement.mapNotifyStatus(b.status);
+    if (outcome === 'unknown') {
+      logger.warn(`[${tag}] Status desconocido: ${b.status}`, { wtxId });
+      return res.status(200).json(OK);
+    }
+
+    try {
+      const result = await settleDispatchedWithdrawal(wtxId, {
+        accepted:      outcome === 'accepted',
+        bankReference: b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
+        reason:        b.descriptionStatus,
+      });
+      logger.info(`[${tag}] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
+    } catch (err) {
+      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider }, extra: { wtxId } });
+    }
+
     return res.status(200).json(OK);
-  }
-
-  const outcome = mapNotifyStatus(b.status);
-  if (outcome === 'unknown') {
-    logger.warn(`[BEC Disbursement IPN] Status desconocido: ${b.status}`, { wtxId });
-    return res.status(200).json(OK);
-  }
-
-  try {
-    const result = await settleDispatchedWithdrawal(wtxId, {
-      accepted:      outcome === 'accepted',
-      bankReference: b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
-      reason:        b.descriptionStatus,
-    });
-    logger.info(`[BEC Disbursement IPN] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
-  } catch (err) {
-    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' }, extra: { wtxId } });
-  }
-
-  return res.status(200).json(OK);
+  };
 }
+
+/** Handler BANECO — alias estable del endpoint ya entregado al banco. */
+export const handleBecDisbursementIPN = handleBankDisbursementIPN('baneco');

@@ -1949,21 +1949,32 @@ export async function adminRejectWithdrawal(req, res) {
   }
 }
 
-// ─── DISPERSIÓN BANCARIA BANECO (§9 Planillas de pagos) ──────────────────────
-// Automatiza el retiro BOB → cuenta del usuario vía el servicio de dispersión.
+// ─── DISPERSIÓN BANCARIA (salida de dinero a cuenta del usuario) ─────────────
+// Automatiza el retiro BOB → cuenta del usuario vía el proveedor de dispersión.
 // Disparo admin-triggered (checkpoint humano). El saldo sigue reservado hasta que
-// el banco confirme por webhook (notifyStatus → settleDispatchedWithdrawal).
+// el proveedor confirme por webhook (→ settleDispatchedWithdrawal).
+//
+// Bank-agnostic: el proveedor se resuelve en `bankRegistry` (WALLET_DISBURSEMENT_PROVIDER,
+// default 'baneco'). Este controlador no debe volver a importar un servicio de banco
+// concreto — sumar un proveedor es un adapter con bloque `disbursement` + una línea
+// en el registro.
 
 /**
  * POST /api/v1/admin/wallet/withdrawal/dispatch
  * Admin dispara la dispersión de un retiro 'pending' (solo method='bank').
- * Body: { wtxId, bankCode?, amlSource?, amlDestination?, beneficiaryDocId? }
+ * Body: { wtxId, bankCode?, amlSource?, amlDestination?, beneficiaryDocId?, provider? }
  */
 export async function adminDispatchWithdrawal(req, res) {
   try {
     const admin = req.user
-    const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId } = req.body
+    const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId, provider } = req.body
     if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
+    const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js')
+    const resolved = getDisbursementAdapter(provider)
+    if (!resolved) {
+      return res.status(501).json({ error: `Sin proveedor de dispersión para '${provider ?? 'default'}'.` })
+    }
 
     const wtx = await WalletTransaction.findOne({ wtxId })
     if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
@@ -1979,13 +1990,15 @@ export async function adminDispatchWithdrawal(req, res) {
       return res.status(400).json({ error: 'bankCode (código ASFI de la entidad financiera destino) es requerido para dispersar.' })
     }
 
-    // Pre-check de liquidez en BANECO (gated). Solo bloquea si la consulta responde
-    // y el saldo es insuficiente; un error del banco no bloquea (fail-open).
-    if (process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true') {
-      const { tryGetAvailableBalance } = await import('../services/bank/becAccountService.js')
-      const { available, ok } = await tryGetAvailableBalance()
+    // Pre-check de liquidez en la cuenta de origen (gated). Solo bloquea si la consulta
+    // responde y el saldo es insuficiente; un error del proveedor no bloquea (fail-open).
+    // WALLET_BANECO_LIQUIDITY_CHECK se mantiene por compatibilidad con lo provisionado.
+    const liquidityCheckOn = process.env.WALLET_BANK_LIQUIDITY_CHECK === 'true'
+      || process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true'
+    if (liquidityCheckOn && typeof resolved.adapter.tryGetAvailableBalance === 'function') {
+      const { available, ok } = await resolved.adapter.tryGetAvailableBalance()
       if (ok && available != null && available < wtx.amount) {
-        return res.status(409).json({ error: `Liquidez BOB insuficiente en BANECO. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
+        return res.status(409).json({ error: `Liquidez BOB insuficiente en ${resolved.provider}. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
       }
     }
 
@@ -1993,16 +2006,15 @@ export async function adminDispatchWithdrawal(req, res) {
     // doble dispersión si dos admins disparan a la vez.
     const claim = await WalletTransaction.updateOne(
       { _id: wtx._id, status: 'pending' },
-      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, dispatchedBy: admin._id, dispatchedAt: new Date() } },
+      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, disbursementProvider: resolved.provider, dispatchedBy: admin._id, dispatchedAt: new Date() } },
     )
     if (claim.modifiedCount === 0) return res.status(409).json({ error: 'El retiro ya fue procesado.' })
 
     const user = await User.findById(wtx.userId).lean()
-    const { transfer } = await import('../services/bank/becDisbursementService.js')
 
     let result
     try {
-      result = await transfer({
+      result = await resolved.disbursement.transfer({
         batchId:       wtx.wtxId,
         batchDetailId: wtx.wtxId,
         amount:        wtx.amount,
@@ -2040,7 +2052,7 @@ export async function adminDispatchWithdrawal(req, res) {
       type:  'wallet',
     }).catch(() => {})
 
-    return res.json({ wtxId, status: 'dispatched', bankBatchId: result.bankBatchId, mock: !!result._mock })
+    return res.json({ wtxId, status: 'dispatched', provider: resolved.provider, bankBatchId: result.bankBatchId, mock: !!result._mock })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })

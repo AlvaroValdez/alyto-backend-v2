@@ -10,15 +10,36 @@
  *   isAvailable()       : boolean         — credenciales configuradas
  *   isMock()            : boolean         — opera en modo simulado
  *   getBalance()        : Promise<{ available, balance, currency, status, raw }>
+ *   tryGetAvailableBalance() : Promise<{ available, ok }>  — variante que no lanza
  *   getMovements(a, b)  : Promise<{ header, movements[], withheld[] }>
  *   normalizeMovement(m): { externalTxId, date, time, direction, amount, currency, documentNumber, description, note, raw }
  *   capabilities        : { balance, movements, disburse }
+ *   disbursement        : bloque OPCIONAL de salida de dinero (ver abajo)
  *
  * `normalizeMovement` traduce el formato crudo de cada banco a una forma común, para
  * que el extracto se muestre y se concilie igual sin importar el banco.
+ *
+ * ── Bloque `disbursement` (opcional) ────────────────────────────────────────────
+ *   transfer(p)           : Promise<{ bankBatchId, _mock? }>  — ordena la salida
+ *   verifyNotifyStatus(r) : { ok, reason }                    — autentica el webhook
+ *   mapNotifyStatus(s)    : 'accepted' | 'rejected' | 'unknown'
+ *   isAvailable()         : boolean — credenciales + cuenta de débito
+ *   isEnabled()           : boolean — gate de dispersión REAL (si no, simula)
+ *
+ * ⚠️ `capabilities.disburse` y la presencia de `disbursement` responden preguntas
+ * DISTINTAS y pueden no coincidir:
+ *   - `capabilities.disburse` = ¿el banco ofrece hoy el riel de dispersión?
+ *     Gobierna qué acciones muestra el admin. BANECO = false: confirmó el 2026-06-25
+ *     que §9 Planillas no está desarrollada, sin fecha (ver docs/ADMIN_BANK_MONITORING.md).
+ *   - `disbursement` presente = ¿tenemos el cliente escrito para hablar ese riel?
+ *     BANECO sí lo tiene (becDisbursementService, gated OFF + mock), y es lo que permite
+ *     ejercitar el flujo completo de retiro en staging sin mover dinero.
+ * El despacho de un retiro resuelve por el bloque `disbursement`; el gate de dinero
+ * real sigue siendo `isEnabled()` dentro de cada servicio.
  */
 
 import * as becAccount from './becAccountService.js';
+import * as becDisbursement from './becDisbursementService.js';
 import { isMockMode as becIsMock } from './becClient.js';
 
 // ── Adapter: Banco Económico (BANECO / BEC) ─────────────────────────────────────
@@ -29,7 +50,17 @@ const banecoAdapter = {
   isAvailable: () => becAccount.isAvailable(),
   isMock:      () => becIsMock(),
   getBalance:  () => becAccount.getBalance(),
+  tryGetAvailableBalance: () => becAccount.tryGetAvailableBalance(),
   getMovements: (start, end) => becAccount.getMovements(start, end),
+
+  /** §9 Planillas — escrito y validado en mock; el riel del banco aún no existe. */
+  disbursement: {
+    transfer:           (p)   => becDisbursement.transfer(p),
+    verifyNotifyStatus: (req) => becDisbursement.verifyNotifyStatus(req),
+    mapNotifyStatus:    (s)   => becDisbursement.mapNotifyStatus(s),
+    isAvailable:        ()    => becDisbursement.isAvailable(),
+    isEnabled:          ()    => becDisbursement.isEnabled(),
+  },
 
   /** Mapea un movimiento crudo de §8 queryMovements a la forma normalizada. */
   normalizeMovement(m, currency = 'BOB') {
@@ -62,4 +93,32 @@ export function getBankAdapter(provider) {
 /** @returns {string[]} proveedores con adapter implementado. */
 export function listProviders() {
   return Object.keys(adapters);
+}
+
+/**
+ * Proveedor de dispersión por defecto para los retiros a cuenta bancaria.
+ * Se lee dentro de la función (regla 21): un `const` de módulo capturaría el valor
+ * previo a la carga de Secrets Manager y caería al default en silencio.
+ * @returns {string}
+ */
+export function resolveDisbursementProvider() {
+  return process.env.WALLET_DISBURSEMENT_PROVIDER || 'baneco';
+}
+
+/**
+ * Resuelve el adapter que debe ejecutar una salida de dinero.
+ * @param {string} [provider] — si se omite, usa `resolveDisbursementProvider()`.
+ * @returns {{ provider: string, adapter: object, disbursement: object }|null}
+ *          null si el proveedor no existe o no tiene cliente de dispersión escrito.
+ */
+export function getDisbursementAdapter(provider) {
+  const name    = provider ?? resolveDisbursementProvider();
+  const adapter = adapters[name];
+  if (!adapter?.disbursement?.transfer) return null;
+  return { provider: name, adapter, disbursement: adapter.disbursement };
+}
+
+/** @returns {string[]} proveedores con cliente de dispersión escrito. */
+export function listDisbursementProviders() {
+  return Object.keys(adapters).filter((k) => adapters[k]?.disbursement?.transfer);
 }
