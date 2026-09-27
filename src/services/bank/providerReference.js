@@ -27,8 +27,25 @@
  * La secuencia vive en el mismo `Counter` atómico que ya numera los
  * comprobantes. No reinicia por período: un alias repetido ante el banco sería
  * ambiguo aunque los separen meses.
+ *
+ * ## Desplazamiento inicial
+ *
+ * Un contador que arranca en 1 le cuenta al proveedor cuántas operaciones
+ * llevamos: ver la referencia `2000000042` es saber que vamos por el cobro 42.
+ * Para evitarlo, la primera vez que se usa una serie se le asigna un `base`
+ * aleatorio que se suma a la secuencia.
+ *
+ * El `base` se sortea **una sola vez** y queda guardado en el propio contador,
+ * no en una variable de entorno. Es deliberado: una constante en el código no
+ * serviría de nada (el repositorio es público y bastaría restarla), y una
+ * variable de entorno se puede bajar por accidente, lo que haría que la serie
+ * vuelva sobre identificadores ya emitidos.
+ *
+ * `seq` sigue siendo la cuenta honesta para nosotros. Lo que se desplaza es
+ * únicamente lo que ve el proveedor.
  */
 
+import crypto            from 'node:crypto';
 import Counter           from '../../models/Counter.js';
 import ProviderReference from '../../models/ProviderReference.js';
 import { logger }        from '../../utils/logger.js';
@@ -40,6 +57,16 @@ const KIND_BLOCK = { payout: 1, payin: 2 };
 const BLOCK_SIZE = 1_000_000_000;
 
 /**
+ * Rango del desplazamiento inicial. El techo deja al menos 5×10⁸ identificadores
+ * por serie, que a cualquier volumen imaginable no se agotan. El piso evita
+ * sortear un número tan chico que el desplazamiento no disimule nada.
+ */
+const BASE_MIN = 100_000_000;
+const BASE_MAX = 500_000_000;
+
+const randomBase = () => BASE_MIN + crypto.randomInt(BASE_MAX - BASE_MIN);
+
+/**
  * Siguiente número de la secuencia, atómico y a prueba de multi-instancia.
  * @param {'payin'|'payout'} kind
  * @param {string} provider
@@ -49,21 +76,30 @@ async function nextReference(provider, kind) {
   const block = KIND_BLOCK[kind];
   if (!block) throw new Error(`providerReference: kind inválido '${kind}'`);
 
+  // `$setOnInsert` sortea el desplazamiento solo al crear la serie. No puede
+  // ir sobre `seq` (MongoDB rechaza $inc y $setOnInsert sobre el mismo campo),
+  // y separarlos además deja `seq` como la cuenta real para nosotros.
   const doc = await Counter.findOneAndUpdate(
     { _id: `PREF-${provider}-${kind}` },
-    { $inc: { seq: 1 } },
+    { $inc: { seq: 1 }, $setOnInsert: { base: randomBase() } },
     { upsert: true, returnDocument: 'after' },
   );
+
+  // `?? 0` cubre una serie creada antes de que existiera `base`: sin eso, un
+  // contador viejo produciría NaN y de ahí una referencia inválida.
+  const offset = (doc.base ?? 0) + doc.seq;
 
   // Agotar el bloque produciría un alias de 11 dígitos que el proveedor
   // truncaría en silencio. Preferimos fallar ruidosamente: con el volumen
   // actual esto no ocurre nunca, y si ocurriera querríamos enterarnos acá y no
   // en una conciliación.
-  if (doc.seq >= BLOCK_SIZE) {
-    throw new Error(`providerReference: bloque '${provider}/${kind}' agotado (seq=${doc.seq})`);
+  if (offset >= BLOCK_SIZE) {
+    throw new Error(
+      `providerReference: bloque '${provider}/${kind}' agotado (base=${doc.base} seq=${doc.seq})`,
+    );
   }
 
-  return String(block * BLOCK_SIZE + doc.seq);
+  return String(block * BLOCK_SIZE + offset);
 }
 
 /**

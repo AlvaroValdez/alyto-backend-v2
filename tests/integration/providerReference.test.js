@@ -63,6 +63,65 @@ describe('formato del alias', () => {
   })
 })
 
+describe('desplazamiento inicial', () => {
+  // Un contador que arranca en 1 le informa al proveedor cuántas operaciones
+  // llevamos. El desplazamiento lo oculta sin perder la cuenta real.
+  test('la primera referencia no delata que es la primera', async () => {
+    const doc = await svc.issueReference(payout('wtx-1'))
+
+    const counter = await mongoose.model('Counter').findById('PREF-redenlace-payout')
+    expect(counter.seq).toBe(1)                       // la cuenta real sigue ahí
+    expect(doc.reference).not.toBe('1000000001')      // pero no se publica
+    expect(Number(doc.reference) - 1_000_000_000).toBeGreaterThan(100_000_000)
+  })
+
+  test('el desplazamiento se sortea una sola vez y no se mueve después', async () => {
+    await svc.issueReference(payout('wtx-1'))
+    const Counter = mongoose.model('Counter')
+    const base    = (await Counter.findById('PREF-redenlace-payout')).base
+
+    await svc.issueReference(payout('wtx-2'))
+    await svc.issueReference(payout('wtx-3'))
+
+    // Si el base cambiara, una serie ya emitida se solaparía con la nueva.
+    expect((await Counter.findById('PREF-redenlace-payout')).base).toBe(base)
+  })
+
+  test('la serie sigue siendo correlativa: cada alias es el anterior más uno', async () => {
+    const a = await svc.issueReference(payout('wtx-1'))
+    const b = await svc.issueReference(payout('wtx-2'))
+
+    expect(Number(b.reference) - Number(a.reference)).toBe(1)
+  })
+
+  test('dos series distintas no comparten desplazamiento', async () => {
+    await svc.issueReference(payout('wtx-1'))
+    await svc.issueReference({ ...payout('tx-1'), kind: 'payin', targetModel: 'Transaction' })
+
+    const Counter = mongoose.model('Counter')
+    const bases = await Promise.all([
+      Counter.findById('PREF-redenlace-payout'),
+      Counter.findById('PREF-redenlace-payin'),
+    ])
+    for (const c of bases) {
+      expect(c.base).toBeGreaterThanOrEqual(100_000_000)
+      expect(c.base).toBeLessThan(500_000_000)
+    }
+  })
+
+  test('una serie creada antes de que existiera el desplazamiento no se rompe', async () => {
+    // Simula un contador viejo, sin `base`. Sin el `?? 0` esto daría NaN y
+    // produciría una referencia inválida en vez de fallar.
+    const Counter = mongoose.model('Counter')
+    await Counter.create({ _id: 'PREF-redenlace-payout', seq: 41 })
+
+    const doc = await svc.issueReference(payout('wtx-viejo'))
+
+    expect(doc.reference).toBe('1000000042')
+    expect(doc.reference).toMatch(/^\d{10}$/)
+  })
+})
+
 describe('unicidad', () => {
   test('dos retiros distintos nunca comparten alias', async () => {
     const a = await svc.issueReference(payout('wtx-1'))
