@@ -186,9 +186,16 @@ async function main() {
 
   // La vigencia real manda sobre BANK_QR_DUE_DAYS. Si ATC la recorta, hay que
   // enterarse acá y no cuando un usuario mire un QR muerto.
+  //
+  // ⚠️ ATC devuelve la fecha SIN zona horaria y es hora de Bolivia (UTC-4, sin
+  // horario de verano). Interpretarla en la zona del proceso da un desfase que
+  // parece un incumplimiento de ATC y no lo es: así se detectó el 2026-09-26,
+  // corriendo esto desde America/Santiago.
   if (d.fechaExpiracion) {
-    const segundos = Math.round((new Date(d.fechaExpiracion) - Date.now()) / 1000);
+    const expira   = new Date(`${d.fechaExpiracion}-04:00`);
+    const segundos = Math.round((expira - Date.now()) / 1000);
     const aviso    = Math.abs(segundos - vigencia) > 60 ? '  ⚠️ ATC NO respetó la vigencia pedida' : '';
+    info(`expira (UTC)            : ${expira.toISOString()}`);
     info(`vigencia efectiva       : ~${segundos} s${aviso}`);
   }
 

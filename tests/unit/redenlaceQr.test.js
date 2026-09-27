@@ -110,7 +110,47 @@ describe('redenlaceQrService — generación', () => {
     })
     const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
     expect(out.expiresAt).toBeInstanceOf(Date)
-    expect(out.expiresAt.toISOString()).toContain('2026-03-12')
+  })
+
+  // ATC manda la fecha sin zona horaria y es hora de Bolivia (UTC-4, sin
+  // horario de verano). Interpretarla en la zona del proceso hace que en el VPS
+  // —que corre en UTC— el QR parezca expirar cuatro horas antes de lo real, y
+  // el barrido marque como fallidos cobros que todavía se pueden pagar.
+  test('interpreta la expiración como hora de Bolivia, no como hora del servidor', async () => {
+    configureReal()
+    mockFetchSequence({
+      success: true,
+      data: { numeroReferencia: '1', qr: 'x', fechaExpiracion: '2026-09-26T22:29:47.841467' },
+    })
+
+    const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
+
+    // 22:29:47 en Bolivia son las 02:29:47 UTC del día siguiente.
+    expect(out.expiresAt.toISOString()).toBe('2026-09-27T02:29:47.841Z')
+  })
+
+  test('respeta la zona si algún día ATC decide informarla', async () => {
+    configureReal()
+    mockFetchSequence({
+      success: true,
+      data: { numeroReferencia: '1', qr: 'x', fechaExpiracion: '2026-09-26T22:29:47Z' },
+    })
+
+    const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
+
+    expect(out.expiresAt.toISOString()).toBe('2026-09-26T22:29:47.000Z')
+  })
+
+  test('una fecha ilegible da null y no una fecha inventada', async () => {
+    configureReal()
+    mockFetchSequence({
+      success: true,
+      data: { numeroReferencia: '1', qr: 'x', fechaExpiracion: 'no-es-una-fecha' },
+    })
+
+    const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
+
+    expect(out.expiresAt).toBeNull()
   })
 
   test('manda la vigencia configurada y el establecimiento como número', async () => {
@@ -199,7 +239,14 @@ describe('redenlaceQrService — webhook', () => {
     expect(p.senderName).toBe('Juan Perez')
     // confirmBankQrTx reconstruye la fecha de pago desde estos dos campos.
     expect(p.paymentDate).toBe('2026-05-26')
-    expect(p.paymentTime).toBe('14:35:20')
+
+    // La hora lleva el desplazamiento de Bolivia pegado. Se ve raro leído
+    // suelto, pero es lo que hace que la concatenación que arma el job
+    // produzca el instante correcto en un servidor que corre en UTC.
+    expect(p.paymentTime).toBe('14:35:20-04:00')
+    expect(new Date(`${p.paymentDate}T${p.paymentTime}`).toISOString())
+      .toBe('2026-05-26T18:35:20.000Z')
+    expect(p.paidAt.toISOString()).toBe('2026-05-26T18:35:20.000Z')
   })
 
   test('un body sin numeroReferencia no produce un pago fantasma', () => {

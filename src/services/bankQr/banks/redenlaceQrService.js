@@ -94,6 +94,31 @@ async function toNumericReference({ transactionId, targetModel, amount, currency
   return doc.reference;
 }
 
+/**
+ * ATC devuelve las fechas **sin zona horaria** (`2026-09-26T22:29:47.841467`).
+ * Son hora de Bolivia, que es UTC-4 todo el año: el país no aplica horario de
+ * verano, así que el desplazamiento fijo es correcto y no envejece.
+ *
+ * Sin esto, `new Date()` interpreta la cadena en la zona del proceso. En el VPS,
+ * que corre en UTC, un QR parecería expirar **cuatro horas antes** de lo real.
+ * La consecuencia no es cosmética: el barrido de vencimiento marcaría como
+ * fallidos cobros que todavía se pueden pagar, y después entraría el dinero de
+ * un usuario cuya transacción ya dimos por perdida.
+ *
+ * Detectado el 2026-09-26 comparando la expiración informada contra el reloj
+ * local en la primera generación real contra el sandbox.
+ *
+ * @param {string} s
+ * @returns {Date|null}
+ */
+function parseAtcDate(s) {
+  if (!s) return null;
+  const raw = String(s).trim();
+  const tieneZona = /(Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  const d = new Date(tieneZona ? raw : `${raw}-04:00`);
+  return isNaN(d) ? null : d;
+}
+
 /** @returns {boolean} true si hay credenciales OAuth y alta de establecimiento */
 export function isAvailable() {
   return clientIsAvailable() && !!cfg.establishmentId();
@@ -174,13 +199,11 @@ export async function generateQR({ transactionId, amount, currency = 'BOB', desc
     throw new Error(`Red Enlace generateQR error: ${data?.message ?? 'respuesta inesperada'}`);
   }
 
-  const expiresAt = data.data.fechaExpiracion ? new Date(data.data.fechaExpiracion) : null;
-
   return {
     qrId:        String(data.data.numeroReferencia),
     qrImage:     data.data.qr,
     qrImageMime: 'image/png',
-    expiresAt:   expiresAt && !isNaN(expiresAt) ? expiresAt : null,
+    expiresAt:   parseAtcDate(data.data.fechaExpiracion),
     numeroReferencia,   // el alias numérico que vio ATC
   };
 }
@@ -217,6 +240,15 @@ function normalizePayment(qrId, src = {}) {
   const fecha = src.fechaHoraTransaccion ?? src.bancoOrigen?.fechaTransaccion ?? '';
   const [paymentDate, paymentTime] = String(fecha).split('T');
 
+  // `confirmBankQrTx` reconstruye el momento del pago como
+  // `new Date(\`${paymentDate.split('T')[0]}T${paymentTime}\`)`. Esa cadena no
+  // lleva zona, así que en el VPS (UTC) el sello quedaría cuatro horas corrido.
+  // Pegarle el desplazamiento de Bolivia a la hora hace que esa concatenación
+  // produzca el instante correcto sin tocar el código compartido del job.
+  const horaConZona = paymentTime && !/(Z|[+-]\d{2}:?\d{2})$/.test(paymentTime)
+    ? `${paymentTime}-04:00`
+    : paymentTime;
+
   return {
     qrId:           String(qrId),
     amount:         Number(src.importe ?? src.monto),
@@ -228,7 +260,8 @@ function normalizePayment(qrId, src = {}) {
     bankName:       src.bancoOrigen?.nombreBanco ?? '',
     achNumber:      src.bancoOrigen?.numeroOrdenAch ?? '',
     paymentDate:    paymentDate || '',
-    paymentTime:    paymentTime || '',
+    paymentTime:    horaConZona || '',
+    paidAt:         parseAtcDate(fecha),   // el instante ya resuelto, para quien lo quiera
     raw:            src,
   };
 }
