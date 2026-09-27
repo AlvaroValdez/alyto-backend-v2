@@ -65,6 +65,35 @@ function vigencia() {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 600;
 }
 
+/**
+ * `numeroReferencia` admite **solo dígitos**.
+ *
+ * No está en la documentación. Lo devolvió el sandbox el 2026-09-26:
+ * `INVALID_FORMAT — El número de referencia debe contener solo dígitos numéricos`.
+ * Nuestros identificadores (`ALY-C-...`, `WTX-...`) no califican, así que hay
+ * que traducirlos a un alias numérico y guardar la equivalencia.
+ *
+ * Si el identificador ya es numérico se usa tal cual, sin tocar la base: eso
+ * mantiene el modo mock y las pruebas unitarias sin dependencia de Mongo.
+ *
+ * @returns {Promise<string>} referencia de solo dígitos
+ */
+async function toNumericReference({ transactionId, targetModel, amount, currency }) {
+  const raw = String(transactionId ?? '');
+  if (/^\d{1,20}$/.test(raw)) return raw;
+
+  const { issueReference } = await import('../../bank/providerReference.js');
+  const doc = await issueReference({
+    provider:    'redenlace',
+    kind:        'payin',
+    targetModel: targetModel ?? 'Transaction',
+    targetId:    raw,
+    amount,
+    currency,
+  });
+  return doc.reference;
+}
+
 /** @returns {boolean} true si hay credenciales OAuth y alta de establecimiento */
 export function isAvailable() {
   return clientIsAvailable() && !!cfg.establishmentId();
@@ -86,13 +115,14 @@ const MOCK_QR_PNG_B64 =
  * Genera un QR de cobro.
  *
  * @param {object} p
- * @param {string} p.transactionId — identificador propio, solo para trazabilidad
+ * @param {string} p.transactionId — identificador propio; se traduce a un alias numérico
  * @param {number} p.amount        — importe en BOB
  * @param {string} [p.currency]    — ATC solo acepta 'BOB' en este producto
  * @param {string} [p.description] — glosa
- * @returns {Promise<{qrId:string, qrImage:string, qrImageMime:string, expiresAt:Date|null}>}
+ * @param {'Transaction'|'WalletTransaction'} [p.targetModel] — a qué apunta el alias
+ * @returns {Promise<{qrId:string, qrImage:string, qrImageMime:string, expiresAt:Date|null, numeroReferencia:string}>}
  */
-export async function generateQR({ transactionId, amount, currency = 'BOB', description }) {
+export async function generateQR({ transactionId, amount, currency = 'BOB', description, targetModel }) {
   if (currency !== 'BOB') {
     // Mejor fallar acá que mandar 'USD' y que ATC cobre en bolivianos igual.
     throw new Error(`Red Enlace QR Simple solo opera en BOB (recibido '${currency}')`);
@@ -116,15 +146,19 @@ export async function generateQR({ transactionId, amount, currency = 'BOB', desc
     throw new Error('Red Enlace: falta REDENLACE_QR_WEBHOOK_URL o REDENLACE_QR_WEBHOOK_VALUE');
   }
 
+  // ATC exige dígitos: `ALY-C-...` se rechaza con INVALID_FORMAT.
+  const numeroReferencia = await toNumericReference({ transactionId, targetModel, amount, currency });
+
   const data = await apiFetch('/qr/simple/v2/generate', {
     method: 'POST',
     body:   JSON.stringify({
       glosa:                 (description ?? `Alyto ${transactionId}`).slice(0, 100),
       moneda:                'BOB',
       monto:                 Number(Number(amount).toFixed(2)),
-      // Referencia propia. ATC no la devuelve en el webhook, así que su valor es
-      // de trazabilidad humana: el vínculo real lo hace `numeroReferencia`.
-      numeroReferencia:      String(transactionId).slice(0, 32),
+      // ATC no devuelve esta referencia en el webhook, así que su valor es de
+      // trazabilidad: aparece en los movimientos de la cuenta de comercio y
+      // permite volver a la transacción vía ProviderReference.
+      numeroReferencia,
       vigencia:              vigencia(),
       idEstablecimiento:     Number(cfg.establishmentId()),
       nombreEstablecimiento: cfg.establishmentName(),
@@ -147,6 +181,7 @@ export async function generateQR({ transactionId, amount, currency = 'BOB', desc
     qrImage:     data.data.qr,
     qrImageMime: 'image/png',
     expiresAt:   expiresAt && !isNaN(expiresAt) ? expiresAt : null,
+    numeroReferencia,   // el alias numérico que vio ATC
   };
 }
 

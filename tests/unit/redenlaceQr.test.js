@@ -84,11 +84,12 @@ describe('redenlaceQrService — generación', () => {
       },
     })
 
-    const out = await svc.generateQR({ transactionId: 'ALY-C-123', amount: 10.5, description: 'test' })
+    const out = await svc.generateQR({ transactionId: '2000000001', amount: 10.5, description: 'test' })
 
     // Si esto se invierte, el webhook llega con '153980' y no matchea nada.
     expect(out.qrId).toBe('153980')
-    expect(out.qrId).not.toBe('ALY-C-123')
+    expect(out.qrId).not.toBe('2000000001')
+    expect(out.numeroReferencia).toBe('2000000001')
   })
 
   test('declara la imagen como PNG (ATC no devuelve SVG como BANECO)', async () => {
@@ -97,7 +98,7 @@ describe('redenlaceQrService — generación', () => {
       success: true,
       data: { numeroReferencia: '1', qr: 'iVBORw0KGgo=', fechaExpiracion: '2026-03-12T18:01:52.304' },
     })
-    const out = await svc.generateQR({ transactionId: 'T', amount: 1 })
+    const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
     expect(out.qrImageMime).toBe('image/png')
   })
 
@@ -107,7 +108,7 @@ describe('redenlaceQrService — generación', () => {
       success: true,
       data: { numeroReferencia: '1', qr: 'x', fechaExpiracion: '2026-03-12T18:01:52.304' },
     })
-    const out = await svc.generateQR({ transactionId: 'T', amount: 1 })
+    const out = await svc.generateQR({ transactionId: '2000000002', amount: 1 })
     expect(out.expiresAt).toBeInstanceOf(Date)
     expect(out.expiresAt.toISOString()).toContain('2026-03-12')
   })
@@ -117,7 +118,7 @@ describe('redenlaceQrService — generación', () => {
     process.env.REDENLACE_QR_VIGENCIA_SECONDS = '900'
     const calls = mockFetchSequence({ success: true, data: { numeroReferencia: '1', qr: 'x' } })
 
-    await svc.generateQR({ transactionId: 'T', amount: 1 })
+    await svc.generateQR({ transactionId: '2000000002', amount: 1 })
 
     const generate = calls.find((c) => c.url.includes('/qr/simple/v2/generate'))
     const body     = JSON.parse(generate.options.body)
@@ -129,14 +130,14 @@ describe('redenlaceQrService — generación', () => {
 
   test('rechaza monedas distintas de BOB en vez de dejar que ATC decida', async () => {
     configureReal()
-    await expect(svc.generateQR({ transactionId: 'T', amount: 1, currency: 'USD' }))
+    await expect(svc.generateQR({ transactionId: '2000000002', amount: 1, currency: 'USD' }))
       .rejects.toThrow(/solo opera en BOB/i)
   })
 
   test('sin webhook configurado no genera: un cobro sin confirmación es un cobro perdido', async () => {
     configureReal()
     delete process.env.REDENLACE_QR_WEBHOOK_VALUE
-    await expect(svc.generateQR({ transactionId: 'T', amount: 1 }))
+    await expect(svc.generateQR({ transactionId: '2000000002', amount: 1 }))
       .rejects.toThrow(/WEBHOOK/i)
   })
 

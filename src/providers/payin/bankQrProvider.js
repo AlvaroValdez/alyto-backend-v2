@@ -26,12 +26,16 @@ export function createBankQrProvider(bankId) {
     /**
      * Genera un QR de cobro bancario.
      *
-     * @param {{ transactionId, amount, currency, description, dueDate }} payload
+     * `targetModel` solo lo usan los bancos que necesitan traducir nuestro
+     * identificador a un alias propio (Red Enlace exige referencias numéricas):
+     * indica a qué colección apunta el alias. BEC lo ignora.
+     *
+     * @param {{ transactionId, amount, currency, description, dueDate, targetModel }} payload
      * @returns {{ qrId: string, qrImage: string }}
      */
-    async execute({ transactionId, amount, currency = 'BOB', description, dueDate }) {
+    async execute({ transactionId, amount, currency = 'BOB', description, dueDate, targetModel }) {
       const svc = getBankQrService(bankId);
-      return svc.generateQR({ transactionId, amount, currency, description, dueDate });
+      return svc.generateQR({ transactionId, amount, currency, description, dueDate, targetModel });
     },
 
     async cancel(qrId) {

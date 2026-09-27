@@ -122,8 +122,10 @@ async function main() {
   // ── Generación ─────────────────────────────────────────────────────────────
   head('3. Generación de QR');
 
-  const monto      = Number(arg('monto', '1.00'));
-  const referencia = `SMOKE${Date.now().toString().slice(-8)}`;
+  const monto = Number(arg('monto', '1.00'));
+  // Solo dígitos. ATC rechaza cualquier otra cosa con INVALID_FORMAT; no está
+  // documentado, lo devolvió el sandbox el 2026-09-26 ante `SMOKE74332707`.
+  const referencia = `9${Date.now().toString().slice(-9)}`;
   const vigencia   = Number(process.env.REDENLACE_QR_VIGENCIA_SECONDS ?? 600);
 
   const body = {
@@ -158,8 +160,12 @@ async function main() {
     bad(`Generación fallida (HTTP ${genRes.status})`);
     console.log(JSON.stringify(gen, null, 2));
     // La vigencia es el sospechoso número uno: su máximo no está documentado.
-    if (JSON.stringify(gen ?? {}).toLowerCase().includes('vigencia')) {
+    const texto = JSON.stringify(gen ?? {}).toLowerCase();
+    if (texto.includes('vigencia')) {
       info('→ probá bajando REDENLACE_QR_VIGENCIA_SECONDS. El ejemplo del portal usa 45.');
+    }
+    if (texto.includes('referencia')) {
+      info('→ numeroReferencia admite SOLO dígitos (verificado en sandbox 2026-09-26).');
     }
     process.exit(1);
   }

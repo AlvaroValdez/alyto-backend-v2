@@ -125,6 +125,90 @@ describe('vuelta desde el proveedor', () => {
   })
 })
 
+describe('traducción de la referencia del cobro QR', () => {
+  // ATC rechaza `numeroReferencia` con letras:
+  //   INVALID_FORMAT — "El número de referencia debe contener solo dígitos numéricos"
+  // Verificado contra el sandbox el 2026-09-26. No figura en la documentación.
+  let qr, restoreEnv
+
+  beforeAll(async () => {
+    qr = await import('../../src/services/bankQr/banks/redenlaceQrService.js')
+  })
+
+  beforeEach(() => {
+    restoreEnv = { ...process.env }
+    process.env.REDENLACE_BASE_URL         = 'https://atcgwapitest.redenlace.com.bo/sandbox'
+    process.env.REDENLACE_CLIENT_ID        = 'id-de-prueba'
+    process.env.REDENLACE_CLIENT_SECRET    = 'secret-de-prueba'
+    process.env.REDENLACE_ESTABLISHMENT_ID = '420056'
+    process.env.REDENLACE_QR_WEBHOOK_URL   = 'https://api-staging.alyto.app/api/v1/ipn/redenlace'
+    process.env.REDENLACE_QR_WEBHOOK_VALUE = 'secreto'
+    delete process.env.REDENLACE_MOCK_ENABLED
+  })
+
+  afterEach(() => {
+    process.env = restoreEnv
+    globalThis.fetch = undefined
+  })
+
+  /**
+   * fetch falso, ruteado por URL y no por orden de llamada: el cliente cachea
+   * el token, así que después de la primera prueba ya no pide autenticación y
+   * una cola posicional se desfasaría.
+   */
+  function stubFetch() {
+    const calls = []
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url: String(url), options })
+      const body = String(url).includes('/oauth-client-credentials/')
+        ? { access_token: 'tok', expires_in: 3600 }
+        : { success: true, data: { numeroReferencia: '153980', qr: 'x', fechaExpiracion: '2027-01-01T00:00:00' } }
+      return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
+    }
+    return calls
+  }
+
+  test('un alytoTransactionId con letras se traduce a un alias de solo dígitos', async () => {
+    const calls = stubFetch()
+
+    const out = await qr.generateQR({ transactionId: 'ALY-C-1759000000-Ab3xK', amount: 10.5 })
+
+    const body = JSON.parse(calls.find((c) => c.url.includes('/generate')).options.body)
+    expect(body.numeroReferencia).toMatch(/^\d+$/)
+    expect(body.numeroReferencia).not.toContain('ALY')
+    expect(out.numeroReferencia).toBe(body.numeroReferencia)
+  })
+
+  test('el alias emitido permite volver a la transacción', async () => {
+    stubFetch()
+    const out = await qr.generateQR({ transactionId: 'ALY-C-1759000000-Ab3xK', amount: 10.5 })
+
+    const doc = await svc.resolveByReference(out.numeroReferencia)
+    expect(doc.targetId).toBe('ALY-C-1759000000-Ab3xK')
+    expect(doc.kind).toBe('payin')
+  })
+
+  test('una carga de wallet apunta a WalletTransaction, no a Transaction', async () => {
+    stubFetch()
+    const out = await qr.generateQR({
+      transactionId: 'WTX-abc123', amount: 50, targetModel: 'WalletTransaction',
+    })
+
+    const doc = await svc.resolveByReference(out.numeroReferencia)
+    expect(doc.targetModel).toBe('WalletTransaction')
+  })
+
+  test('un identificador ya numérico se manda tal cual, sin gastar un alias', async () => {
+    const calls = stubFetch()
+
+    await qr.generateQR({ transactionId: '4024', amount: 1 })
+
+    const body = JSON.parse(calls.find((c) => c.url.includes('/generate')).options.body)
+    expect(body.numeroReferencia).toBe('4024')
+    expect(await ProviderReference.countDocuments({ kind: 'payin' })).toBe(0)
+  })
+})
+
 describe('validaciones', () => {
   test('un kind desconocido no produce un alias de formato distinto', async () => {
     await expect(svc.issueReference({ ...payout('wtx-1'), kind: 'transferencia' }))
