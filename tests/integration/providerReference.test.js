@@ -39,13 +39,21 @@ const payout = (targetId) => ({
 describe('formato del alias', () => {
   test('entra en los 14 caracteres de ATC y en los 10 del QR de activos virtuales', async () => {
     const doc = await svc.issueReference(payout('wtx-1'))
-    expect(doc.reference).toHaveLength(10)
-    expect(doc.reference.length).toBeLessThanOrEqual(14)
+    expect(doc.reference).toHaveLength(9)
+    expect(doc.reference.length).toBeLessThanOrEqual(10)
+  })
+
+  // El sandbox devolvió `For input string: "9475146471"` ante un alias de 10
+  // dígitos: es un NumberFormatException de Java. El techo real del campo no
+  // son 10 caracteres, son 2.147.483.647.
+  test('entra en un int de 32 bits, que es el techo real del campo', async () => {
+    const doc = await svc.issueReference(payout('wtx-1'))
+    expect(Number(doc.reference)).toBeLessThanOrEqual(2_147_483_647)
   })
 
   test('es solo dígitos, porque ATC manda estos campos sin comillas en sus ejemplos', async () => {
     const doc = await svc.issueReference(payout('wtx-1'))
-    expect(doc.reference).toMatch(/^\d{10}$/)
+    expect(doc.reference).toMatch(/^\d{9}$/)
   })
 
   test('no empieza en cero: si el proveedor lo convierte a número, no se pierde nada', async () => {
@@ -71,8 +79,8 @@ describe('desplazamiento inicial', () => {
 
     const counter = await mongoose.model('Counter').findById('PREF-redenlace-payout')
     expect(counter.seq).toBe(1)                       // la cuenta real sigue ahí
-    expect(doc.reference).not.toBe('1000000001')      // pero no se publica
-    expect(Number(doc.reference) - 1_000_000_000).toBeGreaterThan(100_000_000)
+    expect(doc.reference).not.toBe('100000001')       // pero no se publica
+    expect(Number(doc.reference) - 100_000_000).toBeGreaterThan(10_000_000)
   })
 
   test('el desplazamiento se sortea una sola vez y no se mueve después', async () => {
@@ -104,8 +112,8 @@ describe('desplazamiento inicial', () => {
       Counter.findById('PREF-redenlace-payin'),
     ])
     for (const c of bases) {
-      expect(c.base).toBeGreaterThanOrEqual(100_000_000)
-      expect(c.base).toBeLessThan(500_000_000)
+      expect(c.base).toBeGreaterThanOrEqual(10_000_000)
+      expect(c.base).toBeLessThan(50_000_000)
     }
   })
 
@@ -117,8 +125,8 @@ describe('desplazamiento inicial', () => {
 
     const doc = await svc.issueReference(payout('wtx-viejo'))
 
-    expect(doc.reference).toBe('1000000042')
-    expect(doc.reference).toMatch(/^\d{10}$/)
+    expect(doc.reference).toBe('100000042')
+    expect(doc.reference).toMatch(/^\d{9}$/)
   })
 })
 

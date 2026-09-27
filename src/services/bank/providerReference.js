@@ -7,21 +7,27 @@
  *
  * ## Formato
  *
- *     {dígito de bloque}{9 dígitos de secuencia}   →  10 caracteres, solo dígitos
+ *     {dígito de bloque}{8 dígitos}   →  9 caracteres, solo dígitos
  *
- *     1000000001  primer retiro
- *     2000000001  primer cobro
+ *     1xxxxxxxx  retiros
+ *     2xxxxxxxx  cobros
  *
- * Tres razones para este formato y no para un base36 más corto:
+ * Cuatro restricciones, y las dos últimas las descubrimos contra el sandbox
+ * porque la documentación de ATC no las menciona:
  *
- *   1. **Solo dígitos.** La documentación de ATC declara estos campos como
- *      String, pero sus propios ejemplos mandan números sin comillas
- *      (`"numeroReferencia": 2320`). Si su backend los coerciona a entero, un
- *      alias alfanumérico se rompe y un alias numérico sobrevive.
- *   2. **10 caracteres.** Es el más chico de todos los límites del catálogo
- *      (el `numeroReferencia` del QR Binance admite máximo 10), así que un solo
- *      formato sirve para todos los productos sin excepciones por endpoint.
- *   3. **Primer dígito distinto de cero.** Si el proveedor lo convierte a
+ *   1. **Solo dígitos.** Sandbox, 2026-09-26:
+ *      `INVALID_FORMAT — El número de referencia debe contener solo dígitos`.
+ *   2. **Máximo 10 caracteres.** Es el límite más chico del catálogo
+ *      (`numeroReferencia` del QR Binance), así que un solo formato sirve para
+ *      todos los productos sin excepciones por endpoint.
+ *   3. **Tiene que entrar en un `int` de 32 bits con signo.** Sandbox, misma
+ *      fecha, ante `9475146471`:
+ *      `QR_GENERATION_ERROR — For input string: "9475146471"`.
+ *      Es un `NumberFormatException` de Java: su backend hace `parseInt`, así
+ *      que el techo real no son 10 dígitos sino **2.147.483.647**. Por eso el
+ *      formato es de 9 dígitos y no de 10: el máximo que puede producir
+ *      (299.999.999) deja siete veces de margen bajo ese techo.
+ *   4. **Primer dígito distinto de cero.** Si el proveedor lo convierte a
  *      número y lo devuelve, no perdemos ceros a la izquierda.
  *
  * La secuencia vive en el mismo `Counter` atómico que ya numera los
@@ -53,16 +59,22 @@ import { logger }        from '../../utils/logger.js';
 /** Bloque de numeración por dirección del dinero. */
 const KIND_BLOCK = { payout: 1, payin: 2 };
 
-/** 9 dígitos de secuencia por bloque. */
-const BLOCK_SIZE = 1_000_000_000;
+/** 8 dígitos de secuencia por bloque. */
+const BLOCK_SIZE = 100_000_000;
 
 /**
- * Rango del desplazamiento inicial. El techo deja al menos 5×10⁸ identificadores
+ * Techo real del campo: `Integer.MAX_VALUE` de Java. No es una precaución
+ * teórica, es el error que devolvió el sandbox ante un alias de 10 dígitos.
+ */
+const INT32_MAX = 2_147_483_647;
+
+/**
+ * Rango del desplazamiento inicial. El techo deja al menos 5×10⁷ identificadores
  * por serie, que a cualquier volumen imaginable no se agotan. El piso evita
  * sortear un número tan chico que el desplazamiento no disimule nada.
  */
-const BASE_MIN = 100_000_000;
-const BASE_MAX = 500_000_000;
+const BASE_MIN = 10_000_000;
+const BASE_MAX = 50_000_000;
 
 const randomBase = () => BASE_MIN + crypto.randomInt(BASE_MAX - BASE_MIN);
 
@@ -89,8 +101,8 @@ async function nextReference(provider, kind) {
   // contador viejo produciría NaN y de ahí una referencia inválida.
   const offset = (doc.base ?? 0) + doc.seq;
 
-  // Agotar el bloque produciría un alias de 11 dígitos que el proveedor
-  // truncaría en silencio. Preferimos fallar ruidosamente: con el volumen
+  // Agotar el bloque produciría un alias de 10 dígitos que se saldría del
+  // rango del bloque siguiente. Preferimos fallar ruidosamente: con el volumen
   // actual esto no ocurre nunca, y si ocurriera querríamos enterarnos acá y no
   // en una conciliación.
   if (offset >= BLOCK_SIZE) {
@@ -99,7 +111,17 @@ async function nextReference(provider, kind) {
     );
   }
 
-  return String(block * BLOCK_SIZE + offset);
+  const value = block * BLOCK_SIZE + offset;
+
+  // Cinturón sobre el tirante. La aritmética de arriba ya garantiza que el
+  // valor entra en un int de 32 bits, pero un cambio futuro de BLOCK_SIZE o de
+  // KIND_BLOCK podría romperlo, y el síntoma sería un 500 del proveedor en vez
+  // de un error nuestro. Esta línea convierte ese error remoto en uno local.
+  if (value > INT32_MAX) {
+    throw new Error(`providerReference: ${value} excede Integer.MAX_VALUE del proveedor`);
+  }
+
+  return String(value);
 }
 
 /**

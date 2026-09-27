@@ -123,9 +123,12 @@ async function main() {
   head('3. Generación de QR');
 
   const monto = Number(arg('monto', '1.00'));
-  // Solo dígitos. ATC rechaza cualquier otra cosa con INVALID_FORMAT; no está
-  // documentado, lo devolvió el sandbox el 2026-09-26 ante `SMOKE74332707`.
-  const referencia = `9${Date.now().toString().slice(-9)}`;
+  // Dos restricciones que NO están documentadas, ambas verificadas contra el
+  // sandbox el 2026-09-26:
+  //   - solo dígitos          → INVALID_FORMAT ante `SMOKE74332707`
+  //   - entra en un int32     → `For input string: "9475146471"` (parseInt de Java)
+  // De ahí 9 dígitos: el máximo posible (999.999.999) queda bajo 2.147.483.647.
+  const referencia = `9${Date.now().toString().slice(-8)}`;
   const vigencia   = Number(process.env.REDENLACE_QR_VIGENCIA_SECONDS ?? 600);
 
   const body = {
@@ -166,6 +169,10 @@ async function main() {
     }
     if (texto.includes('referencia')) {
       info('→ numeroReferencia admite SOLO dígitos (verificado en sandbox 2026-09-26).');
+    }
+    if (texto.includes('for input string')) {
+      info('→ es un NumberFormatException de Java: la referencia debe entrar en');
+      info('  un int de 32 bits con signo (máximo 2.147.483.647), no solo en 10 dígitos.');
     }
     process.exit(1);
   }
