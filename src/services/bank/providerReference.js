@@ -1,0 +1,149 @@
+/**
+ * providerReference.js — Emisión de alias cortos para proveedores externos.
+ *
+ * El problema concreto: Red Enlace acepta 14 caracteres en `transaccionId` y
+ * nuestros identificadores no entran. Truncarlos haría colisionar retiros
+ * distintos bajo un mismo identificador ante el banco.
+ *
+ * ## Formato
+ *
+ *     {dígito de bloque}{9 dígitos de secuencia}   →  10 caracteres, solo dígitos
+ *
+ *     1000000001  primer retiro
+ *     2000000001  primer cobro
+ *
+ * Tres razones para este formato y no para un base36 más corto:
+ *
+ *   1. **Solo dígitos.** La documentación de ATC declara estos campos como
+ *      String, pero sus propios ejemplos mandan números sin comillas
+ *      (`"numeroReferencia": 2320`). Si su backend los coerciona a entero, un
+ *      alias alfanumérico se rompe y un alias numérico sobrevive.
+ *   2. **10 caracteres.** Es el más chico de todos los límites del catálogo
+ *      (el `numeroReferencia` del QR Binance admite máximo 10), así que un solo
+ *      formato sirve para todos los productos sin excepciones por endpoint.
+ *   3. **Primer dígito distinto de cero.** Si el proveedor lo convierte a
+ *      número y lo devuelve, no perdemos ceros a la izquierda.
+ *
+ * La secuencia vive en el mismo `Counter` atómico que ya numera los
+ * comprobantes. No reinicia por período: un alias repetido ante el banco sería
+ * ambiguo aunque los separen meses.
+ */
+
+import Counter           from '../../models/Counter.js';
+import ProviderReference from '../../models/ProviderReference.js';
+import { logger }        from '../../utils/logger.js';
+
+/** Bloque de numeración por dirección del dinero. */
+const KIND_BLOCK = { payout: 1, payin: 2 };
+
+/** 9 dígitos de secuencia por bloque. */
+const BLOCK_SIZE = 1_000_000_000;
+
+/**
+ * Siguiente número de la secuencia, atómico y a prueba de multi-instancia.
+ * @param {'payin'|'payout'} kind
+ * @param {string} provider
+ * @returns {Promise<string>} 10 dígitos
+ */
+async function nextReference(provider, kind) {
+  const block = KIND_BLOCK[kind];
+  if (!block) throw new Error(`providerReference: kind inválido '${kind}'`);
+
+  const doc = await Counter.findOneAndUpdate(
+    { _id: `PREF-${provider}-${kind}` },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: 'after' },
+  );
+
+  // Agotar el bloque produciría un alias de 11 dígitos que el proveedor
+  // truncaría en silencio. Preferimos fallar ruidosamente: con el volumen
+  // actual esto no ocurre nunca, y si ocurriera querríamos enterarnos acá y no
+  // en una conciliación.
+  if (doc.seq >= BLOCK_SIZE) {
+    throw new Error(`providerReference: bloque '${provider}/${kind}' agotado (seq=${doc.seq})`);
+  }
+
+  return String(block * BLOCK_SIZE + doc.seq);
+}
+
+/**
+ * Emite (o recupera) el alias de un objetivo.
+ *
+ * Para `kind: 'payout'` es idempotente: pedir dos veces el alias del mismo
+ * retiro devuelve el mismo valor. Es la garantía que evita mandarle al banco
+ * dos identificadores para un único retiro si el dispatch se reintenta.
+ *
+ * Para `kind: 'payin'` NO lo es, a propósito: un QR que expira y se regenera
+ * es un cobro nuevo y merece una referencia nueva.
+ *
+ * @param {object}  p
+ * @param {string}  p.provider     — 'redenlace'
+ * @param {'payin'|'payout'} p.kind
+ * @param {'Transaction'|'WalletTransaction'} p.targetModel
+ * @param {string}  p.targetId     — alytoTransactionId | wtxId
+ * @param {number} [p.amount]
+ * @param {string} [p.currency]
+ * @param {object} [p.meta]
+ * @returns {Promise<import('mongoose').Document>}
+ */
+export async function issueReference({ provider, kind, targetModel, targetId, amount, currency, meta }) {
+  if (!provider || !targetId) throw new Error('providerReference: faltan provider o targetId');
+
+  const isPayout = kind === 'payout';
+  const query    = { provider, kind, targetModel, targetId };
+
+  if (isPayout) {
+    const existing = await ProviderReference.findOne(query);
+    if (existing) return existing;
+  }
+
+  const reference = await nextReference(provider, kind);
+
+  try {
+    const doc = await ProviderReference.create({
+      ...query, reference, amount, currency, meta: meta ?? {},
+    });
+    logger.info('[providerReference] Alias emitido', { provider, kind, reference, targetId });
+    return doc;
+  } catch (err) {
+    // Carrera entre dos dispatch del mismo retiro: el índice parcial único hizo
+    // su trabajo. Devolvemos el que ganó. El número que acabamos de consumir
+    // queda sin usar; un hueco en la secuencia es inocuo, un doble pago no.
+    if (err?.code === 11000 && isPayout) {
+      const winner = await ProviderReference.findOne(query);
+      if (winner) {
+        logger.warn('[providerReference] Carrera resuelta, se reusa el alias existente', {
+          provider, kind, targetId, reference: winner.reference,
+        });
+        return winner;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Anota el identificador que devolvió el proveedor, para poder volver desde él.
+ * @param {string} reference         — nuestro alias
+ * @param {string} externalReference — el del proveedor
+ */
+export async function attachExternalReference(reference, externalReference) {
+  if (!externalReference) return null;
+  return ProviderReference.findOneAndUpdate(
+    { reference },
+    { $set: { externalReference: String(externalReference) } },
+    { returnDocument: 'after' },
+  );
+}
+
+/** Vuelta desde el identificador del proveedor (lo que llega en un webhook). */
+export async function resolveByExternal(provider, externalReference) {
+  if (!externalReference) return null;
+  return ProviderReference.findOne({ provider, externalReference: String(externalReference) });
+}
+
+/** Vuelta desde nuestro propio alias. */
+export async function resolveByReference(reference) {
+  if (!reference) return null;
+  return ProviderReference.findOne({ reference: String(reference) });
+}

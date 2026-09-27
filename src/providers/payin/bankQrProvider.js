@@ -47,4 +47,5 @@ export function createBankQrProvider(bankId) {
 }
 
 // ── Instancias pre-construidas por banco ──────────────────────────────────────
-export const becQrProvider = createBankQrProvider('bec');
+export const becQrProvider       = createBankQrProvider('bec');
+export const redenlaceQrProvider = createBankQrProvider('redenlace');

@@ -130,6 +130,19 @@ router.post('/owlpay', captureRawBody, handleOwlPayIPN);
 router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
 
 /**
+ * POST /api/v1/ipn/redenlace
+ *
+ * Webhook de cobro por QR Simple de ATC S.A. (Red Enlace).
+ * Payload plano (`{ numeroReferencia, monto, clienteOrigen, bancoOrigen, ... }`),
+ * distinto del de BANECO: lo traduce `redenlaceQrService.normalizeIpn`.
+ *
+ * Esta URL es la que va en `REDENLACE_QR_WEBHOOK_URL` y se manda en cada
+ * generación de QR. ATC autentica con la cabecera que declaramos nosotros
+ * (`REDENLACE_QR_WEBHOOK_KEY` / `..._VALUE`), no con una firma del body.
+ */
+router.post('/redenlace', captureRawBody, handleBankQrIPN('redenlace'));
+
+/**
  * POST /api/v1/ipn/bec-disbursement
  *
  * IPN de confirmación de estado de dispersión BANECO (§9.2 notifyStatus).

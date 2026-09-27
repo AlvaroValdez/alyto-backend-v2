@@ -2917,7 +2917,18 @@ export function handleBankQrIPN(bankId) {
   return async function (req, res) {
     const OK = { responseCode: 0, message: '' };
 
-    const { payment } = req.body ?? {};
+    // La forma anidada `{ payment: {...} }` es la de BANECO. Un banco cuyo
+    // webhook manda otra cosa (Red Enlace lo manda plano) expone
+    // `normalizeIpn(req)` y traduce. Sin esta costura, sumar un banco obligaba a
+    // ramificar el handler completo.
+    let payment = req.body?.payment;
+    if (!payment?.qrId) {
+      try {
+        payment = getBankQrService(bankId).normalizeIpn?.(req) ?? payment;
+      } catch {
+        // Banco no registrado. Se resuelve más abajo, al no encontrar match.
+      }
+    }
 
     if (!payment?.qrId) {
       logger.warn(`[BankQr IPN ${bankId}] Payload sin payment.qrId`, { body: req.body });
