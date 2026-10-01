@@ -108,9 +108,11 @@ async function confirmBankQrTx(tx, payment, bankId, source) {
     return false;
   }
 
-  const bankPaidAt = payment?.paymentDate && payment?.paymentTime
+  // `paidAt` ya viene resuelto y con la zona horaria de Bolivia desde el
+  // servicio del banco; la concatenación queda como respaldo.
+  const bankPaidAt = payment?.paidAt ?? (payment?.paymentDate && payment?.paymentTime
     ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
-    : new Date();
+    : new Date());
 
   tx.status         = 'payin_confirmed';
   tx.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
@@ -203,7 +205,14 @@ async function reconcilePaidQRs() {
       try {
         paidList = await svc.getPaidQRs(date);
       } catch (err) {
-        logger.error(`[reconcileBankQr] Error consultando paidQR ${bankId}:`, err.message);
+        // El segundo argumento de winston es metadata: pasarle un string lo
+        // descarta en silencio. Entre el 20 y el 29 de septiembre de 2026 esto
+        // dejó cuatro fallos del banco sin una sola pista de qué pasó.
+        logger.error(`[reconcileBankQr] Error consultando paidQR ${bankId}`, {
+          bankId,
+          fecha: date.toISOString().slice(0, 10),
+          error: err.message,
+        });
         Sentry.captureException(err, { tags: { component: 'reconcileBankQrPayments', phase: 'A', bankId } });
         continue;
       }

@@ -35,6 +35,7 @@ import {
 import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
+import { getSrlBankData }   from '../services/srlBankData.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
@@ -1323,7 +1324,11 @@ export async function initCrossBorderPayment(req, res) {
         transactionId: alytoTransactionId,           // 26 chars, bajo el límite de 30
         amount:        amount,
         currency:      corridor.originCurrency ?? 'BOB',
-        description:   `Alyto ${alytoTransactionId}`.slice(0, 100),
+        // La glosa es lo único de este cobro que se ve en el extracto de BANECO.
+        // Desde que la cuenta es exclusiva de Alyto (octubre 2026) tiene que
+        // decir por sí sola a qué destino de fondos corresponde, para poder
+        // rendir el extracto sin cruzarlo contra la base.
+        description:   `Alyto envio ${alytoTransactionId}`.slice(0, 100),
         dueDate,
       });
     } catch (err) {
@@ -1365,20 +1370,8 @@ export async function initCrossBorderPayment(req, res) {
     payinProviderRef = null;
     payinUrl         = null;
 
-    // Leer datos bancarios desde DB (admin los configura); fallback a env vars
-    let dbBankData = {};
-    try {
-      const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' }).select('bankData').lean();
-      dbBankData = srlCfg?.bankData ?? {};
-    } catch (cfgErr) {
-      console.warn('[CrossBorder] No se pudo leer bankData de SRLConfig, usando env vars:', cfgErr.message);
-    }
-
     manualPaymentInstructions = {
-      bankName:      dbBankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
-      accountHolder: dbBankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
-      accountNumber: dbBankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
-      accountType:   dbBankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+      ...(await getSrlBankData()),
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,
@@ -1551,7 +1544,7 @@ export async function initCrossBorderPayment(req, res) {
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
       // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
-      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate } } : {}),
+      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate, purpose: 'crossborder_payin' } } : {}),
       // bankQr: TTL de la tx = fin del día de vencimiento del QR (no el default +24h),
       // para que el barrido de expiración reconcilie/cancele en el momento correcto.
       ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),
@@ -3141,26 +3134,21 @@ export async function getSRLPayinInstructions(req, res) {
     return res.status(403).json({ error: 'Este endpoint es exclusivo para usuarios SRL.' });
   }
 
-  let bankData = {};
   let qrImages = [];
   try {
     const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' })
-      .select('bankData qrImages')
+      .select('qrImages')
       .lean();
-    bankData = srlCfg?.bankData ?? {};
     qrImages = (srlCfg?.qrImages ?? []).map(q => ({
       label:       q.label,
       imageBase64: q.imageBase64,
     }));
   } catch (err) {
-    console.warn('[SRLPayinInstructions] Fallback a env vars:', err.message);
+    console.warn('[SRLPayinInstructions] No se pudieron leer los QR estáticos:', err.message);
   }
 
   return res.status(200).json({
-    bankName:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
-    accountHolder: bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
-    accountNumber: bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
-    accountType:   bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+    ...(await getSrlBankData()),
     currency:      'BOB',
     qrImages,
   });

@@ -205,7 +205,54 @@ export async function cancelQR(qrId) {
 }
 
 /**
+ * BANECO informa el momento del pago partido en dos campos y **sin zona horaria**:
+ * `paymentDate: '2026-09-07T00:00:00'` + `paymentTime: '19:27:28'`. Los tres
+ * consumidores (`ipnController`, `walletController.confirmBankQrDeposit` y
+ * `reconcileBankQrPayments`) los reconcatenan como
+ * `new Date(\`${paymentDate.split('T')[0]}T${paymentTime}\`)`, cadena que `Date`
+ * interpreta en la zona del proceso. El VPS corre en UTC, así que el sello
+ * quedaba **cuatro horas antes** del pago real.
+ *
+ * Verificado el 2026-10-01 contra el extracto de BANECO: el cobro de Bs 1 del
+ * 07/Sep figura en el banco a las 19:27:27 hora de Bolivia y en nuestra base
+ * quedó guardado como `2026-09-07T19:27:28.000Z`, o sea 23:27 Bolivia.
+ *
+ * Bolivia es UTC-4 todo el año porque no aplica horario de verano, así que un
+ * desplazamiento fijo es correcto y no envejece. Mismo tratamiento que ya se le
+ * dio a las fechas de ATC en `redenlaceQrService`.
+ *
+ * Se le pega el desplazamiento a la **hora** en vez de tocar el código
+ * compartido de los tres consumidores: así la concatenación que ya existe
+ * produce el instante correcto sin que ninguno tenga que enterarse.
+ *
+ * @param {object|null} payment
+ * @returns {object|null} el mismo pago con `paymentTime` zonificada y `paidAt` resuelto
+ */
+function normalizarPago(payment) {
+  if (!payment || typeof payment !== 'object') return payment ?? null;
+
+  const hora = String(payment.paymentTime ?? '').trim();
+  const tieneZona = /(Z|[+-]\d{2}:?\d{2})$/.test(hora);
+  const horaConZona = hora && !tieneZona ? `${hora}-04:00` : hora;
+
+  const fecha = String(payment.paymentDate ?? '').split('T')[0];
+  const instante = fecha && horaConZona ? new Date(`${fecha}T${horaConZona}`) : null;
+
+  return {
+    ...payment,
+    paymentTime: horaConZona,
+    // El instante ya resuelto, para quien prefiera no reconcatenar.
+    paidAt: instante && !isNaN(instante) ? instante : null,
+  };
+}
+
+/**
  * Consulta el estado de un QR por su ID.
+ *
+ * ⚠️ Este endpoint **no está acotado a nuestra cuenta**: responde por cualquier
+ * QR del banco, incluidos los de otros comercios. Verificado el 2026-10-01, con
+ * un QR ajeno que BANECO nos notificó por error. Para saber si un cobro es
+ * nuestro hay que usar `getPaidQRs`, que sí filtra por nuestras credenciales.
  *
  * @returns {{ status: 'pending'|'paid'|'cancelled', payment: object|null }}
  */
@@ -223,14 +270,22 @@ export async function getQRStatus(qrId) {
   // gateway de producción 2026-09-01. Un typo `statusQRCode` deja el status en 'unknown'
   // y rompe la confirmación de pagos (verifyIpn Capa 2 + reconcileBankQrPayments).
   const STATUS_MAP = { 0: 'pending', 1: 'paid', 9: 'cancelled' };
+  const crudo = Array.isArray(data.payment) ? data.payment[0] ?? null : data.payment ?? null;
   return {
     status:  STATUS_MAP[data.statusQrCode] ?? 'unknown',
-    payment: Array.isArray(data.payment) ? data.payment[0] ?? null : data.payment ?? null,
+    payment: normalizarPago(crudo),
   };
 }
 
 /**
  * Lista todos los QRs pagados en una fecha — para reconciliación diaria.
+ *
+ * A diferencia de `getQRStatus`, este endpoint **sí está acotado a nuestras
+ * credenciales**: solo devuelve los cobros de nuestra propia cuenta. Verificado
+ * el 2026-10-01 contra producción: para el 07/Sep devuelve exactamente el cobro
+ * de Bs 1 de Alyto, y para el 17/Sep devuelve una lista vacía aunque ese día
+ * BANECO nos notificó por webhook un QR ajeno que `getQRStatus` sí reporta
+ * pagado. Es, por lo tanto, la única vía para distinguir un cobro propio.
  *
  * @param {Date} date
  * @returns {Promise<PaymentQR[]>}
@@ -244,7 +299,36 @@ export async function getPaidQRs(date) {
 
   const data = await apiFetch(`/api/qrsimple/v2/paidQR/${dateStr}`);
   if (data.responseCode !== 0) throw new Error(`BEC paidQR error: ${data.message}`);
-  return data.paymentList ?? [];
+  return (data.paymentList ?? []).map(normalizarPago);
+}
+
+/**
+ * ¿Este cobro corresponde a nuestra cuenta?
+ *
+ * El payload de BANECO **no trae la cuenta de destino** (verificado contra un
+ * pago real guardado en producción: qrId, transactionId, fecha, hora, moneda,
+ * monto y datos del pagador, nada más). Así que la pertenencia no se puede
+ * deducir del pago: hay que preguntarle al banco por la lista acotada del día.
+ *
+ * Se usa para clasificar, NO para autorizar: la acreditación ya está acotada
+ * porque el handler exige que el `qrId` exista en nuestra base y solo guardamos
+ * los que generamos nosotros. Sirve para no confundir "nos notificaron un cobro
+ * ajeno" (ruido del banco, esperable) con "perdimos el registro de un cobro
+ * nuestro" (defecto real). Hoy los dos casos loguean igual y eso envenena la
+ * conciliación.
+ *
+ * @param {string} qrId
+ * @param {Date} [fecha] — día del pago; por defecto hoy
+ * @returns {Promise<boolean|null>} null si no se pudo determinar
+ */
+export async function esCobroPropio(qrId, fecha = new Date()) {
+  try {
+    const lista = await getPaidQRs(fecha);
+    return lista.some((p) => String(p?.qrId) === String(qrId));
+  } catch (err) {
+    logger.warn(`[BEC] No se pudo verificar la pertenencia del QR ${qrId}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -309,6 +393,38 @@ export async function verifyIpn(req) {
     return { ok: true, reason: 'mock' };
   }
 
+  const capa1 = verifyWebhookAuth(req);
+  if (!capa1.ok) return capa1;
+
+  // ── Capa 2: reconfirmación autoritativa con el banco ──
+  let statusInfo;
+  try {
+    statusInfo = await getQRStatus(qrId);
+  } catch (err) {
+    return { ok: false, reason: `bank-status-error:${err.message}` };
+  }
+  if (statusInfo.status !== 'paid') {
+    return { ok: false, reason: `bank-status-${statusInfo.status}` };
+  }
+
+  return { ok: true, reason: `${capa1.layer}+bank`, payment: statusInfo.payment };
+}
+
+/**
+ * Capa 1 sola: autentica el IPN **sin llamar al banco**.
+ *
+ * Existe aparte de `verifyIpn` porque hay un camino en el que hace falta saber
+ * si quien llama es BANECO antes de gastar una llamada saliente: el del QR que
+ * no está en nuestra base. Clasificar ese caso (propio vs ajeno) requiere
+ * preguntarle al banco, y si lo hiciéramos sin autenticar primero, cualquiera
+ * podría disparar una llamada nuestra al banco por cada POST al endpoint
+ * público. Autenticando antes, el costo solo lo puede provocar quien ya tiene
+ * el token.
+ *
+ * @param {import('express').Request} req
+ * @returns {{ ok: boolean, reason?: string, layer?: 'bearer'|'hmac'|'bank' }}
+ */
+export function verifyWebhookAuth(req) {
   const bearerToken = process.env.BEC_IPN_BEARER_TOKEN;
   const secret      = process.env.BEC_IPN_SECRET;
 
@@ -336,19 +452,7 @@ export async function verifyIpn(req) {
     }
   }
 
-  // ── Capa 2: reconfirmación autoritativa con el banco ──
-  let statusInfo;
-  try {
-    statusInfo = await getQRStatus(qrId);
-  } catch (err) {
-    return { ok: false, reason: `bank-status-error:${err.message}` };
-  }
-  if (statusInfo.status !== 'paid') {
-    return { ok: false, reason: `bank-status-${statusInfo.status}` };
-  }
-
-  const authLayer = bearerToken ? 'bearer' : secret ? 'hmac' : 'bank';
-  return { ok: true, reason: `${authLayer}+bank`, payment: statusInfo.payment };
+  return { ok: true, layer: bearerToken ? 'bearer' : secret ? 'hmac' : 'bank' };
 }
 
 /** Para tests de integración: verifica que nuestro cifrado sea compatible con el banco */
