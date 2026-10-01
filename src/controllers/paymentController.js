@@ -36,6 +36,7 @@ import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import { getSrlBankData }   from '../services/srlBankData.js';
+import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
@@ -1248,6 +1249,36 @@ export async function initCrossBorderPayment(req, res) {
   // Generar alytoTransactionId ANTES del call a Fintoc para incluirlo en el metadata.
   // El IPN de confirmación usará este ID para encontrar la transacción en BD.
   const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+  // ── Pre-check: no cobrar lo que no vamos a poder pagar ────────────────────
+  //
+  // Último punto en que todavía no se movió un centavo. Más adelante se emiten
+  // instrucciones de pago o se genera el QR del banco, y a partir de ahí el
+  // dinero del usuario puede entrar en cualquier momento.
+  //
+  // Nace de las 7 operaciones por Bs 3.506 que se cobraron y nunca se
+  // ejecutaron: dos murieron porque la wallet maestra de Vita estaba sin saldo,
+  // y se supo recién al intentar el payout, con la plata ya adentro.
+  const preflight = await verificarPayoutEjecutable({
+    corridor,
+    usdAmount: digitalAssetAmountFinal ?? serverUsdcTransit,
+  });
+  if (!preflight.ok) {
+    logger.error('[CrossBorder] Payin bloqueado: el payout no es ejecutable ahora', {
+      corridorId, motivo: preflight.motivo, ...preflight.detalle,
+    });
+    Sentry.captureMessage(`Payin bloqueado por preflight: ${preflight.motivo}`, {
+      level: 'warning',
+      extra: { corridorId, ...preflight.detalle },
+    });
+    // 503 y no 400: no es un error del usuario ni de su pedido, es que el riel
+    // de pago está sin capacidad en este momento. Reintentar más tarde sirve.
+    return res.status(503).json({
+      error:  'Este corredor no está disponible en este momento. Por favor intenta nuevamente en unos minutos.',
+      code:   'PAYOUT_NOT_EXECUTABLE',
+      reason: preflight.motivo,
+    });
+  }
 
   let payinProviderRef          = null;  // ID externo para lookup en IPN
   let payinUrl                  = null;  // Token/URL que abre el widget de pago
