@@ -640,6 +640,34 @@ const transactionSchema = new Schema(
       index:   true,
     },
 
+    // ── Reembolso ─────────────────────────────────────────────────────────────
+    /**
+     * Evidencia de que el dinero volvió efectivamente al usuario.
+     *
+     * Existe porque `status:'refunded'` por sí solo NO prueba nada: ese estado se
+     * puede fijar a mano desde el panel sin mover un centavo, y en producción hay
+     * exactamente un registro así (ALY-C-1786548682442-NE1YVC, Bs 236, cobrado,
+     * marcado 'refunded', sin ningún movimiento de wallet detrás). Un estado que
+     * afirma una devolución que nadie ejecutó es peor que no tener reembolso,
+     * porque además libera el cupo del Entorno Controlado de Pruebas.
+     *
+     * `wtxId` es la prueba: apunta al WalletTransaction que acreditó el saldo. Sin
+     * ese campo, `getBOBCommitted` sigue contando el monto como pasivo, que es lo
+     * correcto mientras no haya rastro de la restitución.
+     */
+    refund: {
+      type: new Schema({
+        method:   { type: String, enum: ['walletBOB', 'bankTransfer', 'external'], trim: true },
+        wtxId:    { type: String, trim: true },   // WalletTransaction que acreditó el saldo
+        amount:   { type: Number },
+        currency: { type: String, trim: true },
+        at:       { type: Date },
+        by:       { type: Schema.Types.ObjectId, ref: 'User' },
+        reason:   { type: String, trim: true },
+        zone:     { type: String, enum: ['A', 'B'], trim: true },
+      }, { _id: false }),
+    },
+
     // ── Harbor off-ramp transfer (OwlPay v2) ──────────────────────────────────
     /**
      * Detalles del transfer Harbor creado para off-ramp USDC→fiat local.

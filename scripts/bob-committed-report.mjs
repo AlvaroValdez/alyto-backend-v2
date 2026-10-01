@@ -111,7 +111,8 @@ if (JSON_OUT) {
   console.log(`  Saldos de wallets (Σ balance)      ${bs(wallets.balance).padStart(18)}   ${wallets.wallets} wallets`)
   console.log(`  BOB comprometido                   ${bs(committed.committed).padStart(18)}   ${committed.operations} operaciones`)
   console.log(`    ├─ en curso                      ${bs(committed.inProgress).padStart(18)}`)
-  console.log(`    └─ ya debido al usuario          ${bs(committed.refundDue).padStart(18)}   ${refundDetail.length} operaciones`)
+  console.log(`    ├─ ya debido al usuario          ${bs(committed.refundDue).padStart(18)}   ${refundDetail.length} operaciones`)
+  console.log(`    └─ 'refunded' sin evidencia      ${bs(committed.refundedUnproven).padStart(18)}   etiqueta sin movimiento de wallet`)
   console.log(`  ${'─'.repeat(62)}`)
   console.log(`  TOTAL a cubrir por el banco        ${bs(totalBacking).padStart(18)}\n`)
 

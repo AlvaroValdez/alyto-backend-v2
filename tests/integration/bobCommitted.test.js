@@ -36,7 +36,7 @@ afterAll(async () => { await disconnectTestDb() })
 let seq = 0
 
 /** Transacción BOB de la SRL con lo mínimo que el esquema exige. */
-async function txBOB({ status, amount, paidAt, confirmedAt, originCurrency = 'BOB', legalEntity = 'SRL' }) {
+async function txBOB({ status, amount, paidAt, confirmedAt, refundWtxId, originCurrency = 'BOB', legalEntity = 'SRL' }) {
   seq += 1
   return Transaction.create({
     alytoTransactionId: `ALY-C-TEST-${seq}`,
@@ -49,6 +49,7 @@ async function txBOB({ status, amount, paidAt, confirmedAt, originCurrency = 'BO
     status,
     ...(paidAt      ? { bankQr: { bankId: 'bec', qrId: `qr-${seq}`, paidAt } } : {}),
     ...(confirmedAt ? { confirmationDetails: { confirmedAt } } : {}),
+    ...(refundWtxId ? { refund: { wtxId: refundWtxId, method: 'walletBOB' } } : {}),
   })
 }
 
@@ -126,24 +127,54 @@ describe('estados que liberan el efectivo', () => {
     expect(r.committed).toBe(0)
   })
 
-  test('refunded no compromete: ya se acreditó a la wallet y se cuenta del otro lado', async () => {
+  test('refunded CON evidencia no compromete: se cuenta del otro lado', async () => {
     // Si contara aquí, el mismo efectivo respaldaría dos pasivos a la vez.
-    await txBOB({ status: 'refunded', amount: 900, paidAt: new Date() })
+    await txBOB({ status: 'refunded', amount: 900, paidAt: new Date(), refundWtxId: 'WTX-1' })
 
     const r = await getBOBCommitted('SRL')
     expect(r.committed).toBe(0)
+    expect(r.refundedUnproven).toBe(0)
+  })
+
+  test('refunded SIN evidencia sigue siendo pasivo', async () => {
+    // Existe en producción: ALY-C-1786548682442-NE1YVC, Bs 236, cobrado, marcado
+    // 'refunded', cero movimientos de wallet. La etiqueta se pone a mano desde el
+    // panel sin mover dinero, así que por sí sola no libera nada.
+    await txBOB({ status: 'refunded', amount: 236, paidAt: new Date() })
+
+    const r = await getBOBCommitted('SRL')
+    expect(r.committed).toBe(236)
+    expect(r.refundedUnproven).toBe(236)
+    // No es un reembolso debido por fallo: es uno que se afirmó sin ejecutar.
+    expect(r.refundDue).toBe(0)
+    expect(r.inProgress).toBe(0)
   })
 
   test('el reembolso es neutro: lo que sale de comprometido entra al saldo', async () => {
     const tx = await txBOB({ status: 'failed', amount: 1000, paidAt: new Date() })
     expect((await getBOBCommitted('SRL')).committed).toBe(1000)
 
-    // Simula lo que hará el motor de reembolso: terminal 'refunded' + crédito a WalletBOB.
-    await Transaction.updateOne({ _id: tx._id }, { status: 'refunded' })
+    // Simula lo que hará el motor de reembolso: terminal 'refunded' + el wtxId del
+    // crédito a WalletBOB como prueba de que el dinero efectivamente se movió.
+    await Transaction.updateOne(
+      { _id: tx._id },
+      { status: 'refunded', 'refund.wtxId': 'WTX-REEMBOLSO-1', 'refund.method': 'walletBOB' },
+    )
 
     // El comprometido baja exactamente el monto que la wallet va a subir → el respaldo
     // total requerido no se mueve. Esa es la invariante que vuelve defendible el reembolso.
     expect((await getBOBCommitted('SRL')).committed).toBe(0)
+  })
+
+  test('marcar refunded a mano, sin crédito, NO libera el pasivo', async () => {
+    const tx = await txBOB({ status: 'failed', amount: 1000, paidAt: new Date() })
+
+    // Exactamente lo que hoy permite PATCH /admin/transactions/:id/status.
+    await Transaction.updateOne({ _id: tx._id }, { status: 'refunded' })
+
+    const r = await getBOBCommitted('SRL')
+    expect(r.committed).toBe(1000)
+    expect(r.refundedUnproven).toBe(1000)
   })
 })
 
@@ -164,6 +195,6 @@ describe('alcance del cálculo', () => {
 
   test('sin operaciones devuelve ceros, no null', async () => {
     const r = await getBOBCommitted('SRL')
-    expect(r).toEqual({ committed: 0, operations: 0, inProgress: 0, refundDue: 0 })
+    expect(r).toEqual({ committed: 0, operations: 0, inProgress: 0, refundDue: 0, refundedUnproven: 0 })
   })
 })

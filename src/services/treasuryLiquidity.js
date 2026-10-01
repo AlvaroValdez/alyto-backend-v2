@@ -27,12 +27,15 @@ import { getStellarUSDCBalance } from './stellarService.js';
 const INFLIGHT_STATUSES = ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'];
 
 /**
- * Estados en los que el BOB cobrado dejó de ser un pasivo: la operación se ejecutó
- * ('completed', el efectivo pasó a cubrir el USDC que salió de la tesorería) o el
- * dinero ya se trasladó al saldo del usuario ('refunded', que acredita WalletBOB y
- * por lo tanto se cuenta del otro lado de la cobertura).
+ * Único estado en el que el BOB cobrado deja de ser un pasivo por el estado solo: la
+ * operación se ejecutó y el efectivo pasó a cubrir el USDC que salió de la tesorería.
+ *
+ * 'refunded' NO está acá a propósito. Ese estado se puede fijar a mano desde el panel
+ * sin mover un centavo, así que por sí solo no prueba que el dinero volvió: liberarlo
+ * por la etiqueta dejaría de contar un pasivo que sigue existiendo. Se libera solo con
+ * evidencia (`refund.wtxId`), ver el $expr de abajo.
  */
-const BOB_RELEASED_STATUSES = ['completed', 'refunded'];
+const BOB_RELEASED_STATUSES = ['completed'];
 
 /**
  * Estados que SOLO se alcanzan con el payin ya confirmado. Sirven como evidencia de
@@ -116,14 +119,19 @@ export async function getUSDCAvailableNow(entity = 'SRL') {
  * manual— y para los estados en curso basta el estado, que solo se alcanza con el payin
  * ya confirmado.
  *
- * Se excluyen 'completed' (el efectivo pasó a cubrir el USDC que salió de la tesorería)
- * y 'refunded' (el monto ya se acreditó a WalletBOB, así que se cuenta del otro lado:
- * contarlo aquí también sería contarlo dos veces).
+ * Se excluye 'completed': el efectivo pasó a cubrir el USDC que salió de la tesorería.
+ *
+ * 'refunded' se excluye SOLO con evidencia (`refund.wtxId`, el movimiento de wallet que
+ * acreditó el saldo). Sin ella el monto sigue contando, porque la etiqueta se puede
+ * poner a mano sin mover dinero y en producción hay un caso así. Liberar por el estado
+ * dejaría de reconocer un pasivo que todavía existe, y en la dirección que favorece a
+ * la empresa.
  *
  * @param {string} entity 'SRL' | 'LLC'
- * @returns {Promise<{ committed:number, operations:number, inProgress:number, refundDue:number }>}
- *   committed  = total a descontar del respaldo bancario
- *   refundDue  = subconjunto que ya se le debe devolver al usuario (operaciones fallidas)
+ * @returns {Promise<{ committed:number, operations:number, inProgress:number, refundDue:number, refundedUnproven:number }>}
+ *   committed        = total a descontar del respaldo bancario
+ *   refundDue        = subconjunto que ya se le debe devolver al usuario (operaciones fallidas)
+ *   refundedUnproven = marcado 'refunded' sin evidencia de restitución
  */
 export async function getBOBCommitted(entity = 'SRL') {
   const payinSettled = {
@@ -140,7 +148,17 @@ export async function getBOBCommitted(entity = 'SRL') {
         legalEntity:    entity,
         originCurrency: 'BOB',
         status:         { $nin: BOB_RELEASED_STATUSES },
-        ...payinSettled,
+        // 'refunded' solo sale del pasivo si hay un movimiento de wallet que lo pruebe.
+        $and: [
+          payinSettled,
+          {
+            $or: [
+              { status: { $ne: 'refunded' } },
+              { 'refund.wtxId': { $in: [null, ''] } },
+              { 'refund.wtxId': { $exists: false } },
+            ],
+          },
+        ],
       },
     },
     {
@@ -154,19 +172,27 @@ export async function getBOBCommitted(entity = 'SRL') {
             $cond: [{ $eq: ['$status', 'failed'] }, { $ifNull: ['$originalAmount', 0] }, 0],
           },
         },
+        // Marcado como devuelto, sin rastro de la devolución.
+        refundedUnproven: {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'refunded'] }, { $ifNull: ['$originalAmount', 0] }, 0],
+          },
+        },
       },
     },
   ]);
 
-  const row       = agg[0] ?? { committed: 0, operations: 0, refundDue: 0 };
+  const row       = agg[0] ?? { committed: 0, operations: 0, refundDue: 0, refundedUnproven: 0 };
   const committed = +Number(row.committed || 0).toFixed(2);
   const refundDue = +Number(row.refundDue || 0).toFixed(2);
+  const refundedUnproven = +Number(row.refundedUnproven || 0).toFixed(2);
 
   return {
     committed,
     operations: row.operations || 0,
-    inProgress: +(committed - refundDue).toFixed(2),
+    inProgress: +(committed - refundDue - refundedUnproven).toFixed(2),
     refundDue,
+    refundedUnproven,
   };
 }
 
