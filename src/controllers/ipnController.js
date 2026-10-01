@@ -30,6 +30,14 @@ import WalletTransaction from '../models/WalletTransaction.js';
 import User              from '../models/User.js';
 import { confirmBankQrDeposit, settleDispatchedWithdrawal } from './walletController.js';
 import { getBankQrService }     from '../services/bankQr/bankQrRegistry.js';
+import { debeAlertar }          from '../services/adminAlertThrottle.js';
+
+/**
+ * Un corredor faltante no se arregla solo: hasta que un admin lo cree, cada
+ * reintento encuentra lo mismo. Un aviso por día y por transacción alcanza para
+ * que no se olvide, sin repetir el mismo correo en cada pasada.
+ */
+const COOLDOWN_PAYOUT_BLOQUEADO_MS = 24 * 60 * 60 * 1000;
 import {
   createPayout,
   createVitaSentPayout,
@@ -1403,16 +1411,26 @@ export async function dispatchPayout(transaction) {
     });
     await transaction.save().catch(() => {});
 
-    // Alertar al admin — el payin fue confirmado pero no podemos ejecutar el payout
-    sendRawEmail(
-      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
-      `⚠️ Payout bloqueado — corredor no encontrado [${transaction.alytoTransactionId}]`,
-      `<p>El payin fue confirmado pero el corredor <strong>${transaction.corridorId?.toString()}</strong> ` +
-      `no existe en TransactionConfig.</p>` +
-      `<p>Transacción: <strong>${transaction.alytoTransactionId}</strong> | ` +
-      `Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
-      `<p>Requiere intervención manual inmediata.</p>`,
-    ).catch(e => console.error('[dispatchPayout] Error email admin corridor_missing:', e.message));
+    // Alertar al admin — el payin fue confirmado pero no podemos ejecutar el payout.
+    //
+    // Con cooldown POR TRANSACCIÓN: `dispatchPayout` se reintenta, y sin esto cada
+    // intento mandaba otro correo idéntico. El 2026-10-01 fueron 12 correos para
+    // apenas 2 transacciones. El problema es el mismo en el intento 1 y en el 12;
+    // lo único que cambia es el cupo de SendGrid que se consume.
+    if (await debeAlertar(
+      `payout-corridor-missing:${transaction.alytoTransactionId}`,
+      COOLDOWN_PAYOUT_BLOQUEADO_MS,
+    )) {
+      sendRawEmail(
+        process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+        `⚠️ Payout bloqueado — corredor no encontrado [${transaction.alytoTransactionId}]`,
+        `<p>El payin fue confirmado pero el corredor <strong>${transaction.corridorId?.toString()}</strong> ` +
+        `no existe en TransactionConfig.</p>` +
+        `<p>Transacción: <strong>${transaction.alytoTransactionId}</strong> | ` +
+        `Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
+        `<p>Requiere intervención manual inmediata.</p>`,
+      ).catch(e => console.error('[dispatchPayout] Error email admin corridor_missing:', e.message));
+    }
 
     return;
   }

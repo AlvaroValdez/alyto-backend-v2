@@ -22,6 +22,9 @@ import * as Sentry from '@sentry/node';
 
 const HOURS_THRESHOLD = 24;
 
+/** Tiempo mínimo entre dos avisos de KYC incompleto, aunque el job corra más seguido. */
+const COOLDOWN_AVISO_MS = 24 * 60 * 60 * 1000;
+
 export async function kycIncompleteMonitor() {
   const startTime  = Date.now();
   const cutoffDate = new Date(Date.now() - HOURS_THRESHOLD * 60 * 60 * 1000);
@@ -40,6 +43,16 @@ export async function kycIncompleteMonitor() {
     }
 
     console.warn(`[KYC Monitor] ${pendingUsers.length} usuarios con KYC incompleto (>24h).`);
+
+    // Un aviso cada 24 h alcanza: el listado es prácticamente el mismo entre
+    // corridas y nadie va a actuar distinto por verlo cuatro veces el mismo día.
+    // El 2026-10-01 este correo salió 10 veces, en parte porque cada recreación
+    // de contenedor vuelve a disparar el job.
+    const { debeAlertar } = await import('../services/adminAlertThrottle.js');
+    if (!await debeAlertar('kyc-incompleto', COOLDOWN_AVISO_MS)) {
+      console.info('[KYC Monitor] Aviso ya enviado dentro del cooldown — se omite el email.');
+      return;
+    }
 
     const { sendRawEmail } = await import('../services/email.js');
 

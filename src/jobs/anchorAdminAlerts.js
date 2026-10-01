@@ -38,6 +38,7 @@ import {
 } from '../services/anchorAdminService.js'
 import { minHotUSDC } from '../services/treasuryLiquidity.js'
 import { sendRawEmail } from '../services/email.js'
+import { debeAlertar } from '../services/adminAlertThrottle.js'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const RECON_INTERVAL_MS = parseInt(process.env.ANCHOR_ALERT_RECON_INTERVAL_MS ?? String(30 * 60 * 1000), 10) // 30 min
@@ -50,17 +51,24 @@ const COOLDOWN = {
 }
 
 // ── Estado in-module ───────────────────────────────────────────────────────────
-const _lastAlertAt = {}
 let   _lastReconAt = 0
 let   _running     = false
 
+/**
+ * El cooldown vive en MongoDB, no en memoria del proceso.
+ *
+ * Antes era un objeto de módulo (`_lastAlertAt`), y eso lo volvía inútil en la
+ * práctica: se borraba en cada arranque. El 2026-10-01 hubo tres recreaciones de
+ * contenedor y esta alerta, con cooldown de 6 horas, salió 8 veces en el día. Un
+ * cooldown que se reinicia con el proceso no es un cooldown en un backend que se
+ * redespliega a diario.
+ *
+ * Ahora es asíncrono: los llamadores tienen que esperarlo.
+ *
+ * @returns {Promise<boolean>}
+ */
 function _shouldAlert(key, cooldownMs) {
-  const last = _lastAlertAt[key] ?? 0
-  if (Date.now() - last > cooldownMs) {
-    _lastAlertAt[key] = Date.now()
-    return true
-  }
-  return false
+  return debeAlertar(`anchor:${key}`, cooldownMs)
 }
 
 function _adminEmail() {
@@ -128,7 +136,13 @@ export async function anchorAdminAlerts() {
       listener, reconciliation, solvency,
       thresholds: { minHotUSDC: minHotUSDC() },
     })
-    const toFire = alerts.filter(a => _shouldAlert(a.key, COOLDOWN[a.severity] ?? COOLDOWN.warning))
+    // Secuencial y con await: `filter` con un predicado asíncrono conservaría
+    // TODAS las alertas, porque una promesa siempre es truthy, y el cooldown
+    // quedaría desactivado sin que nada falle de forma visible.
+    const toFire = []
+    for (const a of alerts) {
+      if (await _shouldAlert(a.key, COOLDOWN[a.severity] ?? COOLDOWN.warning)) toFire.push(a)
+    }
 
     if (toFire.length === 0) return
 
