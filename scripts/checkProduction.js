@@ -158,6 +158,40 @@ function checkEnvVars() {
       hint: 'DSN de Sentry (debe comenzar con https://)',
     },
 
+    // ── BANECO (BEC) — cobro por QR bancario ────────────────────────────────
+    // ⚠️ Estas cuatro no fallan ruidosamente: `isAvailable()` en becQrService
+    // exige las cuatro, y si falta UNA sola `isMockMode()` da true y
+    // `generateQR` devuelve un QR falso `mock-bec-*` con un SVG de placeholder.
+    // El usuario ve un QR que su app bancaria no puede pagar, y en el log solo
+    // queda un warn. Con los 31 corredores BO en `payinMethod:'bankQr'`, el
+    // hueco está en el camino principal del dinero.
+    { name: 'BEC_USERNAME',       test: v => !!v, hint: 'Usuario del API de BANECO — sin él, el cobro por QR cae en modo simulado y entrega un QR impagable' },
+    { name: 'BEC_PASSWORD',       test: v => !!v, hint: 'Clave del API de BANECO — sin ella, modo simulado silencioso' },
+    { name: 'BEC_ACCOUNT_CREDIT', test: v => !!v, hint: 'Cuenta que recibe los cobros por QR — sin ella, modo simulado silencioso' },
+    {
+      name: 'BEC_AES_KEY',
+      test: v => !!v && v.length === 32,
+      hint: 'Clave AES-256 de BANECO: exactamente 32 caracteres (se usa como 32 bytes UTF-8). Otra longitud revienta el cifrado al generar el QR',
+    },
+    {
+      name: 'BEC_BASE_URL',
+      test: v => !!v && /baneco\.com\.bo/.test(v) && !/apimktdesa/i.test(v),
+      hint: 'Debe apuntar al gateway de producción (apimkt.baneco.com.bo). "apimktdesa" es el ambiente de desarrollo del banco',
+    },
+    {
+      // Fail-closed en producción: sin ningún mecanismo de Capa 1, `verifyIpn`
+      // rechaza TODO aviso entrante. Los pagos igual se acreditan, pero recién
+      // cuando pasa el job de conciliación.
+      name: 'BEC_IPN_BEARER_TOKEN',
+      test: v => !!v || !!process.env.BEC_IPN_SECRET,
+      hint: 'Hace falta BEC_IPN_BEARER_TOKEN o BEC_IPN_SECRET. Sin ninguno, verifyIpn rechaza todo aviso del banco y la acreditación queda a cargo del job',
+    },
+    {
+      name: 'BEC_MOCK_ENABLED',
+      test: v => !v || String(v).toLowerCase() !== 'true',
+      hint: 'NUNCA "true" en producción: deja el cobro por QR inoperante entregando QRs simulados',
+    },
+
     // App
     {
       name: 'NODE_ENV',
