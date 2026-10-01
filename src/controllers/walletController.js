@@ -331,6 +331,10 @@ export async function initiateDeposit(req, res) {
           currency:      'BOB',
           description:   `Alyto deposito ${wtx.wtxId}`.slice(0, 100),
           dueDate,
+          // Para los bancos que traducen nuestro identificador a un alias propio
+          // (Red Enlace exige referencias numéricas), indica a qué colección
+          // apunta ese alias. BEC lo ignora.
+          targetModel:   'WalletTransaction',
         })
       } catch (err) {
         await WalletTransaction.updateOne({ _id: wtx._id }, {
@@ -342,11 +346,24 @@ export async function initiateDeposit(req, res) {
         return res.status(502).json({ error: 'No se pudo generar el QR bancario. Intenta nuevamente en unos minutos.' })
       }
 
+      // El vencimiento que informa el banco MANDA sobre BANK_QR_DUE_DAYS.
+      //
+      // Con BANECO los dos coincidían, porque el QR se emite con una fecha de
+      // vencimiento que nosotros elegimos. Red Enlace no funciona así: el QR
+      // vive los segundos de `vigencia` y expira del lado de ATC. Quedarnos con
+      // nuestro cálculo le mostraría al usuario un plazo de un día para un QR
+      // que muere en diez minutos, y además retrasaría el barrido de
+      // vencimiento, que dejaría el depósito colgado hasta el día siguiente.
+      const expiresAt = qr.expiresAt instanceof Date && !isNaN(qr.expiresAt)
+        ? qr.expiresAt
+        : dueExpiresAt
+
       // QR válido recibido → recién ahora el depósito existe como 'pending'
       // (a la espera de la confirmación automática del banco vía IPN).
       await WalletTransaction.updateOne({ _id: wtx._id }, {
         status:    'pending',
         reference: wtx.wtxId,
+        expiresAt,
         bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate },
       })
 
@@ -356,10 +373,13 @@ export async function initiateDeposit(req, res) {
         amount,
         currency:     'BOB',
         paymentQR:    qr.qrImage,
+        // El tipo de imagen depende del banco: BANECO devuelve SVG y Red Enlace
+        // PNG. El frontend NO puede asumir uno fijo — armar el data URL con esto.
+        paymentQRMime: qr.qrImageMime ?? 'image/svg+xml',
         bankQrId:     qr.qrId,
         reference:    wtx.wtxId,
         instructions: 'Escanea el QR con tu app bancaria. El saldo se acredita automáticamente al confirmarse el pago.',
-        expiresAt:    dueExpiresAt,
+        expiresAt,
       })
     }
 
