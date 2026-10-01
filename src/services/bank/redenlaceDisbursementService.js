@@ -192,11 +192,16 @@ export async function transfer(p) {
     throw new Error('Red Enlace: falta REDENLACE_PAYOUT_WEBHOOK_URL (sin webhook el retiro no se liquida)');
   }
 
+  // El `processId` va en la RUTA de la consulta de estado. Si no se guarda, un
+  // retiro cuyo webhook se pierde queda sin forma de averiguar qué pasó, y la
+  // única salida es despertar a un admin para que mire en el portal de ATC.
+  const processId = crypto.randomUUID();
+
   const data = await apiFetch('/payout/async/v3/lote/autorizar', {
     method:  'POST',
     headers: { branchCode: String(cfg.branchCode()) },
     body:    JSON.stringify({
-      processId:  crypto.randomUUID(),            // 36 caracteres, formato UUID
+      processId,                                  // 36 caracteres, formato UUID
       webhookUrl: cfg.webhookUrl(),
       transacciones: [{
         transaccionId:    alias.reference,
@@ -225,12 +230,15 @@ export async function transfer(p) {
     throw new Error(`Red Enlace rechazó la transacción: ${item.mensaje ?? 'sin detalle'}`);
   }
 
-  // El `numeroReferencia` de ATC es lo que aparece en sus extractos. Guardarlo es
-  // lo único que permite volver desde una conciliación hacia el retiro.
-  if (item.numeroReferencia) {
-    await attachExternalReference(alias.reference, item.numeroReferencia).catch((err) =>
-      logger.error('[RedEnlace] No se pudo guardar numeroReferencia', { error: err.message }));
-  }
+  // Lo que se guarda acá es lo que permite reconstruir la operación después:
+  // `numeroReferencia` es lo que aparece en los extractos de ATC, y `processId`
+  // más `nroLote` son lo que exige la consulta de estado. Sin esto, un webhook
+  // perdido deja el retiro sin diagnóstico posible.
+  await persistirDatosDelLote(alias.reference, {
+    externalReference: item.numeroReferencia,
+    processId,
+    nroLote: data.data.nroLote,
+  });
 
   logger.info('[RedEnlace] Lote autorizado', {
     nroLote: data.data.nroLote, reference: alias.reference, estado: item.estado,
@@ -241,6 +249,82 @@ export async function transfer(p) {
     reference:        alias.reference,
     numeroReferencia: item.numeroReferencia ? String(item.numeroReferencia) : undefined,
   };
+}
+
+/**
+ * Deja en el alias los identificadores que ATC devolvió. Tolerante a fallos a
+ * propósito: el dinero ya fue ordenado, así que un error guardando metadatos no
+ * puede revertir nada ni debe tumbar la respuesta al admin. Queda registrado
+ * como error para que se note.
+ */
+async function persistirDatosDelLote(reference, { externalReference, processId, nroLote }) {
+  try {
+    if (externalReference) await attachExternalReference(reference, externalReference);
+    const doc = await resolveByReference(reference);
+    if (doc) {
+      doc.meta = { ...(doc.meta ?? {}), processId, nroLote: String(nroLote) };
+      doc.markModified('meta');
+      await doc.save();
+    }
+  } catch (err) {
+    logger.error('[RedEnlace] No se pudieron guardar los datos del lote', {
+      reference, error: err.message,
+    });
+  }
+}
+
+// ── Consulta de estado ───────────────────────────────────────────────────────
+
+/**
+ * Pregunta a ATC en qué estado quedó una transacción despachada.
+ *
+ * Es lo que le faltaba a BANECO y por eso allá la red de seguridad solo podía
+ * alertar a un admin. Acá se puede resolver el retiro atascado consultando al
+ * banco, que es la misma lógica que ya usa el barrido del cobro por QR.
+ *
+ * ⚠️ El método HTTP es ambiguo en la documentación de ATC: la tabla de atributos
+ * dice GET y los ejemplos muestran POST. Está preguntado y sin responder, así
+ * que probamos GET y caemos a POST si el gateway lo rechaza, registrando cuál
+ * funcionó. Es la forma de obtener la respuesta que la documentación no da.
+ *
+ * @param {object} p
+ * @param {string} p.processId      — el UUID que mandamos al autorizar
+ * @param {string} p.transaccionId  — nuestro alias de 9 dígitos
+ * @returns {Promise<{estado:string, mensaje?:string, numeroAch?:string, raw:object}|null>}
+ */
+export async function getBatchStatus({ processId, transaccionId }) {
+  if (!processId || !transaccionId) {
+    throw new Error('getBatchStatus: processId y transaccionId son requeridos');
+  }
+  if (disburseMock()) {
+    logger.warn('[RedEnlace] Mock getBatchStatus', { transaccionId });
+    return null;
+  }
+
+  const path = `/payout/async/v3/lote/estado/${encodeURIComponent(processId)}`
+             + `?transaccionId=${encodeURIComponent(transaccionId)}`;
+
+  let data;
+  try {
+    data = await apiFetch(path, { method: 'GET', headers: { branchCode: String(cfg.branchCode()) } });
+    logger.info('[RedEnlace] Consulta de estado por GET');
+  } catch (err) {
+    if (!/HTTP 40[45]/.test(err.message)) throw err;
+    data = await apiFetch(path, { method: 'POST', headers: { branchCode: String(cfg.branchCode()) } });
+    logger.info('[RedEnlace] Consulta de estado por POST (GET rechazado)');
+  }
+
+  if (data?.code !== '00') {
+    throw new Error(`Red Enlace estado error [${data?.code}]: ${data?.message ?? 'sin detalle'}`);
+  }
+
+  // La documentación pone `transacciones` en la raíz en un ejemplo y bajo `data`
+  // en otro. Aceptamos las dos antes que fallar por una inconsistencia de ellos.
+  const lista = data.transacciones ?? data.data?.transacciones ?? [];
+  const t = lista.find((x) => String(x.transaccionId) === String(transaccionId)) ?? lista[0];
+  if (!t) return null;
+
+  return { estado: t.estado, mensaje: t.mensaje, numeroAch: t.numeroAch, raw: t };
 }
 
 // ── Catálogo de bancos ───────────────────────────────────────────────────────

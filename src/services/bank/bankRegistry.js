@@ -108,6 +108,13 @@ const redenlaceAdapter = {
     isAvailable:        ()    => redenlaceDisbursement.isAvailable(),
     isEnabled:          ()    => redenlaceDisbursement.isEnabled(),
     listBanks:          ()    => redenlaceDisbursement.listBanks(),
+
+    /**
+     * Consulta autoritativa de estado. Es lo que BANECO no tiene, y por eso allá
+     * la red de seguridad solo puede alertar a un admin, mientras que acá puede
+     * resolver el retiro atascado preguntándole al banco.
+     */
+    getBatchStatus:     (p)   => redenlaceDisbursement.getBatchStatus(p),
   },
 };
 
