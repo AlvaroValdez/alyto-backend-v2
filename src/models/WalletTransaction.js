@@ -36,8 +36,12 @@ const walletTransactionSchema = new mongoose.Schema({
   },
   type: {
     type:     String,
+    // 'refund' = devolución de un pago transfronterizo que se cobró y no se
+    // ejecutó. NO es un 'deposit': el usuario no trajo dinero nuevo, se le
+    // devuelve el que ya había entregado. Contarlo como depósito inflaría el
+    // volumen de captación, que es una de las cifras que se reporta.
     enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze',
-               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit'],
+               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit', 'refund'],
     required: true,
   },
   /**
