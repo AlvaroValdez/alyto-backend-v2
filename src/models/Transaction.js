@@ -867,6 +867,28 @@ const transactionSchema = new Schema(
       sparse: true,
     },
 
+    /**
+     * Origen de los fondos del payin.
+     *   'bank'       → cobro externo (QR bancario, transferencia, Fintoc, Vita). Default.
+     *   'walletUSDC' → débito del saldo USDC custodiado del usuario (Wallet USDC).
+     *                  El monto se reserva al crear la tx y se confirma/libera según
+     *                  el resultado del payout (ver services/walletPaymentService.js).
+     * Se persiste para auditoría ASFI: distingue un pago financiado con saldo interno
+     * de uno financiado por cobro fiat externo (modelo payin-first).
+     */
+    paymentSource: {
+      type:    String,
+      enum:    ['bank', 'walletUSDC'],
+      default: 'bank',
+    },
+    /** wtxId de la WalletTransaction de reserva/débito (solo paymentSource='walletUSDC'). */
+    walletPayinTxId: {
+      type:  String,
+      trim:  true,
+      index: true,
+      sparse: true,
+    },
+
     // ── Log de Notificaciones IPN ─────────────────────────────────────────────
     /**
      * Registro cronológico de todos los webhooks / IPN recibidos de los

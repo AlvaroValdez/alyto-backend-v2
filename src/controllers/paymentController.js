@@ -25,6 +25,7 @@ import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import BusinessProfile   from '../models/BusinessProfile.js';
+import mongoose          from 'mongoose';
 import Sentry            from '../services/sentry.js';
 import { ENTITY_CURRENCY_MAP, ENTITY_COUNTRY_MAP } from '../utils/entityMaps.js';
 import {
@@ -34,6 +35,11 @@ import {
 } from '../services/fintocService.js';
 import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
+import {
+  reserveUSDCForPayment,
+  releaseUSDCReservation,
+  bobToUsdcDebit,
+} from '../services/walletPaymentService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
@@ -783,8 +789,16 @@ export async function initCrossBorderPayment(req, res) {
     rateConfidence,
     // Legacy alias (backward compat con frontend viejo que mandaba harborQuoteId).
     harborQuoteId,
+    // Origen de los fondos del payin. 'bank' (default) = cobro externo (QR/transferencia/
+    // Fintoc/Vita). 'walletUSDC' = débito del saldo USDC custodiado del usuario.
+    paymentSource,
   } = req.body;
   const userId = req.user?._id;
+
+  // Pago con saldo USDC — feature gated (OFF por defecto). Solo se activa si el flag
+  // está encendido Y el usuario eligió 'walletUSDC' en el checkout.
+  const walletPayinEnabled = process.env.WALLET_PAYIN_ENABLED === 'true';
+  const useWalletUSDC      = walletPayinEnabled && paymentSource === 'walletUSDC';
 
   // ── 1. Validación de entrada ──────────────────────────────────────────────
   if (!corridorId || !originAmount) {
@@ -924,6 +938,24 @@ export async function initCrossBorderPayment(req, res) {
         limit:     ecp.violation?.limit,
         remaining: ecp.violation?.remaining,
         currency:  ecp.violation?.unit === 'BOB' ? 'BOB' : undefined,
+      });
+    }
+  }
+
+  // ── Pago con saldo USDC: elegibilidad ─────────────────────────────────────
+  // Solo corredores SRL con origen BOB (mismos límites/tramos que el payin bancario).
+  // El saldo se debita en USDC equivalente; la transacción sigue denominada en BOB.
+  if (useWalletUSDC) {
+    if (req.user?.legalEntity !== 'SRL' || corridor.originCurrency !== 'BOB' || corridor.legalEntity !== 'SRL') {
+      return res.status(400).json({
+        error: 'El pago con saldo USDC solo está disponible en corredores de Bolivia (SRL).',
+        code:  'WALLET_PAYIN_NOT_ELIGIBLE',
+      });
+    }
+    if (req.user?.kycStatus !== 'approved') {
+      return res.status(403).json({
+        error: 'Debes completar la verificación de identidad (KYC) para pagar con tu saldo.',
+        code:  'KYC_REQUIRED',
       });
     }
   }
@@ -1205,9 +1237,12 @@ export async function initCrossBorderPayment(req, res) {
   // reporta a Sentry como posible manipulación.
   const USDC_TRANSIT_TOLERANCE = 0.015; // 1.5% — cubre drift quote→create con tasa de mercado+buffer
   let serverUsdcTransit = null;
+  // Tasa bloqueada BOB→USDC — reutilizada para calcular el débito en el pago con saldo USDC.
+  let bobPerUsdcLocked = null;
   if (corridor.legalEntity === 'SRL' && corridor.originCurrency === 'BOB') {
     try {
       const { bobPerUsdc } = await resolveQuoteRate(corridor);
+      bobPerUsdcLocked = bobPerUsdc;
       const netBOB = round2(amount - (payinFee + alytoCSpread + fixedFee + profitRetention));
       if (bobPerUsdc > 0 && netBOB > 0) serverUsdcTransit = round2(netBOB / bobPerUsdc);
     } catch (rateErr) {
@@ -1285,8 +1320,60 @@ export async function initCrossBorderPayment(req, res) {
   let payinProvider             = 'unknown';
   let manualPaymentInstructions = null;  // Solo para payinMethod === 'manual'
   let bankQrMeta                = null;  // Solo para payinMethod === 'bankQr'
+  let walletReserve             = null;  // Solo para paymentSource === 'walletUSDC'
 
-  if (corridor.payinMethod === 'fintoc') {
+  if (useWalletUSDC) {
+    // ── Payin con saldo USDC (Bolivia — AV Finance SRL) ───────────────────
+    // Débito del saldo custodiado del usuario en vez de cobro bancario. La tx nace
+    // en 'payin_confirmed' y se despacha el payout de inmediato (ver sección 8).
+    // Modelo hold: se RESERVA el USDC ahora; se confirma el débito al completar el
+    // payout, o se libera si falla (services/walletPaymentService.js).
+    payinProvider = 'walletUSDC';
+
+    if (!(bobPerUsdcLocked > 0)) {
+      return res.status(503).json({
+        error: 'No se pudo obtener la tasa para calcular el débito. Intenta nuevamente.',
+        code:  'RATE_UNAVAILABLE',
+      });
+    }
+
+    const usdcToDebit = bobToUsdcDebit(amount, bobPerUsdcLocked);
+    const rSession = await mongoose.startSession();
+    rSession.startTransaction();
+    try {
+      walletReserve = await reserveUSDCForPayment({
+        userId,
+        usdcAmount:    usdcToDebit,
+        transactionId: alytoTransactionId,
+        bobPerUsdc:    bobPerUsdcLocked,
+        amountBOB:     amount,
+        corridorCode:  corridor.corridorId,
+        session:       rSession,
+      });
+      await rSession.commitTransaction();
+    } catch (reserveErr) {
+      await rSession.abortTransaction();
+      const code = reserveErr.statusCode ?? 500;
+      if (code >= 500) {
+        console.error('[CrossBorder] Error reservando saldo USDC:', reserveErr.message);
+        Sentry.captureException(reserveErr, {
+          tags:  { component: 'initCrossBorderPayment', payinMethod: 'walletUSDC' },
+          extra: { corridorId, amount, usdcToDebit },
+        });
+      }
+      return res.status(code).json({
+        error: reserveErr.message,
+        ...(reserveErr.code ? { code: reserveErr.code } : {}),
+      });
+    } finally {
+      rSession.endSession();
+    }
+
+    console.log('[CrossBorder] Saldo USDC reservado:', {
+      alytoTransactionId, usdcToDebit, bobPerUsdc: bobPerUsdcLocked, wtxId: walletReserve.wtxId,
+    });
+
+  } else if (corridor.payinMethod === 'fintoc') {
     // ── Payin Fintoc (Chile — AV Finance SpA) ─────────────────────────────
     const user = await User.findById(userId).select('email firstName lastName').lean();
 
@@ -1580,15 +1667,26 @@ export async function initCrossBorderPayment(req, res) {
       // para que el barrido de expiración reconcilie/cancele en el momento correcto.
       ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),
       isPrioritySupport:   req.user?.accountType === 'business',
+      // walletUSDC: el saldo ya está reservado → la tx nace confirmada y se despacha ya.
       // bankQr y manual comienzan en 'payin_pending' (no requieren comprobante manual).
       // Manual: admin confirma desde el ledger. bankQr: banco notifica via webhook.
-      status: payinProvider === 'manual' ? 'pending_comprobante' : 'payin_pending',
+      status: useWalletUSDC
+        ? 'payin_confirmed'
+        : (payinProvider === 'manual' ? 'pending_comprobante' : 'payin_pending'),
+      // Origen de los fondos + referencia a la reserva de saldo (auditoría ASFI).
+      ...(useWalletUSDC ? { paymentSource: 'walletUSDC', walletPayinTxId: walletReserve?.wtxId } : {}),
       alytoTransactionId,
     });
   } catch (err) {
     console.error('[Alyto CrossBorder] Error persistiendo transacción en BD:', {
       corridorId, error: err.message,
     });
+    // walletUSDC: si el create falla tras reservar el saldo, liberar la reserva para no
+    // dejar fondos retenidos sin transacción asociada (idempotente, fire-and-forget).
+    if (useWalletUSDC) {
+      releaseUSDCReservation({ transactionId: alytoTransactionId, reason: 'tx_create_failed' })
+        .catch(relErr => console.error('[CrossBorder] Error liberando reserva USDC tras fallo de create:', relErr.message));
+    }
     // No continuar con transaction=undefined (causaba un 500 confuso aguas abajo
     // al acceder a transaction.originCurrency). Devolver el motivo real de inmediato.
     return res.status(500).json({
@@ -1674,6 +1772,42 @@ export async function initCrossBorderPayment(req, res) {
   ).catch(() => {});
 
   // ── 8. Respuesta al cliente ───────────────────────────────────────────────
+
+  // walletUSDC: el saldo ya está reservado y la tx nace en 'payin_confirmed'.
+  // Se despacha el payout de inmediato (sin esperar IPN de cobro). El débito real del
+  // saldo se confirma cuando el payout completa; si el despacho no logra avanzar
+  // (queda en payin_confirmed o falla), se libera la reserva ahora (rollback síncrono).
+  if (useWalletUSDC) {
+    try {
+      await dispatchPayout(transaction);
+    } catch (dispatchErr) {
+      console.error('[CrossBorder] Error en dispatchPayout (walletUSDC):', dispatchErr.message);
+      Sentry.captureException(dispatchErr, {
+        tags:  { component: 'initCrossBorderPayment', payinMethod: 'walletUSDC' },
+        extra: { alytoTransactionId },
+      });
+    }
+
+    // Estado tras el despacho: si no avanzó del handoff, liberar la reserva.
+    const after = await Transaction.findById(transaction._id).select('status').lean();
+    const finalStatus = after?.status ?? transaction.status;
+    if (finalStatus === 'payin_confirmed' || finalStatus === 'failed') {
+      await releaseUSDCReservation({ transactionId: alytoTransactionId, reason: `payout_not_dispatched:${finalStatus}` })
+        .catch(relErr => console.error('[CrossBorder] Error liberando reserva USDC:', relErr.message));
+    }
+
+    return res.status(201).json({
+      transactionId:       alytoTransactionId,
+      payinMethod:         'walletUSDC',
+      paymentSource:       'walletUSDC',
+      status:              finalStatus,
+      usdcDebited:         walletReserve?.usdcAmount ?? null,
+      destinationAmount:   after ? transaction.destinationAmount : (transaction.destinationAmount ?? quotedDestAmount ?? null),
+      destinationCurrency: transaction.destinationCurrency ?? null,
+      exchangeRate:        getDisplayRate(transaction) || quotedExchangeRate || null,
+    });
+  }
+
   if (corridor.payinMethod === 'manual') {
     return res.status(201).json({
       transactionId:       alytoTransactionId,

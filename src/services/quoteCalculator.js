@@ -194,6 +194,42 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
  * @param {string} originCurrency       moneda en la que están los fees sumables
  * @param {string} destinationCurrency  moneda de la fija del proveedor
  */
+/**
+ * Cotiza cuando el usuario ingresa el monto en USDC (saldo de wallet ya comprado con BOB).
+ *
+ * NO reimplementa la fórmula: convierte el USDC a BOB con la MISMA tasa bloqueada
+ * (`bobPerUsdc`) y delega en `calculateQuote`. Así fees, tramos ASFI, límites ECP y el
+ * `destinationAmount` salen exactamente igual que en un pago en BOB — la transacción sigue
+ * denominada en BOB internamente, y el USDC es solo el origen de los fondos.
+ *
+ * Devuelve el mismo objeto que `calculateQuote`, más:
+ *   originAmountUSDC — el USDC que el usuario tipeó (lo que se debita de su wallet)
+ *   originAmountBOB  — el BOB equivalente que alimenta la fórmula (aritmética interna)
+ *
+ * @param {object} input
+ * @param {number} input.usdcAmount  monto en USDC ingresado por el usuario
+ * @param {object} input.corridor
+ * @param {number} input.bobPerUsdc  tasa BOB→USDC bloqueada
+ * @param {number} input.providerRate
+ * @param {number} [input.providerFixedFee]
+ * @param {string} [input.accountType]
+ */
+export function quoteFromUSDC({ usdcAmount, corridor, bobPerUsdc, providerRate, providerFixedFee = null, accountType = 'personal' }) {
+  if (!usdcAmount || usdcAmount <= 0) {
+    throw new Error('quoteFromUSDC: usdcAmount must be positive');
+  }
+  if (!bobPerUsdc || bobPerUsdc <= 0) {
+    throw new Error('quoteFromUSDC: bobPerUsdc must be positive');
+  }
+  const amountBOB = round2(usdcAmount * bobPerUsdc);
+  const quote = calculateQuote({ amount: amountBOB, corridor, bobPerUsdc, providerRate, providerFixedFee, accountType });
+  return {
+    ...quote,
+    originAmountUSDC: round6(usdcAmount),
+    originAmountBOB:  amountBOB,
+  };
+}
+
 export function toPublicFees(fees, { originCurrency, destinationCurrency } = {}) {
   // `profitRetention` se suma a la comisión de servicio en lugar de exponerse
   // como línea propia: al usuario no le aporta nada distinguir entre dos
@@ -217,4 +253,4 @@ export function toPublicFees(fees, { originCurrency, destinationCurrency } = {})
   };
 }
 
-export default { calculateQuote, toPublicFees };
+export default { calculateQuote, quoteFromUSDC, toPublicFees };

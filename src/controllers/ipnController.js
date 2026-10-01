@@ -80,6 +80,7 @@ import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
 import { uploadBuffer } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
+import { settleWalletPayinForTransaction } from '../services/walletPaymentService.js';
 import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -2242,6 +2243,10 @@ export async function handleVitaIPN(req, res) {
         transaction.completedAt = new Date();
         await transaction.save();
 
+        // walletUSDC: confirmar el débito del saldo reservado (idempotente, no-op si no aplica).
+        settleWalletPayinForTransaction(transaction)
+          .catch(err => console.error('[Alyto IPN/Vita] settleWalletPayin error:', err.message));
+
         if (transaction.contactId) {
           recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
         }
@@ -2721,6 +2726,10 @@ export async function handleOwlPayIPN(req, res) {
       transaction.completedAt = new Date();
       if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';
       await transaction.save();
+
+      // walletUSDC: confirmar el débito del saldo reservado (idempotente, no-op si no aplica).
+      settleWalletPayinForTransaction(transaction)
+        .catch(err => console.error('[Alyto IPN/OwlPay] settleWalletPayin error:', err.message));
 
       if (transaction.contactId) {
         recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});

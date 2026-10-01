@@ -40,8 +40,10 @@ const walletTransactionSchema = new mongoose.Schema({
     // ejecutó. NO es un 'deposit': el usuario no trajo dinero nuevo, se le
     // devuelve el que ya había entregado. Contarlo como depósito inflaría el
     // volumen de captación, que es una de las cifras que se reporta.
+    // 'crossborder_payin' = el saldo USDC del usuario financia un pago transfronterizo
+    // (débito de wallet como origen del payin, en vez de QR/transferencia bancaria).
     enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze',
-               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit', 'refund'],
+               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit', 'refund', 'crossborder_payin'],
     required: true,
   },
   /**
