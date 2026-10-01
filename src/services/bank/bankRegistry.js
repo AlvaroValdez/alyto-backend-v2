@@ -41,6 +41,8 @@
 import * as becAccount from './becAccountService.js';
 import * as becDisbursement from './becDisbursementService.js';
 import { isMockMode as becIsMock } from './becClient.js';
+import * as redenlaceDisbursement from './redenlaceDisbursementService.js';
+import { isMockMode as redenlaceIsMock } from './redenlaceClient.js';
 
 // ── Adapter: Banco Económico (BANECO / BEC) ─────────────────────────────────────
 const banecoAdapter = {
@@ -80,9 +82,39 @@ const banecoAdapter = {
   },
 };
 
+// ── Adapter: ATC S.A. (Red Enlace) ─────────────────────────────────────────────
+//
+// Solo dispersión. El cobro por QR vive en el otro registro (`bankQrRegistry`),
+// que es donde el resto del sistema lo busca.
+//
+// `balance` y `movements` quedan en false porque el producto que los da
+// (`/cuentas-comercios/v1/*`, cuentas de comercio y saldos) todavía no está
+// integrado. Cuando lo esté, el pre-check de liquidez del despacho pasa a
+// consultar el `saldoDisponible` neto de retenciones, que es mejor número que
+// el que da BANECO.
+const redenlaceAdapter = {
+  provider: 'redenlace',
+  capabilities: { balance: false, movements: false, disburse: true },
+
+  isAvailable: () => redenlaceDisbursement.isAvailable(),
+  isMock:      () => redenlaceIsMock(),
+
+  /** Pay Out Asíncrono — lote ACH a cuenta bancaria. */
+  disbursement: {
+    transfer:           (p)   => redenlaceDisbursement.transfer(p),
+    verifyNotifyStatus: (req) => redenlaceDisbursement.verifyNotifyStatus(req),
+    normalizeNotify:    (req) => redenlaceDisbursement.normalizeNotify(req),
+    mapNotifyStatus:    (s)   => redenlaceDisbursement.mapNotifyStatus(s),
+    isAvailable:        ()    => redenlaceDisbursement.isAvailable(),
+    isEnabled:          ()    => redenlaceDisbursement.isEnabled(),
+    listBanks:          ()    => redenlaceDisbursement.listBanks(),
+  },
+};
+
 // ── Registro ────────────────────────────────────────────────────────────────────
 const adapters = {
-  baneco: banecoAdapter,
+  baneco:    banecoAdapter,
+  redenlace: redenlaceAdapter,
 };
 
 /** @returns {object|null} adapter del proveedor, o null si no existe. */

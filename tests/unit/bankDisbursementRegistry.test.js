@@ -55,17 +55,32 @@ describe('bankRegistry — proveedor de dispersión', () => {
   })
 
   test('un proveedor desconocido resuelve a null, nunca a otro banco', () => {
-    expect(getDisbursementAdapter('redenlace')).toBeNull()
     expect(getDisbursementAdapter('inexistente')).toBeNull()
+    expect(getDisbursementAdapter('bnb')).toBeNull()
 
     process.env.WALLET_DISBURSEMENT_PROVIDER = 'inexistente'
     expect(getDisbursementAdapter()).toBeNull()
+  })
+
+  test('redenlace expone el bloque de dispersión y sus dos extensiones', () => {
+    const resolved = getDisbursementAdapter('redenlace')
+    expect(resolved).not.toBeNull()
+    expect(resolved.provider).toBe('redenlace')
+
+    // `normalizeNotify` y `listBanks` no existen en BANECO: su webhook usa otra
+    // forma y su API no publica catálogo de bancos.
+    for (const fn of ['transfer', 'verifyNotifyStatus', 'mapNotifyStatus', 'isAvailable', 'isEnabled', 'normalizeNotify', 'listBanks']) {
+      expect(typeof resolved.disbursement[fn]).toBe('function')
+    }
   })
 
   test('capabilities.disburse describe al banco, no al cliente que escribimos', () => {
     // BANECO tiene cliente escrito (gated OFF + mock) pero NO ofrece el riel.
     expect(getDisbursementAdapter('baneco')).not.toBeNull()
     expect(getBankAdapter('baneco').capabilities.disburse).toBe(false)
+
+    // Red Enlace sí lo ofrece, y por eso lo declara.
+    expect(getBankAdapter('redenlace').capabilities.disburse).toBe(true)
   })
 
   test('listDisbursementProviders es un subconjunto de listProviders', () => {

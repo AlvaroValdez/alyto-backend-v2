@@ -3150,18 +3150,10 @@ export function handleBankDisbursementIPN(provider) {
   return async function bankDisbursementIPNHandler(req, res) {
     const OK = { responseCode: 0, message: '' };
     const b  = req.body ?? {};
-    const wtxId = b.batchDetailId ?? b.batchId;
 
-    logger.info(`[${tag}] Confirmación recibida`, {
-      wtxId, status: b.status, bankBatchId: b.bankBatchId,
-    });
-
-    if (!wtxId || !b.status) {
-      logger.warn(`[${tag}] Payload sin batchDetailId/status`, { body: b });
-      return res.status(200).json(OK);
-    }
-
-    // ── Gate de autenticidad (lo define el adapter del proveedor) ──
+    // El adapter se resuelve ANTES de leer el payload: los proveedores no
+    // comparten la forma del webhook y hace falta su traductor para saber
+    // siquiera de qué retiro habla.
     let disbursement;
     try {
       const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js');
@@ -3171,7 +3163,31 @@ export function handleBankDisbursementIPN(provider) {
       return res.status(200).json(OK);
     }
     if (!disbursement) {
-      logger.warn(`[${tag}] Sin adapter de dispersión — ignorando`, { wtxId });
+      logger.warn(`[${tag}] Sin adapter de dispersión — ignorando`);
+      return res.status(200).json(OK);
+    }
+
+    // `{ batchDetailId, status }` es la forma de BANECO. Un proveedor cuyo
+    // webhook manda otra cosa expone `normalizeNotify(req)` y traduce. Red
+    // Enlace manda `transaccionId` (un alias de 9 dígitos) y `estado`, así que
+    // además tiene que resolver el alias contra la base para saber el wtxId.
+    let norm = { wtxId: b.batchDetailId ?? b.batchId, status: b.status };
+    if ((!norm.wtxId || !norm.status) && typeof disbursement.normalizeNotify === 'function') {
+      try {
+        norm = (await disbursement.normalizeNotify(req)) ?? norm;
+      } catch (err) {
+        Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider } });
+        return res.status(200).json(OK);
+      }
+    }
+    const wtxId = norm.wtxId;
+
+    logger.info(`[${tag}] Confirmación recibida`, {
+      wtxId, status: norm.status, bankBatchId: b.bankBatchId ?? b.nroLote,
+    });
+
+    if (!wtxId || !norm.status) {
+      logger.warn(`[${tag}] Payload sin identificador de retiro o sin estado`, { body: b });
       return res.status(200).json(OK);
     }
 
@@ -3184,17 +3200,23 @@ export function handleBankDisbursementIPN(provider) {
       return res.status(200).json(OK);
     }
 
-    const outcome = disbursement.mapNotifyStatus(b.status);
+    const outcome = disbursement.mapNotifyStatus(norm.status);
     if (outcome === 'unknown') {
-      logger.warn(`[${tag}] Status desconocido: ${b.status}`, { wtxId });
+      // No es solo ruido. Acá caen los estados intermedios (sin acción) pero
+      // también `REVERTIDO` de Red Enlace, que significa que un retiro ya pagado
+      // volvió y necesita intervención humana. Por eso además de logear se avisa.
+      logger.warn(`[${tag}] Estado sin acción automática: ${norm.status}`, { wtxId });
+      Sentry.captureMessage(`${tag} estado sin manejar: ${norm.status}`, {
+        level: 'warning', extra: { wtxId, provider, body: b },
+      });
       return res.status(200).json(OK);
     }
 
     try {
       const result = await settleDispatchedWithdrawal(wtxId, {
         accepted:      outcome === 'accepted',
-        bankReference: b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
-        reason:        b.descriptionStatus,
+        bankReference: norm.bankReference ?? b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
+        reason:        norm.reason ?? b.descriptionStatus,
       });
       logger.info(`[${tag}] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
     } catch (err) {

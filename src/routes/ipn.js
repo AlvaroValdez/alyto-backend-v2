@@ -21,7 +21,7 @@
  */
 
 import { Router }                               from 'express';
-import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN, handleBecDisbursementIPN } from '../controllers/ipnController.js';
+import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN, handleBecDisbursementIPN, handleBankDisbursementIPN } from '../controllers/ipnController.js';
 
 const router = Router();
 
@@ -152,6 +152,21 @@ router.post('/redenlace', captureRawBody, handleBankQrIPN('redenlace'));
  * Registrar esta URL como `notifyStatus` en el onboarding del webhook con BANECO.
  */
 router.post('/bec-disbursement', captureRawBody, handleBecDisbursementIPN);
+
+/**
+ * POST /api/v1/ipn/redenlace-disbursement
+ *
+ * Confirmación de dispersión de ATC (Pay Out Asíncrono). ATC hace POST por cada
+ * transacción del lote una vez procesada.
+ *
+ * ⚠️ La autenticación va en el **query string**: ATC llama a
+ * `…/redenlace-disbursement?token=<secreto>`. Eso convierte la URL registrada en
+ * un secreto completo — nunca logearla entera ni commitearla.
+ *
+ * El payload trae `transaccionId` (nuestro alias de 9 dígitos) y `estado`;
+ * `redenlaceDisbursementService.normalizeNotify` lo traduce y resuelve el alias.
+ */
+router.post('/redenlace-disbursement', captureRawBody, handleBankDisbursementIPN('redenlace'));
 
 export default router;
 
