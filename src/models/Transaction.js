@@ -539,6 +539,17 @@ const transactionSchema = new Schema(
         dueDate: { type: Date },                // Fecha de vencimiento del QR
         paidAt:  { type: Date },                // Timestamp de confirmación del banco
         payment: { type: Schema.Types.Mixed },  // Objeto PaymentQR completo del banco
+        /**
+         * Para qué entró la plata. Desde octubre de 2026 la cuenta BANECO que
+         * recibe estos cobros es exclusiva de Alyto y hay que poder rendirla por
+         * destino de fondos: cuánto es carga de billetera y cuánto es pago
+         * transfronterizo. Ver el mismo campo en `WalletTransaction.bankQr`.
+         */
+        purpose: {
+          type:    String,
+          enum:    ['wallet_deposit', 'crossborder_payin'],
+          default: 'crossborder_payin',
+        },
       }, { _id: false }),
     },
     /**
