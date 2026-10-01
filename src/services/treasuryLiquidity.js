@@ -1,5 +1,5 @@
 /**
- * treasuryLiquidity.js — Liquidez de tesorería USDC disponible AHORA
+ * treasuryLiquidity.js — Respaldo de tesorería disponible: USDC y BOB
  *
  * Fuente única para los pre-checks de liquidez que respaldan operaciones que
  * acreditan/envían USDC contra la tesorería (conversión BOB→USDC, payouts, y el
@@ -12,6 +12,12 @@
  * sus DIRECCIONES CUSTODIALES propias, NO en la tesorería. Por eso este número mide
  * SOLO la liquidez de la tesorería (respaldo de USDC convertido / por enviar), no el
  * respaldo total de saldos de usuarios (eso incluye las cuentas custodiales).
+ *
+ * LADO BOB — `getBOBCommitted`. El efectivo de la cuenta bancaria respalda DOS cosas,
+ * no una: los saldos de las wallets (Σ WalletBOB.balance) y los pagos transfronterizos
+ * ya cobrados que todavía no se ejecutaron ni se devolvieron. Lo segundo no figuraba en
+ * ningún pasivo, así que la cobertura BOB se leía mejor de lo que era. Es el mismo
+ * descuento que `getUSDCAvailableNow` aplica con el USDC en vuelo, en la otra moneda.
  */
 
 import Transaction from '../models/Transaction.js';
@@ -19,6 +25,24 @@ import WalletUSDC from '../models/WalletUSDC.js';
 import { getStellarUSDCBalance } from './stellarService.js';
 
 const INFLIGHT_STATUSES = ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'];
+
+/**
+ * Estados en los que el BOB cobrado dejó de ser un pasivo: la operación se ejecutó
+ * ('completed', el efectivo pasó a cubrir el USDC que salió de la tesorería) o el
+ * dinero ya se trasladó al saldo del usuario ('refunded', que acredita WalletBOB y
+ * por lo tanto se cuenta del otro lado de la cobertura).
+ */
+const BOB_RELEASED_STATUSES = ['completed', 'refunded'];
+
+/**
+ * Estados que SOLO se alcanzan con el payin ya confirmado. Sirven como evidencia de
+ * cobro para las operaciones en curso, sin depender de qué método de payin se usó.
+ */
+const BOB_POST_PAYIN_STATUSES = [
+  'payin_confirmed', 'payin_completed', 'processing', 'in_transit',
+  'payout_pending', 'payout_sent', 'payout_pending_usdc_send', 'payout_in_transit',
+  'pending_funding', 'pending_fx_review',
+];
 
 /**
  * Clave pública de la reserva fría de la entidad, si está configurada.
@@ -68,6 +92,82 @@ export async function getUSDCAvailableNow(entity = 'SRL') {
   const inflight = agg[0]?.total ?? 0;
 
   return { available: Math.max(0, treasury - inflight), treasury, inflight };
+}
+
+// ── BOB comprometido (pagos transfronterizos cobrados y no liquidados) ─────────
+
+/**
+ * BOB COMPROMETIDO — efectivo que está en la cuenta bancaria pero NO respalda saldos
+ * de wallet, porque todavía se le debe a una operación o a un reembolso.
+ *
+ * Dos poblaciones, y la segunda es la que importa:
+ *
+ *   1. Operaciones EN CURSO. El payin se confirmó y el payout sigue su camino. El
+ *      efectivo está comprometido a ejecutar ese pago.
+ *   2. Operaciones FALLIDAS con el dinero cobrado. El payout se rechazó (datos del
+ *      beneficiario erróneos, corredor no habilitado, falta de liquidez) y el efectivo
+ *      se le debe al usuario. Hoy no figura como pasivo en ninguna parte.
+ *
+ * Por qué el estado no basta como criterio: 'failed' cubre tanto un rechazo del
+ * proveedor con el dinero ya en la cuenta como un QR que venció sin que nadie pagara
+ * (`BANKQR_EXPIRED`, que marca `failed` igual). El primero es un pasivo, el segundo no
+ * existe. Por eso para los estados terminales se exige evidencia de cobro —
+ * `bankQr.paidAt` para el QR bancario, `confirmationDetails.confirmedAt` para el payin
+ * manual— y para los estados en curso basta el estado, que solo se alcanza con el payin
+ * ya confirmado.
+ *
+ * Se excluyen 'completed' (el efectivo pasó a cubrir el USDC que salió de la tesorería)
+ * y 'refunded' (el monto ya se acreditó a WalletBOB, así que se cuenta del otro lado:
+ * contarlo aquí también sería contarlo dos veces).
+ *
+ * @param {string} entity 'SRL' | 'LLC'
+ * @returns {Promise<{ committed:number, operations:number, inProgress:number, refundDue:number }>}
+ *   committed  = total a descontar del respaldo bancario
+ *   refundDue  = subconjunto que ya se le debe devolver al usuario (operaciones fallidas)
+ */
+export async function getBOBCommitted(entity = 'SRL') {
+  const payinSettled = {
+    $or: [
+      { status: { $in: BOB_POST_PAYIN_STATUSES } },
+      { 'bankQr.paidAt': { $ne: null, $exists: true } },
+      { 'confirmationDetails.confirmedAt': { $ne: null, $exists: true } },
+    ],
+  };
+
+  const agg = await Transaction.aggregate([
+    {
+      $match: {
+        legalEntity:    entity,
+        originCurrency: 'BOB',
+        status:         { $nin: BOB_RELEASED_STATUSES },
+        ...payinSettled,
+      },
+    },
+    {
+      $group: {
+        _id:        null,
+        committed:  { $sum: { $ifNull: ['$originalAmount', 0] } },
+        operations: { $sum: 1 },
+        // Lo ya debido al usuario: terminó mal con el dinero adentro.
+        refundDue:  {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'failed'] }, { $ifNull: ['$originalAmount', 0] }, 0],
+          },
+        },
+      },
+    },
+  ]);
+
+  const row       = agg[0] ?? { committed: 0, operations: 0, refundDue: 0 };
+  const committed = +Number(row.committed || 0).toFixed(2);
+  const refundDue = +Number(row.refundDue || 0).toFixed(2);
+
+  return {
+    committed,
+    operations: row.operations || 0,
+    inProgress: +(committed - refundDue).toFixed(2),
+    refundDue,
+  };
 }
 
 // ── Respaldo custodial (Fase 40) ────────────────────────────────────────────────

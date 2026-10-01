@@ -26,6 +26,7 @@ import WalletBOB from '../models/WalletBOB.js';
 import WalletUSDC from '../models/WalletUSDC.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import { getBankAdapter } from '../services/bank/bankRegistry.js';
+import { getBOBCommitted } from '../services/treasuryLiquidity.js';
 
 // ── Cache de saldo (evita martillar la API del banco) ───────────────────────────
 const BALANCE_TTL_MS = Number(process.env.BANK_BALANCE_CACHE_MS ?? 30_000);
@@ -222,19 +223,81 @@ export async function getTreasuryCoverage(req, res) {
     const bobLiab  = bobAgg[0]  ?? { balance: 0, frozen: 0, reserved: 0, wallets: 0 };
     const usdcLiab = usdcAgg[0] ?? { balance: 0, frozen: 0, reserved: 0, wallets: 0 };
 
-    // Tesorería BOB: saldo en vivo del banco (best-effort, no rompe si el banco falla).
-    let bobTreasury = { available: null, source: 'unavailable', mock: null };
-    const bobBank = await BankAccount.findOne({ provider: 'baneco', currency: 'BOB', status: 'active' }).lean();
-    if (bobBank) {
-      const adapter = getBankAdapter(bobBank.provider);
-      if (adapter?.capabilities.balance) {
+    // ── Tesorería BOB ────────────────────────────────────────────────────────────
+    // Dos correcciones sobre la versión anterior, que leía UNA cuenta con el proveedor
+    // fijo en el código ('baneco') y comparaba su saldo crudo contra el pasivo:
+    //
+    //  1. MULTI-CUENTA. `BankAccount.provider` es un string libre y ya hay más de un
+    //     proveedor de cobro en BOB. Mirar una sola cuenta subdeclara el respaldo.
+    //     Si alguna cuenta no se puede leer → `partial`, y el estado NO afirma ni
+    //     cobertura ni déficit (mismo criterio que el respaldo custodial USDC).
+    //
+    //  2. DESCUENTO DE LO COMPROMETIDO. El efectivo de la cuenta respalda los saldos
+    //     de wallet Y los pagos transfronterizos ya cobrados que no se ejecutaron ni se
+    //     devolvieron. Sin descontar lo segundo, la cobertura se lee mejor de lo que es,
+    //     y se lee mejor en la dirección que favorece a la empresa. Es el mismo descuento
+    //     que ya se aplica con el USDC en vuelo.
+    let bobTreasury = { available: null, source: 'unavailable', partial: true };
+    const bobBanks = await BankAccount.find({ currency: 'BOB', status: 'active' }).lean();
+
+    const bobCommitted = await getBOBCommitted(entity).catch((e) => {
+      logger.warn(`[bankAdmin] getBOBCommitted: ${e.message}`);
+      return null;
+    });
+
+    if (bobBanks.length > 0) {
+      let gross = 0;
+      let read = 0;
+      let failures = 0;
+      let anyMock = false;
+      const accounts = [];
+
+      for (const bank of bobBanks) {
+        const adapter = getBankAdapter(bank.provider);
+        if (!adapter?.capabilities.balance) {
+          // Sin adapter o sin capacidad de consultar saldo: el respaldo de esa cuenta
+          // existe pero no se puede medir. Cuenta como falla, no como cero.
+          failures++;
+          accounts.push({ provider: bank.provider, account: bank.accountNumber, available: null, source: 'no-balance-capability' });
+          continue;
+        }
         try {
           const bal = await adapter.getBalance();
-          bobTreasury = { available: bal.available, balance: bal.balance, source: 'bank', mock: adapter.isMock(), account: bobBank.accountNumber };
+          gross += Number(bal.available) || 0;
+          read++;
+          // `isMock` es parte del contrato del adapter, pero un adapter nuevo incompleto
+          // no debe tumbar el reporte de solvencia entero.
+          const mock = typeof adapter.isMock === 'function' ? adapter.isMock() : null;
+          if (mock) anyMock = true;
+          accounts.push({ provider: bank.provider, account: bank.accountNumber, available: bal.available, balance: bal.balance, mock });
         } catch (e) {
-          bobTreasury = { available: null, source: 'bank-error', error: e.message };
+          failures++;
+          accounts.push({ provider: bank.provider, account: bank.accountNumber, available: null, source: 'bank-error', error: e.message });
         }
       }
+
+      const partial     = failures > 0 || bobCommitted === null;
+      const grossRounded = read > 0 ? Number(gross.toFixed(2)) : null;
+      // `available` es el respaldo NETO: es el único número que se puede enfrentar al
+      // pasivo de wallets sin contar dos veces el efectivo comprometido.
+      const net = (grossRounded == null || bobCommitted === null)
+        ? null
+        : Number(Math.max(0, grossRounded - bobCommitted.committed).toFixed(2));
+
+      bobTreasury = {
+        available:   net,
+        bankBalance: grossRounded,
+        committed:   bobCommitted?.committed ?? null,
+        committedBreakdown: bobCommitted
+          ? { inProgress: bobCommitted.inProgress, refundDue: bobCommitted.refundDue, operations: bobCommitted.operations }
+          : null,
+        source:      read > 0 ? 'bank' : 'bank-error',
+        mock:        read > 0 ? anyMock : null,
+        partial,
+        accounts,
+        accountsRead: read,
+        accountsFailed: failures,
+      };
     }
 
     // Tesorería USDC: el respaldo TOTAL = tesorería disponible (saldo on-chain − payouts
@@ -277,7 +340,11 @@ export async function getTreasuryCoverage(req, res) {
       return avail >= liabBalance ? 'covered' : 'undercollateralized';
     };
 
-    const bobStatus = solvency(bobTreasury.available, bobLiab.balance);
+    // Respaldo incompleto (alguna cuenta ilegible, o el comprometido no se pudo calcular)
+    // → 'unknown'. No afirmar cobertura con una lectura parcial, ni déficit tampoco.
+    const bobStatus = (bobLiab.balance > 0 && bobTreasury.partial && bobTreasury.available != null)
+      ? 'unknown'
+      : solvency(bobTreasury.available, bobLiab.balance);
     // USDC: además 'unknown' si el respaldo custodial vino incompleto (partial).
     const usdcStatus = (usdcLiab.balance > 0 && usdcTreasury.partial && usdcTreasury.available != null)
       ? 'unknown'
