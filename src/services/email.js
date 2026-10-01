@@ -15,6 +15,34 @@ import { getDisplayRate } from '../utils/rateDisplay.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? '');
 
+/**
+ * Extrae el motivo REAL de un fallo de SendGrid.
+ *
+ * `err.message` trae solo el texto del código HTTP, y para SendGrid eso es
+ * engañoso: cuando se agota la cuota de envíos de la cuenta responde **401 con
+ * `"Maximum credits exceeded"`**, así que el log decía "Unauthorized" y mandaba
+ * a revisar la clave de API, que estaba perfecta. El 2026-10-01 eso costó una
+ * investigación entera, y mientras tanto se habían perdido 36 correos ese día y
+ * 30 el 26 de septiembre sin que nadie se enterara.
+ *
+ * El detalle útil vive en `err.response.body.errors`.
+ *
+ * @param {Error & { code?: number, response?: { body?: { errors?: Array<{message?: string}> } } }} err
+ * @returns {{ error: string, status: number|undefined, reasons: string[] }}
+ */
+function detalleSendGrid(err) {
+  const reasons = (err?.response?.body?.errors ?? [])
+    .map((e) => e?.message)
+    .filter(Boolean);
+  return {
+    error:  err?.message,
+    status: err?.code,
+    // Lo que SendGrid realmente objeta. Sin esto, un 401 por cuota agotada y un
+    // 401 por clave revocada son indistinguibles en el log.
+    reasons: reasons.length ? reasons : ['<sin detalle en la respuesta>'],
+  };
+}
+
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
 /**
@@ -183,14 +211,11 @@ export async function sendEmail(to, templateId, dynamicData) {
     await sgMail.send(msg);
     console.info('[Alyto Email] Email enviado.', { to, templateId });
   } catch (err) {
-    console.error('[Alyto Email] Error enviando email:', {
-      to,
-      templateId,
-      error: err.message,
-    });
+    const detalle = detalleSendGrid(err);
+    console.error('[Alyto Email] Error enviando email:', { to, templateId, ...detalle });
     Sentry.captureException(err, {
       tags:  { component: 'emailService' },
-      extra: { to, templateId },
+      extra: { to, templateId, ...detalle },
     });
   }
 }
@@ -221,8 +246,9 @@ export async function sendRawEmail(to, subject, html) {
     });
     console.info('[Alyto Email] Email raw enviado.', { to, subject });
   } catch (err) {
-    console.error('[Alyto Email] Error enviando email raw:', { to, subject, error: err.message });
-    Sentry.captureException(err, { tags: { component: 'emailService' }, extra: { to, subject } });
+    const detalle = detalleSendGrid(err);
+    console.error('[Alyto Email] Error enviando email raw:', { to, subject, ...detalle });
+    Sentry.captureException(err, { tags: { component: 'emailService' }, extra: { to, subject, ...detalle } });
   }
 }
 
