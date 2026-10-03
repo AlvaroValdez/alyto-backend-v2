@@ -46,6 +46,17 @@ const notificationSchema = new mongoose.Schema(
         'usdc_to_bob_rejected',
         'qr_payment',
         'kyc',
+        // ⚠️ Estos cuatro se emitían desde el código SIN estar declarados aquí, así
+        // que `Notification.create` fallaba la validación y `notify()` se comía el
+        // error (lo registra y continúa, para no bloquear el flujo de negocio).
+        // Resultado: la campana de la aplicación nunca mostró nada sobre la
+        // verificación de identidad, ni siquiera la aprobación. El push de FCM sí
+        // salía, porque se envía después y por otra vía; por eso el agujero no se
+        // notaba desde fuera.
+        'kyc_approved',
+        'kyc_rejected',
+        'kyc_recoverable',
+        'kyc_retry_nudge',
         // KYB (cuenta Business) — transiciones de estado notificadas al usuario
         'kyb_approved',
         'kyb_rejected',
@@ -64,6 +75,16 @@ const notificationSchema = new mongoose.Schema(
         'admin_kyb_submitted',
         'admin_payment_proof',
         'admin_p2p_transfer',
+        // Mismo agujero que arriba, auditado el 2026-10-03 comparando los tipos que
+        // emite el código contra los declarados aquí. Los dos últimos son avisos
+        // sobre dinero —un desembolso atascado y un fondeo de tesorería que no
+        // cuadra con ningún aviso de ingreso— y no quedaban en la bandeja de
+        // ningún administrador.
+        'admin_account_deletion',
+        'admin_disbursement_stuck',
+        'treasury_funding_unmatched',
+        // Prueba de push desde el panel de administración.
+        'test',
       ],
     },
 
