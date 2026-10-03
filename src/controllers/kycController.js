@@ -1,8 +1,10 @@
 /**
  * kycController.js — Endpoints de estado KYC del usuario
  *
- * GET /api/v1/kyc/session  → Crea VerificationSession de Stripe Identity
- * GET /api/v1/kyc/status   → Devuelve el kycStatus actual del usuario autenticado
+ * GET  /api/v1/kyc/session         → Crea VerificationSession de Stripe Identity
+ * GET  /api/v1/kyc/status          → Devuelve el kycStatus actual del usuario autenticado
+ * POST /api/v1/kyc/session/restart → Cancela la sesión en curso y habilita el reintento
+ * POST /api/v1/kyc/telemetry       → Hitos del intento reportados por el cliente
  */
 
 import Stripe          from 'stripe';
@@ -13,6 +15,8 @@ import { readDocumentNumber } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { approveKycFromSession } from '../webhooks/stripeWebhook.js';
 import { areSimulatorsAllowed } from '../utils/environment.js';
+import { resolveKycFromStripe } from '../services/kycSessionResolver.js';
+import { openKycAttempt, markKycAttempt, closeKycAttempt, normalizePlatform } from '../services/kycTelemetry.js';
 
 let _stripe = null;
 function getStripe() {
@@ -72,6 +76,15 @@ export async function createKycSession(req, res) {
 
     console.info(`[KYC] Session creada — userId: ${userId} | sessionId: ${session.id}`);
 
+    // Bitácora del intento. Sin esto, de un KYC que falla en la página alojada de
+    // Stripe no queda rastro de desde dónde se lanzó ni de si llegó a cargar.
+    await openKycAttempt({
+      user,
+      sessionId: session.id,
+      platform:  normalizePlatform(req.query?.platform),
+      req,
+    });
+
     return res.json({
       clientSecret: session.client_secret,
       sessionId:    session.id,
@@ -96,21 +109,6 @@ export async function createKycSession(req, res) {
 }
 
 // ─── getKycStatus ─────────────────────────────────────────────────────────────
-
-// Antigüedad a partir de la cual una sesión 'requires_input' SIN error se
-// considera abandonada (el usuario cerró sin terminar) y se degrada a 'pending'.
-// Debe superar holgadamente lo que tarda una verificación normal (~2-5 min).
-const KYC_SESSION_STALE_MS = Number(process.env.KYC_SESSION_STALE_MIN || 15) * 60 * 1000;
-
-// Errores de Stripe Identity que implican rechazo definitivo (mismo set que el webhook)
-const HARD_REJECTION_CODES = new Set([
-  'document_expired',
-  'document_type_not_supported',
-  'document_unverified_other',
-  'selfie_face_mismatch',
-  'selfie_manipulated',
-  'selfie_unverified_other',
-]);
 
 /**
  * GET /api/v1/kyc/status
@@ -145,76 +143,18 @@ export async function getKycStatus(req, res) {
 
     // Fallback activo: si está en in_review, consultar Stripe directamente.
     // Esto resuelve el estado aunque el webhook haya fallado o aún no haya llegado.
+    //
+    // ⚠️ El criterio vive en [kycSessionResolver], no acá: el barrido periódico
+    // tiene que aplicar exactamente el mismo, y una sesión 'requires_input' sin
+    // error es ambigua (puede ser una captura en curso o una página que nunca
+    // cargó), así que una divergencia entre ambos cambia el estado del usuario.
     if (user.kycStatus === 'in_review' && user.stripeVerificationSessionId) {
       try {
-        const session = await getStripe().identity.verificationSessions.retrieve(
-          user.stripeVerificationSessionId,
-        );
-
-        console.info(
-          `[KYC Status] Stripe session ${session.id} → status: ${session.status} | last_error: ${JSON.stringify(session.last_error ?? null)}`,
-        );
-
-        if (session.status === 'verified') {
-          // Auto-aprobar: el webhook no llegó pero Stripe ya completó la
-          // verificación. Reusa el hook del webhook para aplicar TODOS los
-          // efectos (verified_outputs, screening AML, keypair custodial,
-          // notificación) — antes este path solo actualizaba el estado.
-          await approveKycFromSession(session);
-          console.info(`[KYC Status] ✅ Auto-aprobado por polling — userId: ${user._id}`);
-          return res.json({ kycStatus: 'approved', kycApprovedAt: new Date() });
-        }
-
-        if (session.status === 'requires_input') {
-          const errorCode = session.last_error?.code;
-          if (errorCode && HARD_REJECTION_CODES.has(errorCode)) {
-            // Auto-rechazar: error definitivo de Stripe
-            await User.findByIdAndUpdate(user._id, {
-              kycStatus:     'rejected',
-              kycRejectedAt: new Date(),
-              kycErrorCode:  errorCode,
-            });
-            invalidateUserCache(user._id); // forzar refresco del cache del middleware
-            console.info(`[KYC Status] ❌ Auto-rechazado por polling — userId: ${user._id} | code: ${errorCode}`);
-            return res.json({ kycStatus: 'rejected', kycApprovedAt: null });
-          }
-
-          // ⚠️ Una sesión RECIÉN creada también está en 'requires_input' sin error
-          // mientras el usuario captura documento/selfie (el flujo nativo/móvil
-          // hace polling DURANTE la verificación). Degradar a 'pending' en ese
-          // momento desactiva este fallback (los polls con 'pending' ya no
-          // consultan Stripe) y permite crear una segunda sesión que pisa la
-          // primera. Solo tratamos como recuperable si hay un error real
-          // (abandoned, consent_declined, device...) o la sesión quedó vieja.
-          const sessionAgeMs = session.created ? Date.now() - session.created * 1000 : 0;
-          const isStale      = sessionAgeMs > KYC_SESSION_STALE_MS;
-
-          if (errorCode || isStale) {
-            // Recuperable: el usuario empezó pero no terminó la biometría. Lo
-            // devolvemos a 'pending' para que pueda re-lanzar /kyc/session y
-            // reintentar con una sesión nueva (sin esto: polling infinito).
-            if (user.kycStatus !== 'pending') {
-              await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
-              invalidateUserCache(user._id);
-              console.info(`[KYC Status] ↩️ Sesión recuperable (${errorCode ?? `sin error, ${Math.round(sessionAgeMs / 60000)} min`}) — reset a 'pending' para reintento — userId: ${user._id}`);
-            }
-            return res.json({ kycStatus: 'pending', kycApprovedAt: null });
-          }
-
-          // Verificación en curso — mantener in_review y seguir consultando Stripe.
-          return res.json({ kycStatus: 'in_review', kycApprovedAt: null });
-        }
-
-        if (session.status === 'canceled') {
-          // Sesión cancelada (API/redacción) — sin esto el usuario queda en
-          // in_review con polling infinito y sin botón de reintento.
-          await User.findByIdAndUpdate(user._id, { kycStatus: 'pending' });
-          invalidateUserCache(user._id);
-          console.info(`[KYC Status] ↩️ Sesión cancelada — reset a 'pending' para reintento — userId: ${user._id}`);
-          return res.json({ kycStatus: 'pending', kycApprovedAt: null });
-        }
-
-        // session.status === 'processing' → seguir esperando
+        const resolved = await resolveKycFromStripe(user);
+        return res.json({
+          kycStatus:     resolved.kycStatus,
+          kycApprovedAt: resolved.kycApprovedAt ?? null,
+        });
       } catch (stripeErr) {
         // Si Stripe falla, devolvemos el estado de DB sin bloquear al usuario
         console.warn(`[KYC Status] No se pudo consultar Stripe: ${stripeErr.message}`);
@@ -229,6 +169,133 @@ export async function getKycStatus(req, res) {
   } catch (err) {
     console.error('[KYC] Error obteniendo estado:', err.message);
     return res.status(500).json({ error: 'Error al obtener el estado de verificación.' });
+  }
+}
+
+// ─── restartKycSession ───────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/kyc/session/restart
+ * Requiere JWT + email verificado + info de cumplimiento completa.
+ *
+ * Cancela la sesión de Stripe en curso y devuelve al usuario a 'pending' para
+ * que pueda lanzar una nueva.
+ *
+ * Por qué existe: `createKycSession` marca 'in_review' en cuanto crea la sesión,
+ * antes de que el usuario haya hecho nada. Si la página alojada de Stripe falla
+ * al cargar —pasó el 2026-10-02 con un usuario en datos móviles— quedaba viendo
+ * "verificando tu identidad" sin ninguna salida hasta que la sesión envejeciera
+ * los `KYC_SESSION_STALE_MIN` minutos. El reintento no se puede deducir del
+ * estado de Stripe (una sesión recién creada y una que nunca cargó se ven
+ * idénticas), así que tiene que ser una acción explícita del usuario.
+ *
+ * @returns {{ kycStatus: string, canceledSessionId: string|null }}
+ */
+export async function restartKycSession(req, res) {
+  try {
+    const user   = req.user;
+    const userId = user._id.toString();
+
+    if (user.kycStatus === 'approved') {
+      return res.status(409).json({
+        error:     'Tu identidad ya está verificada.',
+        kycStatus: 'approved',
+      });
+    }
+
+    // ⚠️ `protect` NO incluye stripeVerificationSessionId en su select, así que
+    // leerlo de req.user devolvería undefined: nos saltaríamos la cancelación en
+    // Stripe y dejaríamos la sesión viva compitiendo con la siguiente.
+    const actual = await User.findById(userId).select('stripeVerificationSessionId').lean();
+    const sessionId = actual?.stripeVerificationSessionId ?? null;
+    let canceledSessionId = null;
+
+    if (sessionId) {
+      try {
+        const session = await getStripe().identity.verificationSessions.retrieve(sessionId);
+
+        // Carrera real: el usuario terminó en Stripe y pulsó reintentar antes de
+        // que el webhook llegara. Cancelar acá tiraría una verificación buena.
+        if (session.status === 'verified') {
+          await approveKycFromSession(session);
+          console.info(`[KYC Restart] Sesión ya verificada — se aprueba en vez de reiniciar — userId: ${userId}`);
+          return res.json({ kycStatus: 'approved', canceledSessionId: null });
+        }
+
+        // 'processing': el usuario YA envió documento y selfie, y Stripe está
+        // resolviendo. Reiniciar acá le haría repetir la captura sin motivo.
+        if (session.status === 'processing') {
+          return res.status(409).json({
+            error:     'Tu verificación se está procesando. Espera unos segundos antes de reintentar.',
+            kycStatus: 'in_review',
+          });
+        }
+
+        // Stripe solo admite cancelar en 'requires_input'. Cancelar deja la
+        // sesión vieja inerte para el webhook y evita que dos sesiones del mismo
+        // usuario compitan por resolver su estado.
+        if (session.status === 'requires_input') {
+          await getStripe().identity.verificationSessions.cancel(sessionId);
+          canceledSessionId = sessionId;
+        }
+      } catch (stripeErr) {
+        // Que Stripe no responda no puede dejar al usuario atrapado: seguimos
+        // adelante con el reinicio local. La sesión huérfana la cierra el barrido.
+        console.warn(`[KYC Restart] No se pudo cancelar en Stripe: ${stripeErr.message}`);
+      }
+
+      await markKycAttempt(sessionId, { restartedAt: new Date() });
+      await closeKycAttempt(sessionId, { outcome: 'restarted', stripeStatus: 'canceled' });
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      kycStatus:                   'pending',
+      stripeVerificationSessionId: null,
+    });
+    invalidateUserCache(userId);
+
+    console.info(`[KYC Restart] Reintento habilitado — userId: ${userId} | sesión cancelada: ${canceledSessionId ?? 'ninguna'}`);
+    return res.json({ kycStatus: 'pending', canceledSessionId });
+
+  } catch (err) {
+    console.error('[KYC] Error reiniciando la verificación:', err.message);
+    return res.status(500).json({ error: 'No se pudo reiniciar la verificación. Intenta nuevamente.' });
+  }
+}
+
+// ─── recordKycClientEvent ────────────────────────────────────────────────────
+
+/**
+ * POST /api/v1/kyc/telemetry
+ * Body: { event: 'returned' }
+ *
+ * Único hito que el servidor no puede observar por su cuenta: que el navegador
+ * volvió del alojado de Stripe. Un intento sin `returnedAt` y con `restartedAt`
+ * es la firma de una página de Stripe que nunca cargó; con `returnedAt`, de un
+ * usuario que la vio y la abandonó. Son dos problemas distintos.
+ */
+const CLIENT_EVENTS = {
+  returned: () => ({ returnedAt: new Date() }),
+};
+
+export async function recordKycClientEvent(req, res) {
+  try {
+    const build = CLIENT_EVENTS[req.body?.event];
+    if (!build) {
+      return res.status(400).json({ error: 'Evento desconocido.' });
+    }
+
+    // Mismo motivo que en restartKycSession: el campo no viene en req.user.
+    const actual = await User.findById(req.user._id).select('stripeVerificationSessionId').lean();
+    if (actual?.stripeVerificationSessionId) {
+      await markKycAttempt(actual.stripeVerificationSessionId, build());
+    }
+
+    return res.status(204).end();
+  } catch (err) {
+    // Telemetría: nunca puede hacer fallar al cliente.
+    console.warn('[KYC Telemetría] Evento de cliente descartado:', err.message);
+    return res.status(204).end();
   }
 }
 

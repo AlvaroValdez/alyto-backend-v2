@@ -24,6 +24,12 @@ const JOBS = {
     import('./cleanupOrphanTransactions.js').then((m) => m.cleanupOrphanTransactions),
   'kyc-monitor': () =>
     import('./kycIncompleteMonitor.js').then((m) => m.kycIncompleteMonitor),
+  // Barrido de verificaciones colgadas en 'in_review'. NO necesita regla propia
+  // de EventBridge: 'kyc-monitor' ya lo invoca cada 6 h. Se registra solo para
+  // poder dispararlo a mano cuando hay un usuario reportando que está trabado.
+  // Es idempotente, así que una regla dedicada tampoco haría daño.
+  'kyc-stale-sessions': () =>
+    import('./kycStaleSessionSweeper.js').then((m) => m.kycStaleSessionSweeper),
   'reconcile-harbor': () =>
     import('./reconcileHarborTransfers.js').then((m) => m.reconcileHarborTransfers),
   'reconcile-vita': () =>

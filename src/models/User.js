@@ -288,6 +288,24 @@ const userSchema = new Schema(
       type:    Date,
       default: null,
     },
+    /**
+     * Momento y motivo del rechazo de la verificación de identidad.
+     *
+     * ⚠️ Ambos campos se venían escribiendo desde `kycController` y `stripeWebhook`
+     * SIN estar declarados aquí. Con `strict` en su valor por defecto, Mongoose
+     * descarta en silencio las claves desconocidas de un `$set`: el motivo del
+     * rechazo nunca llegó a la base. Quedaba un usuario en 'rejected' sin ninguna
+     * constancia de por qué, que es justo el dato que pide el expediente.
+     */
+    kycRejectedAt: {
+      type:    Date,
+      default: null,
+    },
+    /** Código de error de Stripe Identity que provocó el rechazo (ej. 'document_expired'). */
+    kycErrorCode: {
+      type:    String,
+      default: null,
+    },
     /** Proveedor que realizó la verificación KYC (ej. 'stripe_identity', 'manual') */
     kycProvider: {
       type:    String,
