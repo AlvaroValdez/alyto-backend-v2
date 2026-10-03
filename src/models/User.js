@@ -306,6 +306,25 @@ const userSchema = new Schema(
       type:    String,
       default: null,
     },
+    /**
+     * Control de los avisos para retomar la verificación ([kycRetryNudge]).
+     * Vive en el usuario y no en el intento porque también alcanza a quien nunca
+     * llegó a crear una sesión, que por definición no tiene intento registrado.
+     */
+    kycNudge: {
+      /** Último aviso enviado. */
+      sentAt: { type: Date, default: null },
+      /** Cuántos avisos lleva recibidos en total (tope duro en el job). */
+      count:  { type: Number, default: 0 },
+      /**
+       * Sesión de Stripe vigente cuando se envió el último aviso. Si después hay
+       * una sesión distinta, es que el usuario volvió a intentar y volvió a
+       * quedarse a medias: eso sí justifica un aviso nuevo. Sin este campo, el
+       * único criterio sería el tiempo, y acabaríamos insistiéndole a alguien que
+       * no hizo nada nuevo.
+       */
+      sessionId: { type: String, default: null },
+    },
     /** Proveedor que realizó la verificación KYC (ej. 'stripe_identity', 'manual') */
     kycProvider: {
       type:    String,

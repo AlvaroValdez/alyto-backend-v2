@@ -20,6 +20,7 @@
 
 import User    from '../models/User.js';
 import { kycStaleSessionSweeper } from './kycStaleSessionSweeper.js';
+import { kycRetryNudge }          from './kycRetryNudge.js';
 import * as Sentry from '@sentry/node';
 
 const HOURS_THRESHOLD = 24;
@@ -39,6 +40,12 @@ export async function kycIncompleteMonitor() {
     // una provisionada; un job sin regla queda huérfano con
     // JOBS_EXTERNAL_SCHEDULER=true (ver jobRegistry.js).
     await kycStaleSessionSweeper();
+
+    // Y recién después avisar al usuario. El orden importa: el barrido es lo que
+    // devuelve a 'pending' a quien quedó colgado en 'in_review', así que si el
+    // aviso corriera primero, esos usuarios no entrarían en la selección y se
+    // perderían una vuelta entera de 6 h.
+    await kycRetryNudge();
 
     const pendingUsers = await User.find({
       kycStatus: 'pending',

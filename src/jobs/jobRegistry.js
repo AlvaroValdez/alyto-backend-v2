@@ -30,6 +30,11 @@ const JOBS = {
   // Es idempotente, así que una regla dedicada tampoco haría daño.
   'kyc-stale-sessions': () =>
     import('./kycStaleSessionSweeper.js').then((m) => m.kycStaleSessionSweeper),
+  // Aviso al usuario para que retome la verificación. Tampoco necesita regla
+  // propia: 'kyc-monitor' lo invoca después del barrido. Gated por
+  // KYC_RETRY_NUDGE_ENABLED; sin el flag no envía nada aunque se dispare.
+  'kyc-retry-nudge': () =>
+    import('./kycRetryNudge.js').then((m) => m.kycRetryNudge),
   'reconcile-harbor': () =>
     import('./reconcileHarborTransfers.js').then((m) => m.reconcileHarborTransfers),
   'reconcile-vita': () =>
