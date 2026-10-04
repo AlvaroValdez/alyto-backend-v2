@@ -1030,7 +1030,15 @@ export async function hasUSDCTrustline(address) {
 
 // ─── 10. sendUSDCToHarbor — SRL sends USDC to Harbor instruction_address ─────
 
-async function _findTransactionByMemo(sourcePublicKey, memo, lookbackCount = 200) {
+/**
+ * Busca una transacción exitosa previa con el mismo memo en la cuenta origen.
+ *
+ * Es el guard de idempotencia del envío USDC: si el submit anterior llegó al ledger pero
+ * la respuesta se perdió (timeout de Horizon), reenviar duplicaría un pago real. Se
+ * exporta porque el envío desde cuentas custodiales (`custodyService.sendCustodialUSDC`)
+ * necesita exactamente el mismo guard, anclado en la cuenta del usuario.
+ */
+export async function findTransactionByMemo(sourcePublicKey, memo, lookbackCount = 200) {
   try {
     const page = await horizonServer
       .transactions()
@@ -1084,7 +1092,7 @@ export async function sendUSDCToHarbor({ destinationAddress, amount, memo, trans
 
   console.log('[Stellar] sendUSDCToHarbor:', { destinationAddress, amount, memo, transactionId });
 
-  const existing = await _findTransactionByMemo(srlPublic, memo);
+  const existing = await findTransactionByMemo(srlPublic, memo);
   if (existing) {
     console.warn('[Stellar] Memo already used, returning existing tx:', existing.hash);
     return existing;

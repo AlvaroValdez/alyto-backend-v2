@@ -33,7 +33,7 @@ import {
 
 import crypto from 'node:crypto';
 
-import { Keypair, TransactionBuilder, Operation, Networks } from '@stellar/stellar-sdk';
+import { Keypair, TransactionBuilder, Operation, Networks, Memo, StrKey } from '@stellar/stellar-sdk';
 
 import {
   horizonServer,
@@ -42,6 +42,9 @@ import {
   PRIORITY_FEE_STROOPS,
   TX_TIMEOUT_SECONDS,
 } from '../config/stellar.js';
+// Guard de idempotencia por memo — misma implementación que usa el envío desde tesorería,
+// reutilizada en vez de duplicada para que ambos caminos se comporten igual.
+import { findTransactionByMemo } from './stellarService.js';
 
 import { requireEnvSecret } from '../utils/secrets.js';
 import { logger }           from '../utils/logger.js';
@@ -271,22 +274,61 @@ export async function hasCustodialKeypair(userId) {
 
 /**
  * Envía USDC desde una wallet custodial de usuario a una dirección Stellar destino.
- * Patrón Fee Bump: la channelAccount (STELLAR_MASTER_SECRET) paga los fees XLM.
+ * Patrón Fee Bump: la channelAccount (STELLAR_MASTER_SECRET) paga los fees XLM, así que
+ * la cuenta del usuario no necesita XLM propio para enviar.
  *
- * Uso principal: harvest de revenue P2P hacia la tesorería SRL.
+ * Usos:
+ *   - harvest de revenue P2P hacia la tesorería SRL (sin memo).
+ *   - payout de un pago financiado con saldo del usuario: envío directo al
+ *     `instruction_address` de Harbor, que EXIGE memo para atribuir el depósito al
+ *     transfer correcto. Sin memo, Harbor no puede imputar los fondos.
+ *
+ * Idempotencia: cuando se pasa `memo`, se verifica primero si la cuenta del usuario ya
+ * envió una transacción exitosa con ese mismo memo. Es lo que evita el doble pago real
+ * cuando el submit anterior llegó al ledger pero la respuesta se perdió (timeout de
+ * Horizon). Mismo guard que usa `sendUSDCToHarbor` sobre la tesorería.
  *
  * @param {string}        userId             — MongoDB ObjectId del usuario (para KMS)
  * @param {string}        sourcePublicKey    — Public key Stellar del usuario
  * @param {string}        destinationPublicKey — Destino (ej. STELLAR_SRL_PUBLIC_KEY)
  * @param {string|number} amount             — Monto USDC (se normaliza a 7 decimales)
+ * @param {object}        [opts]
+ * @param {string}        [opts.memo]        — Memo text (≤28 bytes). Obligatorio para Harbor.
  * @returns {Promise<string>} Hash de la transacción Stellar enviada
  */
-export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPublicKey, amount) {
+export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPublicKey, amount, { memo } = {}) {
+  // Guard de dirección: enviar a una public key malformada es pérdida de USDC real.
+  // Mismo criterio que sendUSDCToHarbor.
+  if (!destinationPublicKey || !StrKey.isValidEd25519PublicKey(destinationPublicKey)) {
+    const err = new Error(`[custody] destinationPublicKey inválida: ${destinationPublicKey}`);
+    err.isPermanent = true;
+    throw err;
+  }
+
+  // Memo text en Stellar tope 28 bytes. Truncar silenciosamente rompería la atribución
+  // en Harbor, así que falla explícito y permanente (reintentar no lo arregla).
+  if (memo != null && Buffer.byteLength(String(memo), 'utf8') > 28) {
+    const err = new Error(`[custody] memo excede 28 bytes: "${memo}"`);
+    err.isPermanent = true;
+    throw err;
+  }
+
+  // Idempotencia por memo — antes de firmar nada.
+  if (memo) {
+    const existing = await findTransactionByMemo(sourcePublicKey, String(memo));
+    if (existing) {
+      logger.warn('[custody] sendCustodialUSDC — memo ya enviado, no se reenvía', {
+        userId: String(userId), source: sourcePublicKey, memo, txHash: existing.hash,
+      });
+      return existing.hash;
+    }
+  }
+
   const userKeypair    = await getUserKeypair(userId);
   const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
   const sourceAccount  = await horizonServer.loadAccount(sourcePublicKey);
 
-  const innerTx = new TransactionBuilder(sourceAccount, {
+  const builder = new TransactionBuilder(sourceAccount, {
     fee:               PRIORITY_FEE_STROOPS,
     networkPassphrase: NETWORK_PASSPHRASE,
   })
@@ -294,9 +336,11 @@ export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPubl
       destination: destinationPublicKey,
       asset:       ASSETS.USDC,
       amount:      parseFloat(amount).toFixed(7),
-    }))
-    .setTimeout(TX_TIMEOUT_SECONDS)
-    .build();
+    }));
+
+  if (memo) builder.addMemo(Memo.text(String(memo)));
+
+  const innerTx = builder.setTimeout(TX_TIMEOUT_SECONDS).build();
 
   innerTx.sign(userKeypair);
 
@@ -314,6 +358,7 @@ export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPubl
     source:      sourcePublicKey,
     destination: destinationPublicKey,
     amount:      parseFloat(amount).toFixed(7),
+    ...(memo ? { memo } : {}),
     txHash:      result.hash,
   });
   return result.hash;
