@@ -49,6 +49,17 @@ export async function openKycAttempt({ user, sessionId, platform, req }) {
       ip:          clientIp(req),
       outcome:     'open',
     });
+
+    // Abrir un intento nuevo confirma que el anterior no llegó a término: el
+    // usuario tuvo que volver a la aplicación y pulsar otra vez. Es el momento
+    // exacto en que se puede detectar a alguien que está bloqueado, sin esperas
+    // ni suposiciones. Fire-and-forget: avisar a administración nunca puede
+    // impedir que el usuario empiece su verificación.
+    import('./kycBlockedAlert.js')
+      .then(({ revisarBloqueoKyc }) => revisarBloqueoKyc(user, sessionId))
+      .catch(err => logger.warn('[KYC Telemetría] Revisión de bloqueo omitida', {
+        sessionId, error: err.message,
+      }));
   } catch (err) {
     logger.warn('[KYC Telemetría] No se pudo abrir el intento', { sessionId, error: err.message });
   }

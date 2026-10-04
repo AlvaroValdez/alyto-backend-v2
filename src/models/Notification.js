@@ -83,6 +83,9 @@ const notificationSchema = new mongoose.Schema(
         'admin_account_deletion',
         'admin_disbursement_stuck',
         'treasury_funding_unmatched',
+        // Un usuario que no consigue pasar la verificación de identidad por un
+        // fallo que no es suyo. Ver [kycBlockedAlert].
+        'admin_kyc_bloqueado',
         // Prueba de push desde el panel de administración.
         'test',
       ],
