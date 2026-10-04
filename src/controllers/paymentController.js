@@ -81,6 +81,7 @@ import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.j
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
 import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
+import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
@@ -856,13 +857,17 @@ export async function initCrossBorderPayment(req, res) {
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
   // Mínimo EFECTIVO (incluye el guard de piso del proveedor) — misma fuente que
   // el quote, así no se puede crear una transacción que el payout va a rechazar.
-  const { min: minAmount } = await resolveEffectiveMinimum(corridor, req.user?.accountType);
+  // Valida contra el piso EXACTO (más permisivo) pero anuncia el de display, que
+  // es el que el usuario leyó en pantalla. Al revés le daríamos un número que la
+  // propia interfaz rechaza. Ver la nota en resolveEffectiveMinimum.
+  const { minExact: minAmount, minDisplay, currency: minCurrency } =
+    await resolveEffectiveMinimum(corridor, req.user?.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
-      error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
+      error:    `El monto mínimo para este corredor es ${formatOriginAmount(minDisplay, minCurrency)}.`,
       code:     'BELOW_MINIMUM',
-      min:      minAmount,
-      currency: corridor.originCurrency,
+      min:      minDisplay,
+      currency: minCurrency,
     });
   }
   if (corridor.maxAmountOrigin && amount > corridor.maxAmountOrigin) {
@@ -2437,7 +2442,10 @@ export async function getQuote(req, res) {
   // si hiciera falta para que el NETO (post-fees) alcance el piso del proveedor.
   // Sin esto el usuario cotizaba y pagaba, y el payout moría después en Vita/Harbor
   // (ver corridorMinimums.js).
-  const { min: minAmountOrigin, raisedBy, floorUSD } =
+  // Igual que en la creación: se valida con el exacto y se anuncia el de display,
+  // que es el número que el usuario tiene delante.
+  const { minExact: minAmountOrigin, minDisplay: minAnunciado,
+          currency: monedaMin, raisedBy, floorUSD } =
     await resolveEffectiveMinimum(corridor, req.user?.accountType, vitaResponse);
   if (amount < minAmountOrigin) {
     if (raisedBy) {
@@ -2446,9 +2454,9 @@ export async function getQuote(req, res) {
       });
     }
     return res.status(400).json({
-      error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
-      min:    minAmountOrigin,
-      currency: corridor.originCurrency,
+      error:  `El monto mínimo para este corredor es ${formatOriginAmount(minAnunciado, monedaMin)}.`,
+      min:    minAnunciado,
+      currency: monedaMin,
     });
   }
 

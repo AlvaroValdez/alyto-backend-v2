@@ -10,6 +10,7 @@
  *   - stripeVerificationSessionId ausente o null (nunca abrió el widget)
  *
  * Acción:
+ *   - Resuelve antes las verificaciones colgadas ([kycStaleSessionSweeper])
  *   - Envía email de alerta al admin con listado de usuarios
  *
  * Cómo se programa:
@@ -18,6 +19,8 @@
  */
 
 import User    from '../models/User.js';
+import { kycStaleSessionSweeper } from './kycStaleSessionSweeper.js';
+import { kycRetryNudge }          from './kycRetryNudge.js';
 import * as Sentry from '@sentry/node';
 
 const HOURS_THRESHOLD = 24;
@@ -30,6 +33,20 @@ export async function kycIncompleteMonitor() {
   const cutoffDate = new Date(Date.now() - HOURS_THRESHOLD * 60 * 60 * 1000);
 
   try {
+    // Primero resolver lo resoluble. Un usuario colgado en 'in_review' no aparece
+    // en el listado de abajo (que solo mira 'pending'), así que sin este paso
+    // quedaba fuera del aviso Y fuera del flujo: invisible por partida doble.
+    // Va acá, y no con su propia regla de EventBridge, porque este job ya tiene
+    // una provisionada; un job sin regla queda huérfano con
+    // JOBS_EXTERNAL_SCHEDULER=true (ver jobRegistry.js).
+    await kycStaleSessionSweeper();
+
+    // Y recién después avisar al usuario. El orden importa: el barrido es lo que
+    // devuelve a 'pending' a quien quedó colgado en 'in_review', así que si el
+    // aviso corriera primero, esos usuarios no entrarían en la selección y se
+    // perderían una vuelta entera de 6 h.
+    await kycRetryNudge();
+
     const pendingUsers = await User.find({
       kycStatus: 'pending',
       createdAt: { $lt: cutoffDate },

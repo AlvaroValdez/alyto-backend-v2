@@ -345,6 +345,76 @@ export async function sendWelcomeEmail(user) {
 }
 
 /**
+ * Invita a retomar la verificación de identidad a quien se quedó en el camino.
+ *
+ * Dos variantes, porque son dos situaciones distintas y decirle "vuelve a
+ * intentarlo" a quien nunca empezó no significa nada:
+ *
+ *   'interrumpida' → lanzó la biometría y no llegó a término (la página del
+ *                    proveedor falló, cerró la pestaña, se le cortó la conexión).
+ *   'sin_iniciar'  → se registró y nunca abrió la verificación.
+ *
+ * El tono evita culpar al usuario: en el caso que originó esto (2026-10-02) el
+ * fallo fue de la página del proveedor, no suyo.
+ *
+ * @param {object} user     — email, firstName
+ * @param {'interrumpida'|'sin_iniciar'} variante
+ */
+export async function sendKycRetryEmail(user, variante) {
+  const kycUrl       = `${process.env.FRONTEND_URL ?? 'https://alyto.app'}/kyc`;
+  const supportEmail = process.env.SUPPORT_EMAIL ?? 'soporte@alyto.app';
+  const nombre       = user.firstName && user.firstName !== 'Usuario' ? user.firstName : 'Hola';
+
+  const copy = variante === 'interrumpida'
+    ? {
+        subject: 'Tu verificación de identidad quedó a medias',
+        titulo:  'Tu verificación no llegó a completarse',
+        cuerpo: [
+          'Empezaste a verificar tu identidad en Alyto pero el proceso no llegó a terminar. A veces la pantalla de verificación falla al cargar, sobre todo con una conexión móvil inestable.',
+          'No perdiste nada y no tienes que volver a llenar tus datos: puedes retomarla cuando quieras y toma menos de dos minutos.',
+        ],
+        cta: 'Reintentar verificación',
+      }
+    : {
+        subject: 'Te falta verificar tu identidad para empezar a usar Alyto',
+        titulo:  'Te falta un paso para activar tu cuenta',
+        cuerpo: [
+          'Tu cuenta en Alyto está creada, pero todavía no verificaste tu identidad. Es el paso que nos exige la normativa antes de que puedas enviar dinero.',
+          'Solo necesitas tu documento de identidad y la cámara del teléfono. Toma menos de dos minutos.',
+        ],
+        cta: 'Verificar identidad',
+      };
+
+  const parrafos = copy.cuerpo.map(p =>
+    `<p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:#3B4A63;">${p}</p>`,
+  ).join('');
+
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;background:#F8FAFC;">
+      <div style="background:#0B1526;padding:32px 24px;text-align:center;">
+        <h1 style="color:#FFFFFF;margin:0;font-size:24px;letter-spacing:-0.5px;">Alyto</h1>
+      </div>
+      <div style="background:#FFFFFF;padding:32px 24px;color:#0F1B2E;">
+        <h2 style="margin:0 0 16px;font-size:22px;">${nombre}, ${copy.titulo.toLowerCase()}.</h2>
+        ${parrafos}
+        <a href="${kycUrl}"
+           style="display:inline-block;background:#1D9E75;color:#FFFFFF;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:600;font-size:15px;">
+          ${copy.cta}
+        </a>
+        <p style="margin:32px 0 0;font-size:13px;color:#64748B;">
+          ¿Tuviste algún problema? Escríbenos a <a href="mailto:${supportEmail}" style="color:#1D9E75;">${supportEmail}</a> y lo resolvemos contigo.
+        </p>
+      </div>
+      <div style="padding:16px 24px;text-align:center;font-size:12px;color:#94A3B8;">
+        Este email fue enviado a ${user.email}. © ${new Date().getFullYear()} Alyto.
+      </div>
+    </div>
+  `;
+
+  return sendRawEmail(user.email, copy.subject, html);
+}
+
+/**
  * Envía el código de verificación de email (6 dígitos). Usa SendGrid Dynamic
  * Template si SENDGRID_TEMPLATE_EMAIL_VERIFY está configurado; si no, HTML inline.
  *

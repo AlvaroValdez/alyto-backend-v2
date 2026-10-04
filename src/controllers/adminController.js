@@ -2543,3 +2543,62 @@ export async function listAccessLogs(req, res) {
     return res.status(500).json({ error: 'Error al consultar el registro de accesos.' });
   }
 }
+
+/**
+ * GET /api/v1/admin/kyc-attempts
+ *
+ * Bitácora de intentos de verificación de identidad ([KycAttempt]). Una
+ * telemetría que nadie puede consultar no resuelve nada: esta es la vía para
+ * responder "¿la página de Stripe llegó a cargarle al usuario?" sin entrar a la
+ * base a mano.
+ *
+ * El campo decisivo del resumen es `sinRetorno`: intentos donde el navegador
+ * nunca volvió del alojado de Stripe. Un salto ahí es una caída del proveedor o
+ * un problema de red del lado del usuario, no un abandono.
+ *
+ * Query: ?userId= · ?email= · ?outcome=open|approved|rejected|abandoned|restarted
+ *        · ?platform=native|mobile-web|desktop · ?days=N · ?limit=N
+ */
+export async function listKycAttempts(req, res) {
+  const KycAttempt = (await import('../models/KycAttempt.js')).default;
+
+  const filtro = {};
+  if (['open', 'approved', 'rejected', 'abandoned', 'restarted'].includes(req.query.outcome)) {
+    filtro.outcome = req.query.outcome;
+  }
+  if (['native', 'mobile-web', 'desktop', 'unknown'].includes(req.query.platform)) {
+    filtro.platform = req.query.platform;
+  }
+  if (req.query.email)  filtro.email  = String(req.query.email).toLowerCase().trim();
+  if (req.query.userId) filtro.userId = req.query.userId;
+
+  const days  = Math.min(Math.max(parseInt(req.query.days  ?? '30',  10) || 30,  1), 365);
+  const limit = Math.min(Math.max(parseInt(req.query.limit ?? '100', 10) || 100, 1), 500);
+  filtro.createdAt = { $gte: new Date(Date.now() - days * 86_400_000) };
+
+  try {
+    const [items, porDesenlace, sinRetorno] = await Promise.all([
+      KycAttempt.find(filtro).sort({ createdAt: -1 }).limit(limit).lean(),
+      KycAttempt.aggregate([
+        { $match: filtro },
+        { $group: { _id: '$outcome', n: { $sum: 1 } } },
+      ]),
+      KycAttempt.countDocuments({ ...filtro, returnedAt: null, outcome: { $ne: 'open' } }),
+    ]);
+
+    return res.json({
+      success:     true,
+      ventanaDias: days,
+      resumen: {
+        porDesenlace: Object.fromEntries(porDesenlace.map((r) => [r._id, r.n])),
+        // Intentos cerrados donde el navegador nunca volvió de Stripe.
+        sinRetorno,
+      },
+      count: items.length,
+      items,
+    });
+  } catch (err) {
+    console.error('[Admin listKycAttempts] Error:', err.message);
+    return res.status(500).json({ error: 'Error al consultar los intentos de verificación.' });
+  }
+}

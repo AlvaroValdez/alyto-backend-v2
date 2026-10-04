@@ -31,6 +31,7 @@ import { screenUser }   from '../services/sanctionsService.js';
 import { provisionUserKeypair } from '../services/custodyService.js';
 import { isRealDocumentNumber, readDocumentNumber, hasRealDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
+import { closeKycAttempt } from '../services/kycTelemetry.js';
 
 // Lazy init — dotenv debe cargar antes de instanciar el cliente
 let _stripe = null;
@@ -184,6 +185,10 @@ async function _approveKyc(session) {
   user.kycProvider    = 'stripe_identity';
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
+
+  // Cierre del intento en la bitácora ([KycAttempt]). Idempotente: si el polling
+  // ya lo cerró, esta llamada no hace nada.
+  await closeKycAttempt(session.id, { outcome: 'approved', stripeStatus: session.status });
 
   // Extracción de datos verificados (DOB, documento, dirección, nombres) —
   // best-effort, y LUEGO screening AML con los datos más frescos: los nombres
@@ -356,6 +361,10 @@ async function _recoverKyc(session, errorCode) {
   await user.save();
   invalidateUserCache(user._id);
 
+  await closeKycAttempt(session.id, {
+    outcome: 'abandoned', stripeStatus: session.status, stripeErrorCode: errorCode ?? null,
+  });
+
   notify(user._id, {
     title: 'Verificación incompleta',
     body:  'No terminaste tu verificación de identidad. Puedes reintentarla cuando quieras desde la app.',
@@ -388,6 +397,10 @@ async function _rejectKyc(session, errorCode) {
   user.kycErrorCode  = errorCode;
   await user.save();
   invalidateUserCache(user._id); // forzar refresco del cache del middleware
+
+  await closeKycAttempt(session.id, {
+    outcome: 'rejected', stripeStatus: session.status, stripeErrorCode: errorCode,
+  });
 
   notify(user._id, {
     title: 'Verificación no completada',

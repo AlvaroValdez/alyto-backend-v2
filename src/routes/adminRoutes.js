@@ -56,6 +56,7 @@ import {
   listExpiredSep24,
   cancelExpiredSep24,
   listAccessLogs,
+  listKycAttempts,
 } from '../controllers/adminController.js';
 import {
   status as twoFactorStatus,
@@ -202,6 +203,16 @@ router.get('/users', getAllUsers);
  * Query: ?outcome= ?email= ?userId= ?days= ?limit=
  */
 router.get('/access-logs', listAccessLogs);
+
+/**
+ * GET /api/v1/admin/kyc-attempts
+ *
+ * Bitácora de intentos de verificación de identidad. Permite distinguir un
+ * usuario que abandonó la captura de uno al que la página del proveedor nunca
+ * le cargó, que hasta ahora se veían idénticos desde el sistema.
+ * Query: ?userId= ?email= ?outcome= ?platform= ?days= ?limit=
+ */
+router.get('/kyc-attempts', listKycAttempts);
 
 /**
  * GET /api/v1/admin/2fa/status
