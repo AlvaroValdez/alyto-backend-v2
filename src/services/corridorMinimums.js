@@ -146,10 +146,23 @@ export async function originPerUsdFor(originCurrency) {
  * @param {string} [accountType]
  * @param {object} [vitaPrices] respuesta de getPrices() ya obtenida (opcional, evita re-fetch)
  * @param {object} [opts]
- * @param {boolean} [opts.forDisplay=false] true en el listado/UI → aplica el colchón
- *   (muestra un poco de más). false al VALIDAR → exige el piso exacto. Ver
- *   MIN_FLOOR_BUFFER_PCT: la asimetría es lo que evita "te muestro 592 y te pido 596".
- * @returns {Promise<{min:number, minUSD:number|null, raisedBy:string|null, floorUSD:number|null, currency:string}>}
+ * @param {boolean} [opts.forDisplay=false] qué valor va en `min`. true → el que se
+ *   MUESTRA (con colchón); false → el que se EXIGE (piso exacto).
+ *
+ * ⚠️ Devuelve SIEMPRE los dos (`minDisplay` y `minExact`), y esa es la parte que
+ * importa. El colchón sólo tiene sentido si todo lo que el usuario LEE usa el mismo
+ * número: el hint, el mensaje de error y el bloqueo del botón. Si una superficie
+ * anuncia el exacto y otra el de display, el usuario teclea lo que le dijimos y la
+ * pantalla lo rechaza. Es exactamente lo que pasaba el 2026-10-04: el error del
+ * socket decía "mínimo 241 BOB", el usuario escribía 241 y el hint respondía
+ * "mínimo ≈246 BOB" con el botón muerto.
+ *
+ * La asimetría correcta es: se anuncia `minDisplay` en todas partes, y la creación
+ * de la transacción valida contra `minExact` (más permisivo). Así nadie recibe un
+ * número que luego se le rechaza, y a nadie se le rechaza por un redondeo.
+ *
+ * @returns {Promise<{min:number, minExact:number, minDisplay:number, minUSD:number|null,
+ *                    raisedBy:string|null, floorUSD:number|null, currency:string}>}
  */
 export async function resolveEffectiveMinimum(corridor, accountType = 'personal', vitaPrices = null, { forDisplay = false } = {}) {
   const currency     = corridor?.originCurrency;
@@ -157,7 +170,10 @@ export async function resolveEffectiveMinimum(corridor, accountType = 'personal'
   const originPerUsd = await originPerUsdFor(currency).catch(() => null);
 
   if (!originPerUsd) {
-    return { min: configured, minUSD: null, raisedBy: null, floorUSD: null, currency };
+    return {
+      min: configured, minExact: configured, minDisplay: configured,
+      minUSD: null, raisedBy: null, floorUSD: null, currency,
+    };
   }
 
   let prices = vitaPrices;
@@ -167,15 +183,18 @@ export async function resolveEffectiveMinimum(corridor, accountType = 'personal'
   }
 
   const floorUSD = providerFloorUSD(corridor, prices);
-  const { min, raisedBy } = effectiveMinOrigin({
-    corridor, configuredMin: configured, originPerUsd, floorUSD, accountType,
-    bufferPct: forDisplay ? MIN_FLOOR_BUFFER_PCT : 0,
-  });
+  const base     = { corridor, configuredMin: configured, originPerUsd, floorUSD, accountType };
+
+  const exacto  = effectiveMinOrigin({ ...base, bufferPct: 0 });
+  const display = effectiveMinOrigin({ ...base, bufferPct: MIN_FLOOR_BUFFER_PCT });
+  const elegido = forDisplay ? display : exacto;
 
   return {
-    min,
-    minUSD:  Math.ceil((min / originPerUsd) * 100) / 100,
-    raisedBy,
+    min:        elegido.min,
+    minExact:   exacto.min,
+    minDisplay: display.min,
+    minUSD:     Math.ceil((elegido.min / originPerUsd) * 100) / 100,
+    raisedBy:   elegido.raisedBy,
     floorUSD,
     currency,
   };

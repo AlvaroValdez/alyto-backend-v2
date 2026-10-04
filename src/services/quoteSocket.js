@@ -26,7 +26,9 @@ import { isScopedToken }   from './authTokenService.js';
 import TransactionConfig   from '../models/TransactionConfig.js';
 import SpAConfig           from '../models/SpAConfig.js';
 import { getPrices, VITA_SENT_ONLY_COUNTRIES, getVitaCountryKey, getVitaSentCountry } from './vitaWalletService.js';
-import { resolveMinAmountOrigin, resolveQuoteRate } from './exchangeRateService.js';
+import { resolveQuoteRate } from './exchangeRateService.js';
+import { resolveEffectiveMinimum } from './corridorMinimums.js';
+import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { resolveEuCorridor } from '../routing/euAmountRouter.js';
 import { calculateQuote, toPublicFees } from './quoteCalculator.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
@@ -297,15 +299,22 @@ async function computeQuote(state) {
   const amount = Number(originAmount);
   const round2 = n => Math.round(n * 100) / 100;
 
-  // Validar monto mínimo del corredor (diferenciado retail/business)
-  const minAmount = await resolveMinAmountOrigin(corridor, state.accountType);
+  // Validar monto mínimo del corredor (diferenciado retail/business).
+  //
+  // ⚠️ Usa el mínimo EFECTIVO de display, el mismo que GET /corridors le da al hint
+  // de la pantalla. Antes usaba `resolveMinAmountOrigin` (sólo el configurado, sin
+  // el piso del proveedor): el socket rechazaba con un número y el hint anunciaba
+  // otro, así que el usuario tecleaba el del error y el botón seguía muerto. Ver
+  // la nota en resolveEffectiveMinimum.
+  const { minDisplay: minAmount, currency: minCurrency } =
+    await resolveEffectiveMinimum(corridor, state.accountType, null, { forDisplay: true });
   if (minAmount > 0 && amount < minAmount) {
     return {
       type:           'quote_error',
       code:           'BELOW_MINIMUM',
-      message:        `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
+      message:        `El monto mínimo para este corredor es ${formatOriginAmount(minAmount, minCurrency)}.`,
       minAmountOrigin: minAmount,
-      currency:        corridor.originCurrency,
+      currency:        minCurrency,
     };
   }
 
