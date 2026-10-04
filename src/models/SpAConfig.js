@@ -33,6 +33,17 @@ const spAConfigSchema = new mongoose.Schema(
     // clpPerBob: CLP por 1 BOB = clpPerUsdt / usdtPerBob. Ej: 99.55
     clpPerBob: { type: Number, default: null },
 
+    /**
+     * Quién fijó `clpPerBob` por última vez.
+     *
+     * Existe porque esta tasa era 100% manual y eso la dejó congelada cinco
+     * meses: se cargó bien en mayo de 2026 y quedó 14% desviada cuando el
+     * boliviano se movió. Ahora `refreshExchangeRates` la sincroniza sola, pero
+     * un admin puede fijarla a mano poniendo 'manual' y el job deja de tocarla.
+     */
+    rateSource:    { type: String, enum: ['manual', 'binance_p2p_auto'], default: null },
+    rateUpdatedAt: { type: Date, default: null },
+
     // ── Limites del corredor cl-bo ────────────────────────────────────────
     minAmountCLP: { type: Number, default: 10000 },
     maxAmountCLP: { type: Number, default: 5000000 },
