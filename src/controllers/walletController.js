@@ -36,6 +36,7 @@ import { sendEmail, EMAILS } from '../services/email.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
+import { getSrlBankData }   from '../services/srlBankData.js'
 import { recordAdminAction } from '../services/adminAuditService.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
@@ -364,7 +365,7 @@ export async function initiateDeposit(req, res) {
         status:    'pending',
         reference: wtx.wtxId,
         expiresAt,
-        bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate },
+        bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate, purpose: 'wallet_deposit' },
       })
 
       return res.status(201).json({
@@ -409,10 +410,7 @@ export async function initiateDeposit(req, res) {
       method:        'manual',
       amount,
       currency:      'BOB',
-      bankName:      process.env.SRL_BANK_NAME      ?? 'Banco Económico',
-      accountHolder: process.env.SRL_ACCOUNT_HOLDER ?? 'AV Finance SRL',
-      accountNumber: process.env.SRL_ACCOUNT_NUMBER ?? '',
-      accountType:   process.env.SRL_ACCOUNT_TYPE   ?? 'Cuenta Corriente',
+      ...(await getSrlBankData()),
       reference:     wtx.wtxId,
       instructions:  'Transfiere el monto exacto e incluye el número de referencia en el concepto.',
       expiresAt,
@@ -875,9 +873,11 @@ export async function confirmBankQrDeposit(wtx, payment, bankId, source) {
       return { ok: false, reason: 'wallet_not_found' }
     }
 
-    const parsed = payment?.paymentDate && payment?.paymentTime
+    // `paidAt` ya viene resuelto y con la zona horaria de Bolivia desde el
+    // servicio del banco; la concatenación queda como respaldo.
+    const parsed = payment?.paidAt ?? (payment?.paymentDate && payment?.paymentTime
       ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
-      : new Date()
+      : new Date())
     const paidAt = isNaN(parsed) ? new Date() : parsed
 
     const prevBalance = wallet.balance

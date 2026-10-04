@@ -35,6 +35,8 @@ import {
 import { dispatchPayout }   from './ipnController.js';
 import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
+import { getSrlBankData }   from '../services/srlBankData.js';
+import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
@@ -73,6 +75,7 @@ import { parseComprobante, isBedrockEnabled } from '../services/bedrockService.j
 import { sendEmail, EMAILS }  from '../services/email.js';
 import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../services/exchangeRateService.js';
 import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
+import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
@@ -840,13 +843,17 @@ export async function initCrossBorderPayment(req, res) {
   // ── Validar monto mínimo y máximo del corredor ────────────────────────────
   // Mínimo EFECTIVO (incluye el guard de piso del proveedor) — misma fuente que
   // el quote, así no se puede crear una transacción que el payout va a rechazar.
-  const { min: minAmount } = await resolveEffectiveMinimum(corridor, req.user?.accountType);
+  // Valida contra el piso EXACTO (más permisivo) pero anuncia el de display, que
+  // es el que el usuario leyó en pantalla. Al revés le daríamos un número que la
+  // propia interfaz rechaza. Ver la nota en resolveEffectiveMinimum.
+  const { minExact: minAmount, minDisplay, currency: minCurrency } =
+    await resolveEffectiveMinimum(corridor, req.user?.accountType);
   if (minAmount > 0 && amount < minAmount) {
     return res.status(400).json({
-      error:    `El monto mínimo para este corredor es ${minAmount} ${corridor.originCurrency}.`,
+      error:    `El monto mínimo para este corredor es ${formatOriginAmount(minDisplay, minCurrency)}.`,
       code:     'BELOW_MINIMUM',
-      min:      minAmount,
-      currency: corridor.originCurrency,
+      min:      minDisplay,
+      currency: minCurrency,
     });
   }
   if (corridor.maxAmountOrigin && amount > corridor.maxAmountOrigin) {
@@ -1248,6 +1255,36 @@ export async function initCrossBorderPayment(req, res) {
   // El IPN de confirmación usará este ID para encontrar la transacción en BD.
   const alytoTransactionId = `ALY-${corridor.routingScenario ?? 'D'}-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
+  // ── Pre-check: no cobrar lo que no vamos a poder pagar ────────────────────
+  //
+  // Último punto en que todavía no se movió un centavo. Más adelante se emiten
+  // instrucciones de pago o se genera el QR del banco, y a partir de ahí el
+  // dinero del usuario puede entrar en cualquier momento.
+  //
+  // Nace de las 7 operaciones por Bs 3.506 que se cobraron y nunca se
+  // ejecutaron: dos murieron porque la wallet maestra de Vita estaba sin saldo,
+  // y se supo recién al intentar el payout, con la plata ya adentro.
+  const preflight = await verificarPayoutEjecutable({
+    corridor,
+    usdAmount: digitalAssetAmountFinal ?? serverUsdcTransit,
+  });
+  if (!preflight.ok) {
+    logger.error('[CrossBorder] Payin bloqueado: el payout no es ejecutable ahora', {
+      corridorId, motivo: preflight.motivo, ...preflight.detalle,
+    });
+    Sentry.captureMessage(`Payin bloqueado por preflight: ${preflight.motivo}`, {
+      level: 'warning',
+      extra: { corridorId, ...preflight.detalle },
+    });
+    // 503 y no 400: no es un error del usuario ni de su pedido, es que el riel
+    // de pago está sin capacidad en este momento. Reintentar más tarde sirve.
+    return res.status(503).json({
+      error:  'Este corredor no está disponible en este momento. Por favor intenta nuevamente en unos minutos.',
+      code:   'PAYOUT_NOT_EXECUTABLE',
+      reason: preflight.motivo,
+    });
+  }
+
   let payinProviderRef          = null;  // ID externo para lookup en IPN
   let payinUrl                  = null;  // Token/URL que abre el widget de pago
   let payinProvider             = 'unknown';
@@ -1323,7 +1360,11 @@ export async function initCrossBorderPayment(req, res) {
         transactionId: alytoTransactionId,           // 26 chars, bajo el límite de 30
         amount:        amount,
         currency:      corridor.originCurrency ?? 'BOB',
-        description:   `Alyto ${alytoTransactionId}`.slice(0, 100),
+        // La glosa es lo único de este cobro que se ve en el extracto de BANECO.
+        // Desde que la cuenta es exclusiva de Alyto (octubre 2026) tiene que
+        // decir por sí sola a qué destino de fondos corresponde, para poder
+        // rendir el extracto sin cruzarlo contra la base.
+        description:   `Alyto envio ${alytoTransactionId}`.slice(0, 100),
         dueDate,
       });
     } catch (err) {
@@ -1365,20 +1406,8 @@ export async function initCrossBorderPayment(req, res) {
     payinProviderRef = null;
     payinUrl         = null;
 
-    // Leer datos bancarios desde DB (admin los configura); fallback a env vars
-    let dbBankData = {};
-    try {
-      const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' }).select('bankData').lean();
-      dbBankData = srlCfg?.bankData ?? {};
-    } catch (cfgErr) {
-      console.warn('[CrossBorder] No se pudo leer bankData de SRLConfig, usando env vars:', cfgErr.message);
-    }
-
     manualPaymentInstructions = {
-      bankName:      dbBankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
-      accountHolder: dbBankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
-      accountNumber: dbBankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
-      accountType:   dbBankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+      ...(await getSrlBankData()),
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,
@@ -1551,7 +1580,7 @@ export async function initCrossBorderPayment(req, res) {
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
       // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
-      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate } } : {}),
+      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate, purpose: 'crossborder_payin' } } : {}),
       // bankQr: TTL de la tx = fin del día de vencimiento del QR (no el default +24h),
       // para que el barrido de expiración reconcilie/cancele en el momento correcto.
       ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),
@@ -2279,7 +2308,10 @@ export async function getQuote(req, res) {
   // si hiciera falta para que el NETO (post-fees) alcance el piso del proveedor.
   // Sin esto el usuario cotizaba y pagaba, y el payout moría después en Vita/Harbor
   // (ver corridorMinimums.js).
-  const { min: minAmountOrigin, raisedBy, floorUSD } =
+  // Igual que en la creación: se valida con el exacto y se anuncia el de display,
+  // que es el número que el usuario tiene delante.
+  const { minExact: minAmountOrigin, minDisplay: minAnunciado,
+          currency: monedaMin, raisedBy, floorUSD } =
     await resolveEffectiveMinimum(corridor, req.user?.accountType, vitaResponse);
   if (amount < minAmountOrigin) {
     if (raisedBy) {
@@ -2288,9 +2320,9 @@ export async function getQuote(req, res) {
       });
     }
     return res.status(400).json({
-      error:  `El monto mínimo para este corredor es ${minAmountOrigin} ${corridor.originCurrency}.`,
-      min:    minAmountOrigin,
-      currency: corridor.originCurrency,
+      error:  `El monto mínimo para este corredor es ${formatOriginAmount(minAnunciado, monedaMin)}.`,
+      min:    minAnunciado,
+      currency: monedaMin,
     });
   }
 
@@ -3141,26 +3173,21 @@ export async function getSRLPayinInstructions(req, res) {
     return res.status(403).json({ error: 'Este endpoint es exclusivo para usuarios SRL.' });
   }
 
-  let bankData = {};
   let qrImages = [];
   try {
     const srlCfg = await SRLConfig.findOne({ key: 'srl_bolivia' })
-      .select('bankData qrImages')
+      .select('qrImages')
       .lean();
-    bankData = srlCfg?.bankData ?? {};
     qrImages = (srlCfg?.qrImages ?? []).map(q => ({
       label:       q.label,
       imageBase64: q.imageBase64,
     }));
   } catch (err) {
-    console.warn('[SRLPayinInstructions] Fallback a env vars:', err.message);
+    console.warn('[SRLPayinInstructions] No se pudieron leer los QR estáticos:', err.message);
   }
 
   return res.status(200).json({
-    bankName:      bankData.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
-    accountHolder: bankData.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
-    accountNumber: bankData.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
-    accountType:   bankData.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+    ...(await getSrlBankData()),
     currency:      'BOB',
     qrImages,
   });

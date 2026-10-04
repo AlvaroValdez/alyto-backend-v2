@@ -30,6 +30,14 @@ import WalletTransaction from '../models/WalletTransaction.js';
 import User              from '../models/User.js';
 import { confirmBankQrDeposit, settleDispatchedWithdrawal } from './walletController.js';
 import { getBankQrService }     from '../services/bankQr/bankQrRegistry.js';
+import { debeAlertar }          from '../services/adminAlertThrottle.js';
+
+/**
+ * Un corredor faltante no se arregla solo: hasta que un admin lo cree, cada
+ * reintento encuentra lo mismo. Un aviso por día y por transacción alcanza para
+ * que no se olvide, sin repetir el mismo correo en cada pasada.
+ */
+const COOLDOWN_PAYOUT_BLOQUEADO_MS = 24 * 60 * 60 * 1000;
 import {
   createPayout,
   createVitaSentPayout,
@@ -1403,16 +1411,26 @@ export async function dispatchPayout(transaction) {
     });
     await transaction.save().catch(() => {});
 
-    // Alertar al admin — el payin fue confirmado pero no podemos ejecutar el payout
-    sendRawEmail(
-      process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
-      `⚠️ Payout bloqueado — corredor no encontrado [${transaction.alytoTransactionId}]`,
-      `<p>El payin fue confirmado pero el corredor <strong>${transaction.corridorId?.toString()}</strong> ` +
-      `no existe en TransactionConfig.</p>` +
-      `<p>Transacción: <strong>${transaction.alytoTransactionId}</strong> | ` +
-      `Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
-      `<p>Requiere intervención manual inmediata.</p>`,
-    ).catch(e => console.error('[dispatchPayout] Error email admin corridor_missing:', e.message));
+    // Alertar al admin — el payin fue confirmado pero no podemos ejecutar el payout.
+    //
+    // Con cooldown POR TRANSACCIÓN: `dispatchPayout` se reintenta, y sin esto cada
+    // intento mandaba otro correo idéntico. El 2026-10-01 fueron 12 correos para
+    // apenas 2 transacciones. El problema es el mismo en el intento 1 y en el 12;
+    // lo único que cambia es el cupo de SendGrid que se consume.
+    if (await debeAlertar(
+      `payout-corridor-missing:${transaction.alytoTransactionId}`,
+      COOLDOWN_PAYOUT_BLOQUEADO_MS,
+    )) {
+      sendRawEmail(
+        process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+        `⚠️ Payout bloqueado — corredor no encontrado [${transaction.alytoTransactionId}]`,
+        `<p>El payin fue confirmado pero el corredor <strong>${transaction.corridorId?.toString()}</strong> ` +
+        `no existe en TransactionConfig.</p>` +
+        `<p>Transacción: <strong>${transaction.alytoTransactionId}</strong> | ` +
+        `Entidad: ${transaction.legalEntity} | Monto: ${transaction.originalAmount} ${transaction.originCurrency}</p>` +
+        `<p>Requiere intervención manual inmediata.</p>`,
+      ).catch(e => console.error('[dispatchPayout] Error email admin corridor_missing:', e.message));
+    }
 
     return;
   }
@@ -3002,9 +3020,16 @@ export function handleBankQrIPN(bankId) {
           return res.status(200).json(OK);
         }
 
+        // Autenticar PRIMERO: el monto hay que contrastarlo contra lo que dice el
+        // banco, no contra lo que dice el body. El body de un IPN es, por
+        // definición, dato de terceros sin verificar.
+        const authW = await verifyAuthenticity();
+        if (!authW.ok) return rejectUnauthentic(authW);
+        const pagoW = authW.payment ?? payment;
+
         // Validar monto exacto (modifyAmount=false en el banco, double-check)
         const expectedDep = wtx.amount;
-        const receivedDep = Number(payment.amount);
+        const receivedDep = Number(pagoW.amount);
         if (Math.abs(receivedDep - expectedDep) > 0.02) {
           logger.warn(`[BankQr IPN ${bankId}] Depósito wallet: monto ${receivedDep} ≠ esperado ${expectedDep}`, {
             qrId: payment.qrId,
@@ -3016,11 +3041,8 @@ export function handleBankQrIPN(bankId) {
           return res.status(200).json(OK);
         }
 
-        const authW = await verifyAuthenticity();
-        if (!authW.ok) return rejectUnauthentic(authW);
-
         try {
-          const result = await confirmBankQrDeposit(wtx, payment, bankId, 'ipn');
+          const result = await confirmBankQrDeposit(wtx, pagoW, bankId, 'ipn');
           logger.info(`[BankQr IPN ${bankId}] ✅ Depósito wallet ${result.ok ? 'acreditado' : 'no procesado'}`, {
             wtxId:  wtx.wtxId,
             reason: result.reason,
@@ -3034,7 +3056,61 @@ export function handleBankQrIPN(bankId) {
         return res.status(200).json(OK);
       }
 
-      logger.warn(`[BankQr IPN ${bankId}] QR no encontrado en BD: ${payment.qrId}`);
+      // Un QR que no está en nuestra base puede ser dos cosas muy distintas, y
+      // hasta 2026-10-01 las dos loguearon igual:
+      //
+      //   a) un cobro AJENO que el banco nos notificó de más. BANECO dio de alta
+      //      nuestro webhook con un alcance más amplio que nuestro comercio, así
+      //      que recibimos avisos de QR de terceros cuyo dinero nunca entra a
+      //      nuestra cuenta. Es ruido esperable, no un problema nuestro.
+      //   b) un cobro PROPIO del que perdimos el registro. Eso sí es un defecto
+      //      grave: hay plata en la cuenta sin transacción que la respalde.
+      //
+      // Confundirlos envenena la conciliación contra el extracto, que es
+      // justamente lo que hay que poder sostener ante ASFI. Le preguntamos al
+      // banco por la lista acotada del día para separarlos.
+      //
+      // ⚠️ Pero solo después de autenticar. Este endpoint es público y sin rate
+      // limit: si clasificáramos antes de validar el token, cualquiera podría
+      // hacernos llamar al banco una vez por cada POST que nos mande. Por eso se
+      // usa la Capa 1 sola, que no sale a la red, y recién con ella superada se
+      // gasta la llamada saliente.
+      let propio = null;
+      try {
+        const svc = getBankQrService(bankId);
+        const capa1 = typeof svc.verifyWebhookAuth === 'function'
+          ? svc.verifyWebhookAuth(req)
+          : { ok: false, reason: 'no-layer1-implemented' };
+
+        if (!capa1.ok) {
+          logger.warn(`[BankQr IPN ${bankId}] Aviso no autenticado sobre un QR ajeno a la base — descartado`, {
+            qrId: payment.qrId, reason: capa1.reason,
+          });
+          return res.status(200).json(OK);
+        }
+
+        if (typeof svc.esCobroPropio === 'function') {
+          const fecha = payment.paymentDate ? new Date(payment.paymentDate) : new Date();
+          propio = await svc.esCobroPropio(payment.qrId, isNaN(fecha) ? new Date() : fecha);
+        }
+      } catch { /* clasificar es best-effort: nunca debe tumbar el handler */ }
+
+      if (propio === false) {
+        logger.info(`[BankQr IPN ${bankId}] Cobro ajeno notificado por el banco — ignorando`, {
+          qrId: payment.qrId, amount: payment.amount,
+        });
+        return res.status(200).json(OK);
+      }
+
+      // propio === true  → cobro nuestro sin registro: huérfano real, hay que mirarlo.
+      // propio === null  → no se pudo determinar; se trata como sospechoso.
+      logger.error(`[BankQr IPN ${bankId}] Cobro ${propio ? 'PROPIO' : 'de pertenencia desconocida'} sin registro en BD`, {
+        qrId: payment.qrId, amount: payment.amount, propio,
+      });
+      Sentry.captureMessage(`BankQr huérfano [${bankId}]: ${payment.qrId}`, {
+        level: propio ? 'error' : 'warning',
+        extra: { qrId: payment.qrId, amount: payment.amount, sender: payment.senderName, propio },
+      });
       return res.status(200).json(OK);
     }
 
@@ -3046,9 +3122,15 @@ export function handleBankQrIPN(bankId) {
       return res.status(200).json(OK);
     }
 
+    // Autenticar PRIMERO: igual que en la rama de wallet, el monto se contrasta
+    // contra el pago que reporta el banco, no contra el body del IPN.
+    const authTx = await verifyAuthenticity();
+    if (!authTx.ok) return rejectUnauthentic(authTx);
+    const pagoTx = authTx.payment ?? payment;
+
     // Validar monto (modifyAmount=false garantiza exactitud en el banco, pero double-check)
     const expectedAmount = transaction.originalAmount;
-    const receivedAmount = Number(payment.amount);
+    const receivedAmount = Number(pagoTx.amount);
     if (Math.abs(receivedAmount - expectedAmount) > 0.02) {
       logger.warn(`[BankQr IPN ${bankId}] Monto recibido ${receivedAmount} ≠ esperado ${expectedAmount}`, {
         qrId: payment.qrId,
@@ -3061,32 +3143,31 @@ export function handleBankQrIPN(bankId) {
         provider:   'bankQr',
         eventType:  'bankqr_amount_mismatch',
         status:     transaction.status,
-        rawPayload: { payment, bankId },
+        rawPayload: { payment: pagoTx, bankId },
         receivedAt: new Date(),
       });
       await transaction.save().catch(() => {});
       return res.status(200).json(OK);
     }
 
-    const authTx = await verifyAuthenticity();
-    if (!authTx.ok) return rejectUnauthentic(authTx);
-
     // ── Confirmar payin ───────────────────────────────────────────────────────
-    // Usar timestamp real del banco; fallback a now si el formato no parsea
-    const bankPaidAt = payment.paymentDate && payment.paymentTime
-      ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
-      : new Date();
+    // Usar timestamp real del banco; fallback a now si el formato no parsea.
+    // `paidAt` ya viene resuelto y con la zona de Bolivia desde el servicio del
+    // banco; la concatenación queda como respaldo para pagos viejos.
+    const bankPaidAt = pagoTx.paidAt ?? (pagoTx.paymentDate && pagoTx.paymentTime
+      ? new Date(`${pagoTx.paymentDate.split('T')[0]}T${pagoTx.paymentTime}`)
+      : new Date());
 
     try {
       transaction.status         = 'payin_confirmed';
       transaction.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
-      transaction.bankQr.payment = payment;
-      transaction.payinReference = payment.qrId;
+      transaction.bankQr.payment = pagoTx;
+      transaction.payinReference = pagoTx.qrId ?? payment.qrId;
       transaction.ipnLog.push({
         provider:   'bankQr',
         eventType:  'bankqr_payin_confirmed',
         status:     'payin_confirmed',
-        rawPayload: { payment, bankId },
+        rawPayload: { payment: pagoTx, bankId },
         receivedAt: new Date(),
       });
       await transaction.save();

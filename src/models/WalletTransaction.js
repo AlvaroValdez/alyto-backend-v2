@@ -36,8 +36,12 @@ const walletTransactionSchema = new mongoose.Schema({
   },
   type: {
     type:     String,
+    // 'refund' = devolución de un pago transfronterizo que se cobró y no se
+    // ejecutó. NO es un 'deposit': el usuario no trajo dinero nuevo, se le
+    // devuelve el que ya había entregado. Contarlo como depósito inflaría el
+    // volumen de captación, que es una de las cifras que se reporta.
     enum:     ['deposit', 'withdrawal', 'send', 'receive', 'fee', 'freeze', 'unfreeze',
-               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit'],
+               'bob_to_usdc', 'usdc_to_bob', 'usdc_deposit', 'refund'],
     required: true,
   },
   /**
@@ -138,6 +142,19 @@ const walletTransactionSchema = new mongoose.Schema({
       dueDate: { type: String },                          // 'yyyy-MM-dd' (vencimiento)
       paidAt:  { type: Date },                            // timestamp de confirmación
       payment: { type: mongoose.Schema.Types.Mixed },     // objeto PaymentQR del banco
+      /**
+       * Para qué entró la plata. Desde octubre de 2026 la cuenta BANECO que
+       * recibe estos cobros es exclusiva de Alyto y hay que poder rendirla por
+       * destino de fondos: cuánto es carga de billetera y cuánto es pago
+       * transfronterizo. Hasta ahora la distinción existía solo de forma
+       * implícita, por vivir en colecciones distintas, y eso no se sostiene en
+       * una conciliación contra el extracto del banco.
+       */
+      purpose: {
+        type:    String,
+        enum:    ['wallet_deposit', 'crossborder_payin'],
+        default: 'wallet_deposit',
+      },
     }, { _id: false }),
     default: undefined,
   },

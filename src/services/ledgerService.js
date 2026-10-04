@@ -52,6 +52,10 @@ export const CHART_OF_ACCOUNTS = [
   { code: '2021', name: 'Saldos USDC congelados',            type: 'liability', normalSide: 'credit', currency: 'USDC', isControl: true },
   { code: '2022', name: 'Saldos USDC reservados',            type: 'liability', normalSide: 'credit', currency: 'USDC', isControl: true },
   { code: '2030', name: 'Obligación de payout cross-border', type: 'liability', normalSide: 'credit', currency: 'USDC', isControl: true },
+  // Efectivo BOB cobrado por un pago transfronterizo que todavía no se ejecutó ni se
+  // devolvió. Está en la cuenta bancaria pero no respalda saldos de wallet: es el
+  // equivalente en BOB del "USDC en vuelo". Ver getBOBCommitted en treasuryLiquidity.
+  { code: '2040', name: 'Cobros cross-border pendientes de ejecución', type: 'liability', normalSide: 'credit', currency: 'BOB', isControl: true },
   // ── Ingresos (acreedor) ──
   { code: '4010', name: 'Comisión payin',                    type: 'income',    normalSide: 'credit', currency: 'BOB'  },
   { code: '4020', name: 'Spread FX cross-border',            type: 'income',    normalSide: 'credit', currency: 'BOB'  },
