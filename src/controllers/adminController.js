@@ -2022,35 +2022,82 @@ export async function vitaBalance(req, res) {
 
 /**
  * GET /api/v1/admin/stellar/balance
- * Retorna el saldo USDC real de la wallet Stellar SRL consultando Horizon.
- * Incluye la dirección pública y el link a Stellar Expert para el admin.
+ * Saldo Stellar de una entidad, DESGLOSADO en cuenta operativa y cuenta de reserva.
+ *
+ * Antes devolvía solo la operativa. Como el panel principal consume este endpoint,
+ * mostraba 162,50 de un respaldo real de 540,50: subdeclaraba el 70 % y daba a
+ * entender que la operativa era todo el respaldo. La reserva está bajo multifirma
+ * y no es liquidez ejecutable, pero sí es respaldo, y omitirla desvía la lectura
+ * en la dirección peligrosa.
+ *
+ * Compatibilidad: `publicKey`, `balance.usdc` y `stellarExpertUrl` se conservan
+ * apuntando a la OPERATIVA, para no romper al cliente ya desplegado.
  */
 export async function stellarBalance(req, res) {
   try {
-    const { getStellarUSDCBalance } = await import('../services/stellarService.js');
+    const { getStellarUSDCBalance, getStellarXLMBalance } = await import('../services/stellarService.js');
+    const { coldPubKey } = await import('../services/treasuryLiquidity.js');
 
     const entity    = req.query.entity ?? 'SRL';
     const pubKeyEnv = entity === 'LLC' ? 'STELLAR_LLC_PUBLIC_KEY' : 'STELLAR_SRL_PUBLIC_KEY';
-    const publicKey = process.env[pubKeyEnv];
+    const hotKey    = process.env[pubKeyEnv];
 
-    if (!publicKey) {
+    if (!hotKey) {
       return res.status(500).json({ error: `Variable de entorno ${pubKeyEnv} no configurada.` });
     }
 
-    const usdcBalance = await getStellarUSDCBalance(publicKey);
-
-    const network   = (process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase();
+    const coldKey     = coldPubKey(entity);
+    const network     = (process.env.STELLAR_NETWORK ?? 'testnet').toLowerCase();
     const explorerNet = network === 'mainnet' || network === 'public' ? 'public' : 'testnet';
-    const stellarExpertUrl = `https://stellar.expert/explorer/${explorerNet}/account/${publicKey}`;
+    const explorer    = (k) => `https://stellar.expert/explorer/${explorerNet}/account/${k}`;
+
+    // Que falle una cuenta no puede tumbar la lectura de la otra: devolvemos null
+    // en la que falló, para que el panel lo muestre indeterminado y no como cero.
+    const safe = (p) => p.then(v => v).catch(() => null);
+    const [hotUsdc, hotXlm, coldUsdc, coldXlm] = await Promise.all([
+      safe(getStellarUSDCBalance(hotKey)),
+      safe(getStellarXLMBalance(hotKey)),
+      coldKey ? safe(getStellarUSDCBalance(coldKey)) : Promise.resolve(null),
+      coldKey ? safe(getStellarXLMBalance(coldKey))  : Promise.resolve(null),
+    ]);
+
+    const partial = hotUsdc === null || (Boolean(coldKey) && coldUsdc === null);
 
     return res.json({
       entity,
-      publicKey,
-      network:         explorerNet,
-      balance: {
-        usdc: usdcBalance,
+      network: explorerNet,
+      // ── compatibilidad con el cliente anterior (siempre la operativa) ──
+      publicKey: hotKey,
+      balance:   { usdc: hotUsdc },
+      stellarExpertUrl: explorer(hotKey),
+      // ── desglose real ──
+      accounts: {
+        operativa: {
+          role:      'operativa',
+          publicKey: hotKey,
+          usdc:      hotUsdc,
+          xlm:       hotXlm,
+          signature: 'simple',
+          note:      'Firma simple. Paga las liquidaciones.',
+          stellarExpertUrl: explorer(hotKey),
+        },
+        reserva: coldKey ? {
+          role:      'reserva',
+          publicKey: coldKey,
+          usdc:      coldUsdc,
+          xlm:       coldXlm,
+          signature: 'multifirma',
+          note:      'Multifirma. Respaldo, no liquidez ejecutable.',
+          stellarExpertUrl: explorer(coldKey),
+        } : null,
       },
-      stellarExpertUrl,
+      coldConfigured: Boolean(coldKey),
+      totals: {
+        // Con una lectura parcial el total mentiría por omisión: mejor null.
+        usdc:       partial ? null : (hotUsdc ?? 0) + (coldUsdc ?? 0),
+        usdcSource: coldKey ? 'operativa+reserva' : 'solo-operativa',
+        partial,
+      },
       checkedAt: new Date().toISOString(),
     });
   } catch (err) {
