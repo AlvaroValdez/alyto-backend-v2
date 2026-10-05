@@ -164,6 +164,27 @@ describe('resolveVitaRail — saldo de Vita', () => {
   });
 });
 
+describe('resolveVitaRail — tasa CLP/USD congelada para el pay-out', () => {
+  it('devuelve clpPerUsd en los dos rieles, para poder persistirla', () => {
+    const clp = resolveVitaRail({ ...base, amountUSD: 100, mode: 'clp' });
+    const usd = resolveVitaRail({ ...base, amountUSD: 100, mode: 'usd' });
+    expect(clp.clpPerUsd).toBeCloseTo(1000, 4);   // 1 / 0.001
+    expect(usd.clpPerUsd).toBeCloseTo(1000, 4);
+  });
+
+  it('el monto en CLP coincide con usdcAmount × clpPerUsd — la cuenta que hace el dispatch', () => {
+    for (const amountUSD of [1, 37.5, 100, 2500.75]) {
+      const r = resolveVitaRail({ ...base, amountUSD, mode: 'clp' });
+      expect(r.amountInCurrency).toBe(Math.round(amountUSD * r.clpPerUsd));
+    }
+  });
+
+  it('clpPerUsd es null si Vita no publica la sección clp', () => {
+    const r = resolveVitaRail({ ...base, amountUSD: 100, mode: 'usd', prices: { usd: PRICES.usd } });
+    expect(r.clpPerUsd).toBeNull();
+  });
+});
+
 describe('resolveVitaRail — bordes', () => {
   it('cae al otro riel si Vita no publica la sección pedida', () => {
     const soloUsd = { usd: PRICES.usd };
