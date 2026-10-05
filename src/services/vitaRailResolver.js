@@ -138,12 +138,19 @@ export function resolveVitaRail({
   const monto = Number(amountUSD);
   const montoValido = isFinite(monto) && monto > 0;
 
+  // CLP por USD — se devuelve SIEMPRE para poder congelarla en la transacción:
+  // el pay-out convierte con esta y no con una tasa viva, porque el cobro BOB es
+  // manual y puede confirmarse horas después de cotizar.
+  const clpUsd    = clpToUsdRate(prices);
+  const clpPerUsd = clpUsd ? Math.round((1 / clpUsd) * 1e6) / 1e6 : null;
+
   const decorar = (rail) => {
     if (!rail) return null;
     const amountInCurrency = amountInRailCurrency(montoValido ? monto : 0, rail.currency, prices);
     return {
       ...rail,
       amountInCurrency,
+      clpPerUsd,
       netDestination: round2((montoValido ? monto : 0) * rail.rate - rail.fixedCost),
       funded: isFunded(rail, amountInCurrency, balances),
     };

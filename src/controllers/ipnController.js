@@ -1677,6 +1677,29 @@ export async function dispatchPayout(transaction) {
 
       payoutAmountUSD = usdcAmount;
       vitaCurrency    = 'usd';
+
+      // ── Riel de Vita: la moneda del saldo que se debita ───────────────────
+      // Históricamente los corredores BOB forzaban 'usd'. Si la cotización
+      // eligió el riel CLP (TransactionConfig.vitaPayoutCurrency), se debita CLP
+      // y Vita aplica clp_sell, que medido el 2026-10-05 entregaba más moneda
+      // destino en 13 de 14 destinos. Los corredores de Chile ya iban por CLP.
+      //
+      // Se usa la moneda y la tasa PERSISTIDAS al cotizar, no las vivas: el
+      // cobro BOB es manual y puede confirmarse horas después. `payoutAmountUSD`
+      // ya significa "monto en vitaCurrency" (así lo consume
+      // buildBeneficiaryPayloads y así funcionan los corredores CLP).
+      if (
+        payoutMethod === 'vitaWallet' &&
+        transaction.vitaPayoutCurrency === 'clp' &&
+        transaction.vitaPayoutClpPerUsd > 0
+      ) {
+        vitaCurrency    = 'clp';
+        payoutAmountUSD = Math.round(usdcAmount * transaction.vitaPayoutClpPerUsd);
+        console.info('[dispatchPayout] Riel CLP — debitando saldo CLP de Vita:', {
+          transactionId: transaction.alytoTransactionId,
+          usdcAmount, clpPerUsd: transaction.vitaPayoutClpPerUsd, amountCLP: payoutAmountUSD,
+        });
+      }
     }
 
     // ── Pre-cargar precios Vita (requerido por tryProvider) ────────────────────

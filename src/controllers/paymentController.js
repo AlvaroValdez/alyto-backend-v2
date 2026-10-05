@@ -1305,6 +1305,9 @@ export async function initCrossBorderPayment(req, res) {
   // interno y el usuario no lo ve; `destinationAmount` es el número que el
   // usuario aceptó y el que sale impreso, así que corregirlo en silencio sería
   // mostrarle una cosa y liquidar otra.
+  // Se declara afuera porque el riel elegido no solo valida: se persiste en la
+  // transacción para que el pay-out debite la MISMA moneda que se cotizó.
+  let railDecision = null;
   if (corridor.originCurrency === 'BOB' && corridor.payoutMethod === 'vitaWallet') {
     let expectedDest = null;
     try {
@@ -1319,6 +1322,7 @@ export async function initCrossBorderPayment(req, res) {
       // netDestination = USDC neto × tasa del riel − fija del riel: la misma
       // identidad con la que calculateQuote deriva destinationAmount.
       if (rail && serverUsdcTransit > 0) expectedDest = rail.netDestination;
+      railDecision = rail;
     } catch (priceErr) {
       // Fail-open deliberado: sin precios de Vita no podemos afirmar que esté
       // mal, y bloquear dejaría todos los envíos caídos. El monto que realmente
@@ -1686,6 +1690,14 @@ export async function initCrossBorderPayment(req, res) {
       // con el monto real de Harbor al crear el transfer (rateConfidence='exact').
       ...(quotedDestAmount   != null ? { destinationAmount: quotedDestAmount }         : {}),
       ...(quotedExchangeRate != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
+      // Riel de Vita decidido al cotizar (bloque 3d). Se congela acá para que el
+      // dispatch debite la misma moneda y no re-resuelva con tasas movidas.
+      ...(railDecision
+        ? {
+            vitaPayoutCurrency:  railDecision.currency,
+            vitaPayoutClpPerUsd: railDecision.clpPerUsd ?? null,
+          }
+        : {}),
 
       fees: {
         payinFee,
