@@ -74,7 +74,7 @@ import {
 }                             from '../utils/vitaErrorMapper.js';
 import { resolveClientDocument } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
-import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { selectHarborQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
@@ -1080,9 +1080,10 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       : null;
 
     if (!quoteData) {
-      // Fallback: usa pickSupportedQuote para evitar caer en métodos broken
-      // (ej. SEPA EU) cuando preferredMethod no está disponible.
-      const fallback = pickSupportedQuote(quotesList, corridor.destinationCountry);
+      // Fallback: usa la selección por preferencia para evitar caer en métodos
+      // broken (ej. SEPA EU) cuando preferredMethod no está disponible.
+      const seleccion = selectHarborQuote(quotesList, corridor.destinationCountry);
+      const fallback  = seleccion.quote;
       if (preferredMethod) {
         console.warn(
           '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
@@ -1090,6 +1091,30 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
           fallback?.payment_method ?? quotesList[0]?.payment_method,
         );
       }
+
+      // ⚠️ Acá el criterio se INVIERTE respecto de la cotización. En el quote, un
+      // riel degradado corta el flujo porque nadie pagó todavía. Acá el payin YA
+      // está cobrado: negarse dejaría la plata del usuario encerrada, que es peor
+      // que un payout caro. Así que se liquida y se grita, para que alguien mire.
+      if (seleccion.degraded) {
+        console.error('[tryOwlPayV2] riel preferido ausente CON PAYIN COBRADO — se liquida igual:', {
+          transactionId: transaction.transactionId,
+          corridorId:    corridor.corridorId,
+          preferido:     seleccion.preferredMethod,
+          elegido:       seleccion.method,
+          disponibles:   seleccion.available,
+        });
+        Sentry.captureMessage('Harbor: payout por riel caro con payin ya cobrado', {
+          level: 'error',
+          tags:  {
+            transactionId: transaction.transactionId,
+            corridorId:    corridor.corridorId,
+            preferido:     seleccion.preferredMethod,
+            elegido:       seleccion.method,
+          },
+        });
+      }
+
       quoteData = fallback ?? quotesList[0];
     }
     if (!quoteData) {
