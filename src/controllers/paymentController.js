@@ -963,6 +963,17 @@ export async function initCrossBorderPayment(req, res) {
         code:  'KYC_REQUIRED',
       });
     }
+    // Solo el riel Harbor. Es el único payout que hace un envío USDC on-chain real, y
+    // por eso el único donde el pago puede liquidarse desde la cuenta Stellar propia del
+    // usuario. En los corredores Vita el payout es una llamada API contra el saldo
+    // prefondeado de la SpA: no hay envío que redirigir, así que la segregación que
+    // justifica este método no existiría.
+    if (corridor.payoutMethod !== 'owlPay') {
+      return res.status(400).json({
+        error: 'Este destino todavía no admite el pago con saldo USDC. Usa QR o transferencia.',
+        code:  'WALLET_PAYIN_CORRIDOR_UNSUPPORTED',
+      });
+    }
   }
 
   // ── Payin manual SRL: el comprobante se sube DESPUÉS (spec §2.3) ───────────

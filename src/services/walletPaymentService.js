@@ -28,6 +28,7 @@ import mongoose from 'mongoose'
 import WalletUSDC        from '../models/WalletUSDC.js'
 import WalletTransaction from '../models/WalletTransaction.js'
 import Transaction       from '../models/Transaction.js'
+import User              from '../models/User.js'
 
 /** Estados terminales del payout que liberan la reserva (rollback). */
 const RELEASE_STATUSES = new Set(['failed', 'refunded', 'cancelled'])
@@ -326,8 +327,77 @@ export async function settleWalletPayins({ limit = 200 } = {}) {
   return { scanned: pending.length, confirmed, released }
 }
 
+// ── Origen del USDC del payout ──────────────────────────────────────────────────
+
+/**
+ * Dirección Stellar custodial del usuario. Falla permanente si no está provisionada:
+ * sin cuenta propia no hay desde dónde liquidar, y reintentar no lo arregla.
+ */
+async function getUserStellarAddress(userId) {
+  const user = await User.findById(userId).select('stellarAccount.publicKey').lean()
+  const publicKey = user?.stellarAccount?.publicKey
+  if (!publicKey) {
+    const err = bizError(409, 'El usuario no tiene cuenta Stellar provisionada.', 'NO_CUSTODIAL_ACCOUNT')
+    err.isPermanent = true
+    throw err
+  }
+  return publicKey
+}
+
+/**
+ * Liquidez disponible para un pago financiado con saldo del usuario.
+ *
+ * A diferencia del pago normal, acá NO se mira la tesorería: el USDC tiene que estar
+ * físicamente en la cuenta Stellar del usuario, porque es esa cuenta la que firma el
+ * envío. Tampoco se descuentan "payouts en vuelo" de la entidad, que son compromisos
+ * de la tesorería y no de esta cuenta.
+ *
+ * @returns {Promise<{ sourcePublicKey:string, onChain:number }>}
+ */
+export async function getWalletPayinLiquidity(transaction) {
+  const sourcePublicKey = await getUserStellarAddress(transaction.userId)
+  const { getStellarUSDCBalance } = await import('./stellarService.js')
+  const onChain = await getStellarUSDCBalance(sourcePublicKey)
+  return { sourcePublicKey, onChain }
+}
+
+/**
+ * Envía el USDC del payout desde la cuenta que corresponde según cómo se financió:
+ *
+ *   paymentSource 'bank'       → tesorería corporativa SRL (`sendUSDCToHarbor`).
+ *   paymentSource 'walletUSDC' → cuenta Stellar propia del usuario (`sendCustodialUSDC`),
+ *                                firmando con su llave bajo custodia KMS.
+ *
+ * Es el punto único donde se decide el origen de los fondos, para que los dos sitios
+ * que despachan a Harbor (envío inicial y reintento) no puedan divergir.
+ *
+ * Normaliza la respuesta al shape de `sendUSDCToHarbor` para que los call sites no
+ * tengan que distinguir. `existing` solo es fiable en el camino de tesorería: el envío
+ * custodial devuelve el hash tanto en el envío nuevo como en el acierto idempotente.
+ *
+ * @returns {Promise<{ hash:string, ledger:number|null, existing:boolean, from:'treasury'|'custodial' }>}
+ */
+export async function sendPayoutUSDC({ transaction, destinationAddress, amount, memo }) {
+  const transactionId = transaction.alytoTransactionId
+
+  if (transaction.paymentSource !== 'walletUSDC') {
+    const { sendUSDCToHarbor } = await import('./stellarService.js')
+    const result = await sendUSDCToHarbor({ destinationAddress, amount, memo, transactionId })
+    return { ...result, from: 'treasury' }
+  }
+
+  const sourcePublicKey = await getUserStellarAddress(transaction.userId)
+  const { sendCustodialUSDC } = await import('./custodyService.js')
+  const hash = await sendCustodialUSDC(
+    transaction.userId, sourcePublicKey, destinationAddress, amount, { memo },
+  )
+  return { hash, ledger: null, existing: false, from: 'custodial', sourcePublicKey }
+}
+
 export default {
   bobToUsdcDebit,
+  getWalletPayinLiquidity,
+  sendPayoutUSDC,
   reserveUSDCForPayment,
   confirmUSDCPayment,
   releaseUSDCReservation,

@@ -60,7 +60,6 @@ import FundingRecord from '../models/FundingRecord.js';
 import { HARBOR_MIN_USD, HARBOR_MAX_USD } from '../routing/euAmountRouter.js';
 import {
   registerAuditTrail,
-  sendUSDCToHarbor,
   getStellarUSDCBalance,
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
@@ -80,7 +79,11 @@ import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
 import { uploadBuffer } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
-import { settleWalletPayinForTransaction } from '../services/walletPaymentService.js';
+import {
+  settleWalletPayinForTransaction,
+  sendPayoutUSDC,
+  getWalletPayinLiquidity,
+} from '../services/walletPaymentService.js';
 import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -907,11 +910,13 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       return { provider: 'owlpay', status: 'payout_pending_usdc_send', transferId: transaction.harborTransfer.transferId };
     }
 
-    const stellarResult = await sendUSDCToHarbor({
+    // El origen depende de cómo se financió el pago: tesorería, o la cuenta Stellar del
+    // propio usuario cuando lo pagó con su saldo (ver sendPayoutUSDC).
+    const stellarResult = await sendPayoutUSDC({
+      transaction,
       destinationAddress: retryAddress,
       amount:             retryAmount,
       memo:               retryMemo,
-      transactionId:      transaction.alytoTransactionId,
     });
 
     transaction.stellarTxHash = stellarResult.hash;
@@ -928,6 +933,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
         memo:     retryMemo,
         existing: stellarResult.existing ?? false,
         retry:    true,
+        // Desde qué cuenta salió el USDC: 'treasury' o 'custodial' (la del usuario).
+        // Queda en el asiento porque es la evidencia de que un pago financiado con saldo
+        // se liquidó contra la cuenta segregada del usuario y no contra la tesorería.
+        from:     stellarResult.from ?? 'treasury',
+        ...(stellarResult.sourcePublicKey ? { source: stellarResult.sourcePublicKey } : {}),
       },
       receivedAt: new Date(),
     });
@@ -963,46 +973,79 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // es un libro de trazabilidad de origen, NO una tranca de pago. Esta fórmula es
   // idéntica a la del panel de previsión (getUSDCForecast → availableNow), de modo
   // que lo que el admin ve disponible es exactamente lo que el motor autoriza.
-  const [onChainBalance, inflightAgg] = await Promise.all([
-    getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
-    Transaction.aggregate([
-      {
-        $match: {
-          legalEntity: entity,
-          status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
+  //
+  // Pago financiado con saldo del usuario (`paymentSource:'walletUSDC'`): la fuente de
+  // fondos NO es la tesorería sino la cuenta Stellar propia del usuario, que es la que
+  // firma el envío. Por eso se mide SU saldo on-chain y no se descuentan los payouts en
+  // vuelo de la entidad, que son compromisos de la tesorería y no de esa cuenta. Medir
+  // la tesorería acá bloquearía un pago que el usuario sí puede cubrir, o peor,
+  // autorizaría uno que su cuenta no cubre.
+  //
+  // Tampoco se suma el +1 USDC de reserva: los fees de red se pagan en XLM y los cubre
+  // la channelAccount vía Fee Bump, así que exigirle al usuario 1 USDC extra le impediría
+  // gastar su saldo completo.
+  const isWalletPayin = transaction.paymentSource === 'walletUSDC';
+
+  let usdcBalance;
+  let needed;
+  if (isWalletPayin) {
+    const { sourcePublicKey, onChain } = await getWalletPayinLiquidity(transaction);
+    usdcBalance = onChain;
+    needed      = netAmountUSD;
+    console.log('[OwlPay] Pre-check liquidez sobre cuenta del usuario:',
+      { source: sourcePublicKey, onChain, needed, tx: transaction.alytoTransactionId });
+  } else {
+    const [onChainBalance, inflightAgg] = await Promise.all([
+      getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
+      Transaction.aggregate([
+        {
+          $match: {
+            legalEntity: entity,
+            status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
+          },
         },
-      },
-      { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
-    ]),
-  ]);
-  const inflight    = inflightAgg[0]?.total ?? 0;
-  const usdcBalance = Math.max(0, onChainBalance - inflight);
-  const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
+        { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
+      ]),
+    ]);
+    const inflight = inflightAgg[0]?.total ?? 0;
+    usdcBalance = Math.max(0, onChainBalance - inflight);
+    needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
+  }
 
   if (usdcBalance < needed) {
     console.warn('[OwlPay] Insufficient USDC balance:',
       { usdcBalance, needed, tx: transaction.alytoTransactionId });
 
     transaction.status       = 'pending_funding';
-    transaction.statusReason =
-      `Insufficient USDC: has ${usdcBalance}, needs ${needed}`;
+    transaction.statusReason = isWalletPayin
+      ? `Insufficient USDC en la cuenta del usuario: tiene ${usdcBalance}, necesita ${needed}`
+      : `Insufficient USDC: has ${usdcBalance}, needs ${needed}`;
     await transaction.save();
 
     broadcastToAdmins('tx_manual_payout', {
       transactionId: transaction.alytoTransactionId,
-      reason:        'pending_funding_usdc',
+      reason:        isWalletPayin ? 'pending_funding_usdc_custodial' : 'pending_funding_usdc',
       required:      needed,
       available:     usdcBalance,
     });
 
     try {
+      // La cuenta a fondear es distinta según cómo se financió el pago. Decir "fondea la
+      // wallet SRL" cuando el que no tiene saldo es el usuario mandaría al operador a
+      // mover dinero al lugar equivocado.
+      const dondeFondear = isWalletPayin
+        ? `<p>El saldo del usuario está acreditado en el ledger pero el USDC no está en su ` +
+          `cuenta Stellar. Suele ser saldo convertido desde BOB, cuyo respaldo sigue en ` +
+          `tesorería: hay que trasladarlo a la cuenta del usuario y reintentar el payout. ` +
+          `La reserva del saldo queda retenida mientras tanto.</p>`
+        : `<p>Fondea la wallet Stellar SRL y vuelve a ejecutar el payout.</p>`;
       await sendRawEmail(
         process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
         `⚠️ USDC Liquidez Insuficiente — ${transaction.alytoTransactionId}`,
         `<p>Transaction <strong>${transaction.alytoTransactionId}</strong> requiere ` +
         `<strong>${needed.toFixed(2)} USDC</strong>, pero hay ` +
         `<strong>${usdcBalance.toFixed(2)} USDC</strong> disponibles.</p>` +
-        `<p>Fondea la wallet Stellar SRL y vuelve a ejecutar el payout.</p>`,
+        dondeFondear,
       );
     } catch (e) { console.error('[tryOwlPayV2] Error email admin (pending_funding):', e.message); }
 
@@ -1302,11 +1345,13 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       `No es posible enviar USDC sin memo. Contactar OwlPay soporte.`,
     );
   }
-  const stellarResult  = await sendUSDCToHarbor({
+  // El origen depende de cómo se financió el pago: tesorería, o la cuenta Stellar del
+  // propio usuario cuando lo pagó con su saldo (ver sendPayoutUSDC).
+  const stellarResult  = await sendPayoutUSDC({
+    transaction,
     destinationAddress: instructionAddress,
     amount:             netAmountUSD,
     memo:               instructionMemo,
-    transactionId:      transaction.alytoTransactionId,
   });
 
   transaction.stellarTxHash = stellarResult.hash;
@@ -1322,12 +1367,15 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       amount:   netAmountUSD,
       memo:     instructionMemo,
       existing: stellarResult.existing ?? false,
+      // Desde qué cuenta salió el USDC: 'treasury' o 'custodial' (la del usuario).
+      from:     stellarResult.from ?? 'treasury',
+      ...(stellarResult.sourcePublicKey ? { source: stellarResult.sourcePublicKey } : {}),
     },
     receivedAt: new Date(),
   });
   await transaction.save();
 
-  console.log('[OwlPay] USDC sent:', stellarResult.hash);
+  console.log('[OwlPay] USDC sent:', stellarResult.hash, '| origen:', stellarResult.from ?? 'treasury');
   return {
     provider:     'owlpay',
     status:       'payout_sent',
