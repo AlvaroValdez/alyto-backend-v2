@@ -34,6 +34,7 @@ import { calculateQuote, toPublicFees } from './quoteCalculator.js';
 import { applyVitaRail } from './vitaRailResolver.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { BoundedCache }    from '../utils/boundedCache.js';
 import Sentry              from './sentry.js';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
@@ -64,7 +65,13 @@ const vitaCache = {
 
 // ─── Cache de tasas Harbor para el WS ────────────────────────────────────────
 // Key: "DEST_COUNTRY|DEST_CURRENCY|TRAMO_USD" — TTL: REFRESH_INTERVAL_MS (60s)
-const harborRateCache = new Map();
+//
+// Acotado a propósito: desde que el monto entra en la clave, el número de claves
+// posibles dejó de ser "un puñado de destinos" y pasó a ser destinos × tramos
+// (hasta ~2.000 tramos por destino con el techo de 9.998 de Harbor). Un Map pelado
+// nunca borra las entradas vencidas, así que crecería sin tope en un proceso que
+// vive semanas. BoundedCache expira por TTL y además desaloja por tamaño.
+const harborRateCache = new BoundedCache(500, REFRESH_INTERVAL_MS);
 
 /**
  * Ancho del tramo (en USD) con el que se agrupan montos en el cache.
@@ -105,8 +112,9 @@ async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid, 
 
   const tramo  = Math.floor(amount / HARBOR_PROBE_BUCKET_USD) * HARBOR_PROBE_BUCKET_USD;
   const key    = `${destCountry.toUpperCase()}|${destCurrency.toUpperCase()}|${tramo}`;
+  // BoundedCache ya descarta lo vencido: si devuelve algo, sirve.
   const cached = harborRateCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) return cached;
+  if (cached) return cached;
 
   const quotes = await getHarborQuote({
     sourceAmount:   amount,
@@ -130,7 +138,6 @@ async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid, 
   const entry = {
     exchangeRate:  quote.exchangeRate,
     paymentMethod: quote.paymentMethod,
-    expiresAt:     Date.now() + REFRESH_INTERVAL_MS,
   };
   harborRateCache.set(key, entry);
   return entry;
