@@ -20,6 +20,24 @@
  * El EU auto-router (euAmountRouter.js) usa harbor.minAmountUSD para su rango, así que
  * al fijar Harbor en $40 el ruteo queda: Harbor [40, 9998] USD / Vita fuera del rango.
  *
+ * ⚠️ OJO ANTES DE RE-CORRERLO (2026-10-05): la premisa de la línea de Harbor es FALSA.
+ * «providerMin = $30 confirmado vs API [30,9998]» vale para el TECHO, no para el piso:
+ * el piso de Harbor es **por ruta**. `bo-jp` exige 75,02 y `bo-us` 50,11 sobre el neto,
+ * o sea 2,4× y 1,7× el supuesto $30. Calcular $40 desde un piso global dejaba esas dos
+ * rutas cobrando un payin que el payout no podía ejecutar.
+ *
+ * Re-correr este script NO rompe la protección —el piso real vive aparte, en
+ * `TransactionConfig.providerFloorUSD`, y `providerFloorUSD()` toma el mayor de los
+ * dos— pero sí reinstala la creencia equivocada en los `minAmountUSD`. Si se toca
+ * esto, actualizar también los pisos por ruta:
+ *
+ *   node scripts/harbor-route-floors.mjs            # sondea e informa
+ *   node scripts/harbor-route-floors.mjs --apply    # escribe providerFloorUSD
+ *
+ * Y tener presente que esos pisos son valores VIVOS: el de JP se movió de 75,02 a
+ * 75,05 entre dos sondeos del mismo día, porque parece ser un mínimo en moneda
+ * destino convertido a USD a la tasa del momento.
+ *
  * USO: node --env-file=.env scripts/set-coherent-minimums.mjs   (solo lectura DB salvo updateMany)
  */
 
