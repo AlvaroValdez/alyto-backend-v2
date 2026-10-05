@@ -39,6 +39,8 @@ import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
+import { resolveVitaRail } from '../services/vitaRailResolver.js';
+import { validateQuotedDestinationAmount } from '../services/quoteValidation.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -1241,6 +1243,68 @@ export async function initCrossBorderPayment(req, res) {
           extra: { quoted: quotedUsdcTransitAmount, server: serverUsdcTransit, corridorId, userId: String(userId) },
         });
       }
+    }
+  }
+
+  // ── 3d. destinationAmount: validado contra el riel que debitará el pay-out ──
+  // Hasta acá el `destinationAmount` del body se persistía tal cual, así que un
+  // cliente podía declarar el monto de destino que quisiera y quedaba en el
+  // registro y en el Comprobante Oficial. Además, cuando el corredor elija riel
+  // CLP (TransactionConfig.vitaPayoutCurrency) la cotización tiene que haberse
+  // calculado con ESE riel: si no, el beneficiario recibe algo distinto de lo
+  // prometido — más en 13 destinos, pero menos en CR por encima de ~232 USD.
+  //
+  // A diferencia del bloque 3c, fuera de tolerancia NO sobreescribimos con el
+  // valor del servidor: rechazamos y pedimos re-cotizar. `digitalAssetAmount` es
+  // interno y el usuario no lo ve; `destinationAmount` es el número que el
+  // usuario aceptó y el que sale impreso, así que corregirlo en silencio sería
+  // mostrarle una cosa y liquidar otra.
+  if (corridor.originCurrency === 'BOB' && corridor.payoutMethod === 'vitaWallet') {
+    let expectedDest = null;
+    try {
+      const vitaPrices = await getPrices();
+      const rail = resolveVitaRail({
+        amountUSD:           serverUsdcTransit ?? 0,
+        destinationCountry:  corridor.destinationCountry,
+        destinationCurrency: corridor.destinationCurrency,
+        mode:                corridor.vitaPayoutCurrency ?? 'usd',
+        prices:              vitaPrices,
+      });
+      // netDestination = USDC neto × tasa del riel − fija del riel: la misma
+      // identidad con la que calculateQuote deriva destinationAmount.
+      if (rail && serverUsdcTransit > 0) expectedDest = rail.netDestination;
+    } catch (priceErr) {
+      // Fail-open deliberado: sin precios de Vita no podemos afirmar que esté
+      // mal, y bloquear dejaría todos los envíos caídos. El monto que realmente
+      // se despacha lo recalcula dispatchPayout, así que la exposición es el
+      // registro, no el dinero.
+      console.warn('[CrossBorder] No se pudo recalcular destinationAmount:', priceErr.message);
+    }
+
+    const destCheck = validateQuotedDestinationAmount({
+      quoted:   quotedDestAmount,
+      expected: expectedDest,
+    });
+
+    if (destCheck.reason === 'no_reference') {
+      console.warn('[CrossBorder] destinationAmount sin verificar (Vita no respondió):', {
+        quoted: quotedDestAmount, corridorId, userId: String(userId),
+      });
+    }
+
+    if (!destCheck.ok) {
+      console.warn('[CrossBorder] ⚠️ destinationAmount del cliente rechazado:', {
+        ...destCheck, corridorId, userId: String(userId),
+      });
+      Sentry.captureMessage('destinationAmount del cliente fuera de tolerancia (posible manipulación)', {
+        level: 'warning',
+        extra: { ...destCheck, corridorId, userId: String(userId) },
+      });
+      return res.status(409).json({
+        error:    'La cotización ya no es válida. Actualizá la tasa y volvé a confirmar.',
+        code:     'QUOTE_MISMATCH',
+        expected: destCheck.expected,
+      });
     }
   }
 
