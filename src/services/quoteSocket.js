@@ -63,16 +63,53 @@ const vitaCache = {
 };
 
 // ─── Cache de tasas Harbor para el WS ────────────────────────────────────────
-// Key: "DEST_COUNTRY|DEST_CURRENCY" — TTL: REFRESH_INTERVAL_MS (default 60s)
+// Key: "DEST_COUNTRY|DEST_CURRENCY|TRAMO_USD" — TTL: REFRESH_INTERVAL_MS (60s)
 const harborRateCache = new Map();
 
-async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid) {
-  const key    = `${destCountry.toUpperCase()}|${destCurrency.toUpperCase()}`;
+/**
+ * Ancho del tramo (en USD) con el que se agrupan montos en el cache.
+ *
+ * El monto entra en la key porque la tasa de Harbor DEPENDE del monto, pero no
+ * queremos una llamada por cada tecla que toca el usuario: dos montos del mismo
+ * tramo comparten el sondeo. Con 5 USD el error que introduce el tramo es muy
+ * inferior al que producía sondear siempre con 100.
+ */
+const HARBOR_PROBE_BUCKET_USD = 5;
+
+/**
+ * Tasa indicativa de Harbor para un monto dado.
+ *
+ * ⚠️ `sourceAmount` tiene que ser el USDC neto REAL de la operación, no un monto
+ * de muestra. Antes se sondeaba siempre con 100 y se cacheaba sólo por destino,
+ * y eso falseaba la cotización de dos maneras:
+ *
+ *   1. **Métodos con fee fijo.** Harbor cobra fijo en los wires, y la tasa que
+ *      devuelve lo lleva amortizado. En `bo-us`, WIRE da 0,75 sondeado con 100
+ *      (≈$25 fijos sobre 100) y 0,497 sobre un neto de 50. Cotizábamos con la
+ *      primera y liquidábamos con la segunda: el usuario veía casi el doble de
+ *      lo que iba a recibir.
+ *   2. **Rutas con piso propio.** Como 100 supera el piso de cualquier ruta, el
+ *      sondeo SIEMPRE respondía con tasa válida — incluso para montos que Harbor
+ *      iba a rechazar (`bo-jp` exige 75,02). La cotización se mostraba sana y el
+ *      rechazo aparecía recién en el payout, con el cobro ya tomado.
+ *
+ * Sondeando con el monto real, una ruta que no acepta el monto ahora FALLA acá y
+ * el WS responde PROVIDER_UNAVAILABLE en vez de inventar una tasa. El guard de
+ * mínimo (`resolveEffectiveMinimum`) corta antes en los casos que ya conocemos.
+ */
+async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid, sourceAmount) {
+  const amount = Number(sourceAmount);
+  if (!isFinite(amount) || amount <= 0) {
+    throw new Error(`Monto inválido para sondear Harbor: ${sourceAmount}`);
+  }
+
+  const tramo  = Math.floor(amount / HARBOR_PROBE_BUCKET_USD) * HARBOR_PROBE_BUCKET_USD;
+  const key    = `${destCountry.toUpperCase()}|${destCurrency.toUpperCase()}|${tramo}`;
   const cached = harborRateCache.get(key);
   if (cached && Date.now() < cached.expiresAt) return cached;
 
   const quotes = await getHarborQuote({
-    sourceAmount:   100,
+    sourceAmount:   amount,
     sourceCurrency: 'USDC',
     sourceChain:    process.env.OWLPAY_SOURCE_CHAIN ?? 'stellar',
     destCountry,
@@ -396,15 +433,30 @@ async function computeQuote(state) {
       // 'EU' no es un código ISO-2 válido para Harbor — resolveHarborCountry
       // lo convierte a 'DE' (u otro país SEPA extraído del IBAN si disponible)
       const harborDestCountry = resolveHarborCountry(destinationCountry);
+
+      // USDC neto que Harbor va a recibir de verdad. Mismo cálculo que el Paso A
+      // de calculateBOBQuote (paymentController) — hay que sondear con ESTE monto
+      // y no con uno de muestra, porque la tasa de Harbor depende del monto.
+      const netBOB      = amount - round2(payinFee + alytoCSpread + fixedFee + profitRetention);
+      const usdcTransit = round2(netBOB / bobPerUsdc);
+
+      if (usdcTransit <= 0) {
+        console.warn('[Alyto WS] Monto no cubre los fees del corredor:', { amount, netBOB });
+        return null;
+      }
+
       let harborRateData;
       try {
         harborRateData = await getHarborIndicativeRate(
           harborDestCountry,
           corridor.destinationCurrency,
           customerUuid,
+          usdcTransit,
         );
       } catch (err) {
-        console.warn('[Alyto WS] Harbor rate unavailable:', err.message);
+        // Incluye el caso "monto por debajo del piso de la ruta": preferimos no
+        // cotizar antes que mostrar una tasa que el payout no va a poder honrar.
+        console.warn('[Alyto WS] Harbor rate unavailable:', { usdcTransit, error: err.message });
         return {
           type:    'quote_error',
           code:    'PROVIDER_UNAVAILABLE',

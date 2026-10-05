@@ -316,6 +316,35 @@ const transactionConfigSchema = new Schema(
       default: null,
     },
     /**
+     * Piso REAL del proveedor para ESTA ruta, en USD, medido sobre el monto NETO
+     * que Alyto le envía (después de fees) — no sobre lo que teclea el usuario.
+     *
+     * Existe porque el piso del proveedor no siempre es global. `providerFloorUSD()`
+     * deriva uno genérico (Harbor → HARBOR_MIN_USD, hoy 31; Vita → min_amount del
+     * país), pero Harbor publica además mínimos POR RUTA que ese genérico no ve:
+     * bo-jp exige `source.amount >= 75.02` contra los 31 que asumíamos. Como el
+     * mínimo configurado (40 USD ≈ 481 BOB) ya quedaba por encima del piso derivado
+     * (≈407 BOB), el guard nunca se disparaba: el usuario cotizaba $50, pagaba en
+     * BOB y el payout moría en Harbor con el cobro ya tomado.
+     *
+     * Sólo SUBE el piso: `providerFloorUSD()` toma el máximo entre el derivado y
+     * este valor, así un override desactualizado nunca desprotege si el proveedor
+     * sube su mínimo por su cuenta.
+     *
+     * ⚠️ Es un valor VIVO, no una constante. El 75,02 de JP tiene toda la pinta de
+     * ser un mínimo denominado en moneda destino convertido a USD a la tasa del
+     * día, así que se mueve con el FX. Re-descubrirlo con
+     * `scripts/harbor-route-floors.mjs` en vez de confiar en que lo escrito hace
+     * meses sigue valiendo.
+     *
+     * Null = sin piso propio conocido; se usa el derivado del proveedor.
+     */
+    providerFloorUSD: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    /**
      * Monto máximo permitido por transacción, en moneda de origen.
      * Null = sin límite superior (sujeto a KYC del usuario).
      */

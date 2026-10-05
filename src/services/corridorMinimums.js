@@ -77,15 +77,15 @@ export function minOriginForFloor({ floorUSD, originPerUsd, feePct = 0, fixedOri
 }
 
 /**
- * Piso del proveedor en USD para un corredor, leído de la fuente REAL:
+ * Piso GENÉRICO del proveedor: el que se deduce sin saber nada de la ruta.
  *   - Vita  → min_amount del rail que ejecutará el dispatch (withdrawal | vita_sent)
- *   - Harbor→ HARBOR_MIN_USD (límite de la API, hoy 31)
+ *   - Harbor→ HARBOR_MIN_USD (límite global de la API, hoy 31)
  *
- * @param {object} corridor
- * @param {object} [vitaPrices] respuesta de getPrices() (evita re-fetch si ya se tiene)
- * @returns {number|null} piso en USD, o null si el proveedor no declara uno
+ * ⚠️ En Harbor esto es un piso de FAMILIA, no de ruta: la API además exige mínimos
+ * por corredor que esta constante no conoce (JP pide 75,02 contra los 31 genéricos).
+ * Para eso existe el override `corridor.providerFloorUSD`, que compone la pública.
  */
-export function providerFloorUSD(corridor, vitaPrices = null) {
+function derivedProviderFloorUSD(corridor, vitaPrices = null) {
   if (corridor?.payoutMethod === 'owlPay') return HARBOR_MIN_USD;
   if (corridor?.payoutMethod !== 'vitaWallet') return null;   // anchorBolivia: manual
 
@@ -100,6 +100,31 @@ export function providerFloorUSD(corridor, vitaPrices = null) {
 
   const min = Number(attrs?.min_amount?.[key] ?? NaN);
   return (isFinite(min) && min > 0) ? min : null;
+}
+
+/**
+ * Piso del proveedor en USD para un corredor: el MAYOR entre el derivado de la
+ * familia del proveedor y el piso propio de la ruta (`corridor.providerFloorUSD`).
+ *
+ * Se toma el máximo y no el override a secas porque los dos valores envejecen en
+ * direcciones opuestas: el derivado de Vita es vivo (sale de /prices en cada
+ * llamada) mientras que el override es un número escrito a mano que puede quedar
+ * viejo. Quedarse sólo con el override desprotege si el proveedor sube su mínimo;
+ * quedarse sólo con el derivado desprotege en las rutas que el genérico no ve. El
+ * máximo es el único que nunca BAJA el piso, que es la invariante de este módulo.
+ *
+ * @param {object} corridor
+ * @param {object} [vitaPrices] respuesta de getPrices() (evita re-fetch si ya se tiene)
+ * @returns {number|null} piso en USD, o null si no se conoce ninguno
+ */
+export function providerFloorUSD(corridor, vitaPrices = null) {
+  const derived  = derivedProviderFloorUSD(corridor, vitaPrices);
+  const override = Number(corridor?.providerFloorUSD ?? NaN);
+  const propio   = (isFinite(override) && override > 0) ? override : null;
+
+  if (propio  == null) return derived;
+  if (derived == null) return propio;
+  return Math.max(derived, propio);
 }
 
 /**
