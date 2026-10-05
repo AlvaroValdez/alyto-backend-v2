@@ -6,8 +6,9 @@
  * elegidos para que el cruce de Costa Rica caiga en un monto cómodo de testear.
  */
 
+import { jest } from '@jest/globals';
 import '../setup.env.js';
-import { resolveVitaRail } from '../../src/services/vitaRailResolver.js';
+import { resolveVitaRail, applyVitaRail } from '../../src/services/vitaRailResolver.js';
 
 // 1 USD = 1000 CLP (clp_sell.us = 0.001)
 //
@@ -221,5 +222,86 @@ describe('resolveVitaRail — bordes', () => {
     };
     const r = resolveVitaRail({ ...base, amountUSD: 100, mode: 'clp', prices: roto });
     expect(r.currency).toBe('usd');   // el riel clp quedó inválido
+  });
+});
+
+describe('applyVitaRail — segunda pasada compartida por el WS y los dos REST', () => {
+  const corridorVita = {
+    payoutMethod: 'vitaWallet', destinationCurrency: 'COP', vitaPayoutCurrency: 'clp',
+  };
+  // Primera pasada: cotizada con el riel usd (3219.25 / fija 3495)
+  const quoteUsd = { digitalAssetAmount: 100, destinationAmount: 100 * 3219.25 - 3495 };
+  const comun = {
+    destinationCountry: 'CO', prices: PRICES,
+    rate: 3219.25, fixedCost: 3495, validUntil: 'v1',
+  };
+
+  it('re-cotiza con el riel elegido y devuelve sus valores', () => {
+    const rerun = (rate, fixedFee) => ({ digitalAssetAmount: 100, destinationAmount: 100 * rate - fixedFee });
+    const out = applyVitaRail({ ...comun, quote: quoteUsd, corridor: corridorVita, rerun });
+    expect(out.rail.currency).toBe('clp');
+    expect(out.rate).toBeCloseTo(3250, 4);
+    expect(out.fixedCost).toBe(3000);
+    expect(out.quote.destinationAmount).toBeCloseTo(100 * 3250 - 3000, 2);
+    expect(out.validUntil).toBe('2026-10-05T02:30:00.000Z');  // el del riel
+  });
+
+  it('no toca nada si el corredor no es vitaWallet', () => {
+    const rerun = jest.fn();
+    const out = applyVitaRail({
+      ...comun, quote: quoteUsd, rerun,
+      corridor: { payoutMethod: 'anchorBolivia', destinationCurrency: 'BOB' },
+    });
+    expect(rerun).not.toHaveBeenCalled();
+    expect(out.quote).toBe(quoteUsd);
+    expect(out.rail).toBeNull();
+  });
+
+  it('no re-cotiza si el riel resuelto coincide con el ya usado', () => {
+    const rerun = jest.fn();
+    const out = applyVitaRail({
+      ...comun, quote: quoteUsd, rerun,
+      corridor: { ...corridorVita, vitaPayoutCurrency: 'usd' },
+    });
+    expect(rerun).not.toHaveBeenCalled();
+    expect(out.quote).toBe(quoteUsd);
+    expect(out.rail.currency).toBe('usd');
+  });
+
+  it('mantiene la cotización anterior si el re-cálculo lanza', () => {
+    const out = applyVitaRail({
+      ...comun, quote: quoteUsd, corridor: corridorVita,
+      rerun: () => { throw new Error('monto insuficiente'); },
+    });
+    expect(out.quote).toBe(quoteUsd);
+    expect(out.rate).toBe(3219.25);
+  });
+
+  it('mantiene la anterior si el re-cálculo deja destino <= 0', () => {
+    const out = applyVitaRail({
+      ...comun, quote: quoteUsd, corridor: corridorVita,
+      rerun: () => ({ digitalAssetAmount: 100, destinationAmount: 0 }),
+    });
+    expect(out.quote).toBe(quoteUsd);
+    expect(out.rate).toBe(3219.25);
+  });
+
+  it('no hace nada sin USDC neto en la primera pasada', () => {
+    const rerun = jest.fn();
+    const out = applyVitaRail({
+      ...comun, corridor: corridorVita, rerun,
+      quote: { digitalAssetAmount: 0, destinationAmount: 0 },
+    });
+    expect(rerun).not.toHaveBeenCalled();
+    expect(out.rail).toBeNull();
+  });
+
+  it('traza la decisión por onLog', () => {
+    const onLog = jest.fn();
+    applyVitaRail({
+      ...comun, quote: quoteUsd, corridor: corridorVita, onLog,
+      rerun: (rate, fixedFee) => ({ digitalAssetAmount: 100, destinationAmount: 100 * rate - fixedFee }),
+    });
+    expect(onLog).toHaveBeenCalledWith(expect.stringContaining('clp'), expect.objectContaining({ rate: 3250 }));
   });
 });

@@ -186,4 +186,71 @@ export function resolveVitaRail({
   return conTraza(ganador);
 }
 
-export default { resolveVitaRail };
+/**
+ * Segunda pasada: re-cotiza con el riel elegido si difiere del que se usó.
+ *
+ * Existe porque el riel NO se puede resolver antes de cotizar: el modo 'auto'
+ * compara el neto del monto, y el USDC neto lo produce calculateQuote.
+ * Estimarlo ignorando los fees (~9%) elegiría mal cerca del cruce de Costa Rica
+ * (~232 USD), así que primero se cotiza y después se resuelve con el monto exacto.
+ *
+ * Centralizado a propósito: lo consumen el WS y los dos sitios REST. Tres copias
+ * de esta lógica repetirían el problema que ya arrastra la fórmula de fees.
+ *
+ * @param {object}   p
+ * @param {object}   p.quote               Resultado de la primera pasada de calculateQuote
+ * @param {object}   p.corridor            TransactionConfig del corredor
+ * @param {string}   p.destinationCountry  ISO alpha-2
+ * @param {object}   p.prices              Respuesta de getPrices()
+ * @param {number}   p.rate                Tasa usada en la primera pasada
+ * @param {number}   p.fixedCost           Fija usada en la primera pasada
+ * @param {string?}  p.validUntil          validUntil de la primera pasada
+ * @param {Function} p.rerun               (rate, fixedFee) => quote — re-ejecuta calculateQuote
+ * @param {Function} [p.onLog]             (mensaje, extra) para trazar la decisión
+ * @returns {{ quote, rate, fixedCost, validUntil, rail }} valores ya resueltos
+ */
+export function applyVitaRail({
+  quote, corridor, destinationCountry, prices,
+  rate, fixedCost, validUntil, rerun, onLog = null,
+}) {
+  const sinCambio = { quote, rate, fixedCost, validUntil, rail: null };
+
+  // anchorBolivia comparte la rama de cotización pero no pasa por Vita.
+  if (corridor?.payoutMethod !== 'vitaWallet') return sinCambio;
+  if (!(quote?.digitalAssetAmount > 0)) return sinCambio;
+
+  const rail = resolveVitaRail({
+    amountUSD:           quote.digitalAssetAmount,
+    destinationCountry,
+    destinationCurrency: corridor.destinationCurrency,
+    mode:                corridor.vitaPayoutCurrency ?? 'usd',
+    prices,
+  });
+
+  if (!rail) return sinCambio;
+  if (rail.rate === rate && rail.fixedCost === fixedCost) return { ...sinCambio, rail };
+
+  try {
+    const reQuote = rerun(rail.rate, rail.fixedCost);
+    // Si el re-cálculo no deja monto entregable, nos quedamos con el anterior en
+    // vez de devolver una cotización inválida.
+    if (!(reQuote?.destinationAmount > 0)) return { ...sinCambio, rail };
+
+    onLog?.(`riel Vita ${rail.currency} para ${destinationCountry}`, {
+      rate: rail.rate, fixedCost: rail.fixedCost, dest: reQuote.destinationAmount,
+    });
+
+    return {
+      quote:      reQuote,
+      rate:       rail.rate,
+      fixedCost:  rail.fixedCost,
+      validUntil: rail.validUntil ?? validUntil,
+      rail,
+    };
+  } catch (err) {
+    onLog?.(`re-quote con riel ${rail.currency} rechazado, se mantiene el anterior`, { error: err.message });
+    return { ...sinCambio, rail };
+  }
+}
+
+export default { resolveVitaRail, applyVitaRail };

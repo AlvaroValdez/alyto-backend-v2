@@ -45,7 +45,7 @@ import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
-import { resolveVitaRail } from '../services/vitaRailResolver.js';
+import { resolveVitaRail, applyVitaRail } from '../services/vitaRailResolver.js';
 import { validateQuotedDestinationAmount } from '../services/quoteValidation.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
@@ -2346,16 +2346,18 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     providerMeta  = { providerQuoteId: null, rateSource: 'vita', rateExpiresAt: null, rateConfidence: 'estimated' };
   }
 
+  const correrQuote = (rate, fixedFee) => calculateQuote({
+    amount, corridor, bobPerUsdc,
+    providerRate:     rate,
+    // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
+    // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
+    providerFixedFee: fixedFee,
+    accountType:      req.user?.accountType,
+  });
+
   let quote;
   try {
-    quote = calculateQuote({
-      amount, corridor, bobPerUsdc,
-      providerRate:     usdToDestRate,
-      // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
-      // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
-      providerFixedFee: vitaFixedCost,
-      accountType:      req.user?.accountType,
-    });
+    quote = correrQuote(usdToDestRate, vitaFixedCost);
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -2364,6 +2366,19 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   if (quote.destinationAmount <= 0) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
+
+  // Riel de Vita — el WS y este endpoint tienen que coincidir, o el cerrojo del
+  // create rechazaría con 409 lo que cotizó el fallback REST.
+  ({ quote, rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = applyVitaRail({
+    quote, corridor,
+    destinationCountry: dest,
+    prices:     vitaResponse,
+    rate:       usdToDestRate,
+    fixedCost:  vitaFixedCost,
+    validUntil,
+    rerun:      correrQuote,
+    onLog:      (msg, extra) => console.info('[Quote BOB] ' + msg, extra),
+  }));
 
   const alytoProfitUSDC = round2(
     (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
@@ -2727,20 +2742,23 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+    // let: el riel de Vita puede reemplazarlos en la segunda pasada.
+    let { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
 
     // ── Quote unificado — canonical formula (spec v1.0 §3.2) ─────────────────
+    const correrQuote = (rate, fixedFee) => calculateQuote({
+      amount,
+      corridor,
+      bobPerUsdc,
+      providerRate:     rate,
+      // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
+      providerFixedFee: fixedFee,
+      accountType:      req.user?.accountType,
+    });
+
     let quote;
     try {
-      quote = calculateQuote({
-        amount,
-        corridor,
-        bobPerUsdc,
-        providerRate:     usdcToDestRate,
-        // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
-        providerFixedFee: vitaFixedCost,
-        accountType:      req.user?.accountType,
-      });
+      quote = correrQuote(usdcToDestRate, vitaFixedCost);
     } catch (err) {
       console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -2749,6 +2767,18 @@ export async function getQuote(req, res) {
     if (quote.destinationAmount <= 0) {
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
     }
+
+    // Riel de Vita — mismo resolver que el WS y que el cerrojo del create.
+    ({ quote, rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = applyVitaRail({
+      quote, corridor,
+      destinationCountry: dest,
+      prices:     vitaResponse,
+      rate:       usdcToDestRate,
+      fixedCost:  vitaFixedCost,
+      validUntil,
+      rerun:      correrQuote,
+      onLog:      (msg, extra) => console.info('[Alyto Quote] ' + msg, extra),
+    }));
 
     // Provider-aware override (mismo helper que calculateBOBQuote).
     const providerMeta = await resolveProviderQuote({
