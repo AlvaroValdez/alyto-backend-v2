@@ -39,6 +39,8 @@ import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
+import { resolveVitaRail, applyVitaRail } from '../services/vitaRailResolver.js';
+import { validateQuotedDestinationAmount } from '../services/quoteValidation.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 
 // ─── Multer: almacenamiento en memoria para comprobantes ─────────────────────
@@ -1244,6 +1246,72 @@ export async function initCrossBorderPayment(req, res) {
     }
   }
 
+  // ── 3d. destinationAmount: validado contra el riel que debitará el pay-out ──
+  // Hasta acá el `destinationAmount` del body se persistía tal cual, así que un
+  // cliente podía declarar el monto de destino que quisiera y quedaba en el
+  // registro y en el Comprobante Oficial. Además, cuando el corredor elija riel
+  // CLP (TransactionConfig.vitaPayoutCurrency) la cotización tiene que haberse
+  // calculado con ESE riel: si no, el beneficiario recibe algo distinto de lo
+  // prometido — más en 13 destinos, pero menos en CR por encima de ~232 USD.
+  //
+  // A diferencia del bloque 3c, fuera de tolerancia NO sobreescribimos con el
+  // valor del servidor: rechazamos y pedimos re-cotizar. `digitalAssetAmount` es
+  // interno y el usuario no lo ve; `destinationAmount` es el número que el
+  // usuario aceptó y el que sale impreso, así que corregirlo en silencio sería
+  // mostrarle una cosa y liquidar otra.
+  // Se declara afuera porque el riel elegido no solo valida: se persiste en la
+  // transacción para que el pay-out debite la MISMA moneda que se cotizó.
+  let railDecision = null;
+  if (corridor.originCurrency === 'BOB' && corridor.payoutMethod === 'vitaWallet') {
+    let expectedDest = null;
+    try {
+      const vitaPrices = await getPrices();
+      const rail = resolveVitaRail({
+        amountUSD:           serverUsdcTransit ?? 0,
+        destinationCountry:  corridor.destinationCountry,
+        destinationCurrency: corridor.destinationCurrency,
+        mode:                corridor.vitaPayoutCurrency ?? 'usd',
+        prices:              vitaPrices,
+      });
+      // netDestination = USDC neto × tasa del riel − fija del riel: la misma
+      // identidad con la que calculateQuote deriva destinationAmount.
+      if (rail && serverUsdcTransit > 0) expectedDest = rail.netDestination;
+      railDecision = rail;
+    } catch (priceErr) {
+      // Fail-open deliberado: sin precios de Vita no podemos afirmar que esté
+      // mal, y bloquear dejaría todos los envíos caídos. El monto que realmente
+      // se despacha lo recalcula dispatchPayout, así que la exposición es el
+      // registro, no el dinero.
+      console.warn('[CrossBorder] No se pudo recalcular destinationAmount:', priceErr.message);
+    }
+
+    const destCheck = validateQuotedDestinationAmount({
+      quoted:   quotedDestAmount,
+      expected: expectedDest,
+    });
+
+    if (destCheck.reason === 'no_reference') {
+      console.warn('[CrossBorder] destinationAmount sin verificar (Vita no respondió):', {
+        quoted: quotedDestAmount, corridorId, userId: String(userId),
+      });
+    }
+
+    if (!destCheck.ok) {
+      console.warn('[CrossBorder] ⚠️ destinationAmount del cliente rechazado:', {
+        ...destCheck, corridorId, userId: String(userId),
+      });
+      Sentry.captureMessage('destinationAmount del cliente fuera de tolerancia (posible manipulación)', {
+        level: 'warning',
+        extra: { ...destCheck, corridorId, userId: String(userId) },
+      });
+      return res.status(409).json({
+        error:    'La cotización ya no es válida. Actualizá la tasa y volvé a confirmar.',
+        code:     'QUOTE_MISMATCH',
+        expected: destCheck.expected,
+      });
+    }
+  }
+
   // ── 4. Crear payin según el método del corredor ───────────────────────────
   //
   //   fintoc    → Checkout Session en Fintoc. Fondos llegan a cuenta SpA en Chile.
@@ -1524,6 +1592,14 @@ export async function initCrossBorderPayment(req, res) {
       // con el monto real de Harbor al crear el transfer (rateConfidence='exact').
       ...(quotedDestAmount   != null ? { destinationAmount: quotedDestAmount }         : {}),
       ...(quotedExchangeRate != null ? { exchangeRate: quotedExchangeRate, exchangeRateLockedAt: new Date() } : {}),
+      // Riel de Vita decidido al cotizar (bloque 3d). Se congela acá para que el
+      // dispatch debite la misma moneda y no re-resuelva con tasas movidas.
+      ...(railDecision
+        ? {
+            vitaPayoutCurrency:  railDecision.currency,
+            vitaPayoutClpPerUsd: railDecision.clpPerUsd ?? null,
+          }
+        : {}),
 
       fees: {
         payinFee,
@@ -2125,16 +2201,18 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     providerMeta  = { providerQuoteId: null, rateSource: 'vita', rateExpiresAt: null, rateConfidence: 'estimated' };
   }
 
+  const correrQuote = (rate, fixedFee) => calculateQuote({
+    amount, corridor, bobPerUsdc,
+    providerRate:     rate,
+    // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
+    // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
+    providerFixedFee: fixedFee,
+    accountType:      req.user?.accountType,
+  });
+
   let quote;
   try {
-    quote = calculateQuote({
-      amount, corridor, bobPerUsdc,
-      providerRate:     usdToDestRate,
-      // Fija REAL de Vita (fixed_cost live, moneda destino): sin descontarla el
-      // quote prometía más de lo que Vita entrega (ej. withdrawal[eu]: 5 EUR).
-      providerFixedFee: vitaFixedCost,
-      accountType:      req.user?.accountType,
-    });
+    quote = correrQuote(usdToDestRate, vitaFixedCost);
   } catch (err) {
     console.error('[Quote BOB] calculateQuote rejected inputs:', err.message);
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -2143,6 +2221,19 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   if (quote.destinationAmount <= 0) {
     return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
   }
+
+  // Riel de Vita — el WS y este endpoint tienen que coincidir, o el cerrojo del
+  // create rechazaría con 409 lo que cotizó el fallback REST.
+  ({ quote, rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = applyVitaRail({
+    quote, corridor,
+    destinationCountry: dest,
+    prices:     vitaResponse,
+    rate:       usdToDestRate,
+    fixedCost:  vitaFixedCost,
+    validUntil,
+    rerun:      correrQuote,
+    onLog:      (msg, extra) => console.info('[Quote BOB] ' + msg, extra),
+  }));
 
   const alytoProfitUSDC = round2(
     (quote.fees.payinFee + quote.fees.alytoCSpread + quote.fees.fixedFee + quote.fees.profitRetention)
@@ -2506,20 +2597,23 @@ export async function getQuote(req, res) {
       });
     }
 
-    const { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
+    // let: el riel de Vita puede reemplazarlos en la segunda pasada.
+    let { rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = vitaPricingUSD;
 
     // ── Quote unificado — canonical formula (spec v1.0 §3.2) ─────────────────
+    const correrQuote = (rate, fixedFee) => calculateQuote({
+      amount,
+      corridor,
+      bobPerUsdc,
+      providerRate:     rate,
+      // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
+      providerFixedFee: fixedFee,
+      accountType:      req.user?.accountType,
+    });
+
     let quote;
     try {
-      quote = calculateQuote({
-        amount,
-        corridor,
-        bobPerUsdc,
-        providerRate:     usdcToDestRate,
-        // Fija REAL de Vita (fixed_cost live) — sin ella el quote promete de más.
-        providerFixedFee: vitaFixedCost,
-        accountType:      req.user?.accountType,
-      });
+      quote = correrQuote(usdcToDestRate, vitaFixedCost);
     } catch (err) {
       console.error('[Alyto Quote] calculateQuote rejected inputs:', err.message);
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
@@ -2528,6 +2622,18 @@ export async function getQuote(req, res) {
     if (quote.destinationAmount <= 0) {
       return res.status(400).json({ error: 'Monto insuficiente para cubrir los fees del corredor.' });
     }
+
+    // Riel de Vita — mismo resolver que el WS y que el cerrojo del create.
+    ({ quote, rate: usdcToDestRate, fixedCost: vitaFixedCost, validUntil } = applyVitaRail({
+      quote, corridor,
+      destinationCountry: dest,
+      prices:     vitaResponse,
+      rate:       usdcToDestRate,
+      fixedCost:  vitaFixedCost,
+      validUntil,
+      rerun:      correrQuote,
+      onLog:      (msg, extra) => console.info('[Alyto Quote] ' + msg, extra),
+    }));
 
     // Provider-aware override (mismo helper que calculateBOBQuote).
     const providerMeta = await resolveProviderQuote({

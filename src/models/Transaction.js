@@ -411,6 +411,33 @@ const transactionSchema = new Schema(
       type: Date,
     },
 
+    // ── Riel de pago de Vita (moneda del saldo que se debita) ─────────────────
+    /**
+     * Moneda del saldo de Vita con la que se despachó el pay-out, decidida AL
+     * COTIZAR por resolveVitaRail y persistida acá a propósito: si el dispatch
+     * la recalculara, las tasas se mueven cada ~2 min y el beneficiario podría
+     * recibir algo distinto de lo que el usuario aceptó.
+     *
+     * null = corredor que no es Vita, o tx anteriores a esta feature (el
+     * dispatch cae al comportamiento histórico: 'usd' para origen BOB).
+     */
+    vitaPayoutCurrency: {
+      type:    String,
+      enum:    ['usd', 'clp', null],
+      default: null,
+    },
+    /**
+     * CLP por USD vigente al cotizar. Solo se usa si vitaPayoutCurrency='clp',
+     * para convertir el USDC de tránsito al monto en CLP que se le pide a Vita.
+     * Congelada por el mismo motivo que la de arriba: el cobro BOB es manual y
+     * puede confirmarse horas después (ver checkFxDrift en dispatchPayout).
+     */
+    vitaPayoutClpPerUsd: {
+      type:    Number,
+      default: null,
+      min:     0,
+    },
+
     // ── Provider quote metadata (Harbor real cotization) ──────────────────────
     /**
      * ID del quote del provider que usamos para cotizar (Harbor `quote_xxx`).

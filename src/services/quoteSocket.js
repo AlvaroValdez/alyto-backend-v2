@@ -31,6 +31,7 @@ import { resolveEffectiveMinimum } from './corridorMinimums.js';
 import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { resolveEuCorridor } from '../routing/euAmountRouter.js';
 import { calculateQuote, toPublicFees } from './quoteCalculator.js';
+import { applyVitaRail } from './vitaRailResolver.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import Sentry              from './sentry.js';
@@ -471,26 +472,40 @@ async function computeQuote(state) {
       return null;
     }
 
-    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+    // let: el riel de Vita puede reemplazarlos más abajo (segunda pasada).
+    let { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+
+    const correrQuote = (rate, fixedFee) => calculateQuote({
+      amount,
+      corridor,
+      bobPerUsdc,
+      providerRate:     rate,
+      // Fija REAL del proveedor (fixed_cost live): sin descontarla el quote
+      // prometía más de lo que Vita entrega (ej. EU withdrawal: 5 EUR).
+      providerFixedFee: fixedFee,
+      accountType:      state.accountType,
+    });
 
     let quote;
     try {
-      quote = calculateQuote({
-        amount,
-        corridor,
-        bobPerUsdc,
-        providerRate:     usdToDestRate,
-        // Fija REAL del proveedor (fixed_cost live): sin descontarla el quote
-        // prometía más de lo que Vita entrega (ej. EU withdrawal: 5 EUR).
-        providerFixedFee: vitaFixedCost,
-        accountType:      state.accountType,
-      });
+      quote = correrQuote(usdToDestRate, vitaFixedCost);
     } catch (err) {
       console.warn('[Alyto WS] calculateQuote rejected:', err.message);
       return null;
     }
 
     if (quote.destinationAmount <= 0) return null;
+
+    // ── Riel de Vita: cotizar con la moneda que el pay-out va a debitar ───────
+    ({ quote, rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = applyVitaRail({
+      quote, corridor, destinationCountry,
+      prices:     vitaCache.prices,
+      rate:       usdToDestRate,
+      fixedCost:  vitaFixedCost,
+      validUntil,
+      rerun:      correrQuote,
+      onLog:      (msg, extra) => console.info('[Alyto WS] ' + msg, extra),
+    }));
 
     const localExpiry    = new Date(Date.now() + QUOTE_VALIDITY_MS);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;

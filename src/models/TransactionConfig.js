@@ -111,6 +111,24 @@ const transactionConfigSchema = new Schema(
       enum:    ['USDC', 'XLM', null],
       default: 'USDC',
     },
+    /**
+     * Moneda del saldo de Vita que se debita en el pay-out (`currency` de
+     * createPayout). Vita publica precios por moneda y las dos vías no rinden
+     * igual: medido el 2026-10-05, el riel CLP entregaba más moneda destino en
+     * 13 de 14 destinos (+0,83% promedio, +1,73% en EU).
+     *
+     *   'usd'  — tasa usd_sell[dest]            (comportamiento histórico)
+     *   'clp'  — tasa clp_sell[dest]/clp_sell.us
+     *   'auto' — compara el NETO para el monto concreto y elige el mejor
+     *
+     * Default 'usd': sin cambiarlo, el comportamiento es el de siempre.
+     * Solo aplica a corredores con payoutMethod='vitaWallet'.
+     */
+    vitaPayoutCurrency: {
+      type:    String,
+      enum:    ['usd', 'clp', 'auto'],
+      default: 'usd',
+    },
 
     // ── Spread y Estructura de Fees ───────────────────────────────────────────
 
