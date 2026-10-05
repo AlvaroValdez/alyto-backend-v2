@@ -119,3 +119,88 @@ describe('providerFloorUSD', () => {
     expect(providerFloorUSD({ payoutMethod: 'vitaWallet', destinationCountry: 'GT' }, prices)).toBeNull()
   })
 })
+
+/**
+ * Piso POR RUTA (barrido de producción 2026-10-05).
+ *
+ * El piso de Harbor no es uno solo: la constante global (31) es de familia, pero
+ * la API exige además mínimos por corredor. `bo-jp` pide `source.amount >= 75.02`.
+ * Como el mínimo configurado (40 USD) ya superaba al genérico, el guard nunca se
+ * disparaba y la operación moría DESPUÉS del cobro.
+ */
+describe('providerFloorUSD — override por ruta', () => {
+  test('el piso propio de la ruta gana cuando supera al genérico (caso bo-jp)', () => {
+    expect(providerFloorUSD({ payoutMethod: 'owlPay', providerFloorUSD: 75.02 })).toBe(75.02)
+  })
+
+  test('un override más BAJO que el genérico no desprotege', () => {
+    // Si Harbor sube su mínimo global y el override quedó viejo, manda el genérico.
+    const floor = providerFloorUSD({ payoutMethod: 'owlPay', providerFloorUSD: 10 })
+    expect(floor).toBeGreaterThanOrEqual(30)
+  })
+
+  test('en Vita se compone con el min_amount vivo, tomando el mayor', () => {
+    const prices = {
+      usd: { withdrawal: { prices: { attributes: { min_amount: { au: 50 } } } } },
+    }
+    const base = { payoutMethod: 'vitaWallet', destinationCountry: 'AU' }
+    // Override por encima del vivo → manda el override
+    expect(providerFloorUSD({ ...base, providerFloorUSD: 80 }, prices)).toBe(80)
+    // Override por debajo del vivo → manda el vivo (que es el dato fresco)
+    expect(providerFloorUSD({ ...base, providerFloorUSD: 20 }, prices)).toBe(50)
+  })
+
+  test('un override vacío o absurdo se ignora en vez de romper el piso', () => {
+    const harbor = providerFloorUSD({ payoutMethod: 'owlPay' })
+    for (const v of [null, undefined, 0, -5, NaN, 'setenta']) {
+      expect(providerFloorUSD({ payoutMethod: 'owlPay', providerFloorUSD: v })).toBe(harbor)
+    }
+  })
+
+  test('da piso a un corredor manual, que no tiene API de donde derivarlo', () => {
+    expect(providerFloorUSD({ payoutMethod: 'anchorBolivia', providerFloorUSD: 25 })).toBe(25)
+  })
+})
+
+describe('bo-jp — la aritmética que dejaba pasar el cobro', () => {
+  // Fees retail reales del corredor: 6.5% spread + Bs 6 fija (ver CLAUDE.md §1).
+  const BOB_PER_USD_HOY = 12.01
+  const FLOOR_JP        = 75.02
+  const configuredMin   = Math.ceil(40 * BOB_PER_USD_HOY)   // minAmountUSD = 40 → 481 BOB
+
+  test('con el piso genérico (31) el guard NO se disparaba', () => {
+    const r = effectiveMinOrigin({
+      corridor: CORRIDOR, configuredMin, originPerUsd: BOB_PER_USD_HOY, floorUSD: 31,
+    })
+    expect(r.raisedBy).toBeNull()
+    expect(r.min).toBe(configuredMin)
+
+    // Y ese mínimo mandaba a Harbor un neto muy por debajo de lo que exige la ruta:
+    const netUSD = (configuredMin * (1 - 6.5 / 100) - 6) / BOB_PER_USD_HOY
+    expect(netUSD).toBeLessThan(FLOOR_JP)
+  })
+
+  test('con el piso real de la ruta eleva el mínimo y el neto YA alcanza', () => {
+    const r = effectiveMinOrigin({
+      corridor: CORRIDOR, configuredMin, originPerUsd: BOB_PER_USD_HOY, floorUSD: FLOOR_JP,
+    })
+    expect(r.raisedBy).toBe('provider_floor')
+    expect(r.min).toBeGreaterThan(configuredMin)
+
+    // Verificación inversa: aplicarle los fees al mínimo nuevo deja ≥ 75.02 USD.
+    const netUSD = (r.min * (1 - 6.5 / 100) - 6) / BOB_PER_USD_HOY
+    expect(netUSD).toBeGreaterThanOrEqual(FLOOR_JP)
+  })
+
+  test('business nunca estuvo afectado: su mínimo ya supera el piso', () => {
+    // minAmountUSDBusiness = 300 con fees business (4% + Bs 10).
+    const corridorBiz = { ...CORRIDOR, businessAlytoCSpread: 4, businessFixedFee: 10 }
+    const minBiz      = Math.ceil(300 * BOB_PER_USD_HOY)
+    const r = effectiveMinOrigin({
+      corridor: corridorBiz, configuredMin: minBiz, originPerUsd: BOB_PER_USD_HOY,
+      floorUSD: FLOOR_JP, accountType: 'business',
+    })
+    expect(r.raisedBy).toBeNull()
+    expect(r.min).toBe(minBiz)
+  })
+})
