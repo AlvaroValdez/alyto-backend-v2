@@ -79,7 +79,7 @@ import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../service
 import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
 import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
-import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
+import { selectHarborQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { resolveEuCorridor, isEuSepaDestination } from '../routing/euAmountRouter.js';
@@ -1994,6 +1994,10 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
     rateSource:      'vita',
     rateExpiresAt:   null,
     rateConfidence:  'estimated',
+    // Se marca aparte y NO se lanza: el catch de abajo convierte cualquier
+    // excepción en `vita_fallback`, que es justamente lo que esconderia el
+    // problema. El llamador corta la cotización al verla.
+    railDegraded:    false,
   };
 
   if (corridor.payoutMethod !== 'owlPay') return meta;
@@ -2022,9 +2026,24 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
 
     // Filtra a métodos soportados (ver utils/harborMethodSupport.js).
     // Evita cotizar con SEPA si el sistema no puede ejecutar SEPA.
-    const selected = pickSupportedQuote(harborQuotes, corridor.destinationCountry, requestedMethod);
+    const seleccion = selectHarborQuote(harborQuotes, corridor.destinationCountry, requestedMethod);
+    const selected  = seleccion.quote;
 
     if (!selected) throw new Error('Harbor devolvió 0 quotes');
+
+    if (seleccion.degraded) {
+      meta.railDegraded = true;
+      console.error('[Quote] riel preferido ausente en Harbor:', {
+        corridorId:  corridor.corridorId,
+        preferido:   seleccion.preferredMethod,
+        elegido:     seleccion.method,
+        disponibles: seleccion.available,
+      });
+      Sentry.captureMessage('Harbor: riel preferido ausente en cotización', {
+        level: 'error',
+        tags:  { corridorId: corridor.corridorId, preferido: seleccion.preferredMethod, elegido: seleccion.method },
+      });
+    }
 
     quote.destinationAmount = selected.destinationAmount;
     quote.effectiveRate     = round6(selected.destinationAmount / quote.originAmount);
@@ -2100,7 +2119,29 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     const requestedMethod = req.query.method ?? null;
     // Filtra a métodos soportados (utils/harborMethodSupport.js) — evita SEPA EU bug.
     const quotesArr = Array.isArray(harborQuotes) ? harborQuotes : [harborQuotes];
-    const selected = pickSupportedQuote(quotesArr, corridor.destinationCountry, requestedMethod) ?? quotesArr[0];
+    const seleccion = selectHarborQuote(quotesArr, corridor.destinationCountry, requestedMethod);
+    const selected  = seleccion.quote ?? quotesArr[0];
+
+    // Riel barato ausente ANTES del cobro → no cotizamos. Nadie pagó todavía, así que
+    // negarse acá es gratis; cotizar sería ofrecer una operación que entrega ~la mitad
+    // y cuyo mínimo se validó contra el piso del riel que ya no está (ver
+    // RIELES_CON_FIJO_ALTO en harborMethodSupport.js).
+    if (seleccion.degraded) {
+      console.error('[Quote BOB Harbor] riel preferido ausente — no se cotiza:', {
+        corridorId: corridor.corridorId,
+        preferido:  seleccion.preferredMethod,
+        elegido:    seleccion.method,
+        disponibles: seleccion.available,
+      });
+      Sentry.captureMessage('Harbor: riel preferido ausente en cotización', {
+        level: 'error',
+        tags:  { corridorId: corridor.corridorId, preferido: seleccion.preferredMethod, elegido: seleccion.method },
+      });
+      return res.status(503).json({
+        error: 'Este destino no está disponible en este momento. Intenta más tarde.',
+        code:  'HARBOR_RAIL_DEGRADED',
+      });
+    }
 
     if (!selected?.exchangeRate) {
       return res.status(503).json({ error: 'Harbor no devolvió tasa válida.' });
@@ -2641,6 +2682,14 @@ export async function getQuote(req, res) {
       corridor,
       requestedMethod: req.query.method ?? null,
     });
+
+    // Mismo criterio que en calculateBOBQuote: antes del cobro, no se cotiza.
+    if (providerMeta.railDegraded) {
+      return res.status(503).json({
+        error: 'Este destino no está disponible en este momento. Intenta más tarde.',
+        code:  'HARBOR_RAIL_DEGRADED',
+      });
+    }
 
     const alytoProfitUSDC = round2(
       // Ganancia = solo fees de Alyto (spread + fijo + retención). payinFee es

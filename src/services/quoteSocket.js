@@ -33,7 +33,7 @@ import { resolveEuCorridor } from '../routing/euAmountRouter.js';
 import { calculateQuote, toPublicFees } from './quoteCalculator.js';
 import { applyVitaRail } from './vitaRailResolver.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
-import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { selectHarborQuote } from '../utils/harborMethodSupport.js';
 import { BoundedCache }    from '../utils/boundedCache.js';
 import Sentry              from './sentry.js';
 
@@ -128,9 +128,20 @@ async function getHarborIndicativeRate(destCountry, destCurrency, customerUuid, 
 
   // Filtra a métodos que el sistema sabe ejecutar (evita mostrar SEPA rate
   // si después forzamos WIRE, etc.) — ver utils/harborMethodSupport.js.
-  const quote = Array.isArray(quotes)
-    ? (pickSupportedQuote(quotes, destCountry) ?? quotes[0])
-    : quotes;
+  const seleccion = Array.isArray(quotes)
+    ? selectHarborQuote(quotes, destCountry)
+    : { quote: quotes, degraded: false };
+  const quote = seleccion.quote ?? (Array.isArray(quotes) ? quotes[0] : quotes);
+
+  // Riel barato ausente: lanzamos, y el llamador responde PROVIDER_UNAVAILABLE en
+  // vez de cotizar. Es el mismo criterio que el REST — antes del cobro, no se cotiza.
+  if (seleccion.degraded) {
+    throw new Error(
+      `Riel preferido ausente para ${destCountry}: esperaba ${seleccion.preferredMethod}, ` +
+      `vinieron [${seleccion.available.join(',')}]`,
+    );
+  }
+
   if (!quote?.exchangeRate) {
     throw new Error(`Harbor no devolvió exchangeRate para ${destCountry}/${destCurrency}`);
   }
