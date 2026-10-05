@@ -31,6 +31,7 @@ import { resolveEffectiveMinimum } from './corridorMinimums.js';
 import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { resolveEuCorridor } from '../routing/euAmountRouter.js';
 import { calculateQuote, toPublicFees } from './quoteCalculator.js';
+import { resolveVitaRail } from './vitaRailResolver.js';
 import { getHarborQuote, getCustomerUuid, resolveHarborCountry } from './owlPayService.js';
 import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
 import Sentry              from './sentry.js';
@@ -471,26 +472,62 @@ async function computeQuote(state) {
       return null;
     }
 
-    const { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+    // let: el riel de Vita puede reemplazarlos más abajo (segunda pasada).
+    let { rate: usdToDestRate, fixedCost: vitaFixedCost, validUntil } = usdPricing;
+
+    const correrQuote = (rate, fixedFee) => calculateQuote({
+      amount,
+      corridor,
+      bobPerUsdc,
+      providerRate:     rate,
+      // Fija REAL del proveedor (fixed_cost live): sin descontarla el quote
+      // prometía más de lo que Vita entrega (ej. EU withdrawal: 5 EUR).
+      providerFixedFee: fixedFee,
+      accountType:      state.accountType,
+    });
 
     let quote;
     try {
-      quote = calculateQuote({
-        amount,
-        corridor,
-        bobPerUsdc,
-        providerRate:     usdToDestRate,
-        // Fija REAL del proveedor (fixed_cost live): sin descontarla el quote
-        // prometía más de lo que Vita entrega (ej. EU withdrawal: 5 EUR).
-        providerFixedFee: vitaFixedCost,
-        accountType:      state.accountType,
-      });
+      quote = correrQuote(usdToDestRate, vitaFixedCost);
     } catch (err) {
       console.warn('[Alyto WS] calculateQuote rejected:', err.message);
       return null;
     }
 
     if (quote.destinationAmount <= 0) return null;
+
+    // ── Riel de Vita: cotizar con la moneda que el pay-out va a debitar ───────
+    // Si el corredor elige riel CLP, la tasa tiene que ser clp_sell: cotizar con
+    // usd_sell y debitar CLP entregaría algo distinto de lo prometido.
+    // Dos pasadas a propósito: el modo 'auto' compara el NETO, y el USDC neto lo
+    // produce calculateQuote. Resolvemos con ese monto exacto en vez de estimarlo
+    // ignorando los fees (~9%), que cerca del cruce de CR elegiría mal.
+    // anchorBolivia no pasa por Vita — queda fuera.
+    if (corridor.payoutMethod === 'vitaWallet') {
+      const rail = resolveVitaRail({
+        amountUSD:           quote.digitalAssetAmount,
+        destinationCountry,
+        destinationCurrency: corridor.destinationCurrency,
+        mode:                corridor.vitaPayoutCurrency ?? 'usd',
+        prices:              vitaCache.prices,
+      });
+      if (rail && (rail.rate !== usdToDestRate || rail.fixedCost !== vitaFixedCost)) {
+        try {
+          const reQuote = correrQuote(rail.rate, rail.fixedCost);
+          if (reQuote.destinationAmount > 0) {
+            quote         = reQuote;
+            usdToDestRate = rail.rate;
+            vitaFixedCost = rail.fixedCost;
+            validUntil    = rail.validUntil ?? validUntil;
+            console.info('[Alyto WS] Riel Vita ' + rail.currency + ' para ' + destinationCountry + ':', {
+              rate: rail.rate, fixedCost: rail.fixedCost, dest: reQuote.destinationAmount,
+            });
+          }
+        } catch (err) {
+          console.warn('[Alyto WS] re-quote con riel ' + rail.currency + ' rechazado, se mantiene el anterior:', err.message);
+        }
+      }
+    }
 
     const localExpiry    = new Date(Date.now() + QUOTE_VALIDITY_MS);
     const vitaExpiry     = validUntil ? new Date(validUntil) : null;
