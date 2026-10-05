@@ -44,6 +44,8 @@ import {
   VITA_SENT_ONLY_COUNTRIES,
   getVitaSentCountry,
   getPrices,
+  getWallets,
+  extractVitaBalances,
 } from '../services/vitaWalletService.js';
 import {
   verifyWebhookSignature,
@@ -1718,6 +1720,65 @@ export async function dispatchPayout(transaction) {
         });
       } catch (priceErr) {
         console.warn('[dispatchPayout] No se pudo cargar precios Vita (tryProvider usará call propio):', priceErr.message);
+      }
+    }
+
+    // ── Pre-check de saldo prefondeado en Vita ────────────────────────────────
+    // Vita no mueve USDC: debita un saldo prefondeado, y en la moneda que se le
+    // pide. Sin este check la API rechaza con un error opaco y la tx termina en
+    // failed, cuando lo correcto es pending_funding — el mismo estado que usa
+    // Harbor cuando falta USDC, que el admin sabe cómo resolver.
+    //
+    // Se lee ACÁ y no al cotizar a propósito: el cobro BOB es manual y puede
+    // confirmarse horas después, así que el saldo que importa es el de ahora.
+    // Fail-open si no se puede leer: un fallo de lectura no debe frenar un
+    // payout que quizá sí tiene fondos.
+    if (payoutMethod === 'vitaWallet') {
+      let saldoVita = null;
+      try {
+        const balances = extractVitaBalances(await getWallets());
+        const raw      = balances?.[vitaCurrency];
+        if (raw != null && isFinite(Number(raw))) saldoVita = Number(raw);
+      } catch (balErr) {
+        console.warn('[dispatchPayout] No se pudo leer el saldo de Vita (fail-open):', balErr.message);
+      }
+
+      if (saldoVita != null && saldoVita < payoutAmountUSD) {
+        const moneda = vitaCurrency.toUpperCase();
+        console.warn('[dispatchPayout] Saldo Vita insuficiente:', {
+          transactionId: transaction.alytoTransactionId,
+          moneda, saldo: saldoVita, necesita: payoutAmountUSD,
+        });
+
+        transaction.status       = 'pending_funding';
+        transaction.statusReason = 'pending_funding_vita';
+        transaction.failureReason =
+          `Saldo Vita insuficiente en ${moneda}: hay ${saldoVita}, necesita ${payoutAmountUSD}`;
+        await transaction.save().catch(() => {});
+
+        broadcastToAdmins('tx_manual_payout', {
+          transactionId: transaction.alytoTransactionId,
+          reason:        'pending_funding_vita',
+          currency:      moneda,
+          required:      payoutAmountUSD,
+          available:     saldoVita,
+        });
+
+        try {
+          await sendRawEmail(
+            process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
+            `⚠️ Saldo Vita insuficiente (${moneda}) — ${transaction.alytoTransactionId}`,
+            `<p>La transacción <strong>${transaction.alytoTransactionId}</strong> requiere ` +
+            `<strong>${payoutAmountUSD} ${moneda}</strong> y la wallet maestra de Vita tiene ` +
+            `<strong>${saldoVita} ${moneda}</strong>.</p>` +
+            `<p>Fondeá el saldo ${moneda} en Vita y volvé a ejecutar el payout. ` +
+            `El riel (${moneda}) lo fijó la cotización, así que fondear otra moneda no ` +
+            `desbloquea esta operación.</p>`,
+          );
+        } catch (e) {
+          console.error('[dispatchPayout] Error email admin (pending_funding_vita):', e.message);
+        }
+        return;
       }
     }
 

@@ -614,3 +614,22 @@ export function getCryptoPrices() {
 export function getVitaTransaction(vitaId) {
   return vitaRequest('GET', `/transactions/${vitaId}`);
 }
+
+/**
+ * Saldos de la wallet maestra desde la respuesta de getWallets().
+ *
+ * Vita no mueve USDC en los payouts: debita un saldo PREFONDEADO, y lo hace en
+ * la moneda que se le pide (`currency` de createPayout). Por eso el pre-check de
+ * liquidez tiene que mirar el saldo de ESA moneda y no un total.
+ *
+ * Pura y separada del fetch para poder testearla sin red.
+ *
+ * @param {object} walletsResponse — respuesta cruda de getWallets()
+ * @returns {{ clp?: number, usd?: number, usdc?: number, usdt?: number, cop?: number } | null}
+ */
+export function extractVitaBalances(walletsResponse) {
+  const wallets = walletsResponse?.wallets ?? walletsResponse?.data ?? [];
+  if (!Array.isArray(wallets) || wallets.length === 0) return null;
+  const master = wallets.find(w => w?.attributes?.is_master) ?? wallets[0];
+  return master?.attributes?.balances ?? null;
+}
