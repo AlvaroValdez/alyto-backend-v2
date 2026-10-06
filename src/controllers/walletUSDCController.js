@@ -28,6 +28,7 @@ import User              from '../models/User.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
+import { recordAdminAction } from '../services/adminAuditService.js'
 import { normalizeAlias } from './aliasController.js'
 
 // Comisión P2P USDC — configurable desde WalletFeeConfig (P3). Arranca en 0
@@ -619,6 +620,22 @@ export async function adminConfirmBOBtoUSDC(req, res) {
       )
     }
 
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.bob_usdc.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', bobReservado: bobAmount },
+      after:      { status: 'completed', usdcAcreditado: usdcAmount, newBalanceBOB, newBalanceUSDC },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount, usdcAmount,
+                    bobPerUsdc: wtx.metadata?.bobPerUsdc ?? null },
+    })
+
     await session.commitTransaction()
 
     // 5. Audit trail Stellar — fire and forget
@@ -745,6 +762,21 @@ export async function adminRejectBOBtoUSDC(req, res) {
     await WalletBOB.updateOne({ _id: walletBOB._id }, {
       $inc: { balanceReserved: -bobAmount },
     }, { session })
+
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.bob_usdc.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', bobReservado: bobAmount },
+      after:      { status: 'failed', reservaLiberada: bobAmount },
+      reason:     rejectReason ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount },
+    })
 
     await session.commitTransaction()
 
@@ -1084,6 +1116,22 @@ export async function adminConfirmUSDCtoBOB(req, res) {
       )
     }
 
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.usdc_bob.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', usdcReservado: usdcAmount },
+      after:      { status: 'completed', bobAcreditado: bobAmount, newBalanceBOB, newBalanceUSDC },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount, usdcAmount,
+                    bobPerUsdc: wtx.metadata?.bobPerUsdc ?? null },
+    })
+
     await session.commitTransaction()
 
     // 4. Audit trail + notificación — fire and forget
@@ -1177,6 +1225,21 @@ export async function adminRejectUSDCtoBOB(req, res) {
     await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
       $inc: { balanceReserved: -usdcAmount },
     }, { session })
+
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.usdc_bob.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', usdcReservado: usdcAmount },
+      after:      { status: 'failed', reservaLiberada: usdcAmount },
+      reason:     rejectReason ?? '',
+      metadata:   { userId: String(wtx.userId), usdcAmount },
+    })
 
     await session.commitTransaction()
 

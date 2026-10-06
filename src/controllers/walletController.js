@@ -813,6 +813,21 @@ export async function adminConfirmDeposit(req, res) {
       metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
     }, { session })
 
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.deposit.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balance: prevBalance },
+      after:      { status: 'completed', balance: newBalance },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, bankReference },
+    })
+
     await session.commitTransaction()
 
     // Audit trail Stellar — fire and forget
@@ -1178,6 +1193,18 @@ export async function adminAttachWithdrawalComprobante(req, res) {
       size:       req.file.size,
       uploadedAt: new Date(),
     }
+
+    // Adjuntar un comprobante RETROACTIVO es excepcional: queda asentado quién
+    // lo adjuntó y a qué retiro, antes de escribirlo.
+    await recordAdminAction({
+      req,
+      action:     'wallet.withdrawal.attach_comprobante',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { teniaComprobante: Boolean(wtx.metadata?.withdrawalProof) },
+      after:      { filename: withdrawalProof.filename, size: withdrawalProof.size },
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, status: wtx.status },
+    })
 
     await WalletTransaction.updateOne({ _id: wtx._id }, {
       $set: {
@@ -1875,6 +1902,22 @@ export async function adminConfirmWithdrawal(req, res) {
       },
     }, { session })
 
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.withdrawal.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balance: prevBalance },
+      after:      { status: 'completed', balance: newBalance },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, bankReference,
+                    comprobanteAdjunto: Boolean(withdrawalProof) },
+    })
+
     await session.commitTransaction()
 
     // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). El retiro también
@@ -1948,6 +1991,21 @@ export async function adminRejectWithdrawal(req, res) {
       { $inc: { balanceReserved: -wtx.amount } },
       { session },
     )
+
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.withdrawal.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balanceReserved: wtx.amount },
+      after:      { status: 'failed', reservaLiberada: wtx.amount },
+      reason:     reason ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount },
+    })
 
     await session.commitTransaction()
 
@@ -2029,6 +2087,20 @@ export async function adminDispatchWithdrawal(req, res) {
       { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, disbursementProvider: resolved.provider, dispatchedBy: admin._id, dispatchedAt: new Date() } },
     )
     if (claim.modifiedCount === 0) return res.status(409).json({ error: 'El retiro ya fue procesado.' })
+
+    // Asiento ANTES de llamar al banco: si la dispersión llega a salir, su orden
+    // quedó registrada con actor y destino. Sin sesión (no hay transacción acá):
+    // el servicio alerta a Sentry si el asiento falla, sin frenar la dispersión.
+    await recordAdminAction({
+      req,
+      action:     'wallet.withdrawal.dispatch',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending' },
+      after:      { status: 'dispatched', provider: resolved.provider },
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount,
+                    bankCode: destBankCode, accountHolder: meta.accountHolder ?? '' },
+    })
 
     const user = await User.findById(wtx.userId).lean()
 
