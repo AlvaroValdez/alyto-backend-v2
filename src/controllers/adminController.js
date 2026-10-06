@@ -38,6 +38,7 @@ import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { denyIfProduction }   from '../middlewares/sandboxOnly.js';
 import { recordAdminAction }  from '../services/adminAuditService.js';
+import { completePayinLeg } from '../utils/paymentLegs.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -732,6 +733,8 @@ export async function updateTransactionStatus(req, res) {
       confirmationNote: note.trim(),
       bankReference:    bankReference?.trim() ?? null,
     };
+    // Cerrar la etapa de payin del desglose: el admin acaba de dar fe del cobro.
+    completePayinLeg(transaction, { externalId: bankReference?.trim() ?? null });
   }
 
   transaction.ipnLog.push({
