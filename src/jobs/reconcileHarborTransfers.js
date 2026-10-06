@@ -21,6 +21,7 @@ import { sendRawEmail }    from '../services/email.js';
 import { tryOwlPayV2, generateComprobanteOnCompletion, notifyTransactionCompleted, notifyTransactionFailed } from '../controllers/ipnController.js';
 import { registerAuditTrail } from '../services/stellarService.js';
 import { mapHarborError } from '../utils/harborErrorMapper.js';
+import { recordPayoutLeg, completePayinLeg } from '../utils/paymentLegs.js';
 
 // Edad mínima antes de reconciliar — evita race condition con webhook que
 // llega normal en segundos. Si webhook no llegó en 15 min, ya hay problema.
@@ -139,6 +140,16 @@ async function _reconcileHarborTransfers() {
       // post-proceso del webhook handleOwlPayIPN: audit trail Stellar + comprobante.
       // Sin esto, las tx completadas por el poll quedaban SIN registro on-chain ni PDF.
       if (alytoStatus === 'completed') {
+        // Mismo criterio que el post-proceso de arriba: este camino corre cuando
+        // el webhook de Harbor se perdió, y el desglose por etapa se quedaba sin
+        // cerrar. Ver utils/paymentLegs.js.
+        completePayinLeg(tx);
+        recordPayoutLeg(tx, {
+          provider:    'owlPay',
+          status:      'completed',
+          externalId:  tx.harborTransfer?.transferId,
+          completedAt: new Date(),
+        });
         try {
           const stellarTxId = await registerAuditTrail(tx);
           if (stellarTxId) {

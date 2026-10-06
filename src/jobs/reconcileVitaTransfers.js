@@ -31,6 +31,7 @@ import { sendEmail, EMAILS }             from '../services/email.js';
 import { sendRawEmail }                  from '../services/email.js';
 import { mapVitaIpnFailure }             from '../utils/vitaErrorMapper.js';
 import { logger }                        from '../utils/logger.js';
+import { recordPayoutLeg, completePayinLeg } from '../utils/paymentLegs.js';
 
 const PAYOUT_SENT_AGE_MS       = 15 * 60 * 1000;          // 15 min antes de reconciliar
 const MAX_AGE_BEFORE_GIVEUP_MS = 7 * 24 * 60 * 60 * 1000; // 7 días → auto-fail
@@ -71,6 +72,19 @@ export function extractVitaTxAttributes(resp) {
 async function finalizeVitaCompleted(transaction) {
   transaction.status      = 'completed';
   transaction.completedAt = new Date();
+  // Esta función replica a propósito el bloque 'completed' de
+  // ipnController.handleVitaIPN, así que TODO lo que se agregue allá hay que
+  // agregarlo acá. El desglose por etapa se perdía justo en este camino —el que
+  // corre cuando el IPN de Vita no llega, que es el caso real observado en
+  // ALY-C-1791276352443-HD5WWD— y la operación terminaba 'completed' con el
+  // payin en 'pending' y sin etapa de payout.
+  completePayinLeg(transaction);
+  recordPayoutLeg(transaction, {
+    provider:    'vitaWallet',
+    status:      'completed',
+    externalId:  transaction.payoutReference,
+    completedAt: transaction.completedAt,
+  });
   transaction.ipnLog = transaction.ipnLog ?? [];
   transaction.ipnLog.push({
     provider:   'vitaWallet',
