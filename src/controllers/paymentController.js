@@ -37,6 +37,7 @@ import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
+import { checkBeneficiaryExecutable } from '../services/beneficiaryValidation.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { resolveVitaRail, applyVitaRail } from '../services/vitaRailResolver.js';
@@ -1350,6 +1351,34 @@ export async function initCrossBorderPayment(req, res) {
       error:  'Este corredor no está disponible en este momento. Por favor intenta nuevamente en unos minutos.',
       code:   'PAYOUT_NOT_EXECUTABLE',
       reason: preflight.motivo,
+    });
+  }
+
+  // ── Pre-check: no cobrar lo que el proveedor va a RECHAZAR ─────────────────
+  //
+  // El gemelo del preflight de arriba: aquel cubre el SALDO, este cubre los
+  // DATOS del beneficiario. Reproducido e2e el 2026-10-05 (ALY-C-…-BNBIXN):
+  // un pix_key_type fuera del enum pasó el create, generó el QR real de BANECO
+  // y murió en Vita con code 305 — con un pago real, dinero cobrado contra un
+  // payout imposible. Mismo patrón que la operación de junio con el número de
+  // cuenta inválido (Bs 3.506 regularizados el 2026-10-01).
+  //
+  // 400 y no 503: a diferencia del saldo, esto SÍ es corregible por el usuario
+  // — el mensaje dice exactamente qué campo está mal y qué valores se aceptan.
+  const beneficiarioCheck = await checkBeneficiaryExecutable({
+    corridor,
+    beneficiaryData: beneficiaryData ?? legacyBeneficiary ?? {},
+    owlPayMethod:    owlPayMethod ?? null,
+  });
+  if (!beneficiarioCheck.ok) {
+    logger.warn('[CrossBorder] Payin bloqueado: datos del beneficiario no ejecutables', {
+      corridorId, errores: beneficiarioCheck.errores,
+    });
+    return res.status(400).json({
+      error:    'Los datos del beneficiario no son válidos para este destino. ' +
+                'Corrige los campos indicados e intenta de nuevo.',
+      code:     'BENEFICIARY_INVALID',
+      detalles: beneficiarioCheck.errores,
     });
   }
 
