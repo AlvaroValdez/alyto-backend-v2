@@ -25,6 +25,7 @@ import { Router }    from 'express';
 import { protect }   from '../middlewares/authMiddleware.js';
 import { checkAdmin } from '../middlewares/checkAdmin.js';
 import { sandboxOnly } from '../middlewares/sandboxOnly.js';
+import { auditAdmin } from '../middlewares/auditAdmin.js';
 import { idempotencyCheck } from '../middlewares/idempotency.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
 import {
@@ -249,7 +250,7 @@ router.patch('/users/:userId', updateUser);
  * PATCH /api/v1/admin/users/:userId/reset-token-version
  * Resetea tokenVersion del usuario a 0 (rescate de sesiones desincronizadas).
  */
-router.patch('/users/:userId/reset-token-version', resetUserTokenVersion);
+router.patch('/users/:userId/reset-token-version', auditAdmin('user.reset_token_version', { targetType: 'User', targetParam: 'userId' }), resetUserTokenVersion);
 
 // ─── Ledger legacy ────────────────────────────────────────────────────────────
 
@@ -381,7 +382,7 @@ router.get('/corridors/rates', getCorridorRates);
  * Crea un corredor nuevo. Valida que corridorId no exista.
  * Body: todos los campos requeridos de TransactionConfig.
  */
-router.post('/corridors', createCorridor);
+router.post('/corridors', auditAdmin('corridor.create', { targetType: 'TransactionConfig', targetBodyKey: 'corridorId' }), createCorridor);
 
 /**
  * PATCH /api/v1/admin/corridors/:corridorId/rate
@@ -395,21 +396,21 @@ router.post('/corridors', createCorridor);
  *
  * Esta ruta DEBE registrarse ANTES de /:corridorId para que Express no la capture.
  */
-router.patch('/corridors/:corridorId/rate', setCorridorRate);
+router.patch('/corridors/:corridorId/rate', auditAdmin('corridor.rate.update', { targetType: 'TransactionConfig', targetParam: 'corridorId' }), setCorridorRate);
 
 /**
  * PATCH /api/v1/admin/corridors/:corridorId
  * Actualiza parámetros de un corredor con registro en changeLog.
  * corridorId es inmutable.
  */
-router.patch('/pricing/global', updateGlobalPricing);
-router.patch('/corridors/:corridorId', updateCorridor);
+router.patch('/pricing/global', auditAdmin('pricing.global.update', { targetType: 'TransactionConfig' }), updateGlobalPricing);
+router.patch('/corridors/:corridorId', auditAdmin('corridor.update', { targetType: 'TransactionConfig', targetParam: 'corridorId' }), updateCorridor);
 
 /**
  * DELETE /api/v1/admin/corridors/:corridorId
  * Baja lógica: isActive: false + deletedAt. No elimina físicamente.
  */
-router.delete('/corridors/:corridorId', deactivateCorridor);
+router.delete('/corridors/:corridorId', auditAdmin('corridor.deactivate', { targetType: 'TransactionConfig', targetParam: 'corridorId' }), deactivateCorridor);
 
 /**
  * GET /api/v1/admin/corridors/:corridorId/analytics
@@ -426,7 +427,7 @@ router.get('/corridors/:corridorId/analytics', getCorridorAnalytics);
  * Body: { entity, type, asset, amount, sourceCurrency?, sourceAmount?,
  *         stellarTxId?, binanceOrderId?, bankReference?, note?, status? }
  */
-router.post('/funding', createFunding);
+router.post('/funding', auditAdmin('funding.create', { targetType: 'FundingRecord' }), createFunding);
 
 /**
  * GET /api/v1/admin/funding
@@ -474,9 +475,9 @@ router.get('/users/:userId/wallet-summary', getUserWalletSummary);
  * GET    /api/v1/admin/funding/intents               — lista intents
  * PATCH  /api/v1/admin/funding/intents/:intentId/cancel — cancela intent abierto
  */
-router.post('/funding/intents', createFundingIntent);
+router.post('/funding/intents', auditAdmin('funding.intent.create', { targetType: 'FundingIntent' }), createFundingIntent);
 router.get('/funding/intents', listFundingIntents);
-router.patch('/funding/intents/:intentId/cancel', cancelFundingIntent);
+router.patch('/funding/intents/:intentId/cancel', auditAdmin('funding.intent.cancel', { targetType: 'FundingIntent', targetParam: 'intentId' }), cancelFundingIntent);
 
 /**
  * Comisiones de wallet (P3 USDC P2P).
@@ -486,7 +487,7 @@ router.patch('/funding/intents/:intentId/cancel', cancelFundingIntent);
  * POST /api/v1/admin/wallet-fees/harvest-revenue   — cosecha revenue → tesorería SRL (?dryRun=true)
  */
 router.get('/wallet-fees/revenue', getWalletFeeRevenue);
-router.post('/wallet-fees/harvest-revenue', harvestRevenueToTreasury);
+router.post('/wallet-fees/harvest-revenue', auditAdmin('walletfees.harvest_revenue', { targetType: 'WalletFeeConfig' }), harvestRevenueToTreasury);
 router.get('/wallet-fees', getWalletFeeConfig);
 router.put('/wallet-fees', updateWalletFeeConfig);
 
@@ -504,21 +505,21 @@ router.get('/exchange-rates/clp-bob', getCLPBOBRate);
  * Actualiza CLP/USDT + BOB/USDT, calcula CLP/BOB, sincroniza SpAConfig.clpPerBob.
  * Body: { clpPerUsdt, bobPerUsdt, note? }
  */
-router.patch('/exchange-rates/clp-bob', updateCLPBOBRate);
+router.patch('/exchange-rates/clp-bob', auditAdmin('exchange_rate.clp_bob.update', { targetType: 'ExchangeRate' }), updateCLPBOBRate);
 
 /**
  * POST /api/v1/admin/exchange-rates
  * Crea o actualiza la tasa para un par (upsert). Guarda previousRate automáticamente.
  * Body: { pair, rate, note? }
  */
-router.post('/exchange-rates', upsertExchangeRate);
+router.post('/exchange-rates', auditAdmin('exchange_rate.upsert', { targetType: 'ExchangeRate', targetBodyKey: 'pair' }), upsertExchangeRate);
 
 /**
  * DELETE /api/v1/admin/exchange-rates/bob-usdc-override
  * Elimina el override manual BOB-USDC y vuelve al auto-computado (job ≤ 30 min).
  * Falla si no hay override manual activo.
  */
-router.delete('/exchange-rates/bob-usdc-override', deleteBOBUSDCOverride);
+router.delete('/exchange-rates/bob-usdc-override', auditAdmin('exchange_rate.bob_usdc_override.delete', { targetType: 'ExchangeRate' }), deleteBOBUSDCOverride);
 
 /**
  * GET /api/v1/admin/exchange-rates
@@ -562,7 +563,7 @@ router.get('/spa-config', getSpAConfig);
  * Body: { bankName?, accountType?, accountNumber?, rut?, accountHolder?,
  *         bankEmail?, clpPerBob?, minAmountCLP?, maxAmountCLP?, isActive? }
  */
-router.patch('/spa-config', updateSpAConfig);
+router.patch('/spa-config', auditAdmin('spa_config.update', { targetType: 'SpAConfig' }), updateSpAConfig);
 
 // ─── SRL Bolivia — Configuración QR de pago ──────────────────────────────────
 
@@ -590,7 +591,7 @@ router.get('/srl-config', getSRLConfig);
  * IMPORTANTE: esta ruta DEBE ir ANTES de /srl-config/qr/:qrId para que Express
  * no confunda el path con un qrId.
  */
-router.post('/srl-config/qr', qrUpload.single('qr'), uploadSRLQR);
+router.post('/srl-config/qr', qrUpload.single('qr'), auditAdmin('srl_config.qr.upload', { targetType: 'SRLConfig' }), uploadSRLQR);
 
 /**
  * PATCH /api/v1/admin/srl-config/qr/:qrId
@@ -598,7 +599,7 @@ router.post('/srl-config/qr', qrUpload.single('qr'), uploadSRLQR);
  * Activa o desactiva un QR sin eliminarlo.
  * Body: { "isActive": true | false }
  */
-router.patch('/srl-config/qr/:qrId', toggleSRLQR);
+router.patch('/srl-config/qr/:qrId', auditAdmin('srl_config.qr.toggle', { targetType: 'SRLConfig', targetParam: 'qrId' }), toggleSRLQR);
 
 /**
  * DELETE /api/v1/admin/srl-config/qr/:qrId
@@ -606,7 +607,7 @@ router.patch('/srl-config/qr/:qrId', toggleSRLQR);
  * Elimina permanentemente un QR de la configuración.
  * No afecta transacciones ya creadas.
  */
-router.delete('/srl-config/qr/:qrId', deleteSRLQR);
+router.delete('/srl-config/qr/:qrId', auditAdmin('srl_config.qr.delete', { targetType: 'SRLConfig', targetParam: 'qrId' }), deleteSRLQR);
 
 /**
  * POST   /api/v1/admin/srl-config/wallet-qr          — Subir QR depósito Wallet BOB
@@ -615,9 +616,9 @@ router.delete('/srl-config/qr/:qrId', deleteSRLQR);
  *
  * IMPORTANTE: la ruta POST debe ir ANTES de /wallet-qr/:qrId
  */
-router.post('/srl-config/wallet-qr',          qrUpload.single('qr'), uploadWalletSRLQR);
-router.patch('/srl-config/wallet-qr/:qrId',   toggleWalletSRLQR);
-router.delete('/srl-config/wallet-qr/:qrId',  deleteWalletSRLQR);
+router.post('/srl-config/wallet-qr',          qrUpload.single('qr'), auditAdmin('srl_config.wallet_qr.upload', { targetType: 'SRLConfig' }), uploadWalletSRLQR);
+router.patch('/srl-config/wallet-qr/:qrId',   auditAdmin('srl_config.wallet_qr.toggle', { targetType: 'SRLConfig', targetParam: 'qrId' }), toggleWalletSRLQR);
+router.delete('/srl-config/wallet-qr/:qrId',  auditAdmin('srl_config.wallet_qr.delete', { targetType: 'SRLConfig', targetParam: 'qrId' }), deleteWalletSRLQR);
 
 /**
  * PATCH /api/v1/admin/srl-config/bank-data
@@ -627,7 +628,7 @@ router.delete('/srl-config/wallet-qr/:qrId',  deleteWalletSRLQR);
  *
  * IMPORTANTE: esta ruta DEBE ir DESPUÉS de /srl-config/qr/:qrId para evitar conflictos.
  */
-router.patch('/srl-config/bank-data', updateBankData);
+router.patch('/srl-config/bank-data', auditAdmin('srl_config.bank_data.update', { targetType: 'SRLConfig' }), updateBankData);
 
 // ─── KYB — Cuentas Business ───────────────────────────────────────────────────
 
@@ -826,7 +827,7 @@ router.get('/sanctions/flagged-users',         listFlaggedUsers);
 router.post('/sanctions/flagged-users/:userId/clear', clearSanctionsFlag);
 
 /** DELETE /api/v1/admin/sanctions/:entryId — Desactivar entrada (baja lógica) */
-router.delete('/sanctions/:entryId',   removeSanction);
+router.delete('/sanctions/:entryId',   auditAdmin('sanctions.entry.remove', { targetType: 'SanctionsList', targetParam: 'entryId' }), removeSanction);
 
 // ─── Notificaciones push — Trigger manual ─────────────────────────────────────
 
@@ -857,7 +858,7 @@ router.post('/test-push', testPush);
  *
  * Respuesta: { success: boolean, message: string }
  */
-router.post('/notifications/send', sendNotification);
+router.post('/notifications/send', auditAdmin('notification.manual_send', { targetType: 'User', targetBodyKey: 'userId' }), sendNotification);
 
 // ─── Observabilidad ──────────────────────────────────────────────────────────
 
@@ -900,7 +901,7 @@ import ROSAlert                      from '../models/ROSAlert.js';
  * POST /api/v1/admin/cleanup-orphans
  * Ejecuta manualmente el job de limpieza de transacciones huérfanas.
  */
-router.post('/cleanup-orphans', async (req, res) => {
+router.post('/cleanup-orphans', auditAdmin('job.cleanup_orphans'), async (req, res) => {
   try {
     const deleted = await cleanupOrphanTransactions();
     res.json({ deleted, runAt: new Date() });
@@ -914,7 +915,7 @@ router.post('/cleanup-orphans', async (req, res) => {
  * Ejecuta manualmente el job de reconciliation Harbor.
  * Útil para forzar polling cuando un webhook se perdió y la tx quedó stuck.
  */
-router.post('/reconcile-harbor', async (req, res) => {
+router.post('/reconcile-harbor', auditAdmin('job.reconcile_harbor'), async (req, res) => {
   try {
     const stats = await reconcileHarborTransfers();
     res.json({ stats, runAt: new Date() });
@@ -928,7 +929,7 @@ router.post('/reconcile-harbor', async (req, res) => {
  * Ejecuta manualmente el job de reconciliation Vita.
  * Útil para forzar polling cuando un IPN se perdió y la tx quedó en payout_sent.
  */
-router.post('/reconcile-vita', async (req, res) => {
+router.post('/reconcile-vita', auditAdmin('job.reconcile_vita'), async (req, res) => {
   try {
     const stats = await reconcileVitaTransfers();
     res.json({ stats, runAt: new Date() });
@@ -1221,8 +1222,23 @@ router.patch('/ros/alerts/:alertId', async (req, res) => {
       ...(status === 'reported_uif' ? { reportedToUifAt: new Date() } : {}),
     };
 
+    const previa = await ROSAlert.findOne({ alertId }).select('status').lean();
     const alert = await ROSAlert.findOneAndUpdate({ alertId }, update, { returnDocument: 'after' });
     if (!alert) return res.status(404).json({ error: 'Alerta no encontrada.' });
+
+    // Asiento de auditoría: el tratamiento de una alerta ROS (revisada,
+    // desestimada o reportada a la UIF) es trazabilidad AML ante ASFI — el
+    // reviewNote ya era obligatorio al desestimar; ahora además queda el asiento
+    // de quién la trató (Tier 2 del barrido 2026-10-05).
+    await recordAdminAction({
+      req,
+      action:     'ros.alert.review',
+      targetType: 'ROSAlert',
+      targetId:   alertId,
+      before:     { status: previa?.status ?? null },
+      after:      { status },
+      reason:     reviewNote ?? '',
+    });
 
     res.json({ success: true, alert });
   } catch (err) {
@@ -1234,7 +1250,7 @@ router.patch('/ros/alerts/:alertId', async (req, res) => {
  * POST /api/v1/admin/ros/run
  * Fuerza un ciclo inmediato del monitor ROS (útil para testing o revisión urgente).
  */
-router.post('/ros/run', async (req, res) => {
+router.post('/ros/run', auditAdmin('job.ros_run'), async (req, res) => {
   try {
     const [crossborder, wallet] = await Promise.all([rosMonitor(), rosMonitorWallet()]);
     res.json({ stats: { crossborder, wallet }, runAt: new Date() });
