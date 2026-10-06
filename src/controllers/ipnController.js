@@ -82,6 +82,7 @@ import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
 import { uploadBuffer } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
+import { completePayinLeg, recordPayoutLeg } from '../utils/paymentLegs.js';
 import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -932,6 +933,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       },
       receivedAt: new Date(),
     });
+    recordPayoutLeg(transaction, {
+      provider:   'owlPay',
+      status:     'processing',
+      externalId: transaction.harborTransfer?.transferId,
+    });
     await transaction.save();
 
     console.log('[OwlPay] USDC sent (retry):', stellarResult.hash);
@@ -1338,6 +1344,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   transaction.stellarTxHash = stellarResult.hash;
   transaction.status        = 'payout_sent';
   transaction.statusReason  = null;
+  recordPayoutLeg(transaction, {
+    provider:   'owlPay',
+    status:     'processing',
+    externalId: transferId,
+  });
   transaction.ipnLog.push({
     provider:   'stellar',
     eventType:  'usdc_sent_to_harbor',
@@ -2026,6 +2037,14 @@ export async function dispatchPayout(transaction) {
     } else {
       // ── VITA PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─
       transaction.status = 'payout_sent';
+      // El payout fue aceptado por Vita pero no acreditado: 'processing' hasta
+      // que llegue el IPN de liquidación. Antes esta etapa no se registraba y
+      // `providersUsed` listaba el payout que `paymentLegs` no mostraba.
+      recordPayoutLeg(transaction, {
+        provider:   providerUsed,
+        status:     'processing',
+        externalId: transaction.payoutReference,
+      });
 
       await appendIpnLog(transaction, 'payout_dispatched', providerUsed, 'payout_sent', {
         payoutReference: transaction.payoutReference,
@@ -2348,6 +2367,12 @@ export async function handleVitaIPN(req, res) {
 
       if (vitaStatus === 'completed') {
         transaction.status      = 'completed';
+        recordPayoutLeg(transaction, {
+          provider:    'vitaWallet',
+          status:      'completed',
+          externalId:  transaction.payoutReference,
+          completedAt: new Date(),
+        });
         transaction.completedAt = new Date();
         await transaction.save();
 
@@ -2829,6 +2854,12 @@ export async function handleOwlPayIPN(req, res) {
       transaction.status      = 'completed';
       transaction.completedAt = new Date();
       if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';
+      recordPayoutLeg(transaction, {
+        provider:    'owlPay',
+        status:      'completed',
+        externalId:  transaction.harborTransfer?.transferId,
+        completedAt: new Date(),
+      });
       await transaction.save();
 
       if (transaction.contactId) {
@@ -3270,6 +3301,13 @@ export function handleBankQrIPN(bankId) {
     try {
       transaction.status         = 'payin_confirmed';
       transaction.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
+      // Cerrar la etapa de payin del desglose con la fecha del banco, no con
+      // `now`: el desglose tiene que coincidir con bankQr.paidAt y el ipnLog.
+      completePayinLeg(transaction, {
+        provider:    'bankQr',
+        externalId:  pagoTx.qrId ?? payment.qrId,
+        completedAt: isNaN(bankPaidAt) ? new Date() : bankPaidAt,
+      });
       transaction.bankQr.payment = pagoTx;
       transaction.payinReference = pagoTx.qrId ?? payment.qrId;
       transaction.ipnLog.push({
