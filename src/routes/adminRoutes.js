@@ -46,6 +46,7 @@ import {
   getGlobalAnalytics,
   updateGlobalPricing,
   getTransactionComprobante,
+  getTransactionComprobanteOficial,
   getCorridorRates,
   vitaDiagnostic,
   vitaBalance,
@@ -331,6 +332,12 @@ router.get('/transactions/:transactionId', getTransaction);
  * Esta ruta DEBE ir ANTES de /:transactionId/status para evitar conflicto.
  */
 router.get('/transactions/:transactionId/comprobante', getTransactionComprobante);
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/comprobante-oficial
+ * Devuelve URL descargable del Comprobante Oficial (PDF BOL- generado en S3).
+ */
+router.get('/transactions/:transactionId/comprobante-oficial', getTransactionComprobanteOficial);
 
 /**
  * GET /api/v1/admin/transactions/:transactionId/business-invoice

@@ -38,6 +38,7 @@ import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { denyIfProduction }   from '../middlewares/sandboxOnly.js';
 import { recordAdminAction }  from '../services/adminAuditService.js';
+import { resolveComprobanteUrl } from '../services/storageService.js';
 import { completePayinLeg } from '../utils/paymentLegs.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1630,6 +1631,58 @@ export async function getTransactionComprobante(req, res) {
     filename:   transaction.paymentProof.filename,
     size:       transaction.paymentProof.size,
     uploadedAt: transaction.paymentProof.uploadedAt,
+  });
+}
+
+// ─── getTransactionComprobanteOficial ─────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/comprobante-oficial
+ *
+ * Devuelve una URL descargable del COMPROBANTE OFICIAL DE TRANSACCIÓN (el PDF
+ * BOL-… generado y guardado en S3 con Object Lock), distinto del comprobante que
+ * sube el usuario (ese lo sirve getTransactionComprobante). Hasta ahora admin no
+ * tenía forma de ver este documento — detectado el 2026-10-06.
+ *
+ * Resuelve `boliviaCompliance.comprobanteUrl` (s3key://…) a una presigned fresca
+ * de 1 h vía storageService. Las facturas B2B (serie SRV) tienen su propia ruta
+ * (business-invoice) y NO pasan por acá.
+ *
+ * Requiere: protect + checkAdmin
+ */
+export async function getTransactionComprobanteOficial(req, res) {
+  const { transactionId } = req.params;
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId })
+      .select('alytoTransactionId boliviaCompliance status')
+      .lean();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  const stored = transaction.boliviaCompliance?.comprobanteUrl;
+  if (!stored) {
+    return res.status(404).json({
+      error: 'Esta transacción aún no tiene Comprobante Oficial. Se genera al completarse el pago (corredores SRL retail).',
+      code:  'NO_COMPROBANTE',
+    });
+  }
+
+  const url = await resolveComprobanteUrl(stored);
+  if (!url) {
+    return res.status(502).json({ error: 'No se pudo generar el enlace de descarga del comprobante.' });
+  }
+
+  return res.status(200).json({
+    url,
+    numeroComprobante: transaction.boliviaCompliance.numeroComprobante ?? null,
+    generatedAt:       transaction.boliviaCompliance.comprobanteGeneratedAt ?? null,
   });
 }
 
