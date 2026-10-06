@@ -165,6 +165,7 @@ RULES=(
   "alyto-cron-reconcile-stellar|rate(15 minutes)|reconcile-stellar"
   "alyto-cron-ros-monitor|rate(6 hours)|ros-monitor"
   "alyto-cron-ros-monitor-wallet|rate(6 hours)|ros-monitor-wallet"
+  "alyto-cron-reclamos-vencimientos|rate(6 hours)|reclamos-vencimientos"
   # 2 min y no 30: el webhook de BANECO no está llegando (verificado con un pago
   # real el 2026-09-07), así que este job es HOY el único camino de confirmación.
   # Cuesta 2 llamadas por corrida (paidQR de ayer + hoy) contra un endpoint que el

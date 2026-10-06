@@ -46,6 +46,10 @@ const JOBS = {
   // Registrarlo permitiría dispararlo por Lambda → doble ejecución. Ver server.js.
   'ros-monitor': () =>
     import('./rosMonitor.js').then((m) => m.rosMonitor),
+  // Plazo regulatorio PRILI (10 días hábiles): alerta vencidos y por vencer.
+  // Solo avisa — el escalamiento a ASFI es decisión del operador.
+  'reclamos-vencimientos': () =>
+    import('./reclamosVencimientosMonitor.js').then((m) => m.reclamosVencimientosMonitor),
   'ros-monitor-wallet': () =>
     import('./rosMonitorWallet.js').then((m) => m.rosMonitorWallet),
   // Red de seguridad del QR bancario boliviano (BEC/BANECO) ante IPN perdidos, y

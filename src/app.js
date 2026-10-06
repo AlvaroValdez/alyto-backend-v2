@@ -860,6 +860,13 @@ async function startServer() {
       const { rosMonitorWallet } = await import('./jobs/rosMonitorWallet.js');
       setTimeout(rosMonitorWallet, 4 * 60 * 1000);              // primera corrida 4 min post-start
       setInterval(rosMonitorWallet, 6 * 60 * 60 * 1000);        // cada 6h
+
+      // Plazo regulatorio PRILI — vencidos y por vencer (solo alerta; escalar
+      // a ASFI es decisión humana). Ver jobs/reclamosVencimientosMonitor.js.
+      const { reclamosVencimientosMonitor } = await import('./jobs/reclamosVencimientosMonitor.js');
+      setTimeout(reclamosVencimientosMonitor, 3 * 60 * 1000);           // primera corrida 3 min post-start
+      setInterval(reclamosVencimientosMonitor, 6 * 60 * 60 * 1000);     // cada 6h
+      console.info('[Server] Reclamos vencimientos monitor programado cada 6h');
       console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
 
       // Reconciliación QR bancario boliviano — safety net para IPN perdidos
