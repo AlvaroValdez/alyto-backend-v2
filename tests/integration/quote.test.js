@@ -8,7 +8,7 @@
 import '../setup.env.js';
 import { jest } from '@jest/globals';
 import { connectTestDb, disconnectTestDb, clearCollections, seedCorridorClCo, seedCorridor } from '../helpers/db.js';
-import { createSpAUser } from '../helpers/auth.js';
+import { createSpAUser, createSRLUser } from '../helpers/auth.js';
 import { mockVitaPricesResponse } from '../helpers/vitaMock.js';
 
 // ─── Mock de vitaWalletService (debe ir antes de importar server.js) ──────────
@@ -297,4 +297,98 @@ describe('GET /api/v1/payments/quote', () => {
     expect(destinationAmount).toBe(440800);
   });
 
+});
+
+// ─── Regresión: cotización BOB → Vita (la rama que faltaba cubrir) ─────────────
+//
+// El 2026-10-05 un `let vitaResponse` quedó encerrado en un bloque mientras
+// applyVitaRail lo consumía afuera: "vitaResponse is not defined" en runtime.
+// Tumbó la cotización REST de los 17 corredores Vita de origen BOB en producción
+// y la suite no lo vio porque solo cubría quotes de origen CL (rama genérica) y
+// Harbor. Lo encontró la prueba e2e manual. Este bloque cierra ese hueco: si la
+// rama Vita-BOB vuelve a romperse, se rompe acá y no en producción.
+describe('GET /api/v1/payments/quote — corredor BOB → Vita (bo-br)', () => {
+
+  async function seedBoBrVita() {
+    const { default: TransactionConfig } = await import('../../src/models/TransactionConfig.js');
+    return TransactionConfig.create({
+      corridorId:          'bo-br',
+      originCountry:       'BO',
+      destinationCountry:  'BR',
+      originCurrency:      'BOB',
+      destinationCurrency: 'BRL',
+      payinMethod:         'manual',
+      payoutMethod:        'vitaWallet',
+      legalEntity:         'SRL',
+      routingScenario:     'C',
+      alytoCSpread:        6.5,
+      fixedFee:            6,
+      payinFeePercent:     0,
+      payoutFeeFixed:      0,
+      profitRetentionPercent: 0,
+      minAmountOrigin:     100,
+      isActive:            true,
+    });
+  }
+
+  /**
+   * Precios con la sección `usd.withdrawal` que la rama de origen BOB lee
+   * (extractVitaPricing → vitaPricesResponse.usd.withdrawal.prices.attributes).
+   * El mock base trae solo la forma top-level/CLP, que esta rama no consulta.
+   */
+  const preciosConBrasil = () => {
+    const base = mockVitaPricesResponse();
+    base.usd = {
+      withdrawal: {
+        prices: {
+          attributes: {
+            usd_sell:    { br: 4.88 },
+            fixed_cost:  { br: 3 },
+            valid_until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+          },
+        },
+      },
+    };
+    return base;
+  };
+
+  test('cotiza de punta a punta sin reventar (regresión vitaResponse)', async () => {
+    await seedBoBrVita();
+    const { token } = await createSRLUser();
+    mockGetPrices.mockResolvedValue(preciosConBrasil());
+
+    const res = await request(app)
+      .get('/api/v1/payments/quote')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ corridorId: 'bo-br', originAmount: 400 });
+
+    // Lo esencial de la regresión: 200, no 500 por ReferenceError.
+    expect(res.status).toBe(200);
+    expect(res.body.destinationCurrency).toBe('BRL');
+    expect(res.body.destinationAmount).toBeGreaterThan(0);
+    expect(res.body.exchangeRate).toBeGreaterThan(0);
+    // La rama Vita marca la tasa como estimada (la exacta es de Harbor).
+    expect(res.body.rateSource).toBe('vita');
+  });
+
+  test('el desglose descuenta los fees del corredor y la fija de Vita', async () => {
+    await seedBoBrVita();
+    const { token } = await createSRLUser();
+    mockGetPrices.mockResolvedValue(preciosConBrasil());
+
+    const res = await request(app)
+      .get('/api/v1/payments/quote')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ corridorId: 'bo-br', originAmount: 400 });
+
+    expect(res.status).toBe(200);
+    const { fees, destinationAmount } = res.body;
+    // 6.5% de 400 = 26 de spread + Bs 6 fija = 32 deducidos
+    expect(fees.alytoCSpread).toBe(26);
+    expect(fees.fixedFee).toBe(6);
+    // Verificación inversa gruesa: neto 368 BOB → USD (tasa viva o fallback) →
+    // × 4.88 − 3 BRL. Sin fijar la tasa BOB/USD del entorno, el destino debe
+    // quedar en un rango sano, no en 0 ni negativo.
+    expect(destinationAmount).toBeGreaterThan(50);
+  });
 });

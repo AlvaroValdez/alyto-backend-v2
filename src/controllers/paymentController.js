@@ -2215,10 +2215,14 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   }
 
   // ── Vita / anchorBolivia ──────────────────────────────────────────────────
-  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta;
+  // vitaResponse se declara ACÁ y no dentro del bloque de abajo: applyVitaRail lo
+  // consume fuera del bloque. Con el `let` adentro el archivo cargaba igual y
+  // reventaba recién en runtime — "vitaResponse is not defined" — tumbando la
+  // cotización REST de los 17 corredores Vita BOB (2026-10-05). Ningún test lo
+  // vio porque la suite solo cubría quotes de origen CL (la rama genérica).
+  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta, vitaResponse;
 
   {
-    let vitaResponse;
     try {
       vitaResponse = await getPrices();
     } catch (err) {
