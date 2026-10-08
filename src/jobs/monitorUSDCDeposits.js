@@ -34,6 +34,7 @@ import WalletUSDC               from '../models/WalletUSDC.js'
 import WalletTransaction        from '../models/WalletTransaction.js'
 import Transaction              from '../models/Transaction.js'
 import { notify, NOTIFICATIONS } from '../services/notifications.js'
+import { isAccountNotFound }    from '../utils/stellarErrors.js'
 
 const LEGACY_CURSOR_KEY = 'stellar:srl:cursor'                  // dirección SRL compartida (memo)
 const cursorKeyFor      = (addr) => `stellar:deposit:cursor:${addr}`
@@ -51,7 +52,7 @@ export async function monitorUSDCDeposits() {
   }
 
   _isRunning = true
-  const stats = { processed: 0, credited: 0, skipped: 0, noMatch: 0, errors: 0, addresses: 0 }
+  const stats = { processed: 0, credited: 0, skipped: 0, noMatch: 0, errors: 0, addresses: 0, notProvisioned: 0 }
 
   try {
     const srlShared = process.env.STELLAR_SRL_PUBLIC_KEY ?? null
@@ -65,18 +66,42 @@ export async function monitorUSDCDeposits() {
     })
 
     // 2. Vigilar cada dirección custodial (match por dirección, sin memo)
+    const notProvisioned = []
     for (const addr of custodialAddresses) {
       stats.addresses++
       try {
         await _pollAddress(addr, { mode: 'custodial' }, stats)
       } catch (err) {
+        // 404 = la cuenta aún no existe en el ledger, no un fallo del monitor. Pasa
+        // cuando la provisión quedó a medias: provisionUserKeypair persiste la
+        // publicKey (paso 3) ANTES de fondear (paso 5) y no relanza si el
+        // createAccount falla, así que la WalletUSDC queda 'active' apuntando a una
+        // cuenta inexistente. Reintentar el poll no lo arregla — lo repara
+        // ensureAccountOnChain. Mandarlo a Sentry cada 30s solo entierra las alertas
+        // que sí importan.
+        if (isAccountNotFound(err)) {
+          stats.notProvisioned++
+          notProvisioned.push(addr)
+          continue
+        }
         stats.errors++
         console.error('[USDC Monitor] Error vigilando dirección custodial:', { addr, error: err.message })
         Sentry.captureException(err, { tags: { job: 'monitorUSDCDeposits', mode: 'custodial' }, extra: { addr } })
       }
     }
 
-    // 3. Dirección SRL compartida legacy (match por memo ALYTO-) — transición hasta H4
+    // Un aviso consolidado por ciclo en vez de uno por dirección por error: queda
+    // visible en CloudWatch y en el heartbeat (stats.notProvisioned), sin ruido en Sentry.
+    if (notProvisioned.length) {
+      console.warn('[USDC Monitor] Direcciones custodiales sin cuenta on-chain — provisión incompleta:', {
+        count:     notProvisioned.length,
+        addresses: notProvisioned,
+        reparar:   'node scripts/repair-custody-account.mjs',
+      })
+    }
+
+    // 3. Dirección SRL compartida legacy (match por memo ALYTO-) — transición hasta H4.
+    //    Acá un 404 SÍ es alarma: la tesorería tiene que existir, así que no se traga.
     if (srlShared) {
       stats.addresses++
       try {
