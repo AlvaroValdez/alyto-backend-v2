@@ -43,9 +43,10 @@ import {
   TX_TIMEOUT_SECONDS,
 } from '../config/stellar.js';
 
-import { requireEnvSecret } from '../utils/secrets.js';
-import { logger }           from '../utils/logger.js';
-import User                 from '../models/User.js';
+import { requireEnvSecret }  from '../utils/secrets.js';
+import { isAccountNotFound } from '../utils/stellarErrors.js';
+import { logger }            from '../utils/logger.js';
+import User                  from '../models/User.js';
 
 // ─── Configuración KMS ───────────────────────────────────────────────────────
 
@@ -267,6 +268,81 @@ export async function getUserKeypair(userId) {
 export async function hasCustodialKeypair(userId) {
   const user = await User.findById(userId).select('stellarAccount.publicKey').lean();
   return !!user?.stellarAccount?.publicKey;
+}
+
+/**
+ * Completa una cuenta custodial provisionada a medias: publicKey ya persistida en
+ * MongoDB pero cuenta inexistente on-chain, o existente sin trustline USDC.
+ *
+ * **Por qué hace falta.** `provisionUserKeypair` persiste la publicKey en el paso 3 y
+ * recién entonces funde (paso 5) y crea la trustline (paso 6) — y ninguno de los dos
+ * relanza si falla, así que la función retorna como si todo hubiera salido bien. Si el
+ * `createAccount` muere (canal sin XLM, `tx_bad_seq` por concurrencia, timeout de
+ * Horizon), el usuario queda con una dirección que Horizon responde 404 y nada lo
+ * reintenta: el webhook de KYC la dispara fire-and-forget y sólo deja un console.error.
+ * El síntoma es `monitorUSDCDeposits` loggeando 404 de esa dirección cada 30s.
+ *
+ * Idempotente: no toca lo que ya está bien, así que es seguro reintentarla tras un
+ * fallo parcial o correrla en loop sobre todas las cuentas.
+ *
+ * @param {string} userId
+ * @returns {Promise<{publicKey: string, funded: boolean, trustlineCreated: boolean, alreadyOk: boolean}>}
+ */
+export async function ensureAccountOnChain(userId) {
+  const user      = await User.findById(userId).select('stellarAccount.publicKey').lean();
+  const publicKey = user?.stellarAccount?.publicKey;
+
+  // Sin publicKey no hay nada que completar: eso es una provisión nueva y la hace
+  // provisionUserKeypair, que además tiene que generar y cifrar la secretKey.
+  if (!publicKey) {
+    const err = new Error(`[custody] User ${userId} sin stellarAccount.publicKey — usar provisionUserKeypair`);
+    err.isPermanent = true;
+    throw err;
+  }
+
+  const log = { userId: String(userId), publicKey, fn: 'ensureAccountOnChain' };
+
+  let account = null;
+  try {
+    account = await horizonServer.loadAccount(publicKey);
+  } catch (err) {
+    // Sólo el 404 significa "no existe". Un error de red se propaga: fondear una
+    // cuenta que en realidad ya existe la haría fallar con op_already_exists, y peor,
+    // asumir que no existe por un timeout es exactamente el bug que estamos cerrando.
+    if (!isAccountNotFound(err)) throw err;
+  }
+
+  let funded = false;
+  if (!account) {
+    logger.warn('[custody] Cuenta inexistente on-chain — fondeando', log);
+    await fundUserAccount(publicKey);
+    funded  = true;
+    account = await horizonServer.loadAccount(publicKey);
+    logger.info('[custody] Cuenta creada y fondeada', log);
+  }
+
+  // Trustline USDC: sin ella la cuenta existe pero no puede recibir USDC.
+  const usdcCode     = ASSETS.USDC.getCode();
+  const usdcIssuer   = ASSETS.USDC.getIssuer();
+  const hasTrustline = account.balances.some(
+    (b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer,
+  );
+
+  let trustlineCreated = false;
+  if (!hasTrustline) {
+    logger.warn('[custody] Sin trustline USDC — creándola', log);
+    await createUsdcTrustline(userId, publicKey);
+    trustlineCreated = true;
+    logger.info('[custody] Trustline USDC creada', log);
+  } else {
+    // La trustline está on-chain pero Mongo pudo quedar desalineado si el intento que
+    // la creó murió antes de escribir activeTrustlines. On-chain es la verdad.
+    await User.findByIdAndUpdate(userId, {
+      $addToSet: { 'stellarAccount.activeTrustlines': 'USDC' },
+    });
+  }
+
+  return { publicKey, funded, trustlineCreated, alreadyOk: !funded && !trustlineCreated };
 }
 
 /**
