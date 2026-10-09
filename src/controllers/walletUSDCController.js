@@ -84,13 +84,25 @@ export async function getOrCreateWalletUSDC(userId, session) {
   const opts = session ? { session } : {}
   let wallet = await WalletUSDC.findOne({ userId }, null, opts)
   if (!wallet) {
+    // Fail-closed por entidad. La WalletUSDC es EXCLUSIVA de SRL y todos los endpoints
+    // que llegan hasta acá ya responden 403 fuera de esa entidad, pero el alta vive en
+    // esta función: sin el guard, un camino nuevo que la llame sin filtrar crearía un
+    // registro que contradice el invariante del modelo (y que el usuario ni puede ver,
+    // porque getUSDCBalance le responde 403). Es lo que pasaba por SEP-24.
+    const owner = await User.findById(userId, 'legalEntity stellarAccount.publicKey', opts).lean()
+
+    if (owner?.legalEntity !== 'SRL') {
+      const err = new Error(`La wallet USDC es exclusiva de usuarios Bolivia (SRL); el usuario ${userId} es ${owner?.legalEntity ?? 'desconocido'}.`)
+      err.status = 403
+      throw err
+    }
+
     // Camino A: la dirección de depósito es la cuenta custodial del PROPIO usuario
     // (Fase 38), NO la wallet de tesorería SRL compartida. Sin memo. Si el usuario
     // ya tiene keypair custodial se usa de inmediato; si no, se provisiona en el
     // flujo de instrucciones de depósito (ver getDepositInstructions).
     // ⚠️ No se provisiona aquí: esta función puede ejecutarse dentro de una sesión
     //    transaccional (convert-bob) y la provisión hace llamadas a Horizon.
-    const owner            = await User.findById(userId, 'stellarAccount.publicKey', opts).lean()
     const custodialAddress = owner?.stellarAccount?.publicKey ?? null
 
     wallet = await WalletUSDC.create([{
