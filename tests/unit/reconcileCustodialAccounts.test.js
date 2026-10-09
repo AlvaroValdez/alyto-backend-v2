@@ -218,6 +218,41 @@ describe('reconcileCustodialAccounts — comportamiento', () => {
     expect(r.exhausted).toBe(1);   // 7 + 1 === maxAttempts por defecto (8)
   });
 
+  it('no se solapa consigo mismo: la segunda corrida se salta', async () => {
+    // Corre in-process cada 30 min Y es disparable a mano por jobRegistry, así que un
+    // disparo encima de una corrida en curso es un escenario real. Sin guard, las dos
+    // verían las mismas candidatas y la segunda chocaría con op_already_exists,
+    // gastando un intento del presupuesto por un error que no es tal.
+    mockFind.mockReturnValue(chain([usuario(1)]));
+    let liberar;
+    mockEnsure.mockImplementation(() => new Promise(r => { liberar = () => r(OK_REPARADA); }));
+
+    const primera = reconcileCustodialAccounts();        // queda en vuelo
+    await new Promise(r => setImmediate(r));             // deja arrancar la primera
+    const segunda = await reconcileCustodialAccounts();  // cae encima
+
+    expect(segunda.skipped).toBe(true);
+    expect(segunda.processed).toBe(0);
+    expect(mockEnsure).toHaveBeenCalledTimes(1);         // solo la primera trabajó
+
+    liberar();
+    await primera;
+  });
+
+  it('tras terminar, una corrida nueva vuelve a entrar', async () => {
+    // El guard tiene que liberarse en `finally`, o un fallo dejaría el job muerto
+    // para siempre sin que nada lo avise.
+    mockFind.mockReturnValue(chain([usuario(1)]));
+    mockEnsure.mockRejectedValue(new Error('boom'));
+
+    const r1 = await reconcileCustodialAccounts();
+    const r2 = await reconcileCustodialAccounts();
+
+    expect(r1.skipped).toBeUndefined();
+    expect(r2.skipped).toBeUndefined();
+    expect(r1.failed).toBe(1);
+  });
+
   it('una cuenta que falla no detiene a las siguientes', async () => {
     mockFind.mockReturnValue(chain([usuario(1), usuario(2)]));
     mockEnsure

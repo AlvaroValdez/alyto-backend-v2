@@ -71,7 +71,14 @@ const JOBS = {
     import('./resealAuditTrails.js').then((m) => m.resealAuditTrails),
   // Red de seguridad de la provisión custodial: completa las cuentas que quedaron con
   // publicKey en MongoDB pero sin existir on-chain (createAccount fallido y tragado).
-  // Sin esta entrada quedaría huérfano en producción, igual que los de arriba.
+  //
+  // ⚠️ EXCEPCIÓN a la regla de arriba: este job corre SIEMPRE in-process (ver app.js) y
+  // sin embargo SÍ se registra. Lo que lo hace seguro es que tiene guard de solapamiento
+  // propio (`_isRunning`), así que un disparo por Lambda encima de una corrida en curso
+  // devuelve `skipped` en vez de duplicar el trabajo — que es justo lo que la regla de
+  // monitorChannelXLM previene por omisión. Se registra a propósito: poder dispararlo a
+  // mano es lo que permite reparar una cuenta sin esperar los 30 min del intervalo.
+  // Por eso NO tiene regla de EventBridge en scripts/aws/setup-lambda-jobs.sh.
   'reconcile-custodial-accounts': () =>
     import('./reconcileCustodialAccounts.js').then((m) => m.reconcileCustodialAccounts),
 };

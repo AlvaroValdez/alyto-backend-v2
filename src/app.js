@@ -895,14 +895,26 @@ async function startServer() {
       setInterval(resealAuditTrails, 30 * 60 * 1000);                     // cada 30 min
       console.info('[Server] Reseal audit trails job programado cada 30 min');
 
-      // Red de seguridad de la provisión custodial — completa las cuentas que quedaron
-      // con publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
-      // persiste antes de fondear y se traga el fallo. Sin esto nada las reintenta.
-      const { reconcileCustodialAccounts } = await import('./jobs/reconcileCustodialAccounts.js');
-      setTimeout(reconcileCustodialAccounts, 8 * 60 * 1000);              // primera corrida 8 min post-start
-      setInterval(reconcileCustodialAccounts, 30 * 60 * 1000);            // cada 30 min
-      console.info('[Server] Reconcile custodial accounts job programado cada 30 min');
     }
+
+    // Red de seguridad de la provisión custodial — completa las cuentas que quedaron con
+    // publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
+    // persiste antes de fondear y se traga el fallo. Sin esto nada las reintenta.
+    //
+    // Corre SIEMPRE in-process, fuera del gate JOBS_EXTERNAL_SCHEDULER, igual que
+    // monitorChannelXLM y por la misma razón: es infraestructura core. De hecho son dos
+    // caras de lo mismo — monitorChannelXLM vigila el XLM del canal y este lo gasta.
+    // Dejarlo dentro del gate lo volvía inalcanzable en producción: el setInterval queda
+    // apagado y crear la regla de EventBridge exige permisos `events:*` que la identidad
+    // del VPS no tiene (por mínimo privilegio, deliberadamente).
+    //
+    // Sigue registrado en jobRegistry para poder dispararlo a mano, y tiene guard de
+    // solapamiento, así que un disparo manual encima de una corrida en curso es inocuo.
+    // Si algún día se agrega la regla de EventBridge, el guard evita el doble trabajo.
+    const { reconcileCustodialAccounts } = await import('./jobs/reconcileCustodialAccounts.js');
+    setTimeout(reconcileCustodialAccounts, 8 * 60 * 1000);              // primera corrida 8 min post-start
+    setInterval(reconcileCustodialAccounts, 30 * 60 * 1000);            // cada 30 min
+    console.info('[Server] Reconcile custodial accounts job programado cada 30 min (siempre in-process)');
 
     // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO
     // Alerta al admin si el saldo XLM cae bajo el umbral. Corre siempre in-process
