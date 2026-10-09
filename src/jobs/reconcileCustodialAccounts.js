@@ -40,6 +40,14 @@ function envInt(name, fallback) {
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
+// Guard de solapamiento. Este job corre in-process cada 30 min Y sigue registrado en
+// jobRegistry, así que un disparo manual (o una regla de EventBridge, si algún día se
+// agrega) puede caer encima de una corrida en curso. Dos corridas simultáneas verían
+// las mismas candidatas y la segunda intentaría crear una cuenta que la primera ya está
+// creando: `op_already_exists` se contaría como fallo y gastaría un intento del
+// presupuesto. Mismo patrón que monitorUSDCDeposits y reconcileBankQrPayments.
+let _isRunning = false;
+
 /**
  * Filtro de las cuentas candidatas a reparar. PURO, para probarlo sin base de datos.
  *
@@ -87,6 +95,19 @@ export function alcanzaElCanal(saldo, pendientes) {
  * @returns {Promise<{processed:number, repaired:number, alreadyOk:number, failed:number, exhausted:number, skippedNoXLM:number}>}
  */
 export async function reconcileCustodialAccounts() {
+  if (_isRunning) {
+    logger.warn('[custody-recon] Ciclo anterior aún en ejecución — skip');
+    return { processed: 0, repaired: 0, alreadyOk: 0, failed: 0, exhausted: 0, skippedNoXLM: 0, skipped: true };
+  }
+  _isRunning = true;
+  try {
+    return await _reconcile();
+  } finally {
+    _isRunning = false;
+  }
+}
+
+async function _reconcile() {
   const now         = new Date();
   const maxAttempts = envInt('CUSTODY_REPAIR_MAX_ATTEMPTS', 8);
   const cooldownMs  = envInt('CUSTODY_REPAIR_COOLDOWN_MS', 30 * 60 * 1000);

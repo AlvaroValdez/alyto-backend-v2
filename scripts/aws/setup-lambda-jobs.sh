@@ -178,12 +178,13 @@ RULES=(
   # sin stellarTxId por un fallo transitorio de Horizon (garantía ASFI de sello por
   # operación completada). Ver src/jobs/resealAuditTrails.js.
   "alyto-cron-reseal-audit-trails|rate(30 minutes)|reseal-audit-trails"
-  # Red de seguridad de la provisión custodial: completa las cuentas que quedaron con
-  # publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
-  # persiste antes de fondear y se traga el fallo. Sin ESTA regla el job no corre en
-  # producción: JOBS_EXTERNAL_SCHEDULER=true apaga su setInterval y nadie lo dispara.
-  # Ver src/jobs/reconcileCustodialAccounts.js.
-  "alyto-cron-reconcile-custodial-accounts|rate(30 minutes)|reconcile-custodial-accounts"
+  # NOTA: `reconcile-custodial-accounts` NO lleva regla a propósito. Corre SIEMPRE
+  # in-process (fuera del gate JOBS_EXTERNAL_SCHEDULER, igual que monitorChannelXLM),
+  # porque crear reglas de EventBridge exige permisos `events:*` que la identidad del
+  # VPS no tiene por mínimo privilegio — y atar una red de seguridad a un permiso que
+  # nadie puede ejercer es dejarla apagada. Agregar la regla acá sería redundante: su
+  # guard de solapamiento la absorbería sin trabajo útil. Sigue en jobRegistry para
+  # poder dispararlo a mano. Ver src/jobs/reconcileCustodialAccounts.js.
 )
 
 for entry in "${RULES[@]}"; do
