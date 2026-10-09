@@ -15,6 +15,9 @@ import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
+// Se reutiliza el armado de sesión del login en vez de duplicarlo: firma el JWT con la
+// tokenVersion vigente Y re-setea la cookie HttpOnly, que es la que `protect` lee primero.
+import { issueSession } from './authController.js';
 import { isRealDocumentNumber, readDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 
@@ -323,11 +326,50 @@ export async function changePassword(req, res) {
       });
     }
 
-    // 5. Hashear y guardar
-    const hashed = await bcrypt.hash(newPassword, 12);
-    await User.findByIdAndUpdate(req.user._id, { $set: { password: hashed } });
+    // 5. Hashear, guardar y REVOCAR las sesiones existentes.
+    //
+    // El `$inc` de tokenVersion es el punto: sin él, cambiar la contraseña no cerraba
+    // ninguna sesión. Quien cambia su contraseña porque sospecha que se la robaron
+    // esperaba justamente eso, y la sesión del atacante sobrevivía al cambio.
+    // `authMiddleware` compara la tokenVersion del JWT contra la del usuario, así que
+    // incrementarla invalida de golpe todos los JWT emitidos antes.
+    const hashed  = await bcrypt.hash(newPassword, 12);
+    const updated = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { password: hashed }, $inc: { tokenVersion: 1 } },
+      { new: true },
+    );
 
-    return res.status(200).json({ message: 'Contraseña actualizada.' });
+    // Obligatorio, no una optimización: `protect` cachea el usuario 2 minutos. Con el
+    // caché sucio, la tokenVersion vieja seguiría autorizando los JWT anteriores Y
+    // rechazando el que se emite abajo, que es peor — dejaría fuera justo al usuario
+    // que acaba de cambiar su contraseña.
+    invalidateUserCache(req.user._id);
+
+    // Sesión nueva para ESTE dispositivo, para no expulsar a quien hizo el cambio.
+    // Se reusa `issueSession` (y no un jwt.sign a mano) porque además de firmar
+    // re-setea la cookie HttpOnly: `protect` lee la cookie ANTES del header Bearer,
+    // así que una cookie sin actualizar invalidaría la sesión igual.
+    //
+    // Se preservan dos cosas de la sesión actual:
+    //   - `amr`: sin él, un admin con segundo factor perdería el claim `otp` y
+    //     `checkAdmin` le respondería 403 en toda la superficie de administración.
+    //   - la duración: se deduce de la vigencia del token actual para no degradar
+    //     a 24 h una sesión que el usuario había pedido recordar por 7 días.
+    const claims     = req.authClaims ?? {};
+    const vigenciaS  = (claims.exp ?? 0) - (claims.iat ?? 0);
+    const rememberMe = vigenciaS > 24 * 60 * 60;   // 7d vs 24h
+
+    const { token, user: publicUser } = issueSession(res, updated, {
+      rememberMe,
+      amr: claims.amr,
+    });
+
+    return res.status(200).json({
+      message: 'Contraseña actualizada. Se cerraron las sesiones en otros dispositivos.',
+      token,
+      user: publicUser,
+    });
   } catch (err) {
     console.error('[UserCtrl] changePassword error:', err.message);
     return res.status(500).json({ error: 'Error interno al cambiar la contraseña.' });
