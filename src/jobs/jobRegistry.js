@@ -79,6 +79,10 @@ const JOBS = {
   // monitorChannelXLM previene por omisión. Se registra a propósito: poder dispararlo a
   // mano es lo que permite reparar una cuenta sin esperar los 30 min del intervalo.
   // Por eso NO tiene regla de EventBridge en scripts/aws/setup-lambda-jobs.sh.
+  //
+  // Su setInterval lo dispara a través de `runJob` (trigger 'interval'), no llamando a
+  // la función pelada como el resto de este archivo. Así sus corridas automáticas SÍ
+  // quedan en `job_runs`: sin eso, un job caído no produce ningún síntoma.
   'reconcile-custodial-accounts': () =>
     import('./reconcileCustodialAccounts.js').then((m) => m.reconcileCustodialAccounts),
 };

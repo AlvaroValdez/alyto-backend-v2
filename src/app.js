@@ -812,7 +812,7 @@ async function startServer() {
     // AWS-2A — Si un scheduler externo (EventBridge→Lambda) dispara los jobs vía
     // POST /api/v1/internal/jobs/:name, NO arrancar los setInterval in-process para
     // evitar doble ejecución. JOBS_EXTERNAL_SCHEDULER!=true → comportamiento histórico.
-    const { isExternalScheduler } = await import('./jobs/jobRegistry.js');
+    const { isExternalScheduler, runJob } = await import('./jobs/jobRegistry.js');
     const externalScheduler = isExternalScheduler();
     if (externalScheduler) {
       console.info('[Server] JOBS_EXTERNAL_SCHEDULER=true — jobs cron los dispara EventBridge→Lambda (setInterval in-process desactivado)');
@@ -911,9 +911,21 @@ async function startServer() {
     // Sigue registrado en jobRegistry para poder dispararlo a mano, y tiene guard de
     // solapamiento, así que un disparo manual encima de una corrida en curso es inocuo.
     // Si algún día se agrega la regla de EventBridge, el guard evita el doble trabajo.
-    const { reconcileCustodialAccounts } = await import('./jobs/reconcileCustodialAccounts.js');
-    setTimeout(reconcileCustodialAccounts, 8 * 60 * 1000);              // primera corrida 8 min post-start
-    setInterval(reconcileCustodialAccounts, 30 * 60 * 1000);            // cada 30 min
+    // Se dispara VÍA runJob y no llamando a la función directo, por dos razones:
+    //
+    //   - Deja constancia en `job_runs`. El resto de los setInterval de este archivo
+    //     invocan la función pelada, así que sus corridas automáticas no se registran
+    //     y un job caído no produce ningún síntoma: los descuadres simplemente dejan
+    //     de detectarse, en silencio. El trigger 'interval' ya existía en el enum del
+    //     modelo y en la firma de runJob, o sea que el diseño lo contemplaba.
+    //
+    //   - runJob NUNCA lanza. Un `setInterval` sobre una función async que rechaza
+    //     (por ejemplo si el `User.find` falla) produce un unhandled rejection; acá
+    //     queda capturado y anotado como corrida fallida.
+    // El módulo lo carga runJob de forma perezosa, igual que los otros 15 registrados.
+    const dispararReconCustodia = () => runJob('reconcile-custodial-accounts', { trigger: 'interval' });
+    setTimeout(dispararReconCustodia, 8 * 60 * 1000);                   // primera corrida 8 min post-start
+    setInterval(dispararReconCustodia, 30 * 60 * 1000);                 // cada 30 min
     console.info('[Server] Reconcile custodial accounts job programado cada 30 min (siempre in-process)');
 
     // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO
