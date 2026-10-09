@@ -73,6 +73,25 @@ export const generalLimiter = makeLimiter({
   message:       'Demasiadas solicitudes. Intenta de nuevo más tarde.',
 });
 
+// ─── Limiter: endpoint interno de jobs ────────────────────────────────────────
+
+// `/api/v1/internal/jobs/*` es alcanzable desde internet (nginx no lo bloquea) y su
+// única defensa es un token compartido entre los 15 jobs. Si ese token se filtra,
+// cualquiera podría disparar trabajos que mueven dinero o gastan XLM. Esto acota el
+// daño y frena el sondeo.
+//
+// 60/15min es holgado a propósito. El llamador legítimo es la Lambda, y el job más
+// frecuente (reconcile-bank-qr) corre cada 2 min: ~8 disparos por ventana, más los de
+// 15 min y los de 6 h, da ~15 en el peor caso. Apretarlo arriesgaría 429 silenciosos
+// que apagarían los jobs sin que nadie se enterara, que es peor que el abuso que
+// previene. Contra el token en sí el límite es irrelevante: son 64 caracteres.
+export const internalJobsLimiter = makeLimiter({
+  windowMs:      15 * 60 * 1000,
+  max:           60,
+  maxPermissive: 300,
+  message:       'Not found',
+});
+
 // ─── Limiters: Auth ───────────────────────────────────────────────────────────
 
 export const loginLimiter = makeLimiter({
