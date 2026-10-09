@@ -39,8 +39,14 @@ const cfg = {
 // ── Token cache ───────────────────────────────────────────────────────────────
 let _cachedToken     = null;
 let _tokenExpiresAt  = 0;
-// Encrypted accountCredit never changes within a process; cache after first call.
-let _encryptedAccount = null;
+// Cifrado de la cuenta de abono, cacheado POR NÚMERO DE CUENTA.
+//
+// Antes era una sola variable. Con una cuenta era una optimización correcta;
+// desde la segregación por destino de fondos (octubre 2026) hay más de una, y
+// esa caché única habría mandado TODOS los QR a la primera cuenta usada desde
+// que arrancó el proceso, sin error y sin aviso: el cobro habría funcionado
+// perfecto contra la cuenta equivocada.
+const _encryptedAccount = new Map();
 
 // ── AES-256-CBC encryption ────────────────────────────────────────────────────
 
@@ -57,9 +63,14 @@ function encryptAes(plaintext) {
   return Buffer.concat([iv, encrypted]).toString('base64');
 }
 
-function getEncryptedAccount() {
-  if (!_encryptedAccount) _encryptedAccount = encryptAes(cfg.accountCredit());
-  return _encryptedAccount;
+/**
+ * @param {string} [numeroCuenta] — si se omite, BEC_ACCOUNT_CREDIT (comportamiento previo)
+ */
+function getEncryptedAccount(numeroCuenta) {
+  const cuenta = String(numeroCuenta || cfg.accountCredit() || '').trim();
+  if (!cuenta) throw new Error('[BEC] No hay cuenta de abono configurada.');
+  if (!_encryptedAccount.has(cuenta)) _encryptedAccount.set(cuenta, encryptAes(cuenta));
+  return _encryptedAccount.get(cuenta);
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -163,10 +174,14 @@ const MOCK_QR_B64 = Buffer.from(MOCK_QR_SVG).toString('base64');
  * @param {string} [params.currency]     — 'BOB' | 'USD'  (default: 'BOB')
  * @param {string} [params.description]  — glosa del cobro (≤ 100 chars)
  * @param {string} params.dueDate        — fecha de vencimiento 'yyyy-MM-dd'
+ * @param {string} [params.accountCredit] — cuenta de abono. Omitirla usa
+ *   `BEC_ACCOUNT_CREDIT`, que es el comportamiento previo a la segregación por
+ *   destino de fondos. Quien cobra decide dónde entra la plata, y esa decisión
+ *   debe salir del mismo lugar que el `bankQr.purpose` con el que se registra.
  * @returns {Promise<{ qrId: string, qrImage: string }>}
  *   qrImage = imagen en Base64 lista para <img src="data:image/svg+xml;base64,...">
  */
-export async function generateQR({ transactionId, amount, currency = 'BOB', description, dueDate }) {
+export async function generateQR({ transactionId, amount, currency = 'BOB', description, dueDate, accountCredit }) {
   if (isMockMode()) {
     const qrId = `mock-bec-${Date.now()}-${transactionId.slice(-8)}`;
     logger.warn(`[BEC] Mock mode activo — QR simulado generado: ${qrId} | ${amount} ${currency}`);
@@ -177,7 +192,7 @@ export async function generateQR({ transactionId, amount, currency = 'BOB', desc
     method: 'POST',
     body:   JSON.stringify({
       transactionId:  transactionId.slice(0, 30),        // API máx 30 chars
-      accountCredit:  getEncryptedAccount(),
+      accountCredit:  getEncryptedAccount(accountCredit),
       currency,
       amount:         Number(amount.toFixed(2)),
       description:    (description ?? `Alyto ${transactionId}`).slice(0, 100),

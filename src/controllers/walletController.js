@@ -326,12 +326,16 @@ export async function initiateDeposit(req, res) {
       let qr
       try {
         const svc = getBankQrService(bankQrCfg.bankId)
+        // La carga de billetera cobra en la cuenta de ese destino de fondos.
+        // Si no hay una declarada, cae en la de siempre (comportamiento previo).
+        const cuenta = await getSrlBankData('wallet_deposit')
         qr = await svc.generateQR({
           transactionId: wtx.wtxId,
           amount,
           currency:      'BOB',
           description:   `Alyto deposito ${wtx.wtxId}`.slice(0, 100),
           dueDate,
+          accountCredit: cuenta.accountNumber || undefined,
           // Para los bancos que traducen nuestro identificador a un alias propio
           // (Red Enlace exige referencias numéricas), indica a qué colección
           // apunta ese alias. BEC lo ignora.
@@ -410,7 +414,7 @@ export async function initiateDeposit(req, res) {
       method:        'manual',
       amount,
       currency:      'BOB',
-      ...(await getSrlBankData()),
+      ...(await getSrlBankData('wallet_deposit')),
       reference:     wtx.wtxId,
       instructions:  'Transfiere el monto exacto e incluye el número de referencia en el concepto.',
       expiresAt,

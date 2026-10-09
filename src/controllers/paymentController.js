@@ -1463,6 +1463,9 @@ export async function initCrossBorderPayment(req, res) {
         // rendir el extracto sin cruzarlo contra la base.
         description:   `Alyto envio ${alytoTransactionId}`.slice(0, 100),
         dueDate,
+        // El pago transfronterizo cobra en la cuenta de ese destino de fondos.
+        // Si no hay una declarada, cae en la de siempre (comportamiento previo).
+        accountCredit: (await getSrlBankData('crossborder_payin')).accountNumber || undefined,
       });
     } catch (err) {
       logger.error('[CrossBorder] Error generando QR bancario:', {
@@ -1504,7 +1507,7 @@ export async function initCrossBorderPayment(req, res) {
     payinUrl         = null;
 
     manualPaymentInstructions = {
-      ...(await getSrlBankData()),
+      ...(await getSrlBankData('crossborder_payin')),
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,
@@ -3375,7 +3378,7 @@ export async function getSRLPayinInstructions(req, res) {
   }
 
   return res.status(200).json({
-    ...(await getSrlBankData()),
+    ...(await getSrlBankData('crossborder_payin')),
     currency:      'BOB',
     qrImages,
   });

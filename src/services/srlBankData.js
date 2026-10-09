@@ -27,32 +27,53 @@ import { logger }  from '../utils/logger.js';
 /** Última lectura buena, para no dejar al usuario sin datos si Mongo parpadea. */
 let _ultimaBuena = null;
 
+/** Propósitos con cuenta propia. Mismos valores que `bankQr.purpose`. */
+const PROPOSITOS = ['wallet_deposit', 'crossborder_payin'];
+
 /**
  * Datos bancarios de la SRL para instrucciones de pago en BOB.
  *
- * Precedencia por campo: `srl_config.bankData` → variable de entorno → default.
- * Es por campo y no por objeto a propósito: un `bankData` a medio cargar no debe
+ * Precedencia por campo:
+ *   `srl_config.bankAccounts[purpose]` → `srl_config.bankData` → env → default
+ *
+ * Es por campo y no por objeto a propósito: una cuenta a medio cargar no debe
  * dejar los otros tres campos en blanco.
  *
+ * El primer escalón es la segregación de octubre de 2026: cada destino de fondos
+ * cobra en su propia cuenta, para poder rendir el dinero de clientes por separado
+ * del gasto operativo. **Mientras `bankAccounts` esté vacío el comportamiento es
+ * idéntico al anterior**, así que esto se puede desplegar antes de tener las
+ * cuentas nuevas y encender cargándolas desde el admin, sin redeploy.
+ *
+ * @param {'wallet_deposit'|'crossborder_payin'} [purpose] — destino de los fondos
  * @returns {Promise<{bankName: string, accountHolder: string, accountNumber: string, accountType: string}>}
  */
-export async function getSrlBankData() {
+export async function getSrlBankData(purpose) {
   let db = {};
+  let porProposito = {};
   try {
-    const cfg = await SRLConfig.findOne({ key: 'srl_bolivia' }).select('bankData').lean();
+    const cfg = await SRLConfig.findOne({ key: 'srl_bolivia' })
+      .select('bankData bankAccounts')
+      .lean();
     db = cfg?.bankData ?? {};
-    _ultimaBuena = db;
+    porProposito = (PROPOSITOS.includes(purpose) ? cfg?.bankAccounts?.[purpose] : null) ?? {};
+    _ultimaBuena = { db, porProposito, purpose };
   } catch (err) {
     // Sin DB usamos la última lectura buena antes que el env: el env es el que
     // demostró estar desactualizado en producción.
-    db = _ultimaBuena ?? {};
+    const cache = _ultimaBuena?.purpose === purpose ? _ultimaBuena : null;
+    db = cache?.db ?? {};
+    porProposito = cache?.porProposito ?? {};
     logger.warn('[srlBankData] No se pudo leer SRLConfig, usando caché/env', { error: err.message });
   }
 
+  const elegir = (campo, ...respaldos) =>
+    porProposito[campo] || db[campo] || respaldos.find(Boolean) || '';
+
   return {
-    bankName:      db.bankName      || process.env.SRL_BANK_NAME      || 'Banco Económico',
-    accountHolder: db.accountHolder || process.env.SRL_ACCOUNT_HOLDER || 'AV Finance SRL',
-    accountNumber: db.accountNumber || process.env.SRL_ACCOUNT_NUMBER || '',
-    accountType:   db.accountType   || process.env.SRL_ACCOUNT_TYPE   || 'Cuenta Corriente',
+    bankName:      elegir('bankName',      process.env.SRL_BANK_NAME,      'Banco Económico'),
+    accountHolder: elegir('accountHolder', process.env.SRL_ACCOUNT_HOLDER, 'AV Finance SRL'),
+    accountNumber: elegir('accountNumber', process.env.SRL_ACCOUNT_NUMBER),
+    accountType:   elegir('accountType',   process.env.SRL_ACCOUNT_TYPE,   'Cuenta Corriente'),
   };
 }

@@ -183,3 +183,54 @@ describe('BEC — Capa 1 del webhook, sin salir a la red', () => {
     }
   });
 });
+
+describe('BEC — una cuenta de abono por destino de fondos', () => {
+  /** Devuelve el accountCredit cifrado que se le mandó al banco en cada generateQR. */
+  function capturarCuentas() {
+    const enviados = [];
+    global.fetch = jest.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/api/authentication/authenticate')) {
+        return { ok: true, status: 200, json: async () => ({ responseCode: 0, token: 'tok', message: '' }) };
+      }
+      if (u.includes('/generateQR')) {
+        enviados.push(JSON.parse(init.body).accountCredit);
+        return { ok: true, status: 200, json: async () => ({ responseCode: 0, qrId: 'q', qrImage: 'i' }) };
+      }
+      throw new Error(`ruta no mockeada: ${u}`);
+    });
+    return enviados;
+  }
+
+  const base = { transactionId: 'ALY-C-1', amount: 10, dueDate: '2026-10-02' };
+
+  test('dos cuentas distintas producen cifrados distintos', async () => {
+    // El bug que esto previene: con la caché anterior, de una sola variable de
+    // módulo, el segundo QR se habría cobrado en la PRIMERA cuenta, sin error.
+    const enviados = capturarCuentas();
+
+    await bec.generateQR({ ...base, accountCredit: '1111111111' });
+    await bec.generateQR({ ...base, accountCredit: '2222222222' });
+
+    expect(enviados).toHaveLength(2);
+    expect(enviados[0]).not.toBe(enviados[1]);
+  });
+
+  test('la misma cuenta reusa el cifrado cacheado', async () => {
+    const enviados = capturarCuentas();
+
+    await bec.generateQR({ ...base, accountCredit: '3333333333' });
+    await bec.generateQR({ ...base, accountCredit: '3333333333' });
+
+    expect(enviados[0]).toBe(enviados[1]);
+  });
+
+  test('sin cuenta explícita usa BEC_ACCOUNT_CREDIT (comportamiento previo)', async () => {
+    const enviados = capturarCuentas();
+
+    await bec.generateQR({ ...base });
+    await bec.generateQR({ ...base, accountCredit: process.env.BEC_ACCOUNT_CREDIT });
+
+    expect(enviados[0]).toBe(enviados[1]);
+  });
+});
