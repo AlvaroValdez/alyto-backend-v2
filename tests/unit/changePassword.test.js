@@ -25,13 +25,19 @@ await jest.unstable_mockModule('bcryptjs', () => ({
 }));
 
 const mockFindById         = jest.fn();
-const mockFindByIdAndUpdate = jest.fn(async () => ({}));
+const mockFindByIdAndUpdate = jest.fn(async () => ({ _id: 'u1', tokenVersion: 4 }));
 await jest.unstable_mockModule('../../src/models/User.js', () => ({
   default: { findById: mockFindById, findByIdAndUpdate: mockFindByIdAndUpdate },
 }));
 
+const mockInvalidateCache = jest.fn();
 await jest.unstable_mockModule('../../src/middlewares/authMiddleware.js', () => ({
-  invalidateUserCache: jest.fn(),
+  invalidateUserCache: mockInvalidateCache,
+}));
+
+const mockIssueSession = jest.fn(() => ({ token: 'jwt.nuevo', user: { id: 'u1' } }));
+await jest.unstable_mockModule('../../src/controllers/authController.js', () => ({
+  issueSession: mockIssueSession,
 }));
 await jest.unstable_mockModule('../../src/services/piiCrypto.js', () => ({
   ensureDek: jest.fn(), isPiiEncryptionEnabled: () => false,
@@ -51,7 +57,14 @@ function fakeRes() {
     json(b)   { this.body = b; return this; },
   };
 }
-const req = (body) => ({ user: { _id: 'u1' }, body });
+const DIA = 24 * 60 * 60;
+const ahora = 1791500000;
+/** `claims` simula lo que protect deja en req.authClaims a partir del JWT. */
+const req = (body, claims) => ({
+  user: { _id: 'u1' },
+  body,
+  authClaims: claims ?? { iat: ahora, exp: ahora + DIA, amr: ['pwd'] },
+});
 
 const VALIDA = 'Contrasena1!';
 
@@ -61,6 +74,8 @@ beforeEach(() => {
   mockFindById.mockReturnValue({ select: () => Promise.resolve({ _id: 'u1', password: '$2a$12$viejo' }) });
   mockCompare.mockResolvedValue(true);   // la contraseña actual es correcta
   mockHash.mockResolvedValue('$2a$12$hashnuevo');
+  mockFindByIdAndUpdate.mockResolvedValue({ _id: 'u1', tokenVersion: 4 });
+  mockIssueSession.mockReturnValue({ token: 'jwt.nuevo', user: { id: 'u1' } });
 });
 
 describe('changePassword — sin confirmPassword (el bug que rompió a los testers)', () => {
@@ -70,7 +85,11 @@ describe('changePassword — sin confirmPassword (el bug que rompió a los teste
     await changePassword(req({ currentPassword: 'Vieja1!', newPassword: VALIDA }), res);
 
     expect(res.statusCode).toBe(200);
-    expect(mockFindByIdAndUpdate).toHaveBeenCalledWith('u1', { $set: { password: '$2a$12$hashnuevo' } });
+    // Se afirma que la contraseña se persiste, no la forma exacta del update: la
+    // revocación de sesiones (`$inc`) tiene sus propios tests más abajo.
+    const [id, update] = mockFindByIdAndUpdate.mock.calls[0];
+    expect(id).toBe('u1');
+    expect(update.$set.password).toBe('$2a$12$hashnuevo');
   });
 
   it('la nueva contraseña se guarda HASHEADA, nunca en claro', async () => {
@@ -108,6 +127,94 @@ describe('changePassword — la confirmación se valida si llega', () => {
 
     expect(res.statusCode).toBe(400);
     expect(mockFindByIdAndUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('changePassword — revocación de sesiones', () => {
+
+  it('incrementa tokenVersion: las sesiones viejas quedan invalidadas', async () => {
+    const res = fakeRes();
+    await changePassword(req({ currentPassword: 'Vieja1!', newPassword: VALIDA }), res);
+
+    const [, update] = mockFindByIdAndUpdate.mock.calls[0];
+    expect(update.$inc).toEqual({ tokenVersion: 1 });
+    // Contraseña y revocación en la MISMA escritura: no puede quedar una sin la otra.
+    expect(update.$set.password).toBe('$2a$12$hashnuevo');
+  });
+
+  it('invalida el caché de protect', async () => {
+    const res = fakeRes();
+    await changePassword(req({ currentPassword: 'Vieja1!', newPassword: VALIDA }), res);
+
+    // Sin esto, el caché de 2 min seguiría autorizando los JWT viejos Y rechazando
+    // el nuevo, que dejaría fuera justo a quien acaba de cambiar su contraseña.
+    expect(mockInvalidateCache).toHaveBeenCalledWith('u1');
+  });
+
+  it('devuelve una sesión nueva: no expulsa a quien hizo el cambio', async () => {
+    const res = fakeRes();
+    await changePassword(req({ currentPassword: 'Vieja1!', newPassword: VALIDA }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.token).toBe('jwt.nuevo');
+    // Se emite sobre el documento YA actualizado, o el token nacería con la
+    // tokenVersion vieja y sería rechazado de inmediato.
+    const [, usuario] = mockIssueSession.mock.calls[0];
+    expect(usuario.tokenVersion).toBe(4);
+  });
+
+  it('preserva el amr: un admin con 2FA no pierde el claim otp', async () => {
+    const res = fakeRes();
+    await changePassword(
+      req({ currentPassword: 'Vieja1!', newPassword: VALIDA },
+          { iat: ahora, exp: ahora + DIA, amr: ['pwd', 'otp'] }),
+      res,
+    );
+
+    // Sin preservarlo, checkAdmin responde 403 en toda la superficie admin.
+    const [, , opts] = mockIssueSession.mock.calls[0];
+    expect(opts.amr).toEqual(['pwd', 'otp']);
+  });
+
+  it('preserva la duración: una sesión de 7 días no se degrada a 24 h', async () => {
+    const res = fakeRes();
+    await changePassword(
+      req({ currentPassword: 'Vieja1!', newPassword: VALIDA },
+          { iat: ahora, exp: ahora + 7 * DIA, amr: ['pwd'] }),
+      res,
+    );
+
+    const [, , opts] = mockIssueSession.mock.calls[0];
+    expect(opts.rememberMe).toBe(true);
+  });
+
+  it('una sesión de 24 h se reemite como 24 h', async () => {
+    const res = fakeRes();
+    await changePassword(req({ currentPassword: 'Vieja1!', newPassword: VALIDA }), res);
+
+    const [, , opts] = mockIssueSession.mock.calls[0];
+    expect(opts.rememberMe).toBe(false);
+  });
+
+  it('sin authClaims no revienta y cae a la sesión corta', async () => {
+    const res = fakeRes();
+    await changePassword({ user: { _id: 'u1' }, body: { currentPassword: 'V1!', newPassword: VALIDA } }, res);
+
+    expect(res.statusCode).toBe(200);
+    const [, , opts] = mockIssueSession.mock.calls[0];
+    expect(opts.rememberMe).toBe(false);
+    expect(opts.amr).toBeUndefined();
+  });
+
+  it('si la contraseña actual es incorrecta NO se revoca nada', async () => {
+    mockCompare.mockResolvedValue(false);
+    const res = fakeRes();
+    await changePassword(req({ currentPassword: 'malade', newPassword: VALIDA }), res);
+
+    // Lo contrario seria un ataque de denegacion: cualquiera con la sesion abierta
+    // podria cerrar las de los demas dispositivos probando contrasenas al azar.
+    expect(mockFindByIdAndUpdate).not.toHaveBeenCalled();
+    expect(mockIssueSession).not.toHaveBeenCalled();
   });
 });
 
