@@ -178,6 +178,12 @@ RULES=(
   # sin stellarTxId por un fallo transitorio de Horizon (garantía ASFI de sello por
   # operación completada). Ver src/jobs/resealAuditTrails.js.
   "alyto-cron-reseal-audit-trails|rate(30 minutes)|reseal-audit-trails"
+  # Red de seguridad de la provisión custodial: completa las cuentas que quedaron con
+  # publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
+  # persiste antes de fondear y se traga el fallo. Sin ESTA regla el job no corre en
+  # producción: JOBS_EXTERNAL_SCHEDULER=true apaga su setInterval y nadie lo dispara.
+  # Ver src/jobs/reconcileCustodialAccounts.js.
+  "alyto-cron-reconcile-custodial-accounts|rate(30 minutes)|reconcile-custodial-accounts"
 )
 
 for entry in "${RULES[@]}"; do
