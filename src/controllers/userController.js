@@ -288,9 +288,15 @@ export async function changePassword(req, res) {
   try {
     const { currentPassword, newPassword, confirmPassword } = req.body ?? {};
 
-    if (!currentPassword || !newPassword || !confirmPassword) {
+    // `confirmPassword` NO se exige. La doble escritura es un control de la interfaz,
+    // y el servidor no puede verificarla: solo compara dos cadenas que el mismo cliente
+    // envía y controla. Exigirla no aportaba seguridad y sí podía romper el flujo
+    // entero, que es lo que pasó — el frontend nunca la mandaba, así que este endpoint
+    // devolvía 400 a todo el mundo desde el commit inicial (2026-03-23) y el cambio de
+    // contraseña jamás funcionó. Si llega, se valida (abajo); si no llega, no estorba.
+    if (!currentPassword || !newPassword) {
       return res.status(400).json({
-        error: 'Se requieren currentPassword, newPassword y confirmPassword.',
+        error: 'Se requieren currentPassword y newPassword.',
       });
     }
 
@@ -304,8 +310,9 @@ export async function changePassword(req, res) {
       return res.status(400).json({ error: 'La contraseña actual es incorrecta.' });
     }
 
-    // 3. Verificar confirmación
-    if (newPassword !== confirmPassword) {
+    // 3. Verificar confirmación SOLO si el cliente la envió. Así un cliente que la
+    //    manda mal sigue siendo atajado, y uno que no la manda no queda bloqueado.
+    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
       return res.status(400).json({ error: 'La nueva contraseña y su confirmación no coinciden.' });
     }
 
