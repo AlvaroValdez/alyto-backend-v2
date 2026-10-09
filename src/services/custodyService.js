@@ -43,6 +43,9 @@ import {
   TX_TIMEOUT_SECONDS,
 } from '../config/stellar.js';
 
+// submitWithRetry reconstruye la transacción en cada intento (recibe una función, no
+// una tx firmada), que es lo que hace falta para sobrevivir un tx_bad_seq.
+import { submitWithRetry }   from './stellarService.js';
 import { requireEnvSecret }  from '../utils/secrets.js';
 import { isAccountNotFound } from '../utils/stellarErrors.js';
 import { logger }            from '../utils/logger.js';
@@ -415,21 +418,33 @@ export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPubl
  */
 async function fundUserAccount(destinationPublicKey) {
   const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
-  const channelAccount = await horizonServer.loadAccount(channelKeypair.publicKey());
 
-  const tx = new TransactionBuilder(channelAccount, {
-    fee:               PRIORITY_FEE_STROOPS,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(Operation.createAccount({
-      destination:     destinationPublicKey,
-      startingBalance: '1.5',   // mínimo Stellar: 1 XLM base reserve + 0.5 de margen
-    }))
-    .setTimeout(TX_TIMEOUT_SECONDS)
-    .build();
+  // La secuencia del canal se relee en CADA intento, y esa es la razón de ser del
+  // retry acá. Dos provisiones concurrentes cargan la MISMA secuencia y la segunda
+  // se rechaza con `tx_bad_seq`, que `isRetriableStellarError` ya clasifica como
+  // transitorio. Reenviar la misma transacción firmada no sirve: la secuencia va
+  // dentro y ya está firmada, así que hay que reconstruirla.
+  //
+  // Es el fallo que dejó una cuenta sin crear en staging el 2026-10-08: dos KYC
+  // aprobados con 2,5 s de diferencia, uno ganó la secuencia y el otro se perdió en
+  // silencio, porque provisionUserKeypair no relanza el error del fondeo.
+  return submitWithRetry(async () => {
+    const channelAccount = await horizonServer.loadAccount(channelKeypair.publicKey());
 
-  tx.sign(channelKeypair);
-  return horizonServer.submitTransaction(tx);
+    const tx = new TransactionBuilder(channelAccount, {
+      fee:               PRIORITY_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.createAccount({
+        destination:     destinationPublicKey,
+        startingBalance: '1.5',   // mínimo Stellar: 1 XLM base reserve + 0.5 de margen
+      }))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
+
+    tx.sign(channelKeypair);
+    return horizonServer.submitTransaction(tx);
+  });
 }
 
 /**
@@ -437,30 +452,39 @@ async function fundUserAccount(destinationPublicKey) {
  * Usa la secretKey del usuario (descifrada de KMS) + Fee Bump corporativa.
  */
 async function createUsdcTrustline(userId, publicKey) {
-  const userKeypair   = await getUserKeypair(userId);
-  const userAccount   = await horizonServer.loadAccount(publicKey);
+  // El keypair se resuelve UNA vez, fuera del retry: cada intento haría un descifrado
+  // KMS de más sin ganar nada, porque la llave no cambia entre intentos.
+  const userKeypair    = await getUserKeypair(userId);
   const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
 
-  const innerTx = new TransactionBuilder(userAccount, {
-    fee:               PRIORITY_FEE_STROOPS,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(Operation.changeTrust({ asset: ASSETS.USDC }))
-    .setTimeout(TX_TIMEOUT_SECONDS)
-    .build();
+  // La secuencia que consume esta operación es la del USUARIO (el Fee Bump no gasta
+  // secuencia del canal), y a esa cuenta solo la toca Alyto, así que colisionar es
+  // menos probable que en el fondeo. Aun así se reconstruye por intento: cubre
+  // tx_too_late y los fallos transitorios de Horizon, que sí pasan.
+  await submitWithRetry(async () => {
+    const userAccount = await horizonServer.loadAccount(publicKey);
 
-  innerTx.sign(userKeypair);
+    const innerTx = new TransactionBuilder(userAccount, {
+      fee:               PRIORITY_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.changeTrust({ asset: ASSETS.USDC }))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
 
-  // Fee Bump: la channelAccount paga las fees, el usuario firma la operación
-  const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
-    channelKeypair,
-    PRIORITY_FEE_STROOPS,
-    innerTx,
-    NETWORK_PASSPHRASE,
-  );
-  feeBumpTx.sign(channelKeypair);
+    innerTx.sign(userKeypair);
 
-  await horizonServer.submitTransaction(feeBumpTx);
+    // Fee Bump: la channelAccount paga las fees, el usuario firma la operación
+    const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+      channelKeypair,
+      PRIORITY_FEE_STROOPS,
+      innerTx,
+      NETWORK_PASSPHRASE,
+    );
+    feeBumpTx.sign(channelKeypair);
+
+    return horizonServer.submitTransaction(feeBumpTx);
+  });
 
   // Actualizar lista de trustlines en MongoDB
   await User.findByIdAndUpdate(userId, {
