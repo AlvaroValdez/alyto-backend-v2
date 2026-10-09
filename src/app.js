@@ -894,6 +894,14 @@ async function startServer() {
       setTimeout(resealAuditTrails, 6 * 60 * 1000);                       // primera corrida 6 min post-start
       setInterval(resealAuditTrails, 30 * 60 * 1000);                     // cada 30 min
       console.info('[Server] Reseal audit trails job programado cada 30 min');
+
+      // Red de seguridad de la provisión custodial — completa las cuentas que quedaron
+      // con publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
+      // persiste antes de fondear y se traga el fallo. Sin esto nada las reintenta.
+      const { reconcileCustodialAccounts } = await import('./jobs/reconcileCustodialAccounts.js');
+      setTimeout(reconcileCustodialAccounts, 8 * 60 * 1000);              // primera corrida 8 min post-start
+      setInterval(reconcileCustodialAccounts, 30 * 60 * 1000);            // cada 30 min
+      console.info('[Server] Reconcile custodial accounts job programado cada 30 min');
     }
 
     // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO

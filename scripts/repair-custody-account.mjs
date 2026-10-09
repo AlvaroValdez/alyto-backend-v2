@@ -29,6 +29,12 @@
  *    fallo original, y reintentar sin fondearlo sólo repite el error.
  *
  * Idempotente: `ensureAccountOnChain` no toca lo que ya está bien.
+ *
+ * ⚠️ Desde que existe el job `reconcileCustodialAccounts` (cada 30 min, registrado como
+ *    'reconcile-custodial-accounts'), esto NO es la vía normal: el job repara solo. Este
+ *    script queda para el diagnóstico y para forzar una cuenta concreta sin esperar el
+ *    cooldown ni el presupuesto de intentos. Para dispararlo a mano en producción:
+ *      POST /api/v1/internal/jobs/reconcile-custodial-accounts
  */
 
 import 'dotenv/config';

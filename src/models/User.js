@@ -105,6 +105,15 @@ const stellarAccountSchema = new Schema(
       type:    [String],
       default: [],
     },
+    // ── Presupuesto de reparación (job reconcileCustodialAccounts) ────────────
+    // `provisionUserKeypair` persiste la publicKey antes de fondear y no relanza si
+    // el createAccount falla, así que una cuenta puede quedar en MongoDB sin existir
+    // on-chain. El job la completa, y estos dos campos acotan el reintento para no
+    // martillar un fallo permanente (canal sin XLM, configuración mala).
+    // Ausentes = nunca se intentó. Aditivos: no requieren migración.
+    repairAttempts:     { type: Number, default: undefined },
+    repairLastAttemptAt:{ type: Date,   default: undefined },
+    repairLastError:    { type: String, default: undefined },
   },
   { _id: false },
 );

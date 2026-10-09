@@ -286,9 +286,15 @@ export async function hasCustodialKeypair(userId) {
  * fallo parcial o correrla en loop sobre todas las cuentas.
  *
  * @param {string} userId
- * @returns {Promise<{publicKey: string, funded: boolean, trustlineCreated: boolean, alreadyOk: boolean}>}
+ * @param {object}  [opts]
+ * @param {boolean} [opts.allowFunding=true] — si es false y la cuenta no existe, NO la
+ *   funde y devuelve `needsFunding:true`. Lo usa el job de reconciliación cuando el
+ *   canal no tiene XLM: así una cuenta a la que solo le falta la trustline (que va por
+ *   Fee Bump y no consume reserva del canal) se repara igual, en vez de quedar
+ *   bloqueada por un presupuesto que no le aplica.
+ * @returns {Promise<{publicKey: string, funded: boolean, trustlineCreated: boolean, alreadyOk: boolean, needsFunding: boolean}>}
  */
-export async function ensureAccountOnChain(userId) {
+export async function ensureAccountOnChain(userId, { allowFunding = true } = {}) {
   const user      = await User.findById(userId).select('stellarAccount.publicKey').lean();
   const publicKey = user?.stellarAccount?.publicKey;
 
@@ -314,6 +320,12 @@ export async function ensureAccountOnChain(userId) {
 
   let funded = false;
   if (!account) {
+    // Sin permiso para fondear no hay nada más que hacer: la trustline se crea CON la
+    // cuenta del usuario como fuente, así que exige que exista primero.
+    if (!allowFunding) {
+      logger.warn('[custody] Cuenta inexistente on-chain y fondeo no permitido', log);
+      return { publicKey, funded: false, trustlineCreated: false, alreadyOk: false, needsFunding: true };
+    }
     logger.warn('[custody] Cuenta inexistente on-chain — fondeando', log);
     await fundUserAccount(publicKey);
     funded  = true;
@@ -342,7 +354,7 @@ export async function ensureAccountOnChain(userId) {
     });
   }
 
-  return { publicKey, funded, trustlineCreated, alreadyOk: !funded && !trustlineCreated };
+  return { publicKey, funded, trustlineCreated, alreadyOk: !funded && !trustlineCreated, needsFunding: false };
 }
 
 /**

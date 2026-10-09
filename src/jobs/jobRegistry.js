@@ -69,6 +69,11 @@ const JOBS = {
   // 'unknown_job'). Ver resealAuditTrails.js.
   'reseal-audit-trails': () =>
     import('./resealAuditTrails.js').then((m) => m.resealAuditTrails),
+  // Red de seguridad de la provisión custodial: completa las cuentas que quedaron con
+  // publicKey en MongoDB pero sin existir on-chain (createAccount fallido y tragado).
+  // Sin esta entrada quedaría huérfano en producción, igual que los de arriba.
+  'reconcile-custodial-accounts': () =>
+    import('./reconcileCustodialAccounts.js').then((m) => m.reconcileCustodialAccounts),
 };
 
 export function jobNames() {
