@@ -15,7 +15,7 @@
  */
 import '../setup.env.js';
 import { jest } from '@jest/globals';
-import { Account } from '@stellar/stellar-sdk';
+import { Account, Keypair } from '@stellar/stellar-sdk';
 
 const mockLoadAccount = jest.fn();
 const mockSubmit      = jest.fn();
@@ -51,11 +51,14 @@ const { ensureAccountOnChain } = await import('../../src/services/custodyService
 
 const PK = 'GBYUCYGC2TCH4DLAUMQNLPOT5FGXZVEQEHODG6K52QPRDPODRDFA7H4T';
 
-// Keypair desechable generado para el test. Keypair.fromSecret valida el checksum, así
-// que un secreto inventado a mano revienta antes de llegar a lo que se quiere probar.
-// No corresponde a ninguna cuenta real: nunca se firma nada que se envíe a la red.
-const CANAL_SECRET = 'SDFQCFI7GKYVZLEQXG2WE7T36GHY2LK67PLSFREJBYJUPOUUJEXOJW7D';
-const CANAL_PUBLIC = 'GBWEG4ZD56LAOZVIISNUNTSTVNYGLS67OFS66DIKCL57ZODYSPGCO7WS';
+// Canal de pruebas generado EN EJECUCIÓN, no escrito en el archivo: `Keypair.fromSecret`
+// valida el checksum, así que hace falta un secreto bien formado, y dejar una cadena
+// `S...` en el repositorio contradiría la regla 1 del CLAUDE.md además de disparar
+// cualquier escáner de secretos. No tiene fondos en ninguna red y nada de lo que firma
+// sale de este test.
+const canal        = Keypair.random();
+const CANAL_SECRET = canal.secret();
+const CANAL_PUBLIC = canal.publicKey();
 
 /** Cadena de Mongoose findById().select().lean() */
 const chain = (doc) => ({ select: () => ({ lean: () => Promise.resolve(doc) }) });
