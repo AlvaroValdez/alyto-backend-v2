@@ -27,7 +27,9 @@ import Sentry  from '../../sentry.js';
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 const cfg = {
-  baseUrl:       () => process.env.BEC_BASE_URL       ?? 'https://apimktdesa.baneco.com.bo/ApiGateway',
+  // Nota: BEC_BASE_URL puede venir con o sin '/' final según cómo lo envíe el
+  // banco. Normalizamos para no generar `//api/...` en los fetches.
+  baseUrl:       () => (process.env.BEC_BASE_URL       ?? 'https://apimktdesa.baneco.com.bo/ApiGateway').replace(/\/+$/, ''),
   username:      () => process.env.BEC_USERNAME,
   password:      () => process.env.BEC_PASSWORD,
   aesKey:        () => process.env.BEC_AES_KEY,
