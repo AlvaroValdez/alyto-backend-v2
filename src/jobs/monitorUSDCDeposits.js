@@ -7,8 +7,13 @@
  * **dirección destino** (sin memo).
  *
  * Dos modos de vigilancia:
- *   1. CUSTODIAL — cada WalletUSDC.stellarAddress (cuenta propia del usuario).
- *      Match por `record.to === address` → acredita esa WalletUSDC. Sin memo.
+ *   1. CUSTODIAL — cada cuenta custodial de usuario. La lista es la UNIÓN de las
+ *      WalletUSDC activas y las `User.stellarAccount.publicKey` provisionadas: la
+ *      cuenta se crea al aprobar el KYC, pero la WalletUSDC nace perezosamente cuando
+ *      el usuario entra a la pantalla de USDC. En ese tramo la cuenta ya recibe USDC,
+ *      así que vigilarla solo desde WalletUSDC dejaba el hueco ciego.
+ *      Match por `record.to === address` → acredita esa WalletUSDC, dándola de alta si
+ *      el depósito llegó antes de que existiera. Sin memo.
  *   2. LEGACY    — la dirección SRL compartida (STELLAR_SRL_PUBLIC_KEY), para
  *      depósitos antiguos con memo `ALYTO-XXXXXX`. Transitorio hasta H4 (migración).
  *      ⚠️ Inflows a SRL SIN memo `ALYTO-` = fondeo de tesorería → este job los
@@ -33,7 +38,9 @@ import SystemConfig             from '../models/SystemConfig.js'
 import WalletUSDC               from '../models/WalletUSDC.js'
 import WalletTransaction        from '../models/WalletTransaction.js'
 import Transaction              from '../models/Transaction.js'
+import User                     from '../models/User.js'
 import { notify, NOTIFICATIONS } from '../services/notifications.js'
+import { isAccountNotFound }    from '../utils/stellarErrors.js'
 
 const LEGACY_CURSOR_KEY = 'stellar:srl:cursor'                  // dirección SRL compartida (memo)
 const cursorKeyFor      = (addr) => `stellar:deposit:cursor:${addr}`
@@ -51,32 +58,77 @@ export async function monitorUSDCDeposits() {
   }
 
   _isRunning = true
-  const stats = { processed: 0, credited: 0, skipped: 0, noMatch: 0, errors: 0, addresses: 0 }
+  const stats = { processed: 0, credited: 0, skipped: 0, noMatch: 0, errors: 0, addresses: 0, notProvisioned: 0, walletsCreadas: 0 }
 
   try {
     const srlShared = process.env.STELLAR_SRL_PUBLIC_KEY ?? null
 
-    // 1. Direcciones custodiales activas a vigilar (excluye null y la SRL compartida)
+    // 1. Direcciones custodiales a vigilar (excluye null y la SRL compartida).
+    //
+    //    La lista sale de DOS fuentes, no solo de WalletUSDC. Una cuenta custodial se
+    //    provisiona al aprobar el KYC, mientras que la WalletUSDC se crea perezosamente
+    //    la primera vez que el usuario entra a la pantalla de USDC
+    //    (getOrCreateWalletUSDC). Entre ambos momentos la cuenta YA existe on-chain y
+    //    ya puede recibir USDC: el usuario puede conocer su dirección por
+    //    GET /stellar/custody/keypair, que la devuelve sin crear WalletUSDC. Vigilar
+    //    solo las direcciones con WalletUSDC dejaba ese tramo ciego, y un depósito ahí
+    //    no se detectaba nunca. Lo que manda es la realidad on-chain: si la cuenta
+    //    puede recibir dinero, se vigila; el apunte contable se crea al acreditar.
     const exclude = [null]
     if (srlShared) exclude.push(srlShared)
-    const custodialAddresses = await WalletUSDC.distinct('stellarAddress', {
-      status:         'active',
-      stellarAddress: { $nin: exclude },
-    })
+
+    const [conWallet, provisionadas] = await Promise.all([
+      WalletUSDC.distinct('stellarAddress', {
+        status:         'active',
+        stellarAddress: { $nin: exclude },
+      }),
+      // Sin filtrar por entidad a propósito: si una cuenta puede recibir USDC, se
+      // vigila. Acotar la vigilancia dejaría dinero real invisible. Quien sí está
+      // acotado es el alta automática de la WalletUSDC en _processPayment (solo SRL).
+      User.distinct('stellarAccount.publicKey', {
+        'stellarAccount.publicKey': { $nin: [...exclude, ''] },
+      }),
+    ])
+
+    const custodialAddresses = [...new Set([...conWallet, ...provisionadas])]
 
     // 2. Vigilar cada dirección custodial (match por dirección, sin memo)
+    const notProvisioned = []
     for (const addr of custodialAddresses) {
       stats.addresses++
       try {
         await _pollAddress(addr, { mode: 'custodial' }, stats)
       } catch (err) {
+        // 404 = la cuenta aún no existe en el ledger, no un fallo del monitor. Pasa
+        // cuando la provisión quedó a medias: provisionUserKeypair persiste la
+        // publicKey (paso 3) ANTES de fondear (paso 5) y no relanza si el
+        // createAccount falla, así que la WalletUSDC queda 'active' apuntando a una
+        // cuenta inexistente. Reintentar el poll no lo arregla — lo repara
+        // ensureAccountOnChain. Mandarlo a Sentry cada 30s solo entierra las alertas
+        // que sí importan.
+        if (isAccountNotFound(err)) {
+          stats.notProvisioned++
+          notProvisioned.push(addr)
+          continue
+        }
         stats.errors++
         console.error('[USDC Monitor] Error vigilando dirección custodial:', { addr, error: err.message })
         Sentry.captureException(err, { tags: { job: 'monitorUSDCDeposits', mode: 'custodial' }, extra: { addr } })
       }
     }
 
-    // 3. Dirección SRL compartida legacy (match por memo ALYTO-) — transición hasta H4
+    // Un aviso consolidado por ciclo en vez de uno por dirección por error: queda
+    // visible en CloudWatch y en el heartbeat (stats.notProvisioned), sin ruido en Sentry.
+    if (notProvisioned.length) {
+      console.warn('[USDC Monitor] Direcciones custodiales sin cuenta on-chain — provisión incompleta:', {
+        count:     notProvisioned.length,
+        addresses: notProvisioned,
+        reparar:   'node scripts/repair-custody-account.mjs',
+      })
+    }
+
+    // 3. Dirección SRL compartida legacy (match por memo ALYTO-) — transición hasta H4.
+    //    Acá un 404 SÍ es alarma: la tesorería tiene que existir, así que no se traga.
     if (srlShared) {
       stats.addresses++
       try {
@@ -177,12 +229,59 @@ async function _processPayment(record, address, opts, stats) {
   if (opts.mode === 'custodial') {
     // Match por dirección destino — la dirección es exclusiva del usuario, sin memo
     wallet = await WalletUSDC.findOne({ stellarAddress: address, status: 'active' })
+
+    // Sin WalletUSDC: la cuenta se provisionó al aprobar el KYC pero el usuario nunca
+    // entró a la pantalla de USDC, que es lo que la crea (getOrCreateWalletUSDC). El
+    // depósito ya llegó on-chain, así que abandonarlo en noMatch sería perder dinero
+    // real del usuario. Se da de alta el apunte contable y se acredita.
     if (!wallet) {
-      stats.noMatch++
-      console.warn('[USDC Monitor] Dirección custodial sin WalletUSDC activa:', {
-        address, operationId: record.id, from: record.from,
+      const owner = await User.findOne({ 'stellarAccount.publicKey': address })
+        .select('_id legalEntity').lean()
+
+      // Acotado a SRL: la WalletUSDC es exclusiva de esa entidad (ver modelo). Fuera
+      // de ahí no se inventa el apunte — se deja visible para que lo resuelva una
+      // persona, que es preferible a crear datos que violan el invariante.
+      if (!owner || owner.legalEntity !== 'SRL') {
+        stats.noMatch++
+        const motivo = owner ? `entidad ${owner.legalEntity}, no SRL` : 'ningún usuario tiene esa dirección'
+        console.error('[USDC Monitor] USDC recibido en dirección sin WalletUSDC y sin alta automática:', {
+          address, operationId: record.id, amount: record.amount, from: record.from, motivo,
+        })
+        Sentry.captureException(
+          new Error(`USDC recibido sin WalletUSDC acreditable (${motivo}): ${address}`),
+          { tags: { job: 'monitorUSDCDeposits', step: 'wallet-alta' }, extra: { address, operationId: record.id, amount: record.amount } },
+        )
+        return
+      }
+
+      // El findOne de arriba busca por DIRECCIÓN, así que no distingue "no hay wallet"
+      // de "hay una congelada". getOrCreateWalletUSDC busca por userId y devolvería la
+      // congelada, y acreditar ahí contradice el bloqueo administrativo del saldo.
+      // El crédito fallaría igual más abajo (findOneAndUpdate exige status activo),
+      // pero con un error genérico en vez de nombrar lo que pasó.
+      const bloqueada = await WalletUSDC.findOne({ userId: owner._id, status: { $ne: 'active' } })
+        .select('walletId status').lean()
+      if (bloqueada) {
+        stats.noMatch++
+        console.error('[USDC Monitor] USDC recibido en una wallet no activa — NO se acredita:', {
+          address, operationId: record.id, amount: record.amount, from: record.from,
+          walletId: bloqueada.walletId, status: bloqueada.status,
+        })
+        Sentry.captureException(
+          new Error(`USDC recibido en WalletUSDC ${bloqueada.status}: ${bloqueada.walletId}`),
+          { tags: { job: 'monitorUSDCDeposits', step: 'wallet-bloqueada' }, extra: { address, operationId: record.id, amount: record.amount } },
+        )
+        return
+      }
+
+      // Import dinámico: el controller importa de vuelta desde este grafo y un import
+      // estático cerraría el ciclo. Mismo patrón que usa sep24Service.
+      const { getOrCreateWalletUSDC } = await import('../controllers/walletUSDCController.js')
+      wallet = await getOrCreateWalletUSDC(owner._id)
+      stats.walletsCreadas++
+      console.info('[USDC Monitor] WalletUSDC creada al recibir el primer depósito:', {
+        userId: String(owner._id), address, walletId: wallet.walletId,
       })
-      return
     }
   } else {
     // Legacy: leer memo de la tx padre y buscar por stellarMemo.

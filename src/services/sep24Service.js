@@ -112,6 +112,18 @@ export async function initiateDeposit({ body, user }) {
   if (!userId) {
     throw Object.assign(new Error('SEP-24 deposit requiere una cuenta Alyto vinculada'), { status: 400 });
   }
+
+  // El depósito aterriza en una WalletUSDC, que es exclusiva de SRL, y la Transaction de
+  // abajo se estampa `legalEntity:'SRL'` fijo. Sin este guard, un usuario de otra entidad
+  // obtenía una wallet y una operación etiquetadas SRL — un registro mal atribuido que
+  // además él no puede consultar, porque el endpoint de saldo le responde 403.
+  // Soportar el anchor multi-entidad es otra discusión; mientras no exista, se rechaza.
+  if (user.legalEntity !== 'SRL') {
+    throw Object.assign(
+      new Error('El depósito de activos digitales está disponible solo para usuarios Bolivia (SRL).'),
+      { status: 403 },
+    );
+  }
   const amt = amount ? parseFloat(amount) : 0;
 
   // Camino A (Fase 40): el depósito custodial va a la dirección Stellar PROPIA del
@@ -200,6 +212,16 @@ export async function initiateWithdraw({ body, user }) {
   if (!userId) {
     throw Object.assign(new Error('SEP-24 withdraw requiere una cuenta Alyto vinculada'), { status: 400 });
   }
+
+  // Mismo criterio que el depósito: la operación se estampa `legalEntity:'SRL'` y liquida
+  // en BOB a un banco boliviano, así que para otra entidad no hay riel que la ejecute.
+  if (user.legalEntity !== 'SRL') {
+    throw Object.assign(
+      new Error('El retiro de activos digitales está disponible solo para usuarios Bolivia (SRL).'),
+      { status: 403 },
+    );
+  }
+
   const amt = amount ? parseFloat(amount) : 0;
 
   // La cuenta Stellar SRL recibe el USDC del usuario

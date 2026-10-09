@@ -43,9 +43,13 @@ import {
   TX_TIMEOUT_SECONDS,
 } from '../config/stellar.js';
 
-import { requireEnvSecret } from '../utils/secrets.js';
-import { logger }           from '../utils/logger.js';
-import User                 from '../models/User.js';
+// submitWithRetry reconstruye la transacción en cada intento (recibe una función, no
+// una tx firmada), que es lo que hace falta para sobrevivir un tx_bad_seq.
+import { submitWithRetry }   from './stellarService.js';
+import { requireEnvSecret }  from '../utils/secrets.js';
+import { isAccountNotFound } from '../utils/stellarErrors.js';
+import { logger }            from '../utils/logger.js';
+import User                  from '../models/User.js';
 
 // ─── Configuración KMS ───────────────────────────────────────────────────────
 
@@ -270,6 +274,93 @@ export async function hasCustodialKeypair(userId) {
 }
 
 /**
+ * Completa una cuenta custodial provisionada a medias: publicKey ya persistida en
+ * MongoDB pero cuenta inexistente on-chain, o existente sin trustline USDC.
+ *
+ * **Por qué hace falta.** `provisionUserKeypair` persiste la publicKey en el paso 3 y
+ * recién entonces funde (paso 5) y crea la trustline (paso 6) — y ninguno de los dos
+ * relanza si falla, así que la función retorna como si todo hubiera salido bien. Si el
+ * `createAccount` muere (canal sin XLM, `tx_bad_seq` por concurrencia, timeout de
+ * Horizon), el usuario queda con una dirección que Horizon responde 404 y nada lo
+ * reintenta: el webhook de KYC la dispara fire-and-forget y sólo deja un console.error.
+ * El síntoma es `monitorUSDCDeposits` loggeando 404 de esa dirección cada 30s.
+ *
+ * Idempotente: no toca lo que ya está bien, así que es seguro reintentarla tras un
+ * fallo parcial o correrla en loop sobre todas las cuentas.
+ *
+ * @param {string} userId
+ * @param {object}  [opts]
+ * @param {boolean} [opts.allowFunding=true] — si es false y la cuenta no existe, NO la
+ *   funde y devuelve `needsFunding:true`. Lo usa el job de reconciliación cuando el
+ *   canal no tiene XLM: así una cuenta a la que solo le falta la trustline (que va por
+ *   Fee Bump y no consume reserva del canal) se repara igual, en vez de quedar
+ *   bloqueada por un presupuesto que no le aplica.
+ * @returns {Promise<{publicKey: string, funded: boolean, trustlineCreated: boolean, alreadyOk: boolean, needsFunding: boolean}>}
+ */
+export async function ensureAccountOnChain(userId, { allowFunding = true } = {}) {
+  const user      = await User.findById(userId).select('stellarAccount.publicKey').lean();
+  const publicKey = user?.stellarAccount?.publicKey;
+
+  // Sin publicKey no hay nada que completar: eso es una provisión nueva y la hace
+  // provisionUserKeypair, que además tiene que generar y cifrar la secretKey.
+  if (!publicKey) {
+    const err = new Error(`[custody] User ${userId} sin stellarAccount.publicKey — usar provisionUserKeypair`);
+    err.isPermanent = true;
+    throw err;
+  }
+
+  const log = { userId: String(userId), publicKey, fn: 'ensureAccountOnChain' };
+
+  let account = null;
+  try {
+    account = await horizonServer.loadAccount(publicKey);
+  } catch (err) {
+    // Sólo el 404 significa "no existe". Un error de red se propaga: fondear una
+    // cuenta que en realidad ya existe la haría fallar con op_already_exists, y peor,
+    // asumir que no existe por un timeout es exactamente el bug que estamos cerrando.
+    if (!isAccountNotFound(err)) throw err;
+  }
+
+  let funded = false;
+  if (!account) {
+    // Sin permiso para fondear no hay nada más que hacer: la trustline se crea CON la
+    // cuenta del usuario como fuente, así que exige que exista primero.
+    if (!allowFunding) {
+      logger.warn('[custody] Cuenta inexistente on-chain y fondeo no permitido', log);
+      return { publicKey, funded: false, trustlineCreated: false, alreadyOk: false, needsFunding: true };
+    }
+    logger.warn('[custody] Cuenta inexistente on-chain — fondeando', log);
+    await fundUserAccount(publicKey);
+    funded  = true;
+    account = await horizonServer.loadAccount(publicKey);
+    logger.info('[custody] Cuenta creada y fondeada', log);
+  }
+
+  // Trustline USDC: sin ella la cuenta existe pero no puede recibir USDC.
+  const usdcCode     = ASSETS.USDC.getCode();
+  const usdcIssuer   = ASSETS.USDC.getIssuer();
+  const hasTrustline = account.balances.some(
+    (b) => b.asset_code === usdcCode && b.asset_issuer === usdcIssuer,
+  );
+
+  let trustlineCreated = false;
+  if (!hasTrustline) {
+    logger.warn('[custody] Sin trustline USDC — creándola', log);
+    await createUsdcTrustline(userId, publicKey);
+    trustlineCreated = true;
+    logger.info('[custody] Trustline USDC creada', log);
+  } else {
+    // La trustline está on-chain pero Mongo pudo quedar desalineado si el intento que
+    // la creó murió antes de escribir activeTrustlines. On-chain es la verdad.
+    await User.findByIdAndUpdate(userId, {
+      $addToSet: { 'stellarAccount.activeTrustlines': 'USDC' },
+    });
+  }
+
+  return { publicKey, funded, trustlineCreated, alreadyOk: !funded && !trustlineCreated, needsFunding: false };
+}
+
+/**
  * Envía USDC desde una wallet custodial de usuario a una dirección Stellar destino.
  * Patrón Fee Bump: la channelAccount (STELLAR_MASTER_SECRET) paga los fees XLM.
  *
@@ -327,21 +418,33 @@ export async function sendCustodialUSDC(userId, sourcePublicKey, destinationPubl
  */
 async function fundUserAccount(destinationPublicKey) {
   const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
-  const channelAccount = await horizonServer.loadAccount(channelKeypair.publicKey());
 
-  const tx = new TransactionBuilder(channelAccount, {
-    fee:               PRIORITY_FEE_STROOPS,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(Operation.createAccount({
-      destination:     destinationPublicKey,
-      startingBalance: '1.5',   // mínimo Stellar: 1 XLM base reserve + 0.5 de margen
-    }))
-    .setTimeout(TX_TIMEOUT_SECONDS)
-    .build();
+  // La secuencia del canal se relee en CADA intento, y esa es la razón de ser del
+  // retry acá. Dos provisiones concurrentes cargan la MISMA secuencia y la segunda
+  // se rechaza con `tx_bad_seq`, que `isRetriableStellarError` ya clasifica como
+  // transitorio. Reenviar la misma transacción firmada no sirve: la secuencia va
+  // dentro y ya está firmada, así que hay que reconstruirla.
+  //
+  // Es el fallo que dejó una cuenta sin crear en staging el 2026-10-08: dos KYC
+  // aprobados con 2,5 s de diferencia, uno ganó la secuencia y el otro se perdió en
+  // silencio, porque provisionUserKeypair no relanza el error del fondeo.
+  return submitWithRetry(async () => {
+    const channelAccount = await horizonServer.loadAccount(channelKeypair.publicKey());
 
-  tx.sign(channelKeypair);
-  return horizonServer.submitTransaction(tx);
+    const tx = new TransactionBuilder(channelAccount, {
+      fee:               PRIORITY_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.createAccount({
+        destination:     destinationPublicKey,
+        startingBalance: '1.5',   // mínimo Stellar: 1 XLM base reserve + 0.5 de margen
+      }))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
+
+    tx.sign(channelKeypair);
+    return horizonServer.submitTransaction(tx);
+  });
 }
 
 /**
@@ -349,30 +452,39 @@ async function fundUserAccount(destinationPublicKey) {
  * Usa la secretKey del usuario (descifrada de KMS) + Fee Bump corporativa.
  */
 async function createUsdcTrustline(userId, publicKey) {
-  const userKeypair   = await getUserKeypair(userId);
-  const userAccount   = await horizonServer.loadAccount(publicKey);
+  // El keypair se resuelve UNA vez, fuera del retry: cada intento haría un descifrado
+  // KMS de más sin ganar nada, porque la llave no cambia entre intentos.
+  const userKeypair    = await getUserKeypair(userId);
   const channelKeypair = Keypair.fromSecret(requireEnvSecret('STELLAR_MASTER_SECRET'));
 
-  const innerTx = new TransactionBuilder(userAccount, {
-    fee:               PRIORITY_FEE_STROOPS,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(Operation.changeTrust({ asset: ASSETS.USDC }))
-    .setTimeout(TX_TIMEOUT_SECONDS)
-    .build();
+  // La secuencia que consume esta operación es la del USUARIO (el Fee Bump no gasta
+  // secuencia del canal), y a esa cuenta solo la toca Alyto, así que colisionar es
+  // menos probable que en el fondeo. Aun así se reconstruye por intento: cubre
+  // tx_too_late y los fallos transitorios de Horizon, que sí pasan.
+  await submitWithRetry(async () => {
+    const userAccount = await horizonServer.loadAccount(publicKey);
 
-  innerTx.sign(userKeypair);
+    const innerTx = new TransactionBuilder(userAccount, {
+      fee:               PRIORITY_FEE_STROOPS,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.changeTrust({ asset: ASSETS.USDC }))
+      .setTimeout(TX_TIMEOUT_SECONDS)
+      .build();
 
-  // Fee Bump: la channelAccount paga las fees, el usuario firma la operación
-  const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
-    channelKeypair,
-    PRIORITY_FEE_STROOPS,
-    innerTx,
-    NETWORK_PASSPHRASE,
-  );
-  feeBumpTx.sign(channelKeypair);
+    innerTx.sign(userKeypair);
 
-  await horizonServer.submitTransaction(feeBumpTx);
+    // Fee Bump: la channelAccount paga las fees, el usuario firma la operación
+    const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+      channelKeypair,
+      PRIORITY_FEE_STROOPS,
+      innerTx,
+      NETWORK_PASSPHRASE,
+    );
+    feeBumpTx.sign(channelKeypair);
+
+    return horizonServer.submitTransaction(feeBumpTx);
+  });
 
   // Actualizar lista de trustlines en MongoDB
   await User.findByIdAndUpdate(userId, {
