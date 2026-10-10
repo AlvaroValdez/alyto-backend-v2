@@ -39,8 +39,10 @@ const mockIssueSession = jest.fn(() => ({ token: 'jwt.nuevo', user: { id: 'u1' }
 await jest.unstable_mockModule('../../src/controllers/authController.js', () => ({
   issueSession: mockIssueSession,
 }));
+// `isEncrypted` lo consume clientIdentityIndex.js, que userController importa de
+// forma indirecta: un mock parcial de piiCrypto tumba la suite entera al enlazar.
 await jest.unstable_mockModule('../../src/services/piiCrypto.js', () => ({
-  ensureDek: jest.fn(), isPiiEncryptionEnabled: () => false,
+  ensureDek: jest.fn(), isPiiEncryptionEnabled: () => false, isEncrypted: () => false,
 }));
 await jest.unstable_mockModule('../../src/utils/clientDocument.js', () => ({
   isRealDocumentNumber: () => true,

@@ -86,6 +86,9 @@ const notificationSchema = new mongoose.Schema(
         // Un usuario que no consigue pasar la verificación de identidad por un
         // fallo que no es suyo. Ver [kycBlockedAlert].
         'admin_kyc_bloqueado',
+        // Una cuenta nueva que comparte documento o teléfono con otra ya existente:
+        // la misma persona registrada dos veces. Ver [clientDuplicateAlert].
+        'admin_cliente_duplicado',
         // Prueba de push desde el panel de administración.
         'test',
       ],

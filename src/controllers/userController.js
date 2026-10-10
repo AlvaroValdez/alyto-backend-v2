@@ -20,6 +20,8 @@ import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { issueSession } from './authController.js';
 import { isRealDocumentNumber, readDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
+import { phoneTail } from '../services/clientIdentityIndex.js';
+import { revisarClienteDuplicado } from '../services/clientDuplicateAlert.js';
 
 // select:false → hay que pedir explícitamente el ciphertext del CI para poder descifrarlo.
 const DOC_CIPHERTEXT_SELECT = '+identityDocument.numberCiphertext';
@@ -260,9 +262,13 @@ export async function updateKycProfile(req, res) {
       address:               { street, city, state, zip, country },
       kycProfileCompletedAt: new Date(),
     };
-    if (phone) $set.phone = phone;
+    if (phone) {
+      $set.phone     = phone;
+      $set.phoneTail = phoneTail(phone);
+    }
     // El CI declarado reemplaza el placeholder 'PENDING_VERIFICATION' del registro.
-    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo.
+    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo, y deja
+    // su huella en numberFingerprint para poder detectar duplicados.
     if (documentNumber) await applyDocumentNumberToSet($set, req.user._id, documentNumber);
 
     const updated = await User.findByIdAndUpdate(
@@ -273,6 +279,18 @@ export async function updateKycProfile(req, res) {
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
     invalidateUserCache(req.user._id); // refrescar el gate kycProfileCompletedAt en protect()
+
+    // Acá es donde de verdad se sabe quién es la persona: en el registro el CI es
+    // opcional y casi nunca viene, en este formulario es obligatorio. La coincidencia
+    // por documento —la señal fuerte— normalmente aparece recién en esta llamada.
+    // Fire-and-forget, sin efecto en la respuesta (ver [clientDuplicateAlert]).
+    setImmediate(() => {
+      revisarClienteDuplicado(updated, {
+        documentNumber,
+        phone:  phone || current?.phone,
+        origen: 'perfil de cumplimiento',
+      }).catch(() => {});
+    });
 
     return sendProfile(res, updated);
   } catch (err) {

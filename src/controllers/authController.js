@@ -18,6 +18,8 @@ import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
 import User     from '../models/User.js';
 import { resolveDocumentNumberStorage } from '../utils/clientDocument.js';
+import { phoneTail }                    from '../services/clientIdentityIndex.js';
+import { revisarClienteDuplicado }      from '../services/clientDuplicateAlert.js';
 import {
   isLockedOut,
   registerFailedAttempt,
@@ -266,13 +268,17 @@ export async function registerUser(req, res) {
     const rawDoc   = (typeof documentNumber === 'string' && documentNumber.trim().length >= 4)
                        ? documentNumber.trim() : '';
     const docStore = await resolveDocumentNumberStorage(_id, rawDoc);
+    const rawPhone = typeof phone === 'string' ? phone.trim() : undefined;
 
     const user = await User.create({
       _id,
       firstName:        (typeof firstName === 'string' && firstName.trim()) || 'Usuario',
       lastName:         (typeof lastName === 'string' && lastName.trim())   || 'Alyto',
       email:            normalizedEmail,
-      phone:            typeof phone === 'string' ? phone.trim() : undefined,
+      phone:            rawPhone,
+      // Clave de búsqueda del teléfono — ver [clientIdentityIndex]. Sin ella, dos
+      // cuentas con el mismo número escrito distinto no se encuentran.
+      phoneTail:        phoneTail(rawPhone) ?? undefined,
       password:         passwordHash,
       legalEntity,
       kycStatus:        'pending',
@@ -285,10 +291,11 @@ export async function registerUser(req, res) {
       // Documento del cliente: si el onboarding ya lo declara, se guarda (cifrado
       // si el flag está activo); si no, queda 'PENDING_VERIFICATION' hasta el KYC.
       identityDocument: {
-        type:             ENTITY_DEFAULT_DOC[legalEntity],
-        number:           docStore.number,
-        numberCiphertext: docStore.numberCiphertext ?? undefined,
-        issuingCountry:   countryCode,
+        type:              ENTITY_DEFAULT_DOC[legalEntity],
+        number:            docStore.number,
+        numberCiphertext:  docStore.numberCiphertext ?? undefined,
+        numberFingerprint: docStore.numberFingerprint ?? undefined,
+        issuingCountry:    countryCode,
       },
       // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI
       tosAcceptance: {
@@ -309,6 +316,14 @@ export async function registerUser(req, res) {
     setImmediate(() => {
       sendVerificationCodeEmail(user, emailCode, EMAIL_CODE_TTL_MS / 60000)
         .catch(err => console.error('[Auth] Error enviando código de verificación:', err.message));
+    });
+
+    // ¿Esta persona ya tiene cuenta? Fire-and-forget y **sin efecto en la respuesta**:
+    // el aviso va a administración, al usuario no se le dice nada. Ver
+    // [clientDuplicateAlert] para por qué no se bloquea ni se informa.
+    setImmediate(() => {
+      revisarClienteDuplicado(user, { documentNumber: rawDoc, phone: rawPhone, origen: 'registro' })
+        .catch(() => {});
     });
 
     // Welcome email — fire-and-forget (no bloquear respuesta de registro).
