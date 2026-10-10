@@ -20,6 +20,7 @@
 
 import { logger }        from '../utils/logger.js';
 import { plazoLiquidacion } from '../utils/ecpTramos.js';
+import { extractVitaBusinessDays } from '../utils/vitaBusinessDays.js';
 import { evaluateCorridorAccess, corridorAccessDenialBody } from '../utils/corridorAccess.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
@@ -1920,13 +1921,14 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     const sentAttrs = vitaPricesResponse?.usd?.vita_sent?.prices?.attributes;
     const sentRate  = Number(sentAttrs?.usd_sell?.[countryKey] ?? NaN);
     if (isFinite(sentRate) && sentRate > 0) {
-      const fixedCost  = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
-      const validUntil = sentAttrs?.valid_until ?? null;
+      const fixedCost    = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
+      const validUntil   = sentAttrs?.valid_until ?? null;
+      const businessDays = extractVitaBusinessDays(sentAttrs, countryKey);
       if (origin === 'BOB') {
         const BOB_USD_RATE = await getBOBRate();
-        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil };
+        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil, businessDays };
       }
-      return { rate: sentRate, fixedCost, validUntil };
+      return { rate: sentRate, fixedCost, validUntil, businessDays };
     }
   }
 
@@ -1966,7 +1968,7 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     console.info('[Alyto Quote] Cotización ' + origin + '→BOB via BOB_USD_RATE:', {
       BOB_USD_RATE, clpToUsd, rate,
     });
-    return { rate, fixedCost: 0, validUntil };
+    return { rate, fixedCost: 0, validUntil, businessDays: extractVitaBusinessDays(attrs, countryKey) };
   }
 
   if (origin === 'CLP') {
@@ -1981,9 +1983,10 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     const directRate = Number(usdAttrs?.usd_sell?.[countryKey] ?? NaN);
     if (isFinite(directRate) && directRate > 0) {
       return {
-        rate:       directRate,
-        fixedCost:  Number(usdAttrs?.fixed_cost?.[countryKey] ?? 0),
-        validUntil: usdAttrs?.valid_until ?? null,
+        rate:         directRate,
+        fixedCost:    Number(usdAttrs?.fixed_cost?.[countryKey] ?? 0),
+        validUntil:   usdAttrs?.valid_until ?? null,
+        businessDays: extractVitaBusinessDays(usdAttrs, countryKey),
       };
     }
     const clpToDest = Number(attrs.clp_sell?.[countryKey] ?? NaN);
@@ -2021,7 +2024,7 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
   const fixedCost  = Number(attrs.fixed_cost?.[countryKey] ?? 0);
   const validUntil = attrs.valid_until ?? null;
 
-  return { rate, fixedCost, validUntil };
+  return { rate, fixedCost, validUntil, businessDays: extractVitaBusinessDays(attrs, countryKey) };
 }
 
 /**
