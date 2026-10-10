@@ -37,6 +37,8 @@ import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.j
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
 import { getSrlBankData }   from '../services/srlBankData.js'
+import { logger }          from '../utils/logger.js'
+import { verificarLiquidezRetiro } from '../services/withdrawalLiquidity.js'
 import { recordAdminAction } from '../services/adminAuditService.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
@@ -644,6 +646,29 @@ export async function requestWithdrawal(req, res) {
     if (balanceAvailable < amount) {
       await session.abortTransaction()
       return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
+    }
+
+    // ── Liquidez de tesorería ────────────────────────────────────────────────
+    //
+    // Tener saldo en la billetera no significa que el banco pueda pagarlo. Al
+    // 2026-10-10 el pasivo era de Bs 4.227 contra Bs 1.047,61 en la cuenta, así
+    // que un retiro grande se aceptaba y reservaba para descubrir al ir a
+    // transferir que no había con qué. Es el mismo patrón que corregimos en el
+    // payin —comprometerse sin verificar que se puede ejecutar— del lado de la
+    // salida.
+    const liquidez = await verificarLiquidezRetiro({ amount, currency: 'BOB' })
+    if (!liquidez.ok) {
+      await session.abortTransaction()
+      logger.error('[Wallet] Retiro bloqueado por liquidez de tesorería', {
+        userId: String(user._id), ...liquidez.detalle,
+      })
+      // 503, no 400: el pedido del usuario es válido y su saldo existe. Lo que
+      // falta es liquidez en la cuenta, y eso se resuelve fondeando.
+      return res.status(503).json({
+        error:  'En este momento no podemos procesar retiros de este monto. Por favor intenta más tarde o con un monto menor.',
+        code:   'TREASURY_INSUFFICIENT',
+        reason: liquidez.motivo,
+      })
     }
 
     // ── Límite diario de retiro (mismo cálculo que getDailyLimits) ──────────
