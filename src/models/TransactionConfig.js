@@ -354,8 +354,14 @@ const transactionConfigSchema = new Schema(
     },
 
     /**
-     * Plazo REAL de liquidación del proveedor de payout, en días hábiles.
-     * 0 = mismo día hábil · 1 = hasta 1 día hábil · N = hasta N días hábiles.
+     * Plazo REAL de liquidación del proveedor de payout, como RANGO en días
+     * hábiles. 0 = sub-diario ("pocas horas").
+     *
+     * Es un rango y no un número único a propósito: un plazo de liquidación no es
+     * determinista —depende del banco destino, del riel y de la hora de corte— y
+     * publicar un número cerrado ("1 día hábil") lo convierte en una promesa que
+     * no se puede sostener. El lenguaje que ya usan los Términos §7 es
+     * precisamente aproximado: "pocas horas a 1 día hábil", "1 a 3 días hábiles".
      *
      * Por qué es un campo por corredor y no una constante: el plazo lo fija el
      * riel del payout, no el monto. Vita liquida en horas; Harbor por WIRE o
@@ -364,16 +370,23 @@ const transactionConfigSchema = new Schema(
      * velocidad del PAGO— y ninguno de los dos proveedores publica un ETA en su
      * cotización, así que no se puede derivar de la API: hay que configurarlo.
      *
-     * ⚠️ Es un PISO, no el plazo publicado. El que ve el usuario sale de
-     * `resolvePlazoLiquidacion()`, que toma el MAYOR entre este valor y el tramo
-     * declarado del Entorno Controlado de Pruebas. Decisión de Alvaro
-     * (2026-10-10): nunca prometer más rápido de lo que el proveedor entrega; si
-     * el plazo del ECP es más largo, se publica el del ECP.
+     * Decisión de Alvaro (2026-10-10): manda el plazo del proveedor, que es el
+     * real, y se expresa aproximado. El tramo del Entorno Controlado de Pruebas
+     * solo cubre el hueco cuando el corredor no tiene estos datos.
      *
-     * Null = sin configurar. El resolver cae al tramo del ECP y marca el dato
-     * como no verificado, en vez de inventar un número.
+     * ⚠️ El MÁXIMO es el que se usa para la fecha límite interna contra la que se
+     * mide el cumplimiento, así que debe ser una cota superior realista, no un
+     * optimismo. El mínimo solo afecta cómo se redacta el rango.
+     *
+     * Null en ambos = sin configurar. El resolver cae al tramo del ECP y marca el
+     * dato como no verificado, en vez de inventar un número.
      */
-    payoutEtaBusinessDays: {
+    payoutEtaMinBusinessDays: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    payoutEtaMaxBusinessDays: {
       type:    Number,
       min:     0,
       default: null,
