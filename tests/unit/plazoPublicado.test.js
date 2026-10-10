@@ -1,14 +1,14 @@
 /**
  * plazoPublicado.test.js — Plazo que se publica al consumidor.
  *
- * Acredita la regla acordada el 2026-10-10: se informa el MAYOR entre el plazo real
- * del proveedor y el tramo declarado del Entorno Controlado de Pruebas. Nunca un
- * plazo más corto que el entregable.
+ * Acredita la regla acordada el 2026-10-10: se informa el plazo REAL del proveedor
+ * siempre que esté configurado. El tramo del Entorno Controlado de Pruebas solo
+ * cubre el hueco cuando el corredor no tiene el dato.
  *
- * Lo que de verdad hay que blindar es el caso peligroso: un importe pequeño en un
- * corredor lento. Cae en el tramo "Estándar / mismo día hábil" y el proveedor tarda
- * días; si el max() se rompiera, la app volvería a prometer un plazo falso sin que
- * nada avise.
+ * Lo que hay que blindar es que el plazo publicado sea EXACTO, no conservador.
+ * Publicar más de lo que tarda el proveedor es tan falso como publicar menos: en un
+ * caso no se cumple la promesa, en el otro se le oculta al usuario que su pago llega
+ * antes. Estos tests fijan las dos direcciones.
  */
 
 import { resolvePlazoLiquidacion, plazoTexto } from '../../src/utils/plazoPublicado.js';
@@ -16,9 +16,10 @@ import { resolvePlazoLiquidacion, plazoTexto } from '../../src/utils/plazoPublic
 // Lunes: evita que el corrimiento de fin de semana contamine las aserciones.
 const LUNES = new Date('2026-10-12T10:00:00');
 
-describe('resolvePlazoLiquidacion — el mayor de los dos plazos', () => {
-  test('proveedor MÁS LENTO que el tramo: publica el del proveedor y lo marca', () => {
+describe('resolvePlazoLiquidacion — manda el plazo del proveedor', () => {
+  test('proveedor MÁS LENTO que el tramo: publica el del proveedor y marca el exceso', () => {
     // Bs 5.000 = tramo Estándar (mismo día). Harbor tarda 3 días hábiles.
+    // Publicar "mismo día" seria una promesa incumplible.
     const r = resolvePlazoLiquidacion({ amountBOB: 5000, payoutEtaBusinessDays: 3, desde: LUNES });
     expect(r.diasHabiles).toBe(3);
     expect(r.plazoLiquidacion).toBe('Hasta 3 días hábiles');
@@ -27,27 +28,31 @@ describe('resolvePlazoLiquidacion — el mayor de los dos plazos', () => {
     expect(r.tramo).toBe('estandar');
   });
 
-  test('proveedor MÁS RÁPIDO que el tramo: publica el del ECP, que es el comprometido', () => {
+  test('proveedor MÁS RÁPIDO que el tramo: publica el del proveedor, no el tramo', () => {
     // Bs 100.000 = tramo Corporativo (2 días). Vita liquida en 1.
+    // Publicar 2 días tambien es falso: le oculta al usuario que llega antes.
     const r = resolvePlazoLiquidacion({ amountBOB: 100000, payoutEtaBusinessDays: 1, desde: LUNES });
-    expect(r.diasHabiles).toBe(2);
-    expect(r.origen).toBe('ecp');
-    expect(r.excedeTramoEcp).toBe(false);
-  });
-
-  test('empate: se atribuye al ECP, que es el plazo declarado', () => {
-    const r = resolvePlazoLiquidacion({ amountBOB: 50000, payoutEtaBusinessDays: 1, desde: LUNES });
     expect(r.diasHabiles).toBe(1);
-    expect(r.origen).toBe('ecp');
+    expect(r.plazoLiquidacion).toBe('Hasta 1 día hábil');
+    expect(r.origen).toBe('proveedor');
     expect(r.excedeTramoEcp).toBe(false);
   });
 
-  test('NUNCA publica un plazo menor que el del proveedor', () => {
+  test('proveedor que liquida el mismo día: se publica así aunque el tramo dé más', () => {
+    const r = resolvePlazoLiquidacion({ amountBOB: 100000, payoutEtaBusinessDays: 0, desde: LUNES });
+    expect(r.diasHabiles).toBe(0);
+    expect(r.plazoLiquidacion).toBe('Mismo día hábil');
+    expect(r.origen).toBe('proveedor');
+  });
+
+  test('el plazo publicado es EXACTAMENTE el del proveedor, en todo el rango', () => {
     // Barrido sobre los tres tramos y plazos de proveedor de 0 a 5 días.
+    // Ni redondea hacia arriba por "prudencia" ni hacia abajo.
     for (const amount of [5000, 50000, 100000]) {
       for (const eta of [0, 1, 2, 3, 4, 5]) {
         const r = resolvePlazoLiquidacion({ amountBOB: amount, payoutEtaBusinessDays: eta, desde: LUNES });
-        expect(r.diasHabiles).toBeGreaterThanOrEqual(eta);
+        expect(r.diasHabiles).toBe(eta);
+        expect(r.origen).toBe('proveedor');
       }
     }
   });

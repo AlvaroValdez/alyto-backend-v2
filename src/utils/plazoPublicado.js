@@ -14,15 +14,27 @@
  *
  * ── Regla (decisión de Alvaro, 2026-10-10) ──────────────────────────────────────
  *
- * Se publica **el MAYOR de los dos**. El plazo del proveedor es el piso: nunca
- * prometer más rápido de lo que se puede entregar. Si el del ECP es más largo, se
- * publica el del ECP, que además es el comprometido ante ASFI.
+ * **Manda el plazo del proveedor, siempre que esté configurado.** Es el dato real,
+ * y lo que hay que proteger es que al consumidor no se le prometa algo que no es.
  *
- * Consecuencia que no se oculta: cuando el proveedor es más lento que el tramo, el
- * plazo publicado EXCEDE el declarado en el Protocolo. Es honesto con el
- * consumidor y, a la vez, evidencia de que el Protocolo declaró tramos que no se
- * cumplen en todos los corredores. El campo `excedeTramoEcp` lo marca para que
- * quede medible y no se descubra por un reclamo.
+ * Esto aplica en LAS DOS direcciones, y es el punto que importa:
+ *   - Proveedor más LENTO que el tramo → se publica el del proveedor. Publicar el
+ *     tramo sería prometer una entrega que no se puede cumplir.
+ *   - Proveedor más RÁPIDO que el tramo → se publica el del proveedor igual.
+ *     Publicar el tramo (más largo) también es información falsa, solo que en la
+ *     otra dirección, y además le oculta al usuario que su pago llega antes.
+ *
+ * Una versión anterior de este módulo publicaba el MAYOR de los dos. Estaba mal:
+ * confundía "no prometer de menos" con "elegir el número más grande". El criterio
+ * correcto es la exactitud, no el margen.
+ *
+ * ⚠️ Consecuencia operativa: al publicar el plazo real se pierde el colchón que
+ * daba el tramo. Por eso `payoutEtaBusinessDays` debe cargarse con la COTA
+ * SUPERIOR de lo que tarda el proveedor, no con su promedio: pasa a ser la
+ * promesa, sin margen detrás.
+ *
+ * `excedeTramoEcp` se conserva porque sigue siendo señal regulatoria: marca los
+ * corredores donde la realidad supera el tramo declarado en el Protocolo.
  *
  * ── Qué pasa si falta el dato ───────────────────────────────────────────────────
  *
@@ -63,9 +75,9 @@ export function resolvePlazoLiquidacion({ amountBOB, payoutEtaBusinessDays = nul
     ? Math.trunc(payoutEtaBusinessDays)
     : null;
 
-  // El mayor manda. Con empate se atribuye al ECP: es el plazo comprometido.
-  const dias   = etaProveedor === null ? tramo.diasHabiles : Math.max(etaProveedor, tramo.diasHabiles);
-  const origen = etaProveedor !== null && etaProveedor > tramo.diasHabiles ? 'proveedor' : 'ecp';
+  // Manda el proveedor cuando hay dato. El tramo solo cubre el hueco.
+  const dias   = etaProveedor ?? tramo.diasHabiles;
+  const origen = etaProveedor === null ? 'ecp' : 'proveedor';
 
   // Mismo criterio que plazoLiquidacion(): si entra en fin de semana, el "mismo
   // día hábil" es el siguiente hábil. No se compromete un vencimiento en día no hábil.
