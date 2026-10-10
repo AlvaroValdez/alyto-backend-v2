@@ -47,6 +47,22 @@ const identityDocumentSchema = new Schema(
       type:   String,
       select: false,
     },
+    /**
+     * Índice ciego del documento: HMAC determinista del número normalizado, con
+     * clave derivada de la DEK (ver `services/clientIdentityIndex.js`).
+     *
+     * Existe porque el ciphertext NO es comparable —IV aleatorio y AAD atado al
+     * usuario—, así que sin esto no hay forma de descubrir que dos cuentas
+     * declararon el mismo CI. Es la única clave con la que se detecta que una
+     * persona ya tiene cuenta.
+     *
+     * select:false como el ciphertext: no es PII en claro, pero tampoco tiene
+     * por qué viajar en una respuesta de API.
+     */
+    numberFingerprint: {
+      type:   String,
+      select: false,
+    },
     /** País emisor del documento (ISO 3166-1 alpha-2) */
     issuingCountry: {
       type:      String,
@@ -196,6 +212,19 @@ const userSchema = new Schema(
     phone: {
       type:  String,
       trim:  true,
+    },
+    /**
+     * Últimos dígitos del teléfono, sin prefijo ni separadores. Clave de búsqueda
+     * para detectar que dos cuentas comparten número: `+591 69769901` y
+     * `69769901` son el mismo teléfono y `phone` no los iguala en ninguna consulta.
+     *
+     * Lo escribe `phoneTail()` (ver `services/clientIdentityIndex.js`) en los dos
+     * puntos donde se toma el teléfono: el registro y el perfil de cumplimiento.
+     */
+    phoneTail: {
+      type:   String,
+      trim:   true,
+      select: false,
     },
     /** Foto de perfil como data URL base64 (max ~150 KB tras compresión en cliente) */
     avatarUrl: {
@@ -633,6 +662,12 @@ userSchema.index(
   { alytoAlias: 1 },
   { unique: true, partialFilterExpression: { alytoAlias: { $type: 'string' } } },
 );
+// Claves de identidad del cliente, para encontrar a la MISMA persona en dos cuentas.
+// A propósito NO son únicos: un documento repetido tiene que poder existir (ya existe
+// en producción) y resolverlo es una decisión humana, no un rechazo de la base. Lo que
+// el índice garantiza es que la consulta del registro sea O(1) y no un barrido.
+userSchema.index({ 'identityDocument.numberFingerprint': 1 }, { sparse: true });
+userSchema.index({ phoneTail: 1 }, { sparse: true });
 
 // ─── Virtual: nombre completo ─────────────────────────────────────────────────
 
