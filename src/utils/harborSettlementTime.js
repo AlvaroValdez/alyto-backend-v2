@@ -3,76 +3,100 @@
  *
  * La cotización de Harbor devuelve el plazo como RANGO CON UNIDAD:
  *
- *   settlement_time_min / fiat_settlement_time_min
- *   settlement_time_max / fiat_settlement_time_max
- *   settlement_time_unit / fiat_settlement_time_unit
+ *   fiat_settlement_time_min / settlement_time_min
+ *   fiat_settlement_time_max / settlement_time_max
+ *   fiat_settlement_time_unit / settlement_time_unit
  *
- * `owlPayService.js` ya los normaliza en dos sitios (líneas 349-351 y 1078-1080)
- * y hasta ahora NADIE los consumía: se extraían y se tiraban. El plazo que se le
- * mostraba al usuario salía de un ternario hardcodeado sobre `payinMethod`.
+ * `owlPayService.js` ya los normalizaba (líneas 349-351 y 1078-1080) y NADIE los
+ * consumía: se extraían y se tiraban, mientras el plazo mostrado al usuario salía
+ * de un ternario hardcodeado sobre `payinMethod`.
  *
- * Es mejor dato que el de Vita, que publica un número único: acá viene el rango,
- * que es exactamente la forma que necesita el texto aproximado.
+ * ── Valores REALES, sondeados contra el sandbox el 2026-10-10 ───────────────────
  *
- * ── La unidad es lo peligroso ───────────────────────────────────────────────────
+ * No se asumen: se preguntaron. Una cotización por ruta (POST de quotes, no crea
+ * transferencia):
  *
- * No hay en el repo ninguna respuesta real que fije los valores de
- * `settlement_time_unit`, así que la conversión es defensiva y, ante una unidad
- * que no se reconoce, devuelve null en vez de asumir.
+ *   US/USD  ACH Push            2–5   DAYS
+ *   US/USD  Fedwire             1–1   DAYS
+ *   US/USD  Domestic Wire       0–2   DAYS
+ *   US/USD  International Wire  1–3   DAYS
+ *   GB/GBP  Bank Transfer       0–2   DAYS
+ *   SG/SGD  Bank Transfer       1–15  MINUTES
+ *   NG/NGN  Bank Transfer       1–5   MINUTES
+ *   BR/USD  International Wire  1–3   DAYS
  *
- * Leer "48" con unidad desconocida como 48 DÍAS cuando son 48 HORAS, o al revés,
- * es un error de dos órdenes de magnitud en una promesa al consumidor. Más vale
- * marcar el corredor como no verificado y caer al tramo del ECP.
+ * Dos cosas que eso enseña y que no estaban en ninguna suposición previa:
+ *   1. La unidad viene en MAYÚSCULAS y existe MINUTES. Hay rutas que liquidan en
+ *      minutos, no en días.
+ *   2. El plazo es POR MÉTODO, no por país: en US, ACH Push tarda 2–5 días y
+ *      Fedwire 1. Elegir el riel más barato puede ser elegir el más lento.
  *
- * ── Dirección conservadora de la conversión ─────────────────────────────────────
+ * ── Se preserva la granularidad real ───────────────────────────────────────────
  *
- * Los días calendario se tratan como hábiles. 3 días calendario que cruzan un fin
- * de semana son menos de 3 hábiles, así que contarlos como hábiles produce un
- * vencimiento MÁS TARDÍO. Un plazo informado de más genera una consulta; uno de
- * menos, un incumplimiento.
+ * Colapsar 1–15 MINUTES a "0 días hábiles" perdería el dato: al usuario se le
+ * puede decir "minutos" con la verdad en la mano. Por eso esta función devuelve el
+ * rango en su unidad canónica y aparte la conversión a días hábiles, que es la que
+ * necesita el cálculo de la fecha límite.
+ *
+ * ── Unidad desconocida: no se adivina ─────────────────────────────────────────
+ *
+ * Leer "48" como 48 DÍAS cuando son 48 HORAS es un error de dos órdenes de
+ * magnitud en una promesa al consumidor. Toda unidad fuera del mapa devuelve null
+ * y el corredor queda marcado como no verificado.
  */
 
-const HORA = new Set(['hour', 'hours', 'hr', 'hrs', 'h']);
-const DIA  = new Set(['day', 'days', 'd', 'business_day', 'business_days', 'businessday', 'businessdays', 'calendar_day', 'calendar_days']);
+/** Unidad de Harbor → unidad canónica + minutos que vale una de esas unidades. */
+const UNIDADES = new Map([
+  ['second',        ['minutes', 1 / 60]], ['seconds',       ['minutes', 1 / 60]],
+  ['minute',        ['minutes', 1]],      ['minutes',       ['minutes', 1]],
+  ['hour',          ['hours',   60]],     ['hours',         ['hours',   60]],
+  ['day',           ['days',    1440]],   ['days',          ['days',    1440]],
+  ['business_day',  ['days',    1440]],   ['business_days', ['days',    1440]],
+  ['businessday',   ['days',    1440]],   ['businessdays',  ['days',    1440]],
+  ['calendar_day',  ['days',    1440]],   ['calendar_days', ['days',    1440]],
+]);
 
-/** Entero >= 0, o null. Un dato roto NO vale cero. */
-function entero(v) {
+const MIN_POR_DIA = 1440;
+
+/** Entero/decimal >= 0, o null. Un dato roto NO vale cero. */
+function num(v) {
   if (v == null || v === '' || typeof v === 'object') return null;
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /**
- * Convierte el plazo de Harbor a días hábiles.
+ * Plazo de Harbor normalizado, preservando su unidad real.
  *
  * @param {{settlementTimeMin?:*, settlementTimeMax?:*, settlementTimeUnit?:*}} q
- *        cotización ya normalizada por owlPayService
- * @returns {{min:number, max:number}|null}  null si falta el dato o la unidad no
- *          se reconoce. El resolver lo marca como no verificado.
+ * @returns {{min:number, max:number, unit:'minutes'|'hours'|'days',
+ *            minBusinessDays:number, maxBusinessDays:number}|null}
  */
-export function harborSettlementToBusinessDays(q) {
+export function harborSettlementRange(q) {
   if (!q) return null;
 
   const unidadRaw = q.settlementTimeUnit;
   if (typeof unidadRaw !== 'string' || unidadRaw.trim() === '') return null;
-  const unidad = unidadRaw.trim().toLowerCase();
+  const mapeo = UNIDADES.get(unidadRaw.trim().toLowerCase());
+  if (!mapeo) return null;                             // unidad desconocida: no se adivina
+  const [unit, minutosPorUnidad] = mapeo;
 
-  const max = entero(q.settlementTimeMax);
+  const max = num(q.settlementTimeMax);
   if (max === null) return null;                       // el máximo es el que compromete
-  const min = Math.min(entero(q.settlementTimeMin) ?? 0, max);
+  const min = Math.min(num(q.settlementTimeMin) ?? 0, max);
 
-  if (HORA.has(unidad)) {
-    // Menos de 24 h es el mismo día hábil. A partir de ahí se redondea hacia
-    // ARRIBA: 25 h no caben en un día hábil.
-    return { min: min < 24 ? 0 : Math.ceil(min / 24), max: max < 24 ? 0 : Math.ceil(max / 24) };
-  }
+  // A días hábiles para la fecha límite. Por debajo de un día es el mismo día
+  // hábil; por encima se redondea hacia ARRIBA, porque 25 h no caben en un día.
+  const aDias = (v) => {
+    const minutos = v * minutosPorUnidad;
+    return minutos < MIN_POR_DIA ? 0 : Math.ceil(minutos / MIN_POR_DIA);
+  };
 
-  if (DIA.has(unidad)) {
-    return { min: Math.trunc(min), max: Math.trunc(max) };
-  }
-
-  // Unidad desconocida: no se adivina.
-  return null;
+  return {
+    min, max, unit,
+    minBusinessDays: aDias(min),
+    maxBusinessDays: aDias(max),
+  };
 }
 
-export default { harborSettlementToBusinessDays };
+export default { harborSettlementRange };
