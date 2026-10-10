@@ -37,6 +37,7 @@ import { generatePaymentQR } from '../services/qrService.js';
 import SRLConfig            from '../models/SRLConfig.js';
 import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
+import { verificarRielHarbor } from '../services/harborPreflight.js';
 import { checkBeneficiaryExecutable } from '../services/beneficiaryValidation.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
@@ -1333,6 +1334,26 @@ export async function initCrossBorderPayment(req, res) {
   // Nace de las 7 operaciones por Bs 3.506 que se cobraron y nunca se
   // ejecutaron: dos murieron porque la wallet maestra de Vita estaba sin saldo,
   // y se supo recién al intentar el payout, con la plata ya adentro.
+  // Riel Harbor: si un payout anterior murió por customer inactivo, el breaker
+  // está levantado y NINGUNA operación del riel puede ejecutarse hasta que se
+  // resuelva con OwlPay. Bloquear acá evita repetir el mismo fallo con el dinero
+  // del usuario ya cobrado, que es lo que pasó dos veces en junio de 2026.
+  const rielHarbor = await verificarRielHarbor({ corridor });
+  if (!rielHarbor.ok) {
+    logger.error('[CrossBorder] Payin bloqueado: el riel Harbor no está ejecutable', {
+      corridorId, motivo: rielHarbor.motivo, ...rielHarbor.detalle,
+    });
+    Sentry.captureMessage(`Payin bloqueado por preflight: ${rielHarbor.motivo}`, {
+      level: 'error',
+      extra: { corridorId, ...rielHarbor.detalle },
+    });
+    return res.status(503).json({
+      error:  'Este destino no está disponible en este momento. Por favor intenta nuevamente más tarde.',
+      code:   'PAYOUT_NOT_EXECUTABLE',
+      reason: rielHarbor.motivo,
+    });
+  }
+
   const preflight = await verificarPayoutEjecutable({
     corridor,
     usdAmount: digitalAssetAmountFinal ?? serverUsdcTransit,

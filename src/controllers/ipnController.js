@@ -67,6 +67,7 @@ import {
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
+import { marcarCustomerInactivo, marcarCustomerActivo } from '../services/harborPreflight.js';
 import {
   mapVitaError,
   mapVitaIpnFailure,
@@ -1180,6 +1181,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     is_self_transfer:          isSelfTransfer,
   });
 
+  // Si Harbor aceptó el transfer, el customer de `on_behalf_of` está activo.
+  // Es mejor evidencia que cualquier sonda, y levanta el breaker sin que nadie
+  // tenga que acordarse de hacerlo a mano.
+  marcarCustomerActivo('LLC').catch(() => {});
+
   const transferData = transfer.data ?? transfer;
   const transferId   = transferData.uuid ?? transferData.id ?? transferData.transfer_id;
   const instructions = transferData.transfer_instructions
@@ -1542,6 +1548,14 @@ export async function dispatchPayout(transaction) {
     } catch (err) {
       // Mapear el error de Harbor a mensajes admin + usuario accionables
       const mapped = mapHarborError(err);
+
+      // El customer inactivo no rompe esta operación: rompe el riel entero.
+      // Levantar la bandera hace que los próximos cobros de Harbor se bloqueen
+      // ANTES de tomar el dinero, en vez de repetir el mismo fallo con plata
+      // adentro. En junio de 2026 pasó dos veces por no tener esto.
+      if (mapped.rielCaido) {
+        await marcarCustomerInactivo('LLC', mapped.adminMessage).catch(() => {});
+      }
 
       console.error('[Alyto Payout] tryOwlPayV2 falló:', {
         transactionId: transaction.alytoTransactionId,

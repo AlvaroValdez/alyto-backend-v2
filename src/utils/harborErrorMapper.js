@@ -125,6 +125,27 @@ export function mapHarborError(err) {
     };
   }
 
+  // ─── 3006 — Customer de Harbor no activo ─────────────────────────────────
+  //
+  // Mata TODO el riel, no una operación: mientras el customer no esté verificado
+  // del lado de Harbor, ningún payout puede ejecutarse. Dos de las 7 operaciones
+  // regularizadas el 2026-10-01 murieron así, cobradas y sin poder pagarse, y
+  // caían en "Error no clasificado" — lo que impedía reaccionar distinto a un
+  // fallo puntual del beneficiario.
+  if (code === 3006 || /on behalf of customer is not active/i.test(message)) {
+    return {
+      category:     'CUSTOMER_NOT_ACTIVE',
+      adminMessage: `Harbor rechazó el payout: el customer de on_behalf_of no está activo (code 3006): "${message}". ` +
+                    'Afecta a TODO el riel Harbor, no solo a esta operación. Hay que completar la verificación del ' +
+                    'customer con OwlPay. Mientras tanto, el pre-check bloquea nuevos cobros de este riel.',
+      userMessage:  'Este destino no está disponible en este momento.',
+      userAction:   'Intenta nuevamente más tarde o elige otro destino.',
+      retryable:    false,
+      /** Señal para el breaker: no es un fallo de esta operación, es del riel. */
+      rielCaido:    true,
+    };
+  }
+
   // ─── 2005 / 422 — Schema validation ──────────────────────────────────────
   if (code === 2005 || status === 422) {
     const errors = err.data?.errors ?? {};
