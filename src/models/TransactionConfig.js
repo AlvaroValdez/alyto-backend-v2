@@ -353,6 +353,32 @@ const transactionConfigSchema = new Schema(
       default: null,
     },
 
+    /**
+     * Plazo REAL de liquidación del proveedor de payout, en días hábiles.
+     * 0 = mismo día hábil · 1 = hasta 1 día hábil · N = hasta N días hábiles.
+     *
+     * Por qué es un campo por corredor y no una constante: el plazo lo fija el
+     * riel del payout, no el monto. Vita liquida en horas; Harbor por WIRE o
+     * BANK-TRANSFER puede tardar días. Antes esto se resolvía con un ternario
+     * sobre `payinMethod` —el método de COBRO, que no tiene relación con la
+     * velocidad del PAGO— y ninguno de los dos proveedores publica un ETA en su
+     * cotización, así que no se puede derivar de la API: hay que configurarlo.
+     *
+     * ⚠️ Es un PISO, no el plazo publicado. El que ve el usuario sale de
+     * `resolvePlazoLiquidacion()`, que toma el MAYOR entre este valor y el tramo
+     * declarado del Entorno Controlado de Pruebas. Decisión de Alvaro
+     * (2026-10-10): nunca prometer más rápido de lo que el proveedor entrega; si
+     * el plazo del ECP es más largo, se publica el del ECP.
+     *
+     * Null = sin configurar. El resolver cae al tramo del ECP y marca el dato
+     * como no verificado, en vez de inventar un número.
+     */
+    payoutEtaBusinessDays: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+
     // ── Entidad Legal y Escenario de Enrutamiento ─────────────────────────────
 
     /**
