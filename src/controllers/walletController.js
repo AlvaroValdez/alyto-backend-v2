@@ -369,7 +369,13 @@ export async function initiateDeposit(req, res) {
         status:    'pending',
         reference: wtx.wtxId,
         expiresAt,
-        bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate, purpose: 'wallet_deposit' },
+        bankQr:    {
+          bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate,
+          purpose: 'wallet_deposit',
+          // Dónde cayó realmente. Hoy es la cuenta única; cuando haya varias,
+          // este campo es lo que permite rendir cada cobro por cuenta.
+          accountCredit: cuenta.accountNumber || process.env.BEC_ACCOUNT_CREDIT || undefined,
+        },
       })
 
       return res.status(201).json({

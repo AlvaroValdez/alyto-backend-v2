@@ -1470,6 +1470,12 @@ export async function initCrossBorderPayment(req, res) {
     dueExpiresAt.setHours(23, 59, 59, 999);
 
     let becResult;
+    // Se resuelve una sola vez: la misma cuenta que se le manda al banco es la
+    // que queda registrada en la transacción. Si se resolvieran por separado
+    // podrían divergir, y el registro diría una cuenta distinta de la real.
+    const cuentaCobro = (await getSrlBankData('crossborder_payin')).accountNumber
+      || process.env.BEC_ACCOUNT_CREDIT || null;
+
     try {
       const { getBankQrService } = await import('../services/bankQr/bankQrRegistry.js');
       const svc = getBankQrService(bankId);
@@ -1486,7 +1492,7 @@ export async function initCrossBorderPayment(req, res) {
         dueDate,
         // El pago transfronterizo cobra en la cuenta de ese destino de fondos.
         // Si no hay una declarada, cae en la de siempre (comportamiento previo).
-        accountCredit: (await getSrlBankData('crossborder_payin')).accountNumber || undefined,
+        accountCredit: cuentaCobro || undefined,
       });
     } catch (err) {
       logger.error('[CrossBorder] Error generando QR bancario:', {
@@ -1511,6 +1517,7 @@ export async function initCrossBorderPayment(req, res) {
       dueDate,                       // string 'yyyy-MM-dd' — mismo valor enviado al banco
       expiresAt: dueExpiresAt,       // Date — fin del día de vencimiento (TTL de la tx)
       qrImage: becResult.qrImage,    // almacenado temporalmente para pasarlo a la response
+      accountCredit: cuentaCobro,    // dónde cae el cobro, para poder rendirlo por cuenta
     };
 
     logger.info('[CrossBorder] QR bancario generado', {
@@ -1709,7 +1716,11 @@ export async function initCrossBorderPayment(req, res) {
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
       // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
-      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate, purpose: 'crossborder_payin' } } : {}),
+      ...(bankQrMeta ? { bankQr: {
+        bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate,
+        purpose: 'crossborder_payin',
+        accountCredit: bankQrMeta.accountCredit ?? undefined,
+      } } : {}),
       // bankQr: TTL de la tx = fin del día de vencimiento del QR (no el default +24h),
       // para que el barrido de expiración reconcilie/cancele en el momento correcto.
       ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),

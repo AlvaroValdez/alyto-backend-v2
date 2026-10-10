@@ -143,6 +143,16 @@ const walletTransactionSchema = new mongoose.Schema({
       paidAt:  { type: Date },                            // timestamp de confirmación
       payment: { type: mongoose.Schema.Types.Mixed },     // objeto PaymentQR del banco
       /**
+       * Cuenta bancaria donde cayó el cobro.
+       *
+       * Hasta que BANECO habilite las cuentas nuevas, TODO entra a la cuenta
+       * original y la segregación existe solo como etiqueta (`purpose`). Sin
+       * registrar la cuenta, el día que convivan varias no habría forma de
+       * saber dónde quedó cada cobro viejo, y la transferencia de regularización
+       * sería a ojo.
+       */
+      accountCredit: { type: String, trim: true },
+      /**
        * Para qué entró la plata. Desde octubre de 2026 la cuenta BANECO que
        * recibe estos cobros es exclusiva de Alyto y hay que poder rendirla por
        * destino de fondos: cuánto es carga de billetera y cuánto es pago

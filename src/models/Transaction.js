@@ -566,6 +566,8 @@ const transactionSchema = new Schema(
         dueDate: { type: Date },                // Fecha de vencimiento del QR
         paidAt:  { type: Date },                // Timestamp de confirmación del banco
         payment: { type: Schema.Types.Mixed },  // Objeto PaymentQR completo del banco
+        /** Cuenta bancaria donde cayó el cobro. Ver el mismo campo en WalletTransaction. */
+        accountCredit: { type: String, trim: true },
         /**
          * Para qué entró la plata. Desde octubre de 2026 la cuenta BANECO que
          * recibe estos cobros es exclusiva de Alyto y hay que poder rendirla por
