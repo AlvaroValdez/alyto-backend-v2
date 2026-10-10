@@ -19,6 +19,7 @@
 
 import mongoose          from 'mongoose';
 import User              from '../models/User.js';
+import { logger }        from '../utils/logger.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import WalletTransaction from '../models/WalletTransaction.js';
@@ -2657,4 +2658,130 @@ export async function listKycAttempts(req, res) {
     console.error('[Admin listKycAttempts] Error:', err.message);
     return res.status(500).json({ error: 'Error al consultar los intentos de verificación.' });
   }
+}
+
+// ─── Devolución de un pago transfronterizo ────────────────────────────────────
+
+/**
+ * POST /api/v1/admin/transactions/:transactionId/refund
+ *
+ * Registra que a un usuario se le devolvió el dinero de una operación que se
+ * cobró y no se ejecutó, con su evidencia.
+ *
+ * Existe porque `status:'refunded'` por sí solo no prueba nada: se puede fijar a
+ * mano desde el panel sin mover un centavo, y en producción pasó. Mientras no
+ * haya evidencia, `getBOBCommitted` sigue contando el monto como pasivo, que es
+ * lo correcto.
+ *
+ * Dos formas de evidencia, según cómo se devolvió:
+ *   - `walletBOB`    → exige `wtxId`, el movimiento que acreditó el saldo.
+ *   - `bankTransfer` → exige `bankReference`, el documento del débito en el banco.
+ *
+ * El comprobante (imagen o PDF) es opcional en el request pero muy recomendable:
+ * ante ASFI, "se devolvió" sin respaldo documental es una afirmación, no un hecho.
+ *
+ * Body (multipart/form-data):
+ *   method        'walletBOB' | 'bankTransfer' | 'external'
+ *   wtxId         requerido si method=walletBOB
+ *   bankReference requerido si method=bankTransfer
+ *   amount        opcional; por defecto el originalAmount de la transacción
+ *   reason        opcional
+ *   proof         archivo opcional (campo de multer)
+ */
+export async function registrarDevolucion(req, res) {
+  const { transactionId } = req.params;
+  const { method, wtxId, bankReference, amount, reason } = req.body ?? {};
+
+  if (!['walletBOB', 'bankTransfer', 'external'].includes(method)) {
+    return res.status(400).json({ error: 'method debe ser walletBOB, bankTransfer o external.' });
+  }
+  if (method === 'walletBOB' && !String(wtxId ?? '').trim()) {
+    return res.status(400).json({ error: 'Una devolución a la billetera exige el wtxId del movimiento.' });
+  }
+  if (method === 'bankTransfer' && !String(bankReference ?? '').trim()) {
+    return res.status(400).json({ error: 'Una devolución por transferencia exige la referencia del banco.' });
+  }
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
+  } catch {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+  if (!transaction) return res.status(404).json({ error: 'Transacción no encontrada.' });
+
+  // Idempotencia: no pisar una devolución ya registrada con evidencia.
+  if (transaction.refund?.wtxId || transaction.refund?.bankReference) {
+    return res.status(409).json({
+      error:  'Esta transacción ya tiene una devolución registrada con evidencia.',
+      refund: { method: transaction.refund.method, at: transaction.refund.at },
+    });
+  }
+
+  const monto = Number(amount ?? transaction.originalAmount);
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return res.status(400).json({ error: 'Monto de devolución inválido.' });
+  }
+
+  transaction.status = 'refunded';
+  transaction.refund = {
+    method,
+    ...(wtxId         ? { wtxId:         String(wtxId).trim() }         : {}),
+    ...(bankReference ? { bankReference: String(bankReference).trim() } : {}),
+    amount:   monto,
+    currency: transaction.originCurrency ?? 'BOB',
+    at:       new Date(),
+    by:       req.user?._id,
+    reason:   String(reason ?? 'Devolución registrada por admin').slice(0, 300),
+    ...(req.file ? {
+      proof: {
+        data:       req.file.buffer,
+        filename:   req.file.originalname,
+        mimetype:   req.file.mimetype,
+        uploadedAt: new Date(),
+      },
+    } : {}),
+  };
+
+  try {
+    await transaction.save();
+  } catch (err) {
+    return res.status(500).json({ error: `No se pudo guardar la devolución: ${err.message}` });
+  }
+
+  logger.info('[Admin] Devolución registrada', {
+    alytoTransactionId: transaction.alytoTransactionId,
+    method, monto, conComprobante: !!req.file, by: req.user?.email,
+  });
+
+  return res.status(200).json({
+    message: 'Devolución registrada. El monto deja de contarse como pasivo.',
+    refund: {
+      method, amount: monto, wtxId: wtxId ?? null, bankReference: bankReference ?? null,
+      conComprobante: !!req.file, at: transaction.refund.at,
+    },
+  });
+}
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/refund-proof
+ * Devuelve el comprobante de la devolución, si se subió.
+ */
+export async function getComprobanteDevolucion(req, res) {
+  const { transactionId } = req.params;
+
+  let t;
+  try {
+    t = await Transaction.findOne({ alytoTransactionId: transactionId }).select('refund').lean();
+  } catch {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+  if (!t) return res.status(404).json({ error: 'Transacción no encontrada.' });
+  if (!t.refund?.proof?.data) {
+    return res.status(404).json({ error: 'Esta devolución no tiene comprobante subido.' });
+  }
+
+  res.setHeader('Content-Type', t.refund.proof.mimetype ?? 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${t.refund.proof.filename ?? 'devolucion'}"`);
+  return res.send(t.refund.proof.data);
 }

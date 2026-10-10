@@ -46,6 +46,8 @@ import {
   getGlobalAnalytics,
   updateGlobalPricing,
   getTransactionComprobante,
+  registrarDevolucion,
+  getComprobanteDevolucion,
   getTransactionComprobanteOficial,
   getCorridorRates,
   vitaDiagnostic,
@@ -332,6 +334,29 @@ router.get('/transactions/:transactionId', getTransaction);
  * Esta ruta DEBE ir ANTES de /:transactionId/status para evitar conflicto.
  */
 router.get('/transactions/:transactionId/comprobante', getTransactionComprobante);
+
+/**
+ * POST /api/v1/admin/transactions/:transactionId/refund
+ * Registra la devolución de una operación cobrada y no ejecutada, con evidencia.
+ *
+ * `status:'refunded'` por sí solo no prueba nada —se puede fijar a mano sin mover
+ * un centavo, y en producción pasó—, así que mientras no haya `wtxId` (devolución
+ * a billetera) o `bankReference` (devolución por transferencia) el monto se sigue
+ * contando como pasivo en `getBOBCommitted`.
+ *
+ * `proofUpload` acepta imagen o PDF de hasta 5 MB, igual que el comprobante de retiro.
+ */
+router.post(
+  '/transactions/:transactionId/refund',
+  proofUpload.single('proof'),
+  registrarDevolucion,
+);
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/refund-proof
+ * Devuelve el comprobante de la devolución.
+ */
+router.get('/transactions/:transactionId/refund-proof', getComprobanteDevolucion);
 
 /**
  * GET /api/v1/admin/transactions/:transactionId/comprobante-oficial
