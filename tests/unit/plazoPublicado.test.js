@@ -21,27 +21,32 @@ const resolver = (amountBOB, min, max, desde = LUNES) => resolvePlazoLiquidacion
   amountBOB, payoutEtaMinBusinessDays: min, payoutEtaMaxBusinessDays: max, desde,
 });
 
-describe('plazoTexto — nunca un número cerrado', () => {
-  test('usa las formas ya establecidas en los Términos §7', () => {
-    expect(plazoTexto(0, 0)).toBe('pocas horas');
-    expect(plazoTexto(0, 1)).toBe('pocas horas a 1 día hábil');
-    expect(plazoTexto(0, 3)).toBe('pocas horas a 3 días hábiles');
-    expect(plazoTexto(1, 3)).toBe('1 a 3 días hábiles');
-    expect(plazoTexto(2, 5)).toBe('2 a 5 días hábiles');
-  });
-
-  test('un rango degenerado se cualifica con "aproximadamente", no se cierra', () => {
+describe('plazoTexto — bandas de días hábiles, nunca un plazo acotado', () => {
+  test('las cuatro formas publicables', () => {
+    expect(plazoTexto(0, 0)).toBe('el mismo día hábil');
     expect(plazoTexto(1, 1)).toBe('aproximadamente 1 día hábil');
     expect(plazoTexto(3, 3)).toBe('aproximadamente 3 días hábiles');
+    expect(plazoTexto(0, 3)).toBe('hasta 3 días hábiles');
+    expect(plazoTexto(2, 5)).toBe('entre 2 y 5 días hábiles');
   });
 
-  test('ningún texto es un número desnudo', () => {
-    // Barrido: todo resultado debe llevar rango ("a"), aproximación o "pocas horas".
+  test('el piso de granularidad es el DÍA HÁBIL: nada de minutos ni horas', () => {
+    // Harbor cotiza Singapur en 1–15 MINUTES y Nigeria en 1–5 MINUTES. Son datos
+    // reales, pero publicarlos seria comprometer una precision que ningun eslabon
+    // garantiza. Sub-diario dice "el mismo dia habil" y punto.
     for (let min = 0; min <= 5; min++) {
       for (let max = min; max <= 5; max++) {
         const t = plazoTexto(min, max);
-        expect(t).toMatch(/pocas horas|aproximadamente| a /);
-        expect(t).not.toMatch(/^Hasta /);   // el techo seco del tramo tampoco vale
+        expect(t).not.toMatch(/minuto|hora|segundo/i);
+      }
+    }
+  });
+
+  test('ningún texto es un número desnudo', () => {
+    for (let min = 0; min <= 5; min++) {
+      for (let max = min; max <= 5; max++) {
+        const t = plazoTexto(min, max);
+        expect(t).toMatch(/el mismo día hábil|aproximadamente|^hasta |^entre /);
       }
     }
   });
@@ -51,7 +56,7 @@ describe('resolvePlazoLiquidacion — manda el plazo del proveedor', () => {
   test('proveedor MÁS LENTO que el tramo: publica el del proveedor y marca el exceso', () => {
     // Bs 5.000 = tramo Estándar (mismo día). Harbor tarda 1 a 3 días hábiles.
     const r = resolver(5000, 1, 3);
-    expect(r.plazoLiquidacion).toBe('1 a 3 días hábiles');
+    expect(r.plazoLiquidacion).toBe('entre 1 y 3 días hábiles');
     expect(r.plazoMaxDiasHabiles).toBe(3);
     expect(r.origen).toBe('proveedor');
     expect(r.excedeTramoEcp).toBe(true);
@@ -61,15 +66,15 @@ describe('resolvePlazoLiquidacion — manda el plazo del proveedor', () => {
   test('proveedor MÁS RÁPIDO que el tramo: publica el del proveedor, no el tramo', () => {
     // Bs 100.000 = tramo Corporativo (2 días). Vita liquida en horas a 1 día.
     const r = resolver(100000, 0, 1);
-    expect(r.plazoLiquidacion).toBe('pocas horas a 1 día hábil');
+    expect(r.plazoLiquidacion).toBe('hasta 1 día hábil');
     expect(r.plazoMaxDiasHabiles).toBe(1);
     expect(r.origen).toBe('proveedor');
     expect(r.excedeTramoEcp).toBe(false);
   });
 
-  test('proveedor sub-diario: "pocas horas", aunque el tramo dé dos días', () => {
+  test('proveedor sub-diario: "el mismo día hábil", aunque el tramo dé dos días', () => {
     const r = resolver(100000, 0, 0);
-    expect(r.plazoLiquidacion).toBe('pocas horas');
+    expect(r.plazoLiquidacion).toBe('el mismo día hábil');
     expect(r.plazoMaxDiasHabiles).toBe(0);
     expect(r.origen).toBe('proveedor');
   });
@@ -127,13 +132,13 @@ describe('resolvePlazoLiquidacion — bordes y datos faltantes', () => {
     const r = resolver(10000, null, null);
     expect(r.etaProveedorVerificada).toBe(false);
     expect(r.origen).toBe('ecp');
-    expect(r.plazoLiquidacion).toBe('pocas horas');   // tramo Estándar = 0 días
+    expect(r.plazoLiquidacion).toBe('el mismo día hábil');   // tramo Estándar = 0 días
   });
 
   test('basta el máximo para considerarlo configurado; sin mínimo se asume 0', () => {
     const r = resolver(10000, null, 2);
     expect(r.etaProveedorVerificada).toBe(true);
-    expect(r.plazoLiquidacion).toBe('pocas horas a 2 días hábiles');
+    expect(r.plazoLiquidacion).toBe('hasta 2 días hábiles');
   });
 
   test('un mínimo mayor que el máximo se recorta, no produce un rango invertido', () => {

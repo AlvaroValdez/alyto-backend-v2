@@ -21,21 +21,23 @@
  * publicar el tramo es una promesa incumplible. Si es más rápido, publicar el tramo
  * también es falso: le oculta al usuario que su pago llega antes.
  *
- * ── Y se expresa APROXIMADO, nunca como número cerrado ──────────────────────────
+ * ── Y se expresa APROXIMADO, en bandas de días hábiles ──────────────────────────
  *
  * Un plazo de liquidación no es determinista: depende del banco destino, del riel y
  * de la hora de corte. Publicar "1 día hábil" lo convierte en una promesa exacta
- * que nadie puede sostener. Por eso el dato es un RANGO y el texto es aproximado,
- * con las formas que ya usan los Términos §7:
+ * que nadie puede sostener. Las formas publicables son:
  *
- *     pocas horas
- *     pocas horas a 1 día hábil
+ *     el mismo día hábil
  *     aproximadamente 1 día hábil
- *     1 a 3 días hábiles
+ *     hasta 3 días hábiles
+ *     entre 2 y 5 días hábiles
+ *
+ * **El piso de granularidad visible es el día hábil.** No se publican minutos ni
+ * horas, aunque el proveedor los cotice: ver `plazoTexto`.
  *
  * ── Dos números distintos, a propósito ──────────────────────────────────────────
  *
- * Lo que se MUESTRA es el rango aproximado. Lo que se MIDE internamente es la
+ * Lo que se MUESTRA es la banda aproximada. Lo que se MIDE internamente es la
  * fecha límite derivada del MÁXIMO (`plazoLiquidacionHasta`), que es contra la que
  * se evalúa el cumplimiento. Mostrar aproximado no significa no comprometerse:
  * significa no fingir una precisión que no existe.
@@ -60,19 +62,35 @@ function dias(n) {
 }
 
 /**
- * Texto público aproximado para un rango de días hábiles.
+ * Texto público para un rango de días hábiles.
  *
- * Usa las formas ya establecidas en los Términos §7. Nunca devuelve un número
- * cerrado sin cualificador: o es un rango, o lleva "aproximadamente".
+ * ── El piso de granularidad visible es EL DÍA HÁBIL ─────────────────────────────
+ *
+ * Decisión de Alvaro (2026-10-10): no se muestran ni se comprometen plazos
+ * acotados con el usuario. Nada de "15 minutos" ni de un número seco.
+ *
+ * Harbor cotiza algunas rutas en MINUTES (Singapur 1–15, Nigeria 1–5), y es un
+ * dato real, pero publicarlo sería comprometerse a una precisión que ningún
+ * eslabón garantiza: por encima del plazo del proveedor están nuestra
+ * confirmación del cobro, la conversión y el despacho. Un "15 minutos" lo rompe
+ * cualquier hipo de la cadena, y además convierte una estimación del proveedor en
+ * una promesa nuestra.
+ *
+ * Por eso todo lo sub-diario colapsa a "el mismo día hábil". El dato fino se
+ * conserva en la capa de datos (ver harborSettlementTime.js) para medición interna
+ * y visibilidad de admin, pero NO se publica.
+ *
+ * Nunca devuelve un número desnudo: o es una banda ("entre N y M"), o lleva
+ * "aproximadamente", o es "el mismo día hábil".
  */
 export function plazoTexto(minDias, maxDias) {
   const min = diaValido(minDias) ?? 0;
   const max = diaValido(maxDias) ?? min;
 
-  if (max === 0)   return 'pocas horas';
-  if (min === 0)   return `pocas horas a ${dias(max)}`;
+  if (max === 0)   return 'el mismo día hábil';
   if (min === max) return `aproximadamente ${dias(max)}`;
-  return `${min} a ${dias(max)}`;
+  if (min === 0)   return `hasta ${dias(max)}`;
+  return `entre ${min} y ${dias(max)}`;
 }
 
 /**

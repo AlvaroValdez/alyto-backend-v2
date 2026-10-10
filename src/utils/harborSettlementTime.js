@@ -31,12 +31,17 @@
  *   2. El plazo es POR MÉTODO, no por país: en US, ACH Push tarda 2–5 días y
  *      Fedwire 1. Elegir el riel más barato puede ser elegir el más lento.
  *
- * ── Se preserva la granularidad real ───────────────────────────────────────────
+ * ── Se preserva la granularidad real, pero NO se publica ───────────────────────
  *
- * Colapsar 1–15 MINUTES a "0 días hábiles" perdería el dato: al usuario se le
- * puede decir "minutos" con la verdad en la mano. Por eso esta función devuelve el
- * rango en su unidad canónica y aparte la conversión a días hábiles, que es la que
- * necesita el cálculo de la fecha límite.
+ * Esta función devuelve el rango en su unidad canónica y, aparte, la conversión a
+ * días hábiles. El rango fino sirve para medición interna y visibilidad de admin.
+ *
+ * ⚠️ NO se le muestra al usuario. Decisión de Alvaro (2026-10-10): no se
+ * comprometen plazos acotados. Publicar "1 a 15 minutos" para Singapur sería
+ * convertir una estimación del proveedor en una promesa nuestra, cuando por encima
+ * de su plazo están nuestra confirmación del cobro, la conversión y el despacho.
+ * El texto publicable lo arma `plazoPublicado.plazoTexto`, cuyo piso de
+ * granularidad es el día hábil: todo lo sub-diario dice "el mismo día hábil".
  *
  * ── Unidad desconocida: no se adivina ─────────────────────────────────────────
  *
