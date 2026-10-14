@@ -92,6 +92,64 @@ export function validateAgainstVitaFields(data, fields) {
       errores.push(
         `Falta el campo "${key}", requerido cuando ${f.when.key} = "${Array.isArray(f.when.value) ? f.when.value.join('|') : f.when.value}".`,
       );
+      continue;
+    }
+
+    // 3. FORMATO declarado por Vita — `regex_validate`, `min` y `max`.
+    //
+    //    Vita publica estas reglas en la MISMA respuesta que ya leíamos y se
+    //    estaban descartando. El 2026-10-14 eso costó dos rechazos code=305 con
+    //    el cobro ya emitido (tx ALY-C-…BDPA3J y …BKBIPA, corredor bo-ve):
+    //      beneficiary_document_number  min 6 max 10  ^\d+$
+    //      account_bank                 min 20 max 20 ^(0102|0156|…)\d{16}$
+    //    Los mensajes que devolvió Vita al rechazar son TEXTUALMENTE los
+    //    `regex_message` de esas reglas. El dato para atajarlo antes de cobrar
+    //    ya estaba llegando.
+    //
+    //    Sigue la misma filosofía que 1 y 2: solo se evalúa un valor PRESENTE.
+    //    Un campo vacío sin `when` no se exige — las rules no traen flag
+    //    `required` y adivinarlo produciría falsos positivos.
+    if (esVacio(valor)) continue;
+    if (f?.type === 'select') continue;   // el enum ya lo cubrió el punto 1
+
+    const texto = String(valor).trim();
+
+    // 3.a Longitud. Es el chequeo más barato y el que más rechazos explica.
+    const min = Number.isFinite(Number(f?.min)) ? Number(f.min) : null;
+    const max = Number.isFinite(Number(f?.max)) ? Number(f.max) : null;
+    if (min != null && texto.length < min) {
+      errores.push(`El campo "${key}" es demasiado corto: tiene ${texto.length} caracteres y el mínimo es ${min}.`);
+      continue;
+    }
+    if (max != null && texto.length > max) {
+      errores.push(`El campo "${key}" es demasiado largo: tiene ${texto.length} caracteres y el máximo es ${max}.`);
+      continue;
+    }
+
+    // 3.b Patrón. `regex_validate` viene de un proveedor externo y en sintaxis
+    //     que no controlamos, así que se compila defensivamente:
+    //       - un patrón que no compila en JS (p.ej. sabor Ruby) se IGNORA, no
+    //         rompe la validación ni bloquea la venta — mismo criterio
+    //         fail-open que con las rules ilegibles;
+    //       - se descarta un patrón desmedido antes de compilarlo, para no
+    //         exponerse a retroceso catastrófico sobre entrada del usuario.
+    const patron = typeof f?.regex_validate === 'string' ? f.regex_validate.trim() : '';
+    if (!patron || patron.length > 300) continue;
+
+    let re = null;
+    try { re = new RegExp(patron); } catch { continue; }
+
+    if (!re.test(texto)) {
+      // El mensaje de Vita ya está redactado para el usuario final y en español.
+      // Preferirlo al nuestro evita traducir dos veces la misma regla.
+      // Vita a veces cierra el mensaje con punto y a veces no: se normaliza para
+      // no mostrarle al usuario un ".." al concatenar.
+      const detalle = typeof f?.regex_message === 'string' ? f.regex_message.trim().replace(/\.+$/, '') : '';
+      errores.push(
+        detalle
+          ? `El campo "${key}" tiene un formato inválido. ${detalle}.`
+          : `El campo "${key}" tiene un formato inválido.`,
+      );
     }
   }
 
