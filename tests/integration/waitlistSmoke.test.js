@@ -22,6 +22,13 @@ beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   await mongoose.connect(mongod.getUri());
 
+  // El índice único de email ES el detector de duplicados del controller, y
+  // mongoose lo construye en segundo plano sin que connect() lo espere. Si la
+  // prueba de idempotencia corre dentro de esa ventana (~20 ms medidos), el
+  // segundo alta no choca contra nada: inserta un duplicado y responde
+  // alreadyRegistered:false. Sin esperarlo, la prueba pasaba por casualidad.
+  await WaitlistEntry.syncIndexes();
+
   app = express();
   app.use(express.json());
   app.use(cors({
