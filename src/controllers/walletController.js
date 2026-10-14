@@ -326,11 +326,17 @@ export async function initiateDeposit(req, res) {
       })
 
       let qr
+      // ⚠️ Se declara FUERA del try a propósito: la cuenta se usa dos veces, al
+      // pedirle el QR al banco y al estampar `bankQr.accountCredit` más abajo, y
+      // ese segundo uso queda después del catch. Declararla dentro del try la
+      // dejaba fuera de alcance y rompía TODO depósito con un 500
+      // (`cuenta is not defined`), que es lo que pasó entre el 2026-10-10 y el 14.
+      let cuenta = {}
       try {
         const svc = getBankQrService(bankQrCfg.bankId)
         // La carga de billetera cobra en la cuenta de ese destino de fondos.
         // Si no hay una declarada, cae en la de siempre (comportamiento previo).
-        const cuenta = await getSrlBankData('wallet_deposit')
+        cuenta = await getSrlBankData('wallet_deposit')
         qr = await svc.generateQR({
           transactionId: wtx.wtxId,
           amount,
