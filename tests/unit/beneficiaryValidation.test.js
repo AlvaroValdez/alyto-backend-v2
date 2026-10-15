@@ -107,6 +107,84 @@ describe('validateAgainstVitaFields — lo que a PROPÓSITO no bloquea', () => {
   })
 })
 
+// ── Formato declarado por Vita (regex_validate / min / max) ──────────────────
+//
+// Reglas REALES de Venezuela, copiadas de la respuesta de producción del
+// 2026-10-14. No son inventadas: son las que Vita publica y las que usó para
+// rechazar dos operaciones con el cobro ya emitido.
+const CAMPOS_VE = [
+  { type: 'text', key: 'beneficiary_document_number', min: 6, max: 10,
+    regex_validate: '^\\d+$', regex_message: 'Solo se permiten números' },
+  { type: 'text', key: 'account_bank', min: 20, max: 20,
+    regex_validate: '^(0102|0156|0172|0114)\\d{16}$',
+    regex_message: 'El número de cuenta debe tener 20 dígitos y comenzar con un código de banco válido.' },
+]
+
+describe('validateAgainstVitaFields — formato declarado por Vita', () => {
+  // Regresión de los dos rechazos reales del 2026-10-14 (bo-ve).
+  it('bloquea el documento con letras que Vita rechazó (code 305)', () => {
+    const errores = validateAgainstVitaFields(
+      { beneficiary_document_number: 'V12345678', account_bank: '01020000000000000001' },
+      CAMPOS_VE,
+    )
+    expect(errores).toHaveLength(1)
+    expect(errores[0]).toContain('beneficiary_document_number')
+    expect(errores[0]).toContain('Solo se permiten números')
+  })
+
+  it('bloquea la cuenta sin código de banco válido que Vita rechazó (code 305)', () => {
+    const errores = validateAgainstVitaFields(
+      { beneficiary_document_number: '12345678', account_bank: '99990000000000000001' },
+      CAMPOS_VE,
+    )
+    expect(errores).toHaveLength(1)
+    expect(errores[0]).toContain('account_bank')
+  })
+
+  it('no duplica el punto final del mensaje de Vita', () => {
+    const errores = validateAgainstVitaFields({ account_bank: '99990000000000000001' }, CAMPOS_VE)
+    expect(errores[0]).not.toMatch(/\.\./)
+  })
+
+  it('deja pasar el beneficiario con formato correcto', () => {
+    const errores = validateAgainstVitaFields(
+      { beneficiary_document_number: '12345678', account_bank: '01020000000000000001' },
+      CAMPOS_VE,
+    )
+    expect(errores).toEqual([])
+  })
+
+  it('bloquea por longitud mínima y máxima', () => {
+    expect(validateAgainstVitaFields({ beneficiary_document_number: '123' }, CAMPOS_VE)[0]).toContain('demasiado corto')
+    expect(validateAgainstVitaFields({ beneficiary_document_number: '12345678901' }, CAMPOS_VE)[0]).toContain('demasiado largo')
+  })
+
+  it('NO exige presencia: un campo vacío sin `when` no bloquea', () => {
+    expect(validateAgainstVitaFields({}, CAMPOS_VE)).toEqual([])
+    expect(validateAgainstVitaFields({ beneficiary_document_number: '   ' }, CAMPOS_VE)).toEqual([])
+  })
+
+  it('un regex que no compila en JS se ignora, no rompe ni bloquea', () => {
+    const campos = [{ type: 'text', key: 'x', regex_validate: '(?<=mal' }]
+    expect(validateAgainstVitaFields({ x: 'cualquier cosa' }, campos)).toEqual([])
+  })
+
+  it('descarta un patrón desmedido sin intentar compilarlo', () => {
+    const campos = [{ type: 'text', key: 'x', regex_validate: '(a+)+'.repeat(80) }]
+    expect(validateAgainstVitaFields({ x: 'a'.repeat(40) }, campos)).toEqual([])
+  })
+
+  it('no aplica formato a los select: ese caso ya lo cubre el enum', () => {
+    const campos = [{ type: 'select', key: 'tipo', options: [{ value: 'a' }], regex_validate: '^\\d+$' }]
+    expect(validateAgainstVitaFields({ tipo: 'a' }, campos)).toEqual([])
+  })
+
+  it('ignora los campos internos fc_* aunque traigan regex', () => {
+    const campos = [{ type: 'text', key: 'fc_display', regex_validate: '^\\d+$' }]
+    expect(validateAgainstVitaFields({ fc_display: 'texto' }, campos)).toEqual([])
+  })
+})
+
 describe('checkBeneficiaryExecutable — riel Harbor (dry-run del instrumento real)', () => {
   const corridorUS = { payoutMethod: 'owlPay', destinationCountry: 'US', destinationCurrency: 'USD' }
 
