@@ -121,9 +121,55 @@ function generateToken(userId, tokenVersion, expiresIn, amr) {
  * @param {boolean} [opts.rememberMe]
  * @param {string[]} [opts.amr]
  */
-export function issueSession(res, user, { rememberMe = false, amr } = {}) {
+export async function issueSession(res, user, { rememberMe = false, amr, unicaSesion = false } = {}) {
   const jwtExpiry = rememberMe ? '7d' : '24h';
   const token     = generateToken(user._id, user.tokenVersion, jwtExpiry, amr);
+  const nuevoJti  = jwt.decode(token)?.jti ?? null;
+
+  // UN SOLO DISPOSITIVO (gana el último). Sólo en los puntos de LOGIN, no en la
+  // reemisión tras cambiar el perfil: ahí el token nuevo sustituye al anterior
+  // en el MISMO equipo, y revocarlo echaría al usuario si su cliente no llega a
+  // guardar el token nuevo.
+  //
+  // Se eligió "gana el último" y no "gana el primero" por dos motivos. Con
+  // "gana el primero", quien reinstala la app o cambia de teléfono sin cerrar
+  // sesión queda encerrado hasta que el token caduque (24 h, o 7 días con
+  // "mantener sesión"). Y "gana el último" le da al titular una señal: si
+  // alguien usa sus credenciales, a él lo expulsan y se entera; con la variante
+  // contraria el intruso falla en silencio y el dueño nunca sabe que lo intentaron.
+  //
+  // ⚠️ Esto se ESPERA, no se dispara y olvida. Es un control de seguridad: si la
+  // revocación falla, la sesión anterior sigue viva y la garantía de un solo
+  // dispositivo deja de cumplirse en silencio. Por eso la función es async y el
+  // error se propaga en vez de quedar en un log.
+  //
+  // `activeSessionJti` se actualiza SIEMPRE, también en la reemisión. Si no, un
+  // login posterior revocaría un identificador viejo y dejaría viva justo la
+  // sesión que pretendía cerrar.
+  const anterior = user.activeSessionJti ?? null;
+
+  if (unicaSesion && anterior && anterior !== nuevoJti) {
+    await RevokedToken.updateOne(
+      { jti: anterior },
+      { $setOnInsert: {
+          jti:       anterior,
+          userId:    user._id,
+          // El token anterior podía ser de 7 días y aquí no conocemos su `exp`.
+          // Se usa el máximo: que el registro sobreviva de más es inocuo; que se
+          // borre antes de tiempo reviviría una sesión ya expulsada.
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          reason:    'nueva_sesion',
+        } },
+      { upsert: true },
+    );
+  }
+
+  if (nuevoJti) {
+    await User.updateOne({ _id: user._id }, { $set: { activeSessionJti: nuevoJti } });
+    // Sin esto, `protect` podría servir hasta 10 s con el usuario cacheado y el
+    // `activeSessionJti` viejo.
+    invalidateUserCache(String(user._id));
+  }
 
   if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
 
@@ -318,6 +364,12 @@ export async function registerUser(req, res) {
     });
 
     const token = generateToken(user._id, user.tokenVersion);
+    // Usuario recien creado: no hay sesion anterior que revocar, pero su jti
+    // tiene que quedar anotado o el primer login posterior no sabria cual cerrar.
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { activeSessionJti: jwt.decode(token)?.jti ?? null } },
+    );
 
     console.info(`[Auth] Registro exitoso — userId: ${user._id} entity: ${legalEntity}`);
 
@@ -620,7 +672,7 @@ export async function loginUser(req, res) {
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
 
-    return res.json(issueSession(res, user, { rememberMe }));
+    return res.json(await issueSession(res, user, { rememberMe, unicaSesion: true }));
 
   } catch (err) {
     console.error('[Auth] Error en loginUser:', err.message);
@@ -849,6 +901,12 @@ export async function logoutUser(req, res) {
           { jti },
           { $setOnInsert: { jti, userId, expiresAt, reason: 'logout' } },
           { upsert: true },
+        );
+        // Dejar de apuntar a una sesion ya cerrada: si no, un login posterior
+        // intentaria revocar algo que ya esta en la lista.
+        await User.updateOne(
+          { _id: userId, activeSessionJti: jti },
+          { $set: { activeSessionJti: null } },
         );
       } else if (process.env.NODE_ENV === 'production') {
         // Token antiguo sin `jti`: no se puede cerrar solo esta sesión, así que

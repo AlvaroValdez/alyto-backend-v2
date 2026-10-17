@@ -143,7 +143,7 @@ export async function confirm(req, res) {
 
     await registerSuccess({ req, email: user.email, user, factor: 'totp' });
 
-    const session = issueSession(res, user, { amr: [AMR_PASSWORD, AMR_OTP] });
+    const session = await issueSession(res, user, { amr: [AMR_PASSWORD, AMR_OTP], unicaSesion: true });
 
     return res.status(200).json({
       ...session,
@@ -222,9 +222,10 @@ export async function verify(req, res) {
     }
 
     const rememberMe = req.body?.rememberMe === true;
-    const session    = issueSession(res, user, {
+    const session    = await issueSession(res, user, {
       rememberMe,
       amr: [AMR_PASSWORD, usaRecuperacion ? AMR_RECOVERY_CODE : AMR_OTP],
+      unicaSesion: true,
     });
 
     return res.status(200).json({

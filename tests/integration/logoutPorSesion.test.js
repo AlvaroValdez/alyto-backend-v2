@@ -108,6 +108,50 @@ describe('cierre de sesión por dispositivo', () => {
     expect(antes2.tokenVersion).not.toBe(versionEnBaseTrasCambio)
   })
 
+  test('UN SOLO DISPOSITIVO: el login nuevo revoca el anterior, no al revés', async () => {
+    // "Gana el último": quien entra expulsa a quien estaba. La variante
+    // contraria encerraría al propio dueño tras reinstalar la app.
+    const userId = new mongoose.Types.ObjectId()
+    const viejo  = jwt.decode(emitirToken(userId))
+    const nuevo  = jwt.decode(emitirToken(userId))
+
+    // Esto es lo que hace issueSession con unicaSesion: true
+    await RevokedToken.updateOne(
+      { jti: viejo.jti },
+      { $setOnInsert: {
+          jti: viejo.jti, userId,
+          expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+          reason: 'nueva_sesion',
+        } },
+      { upsert: true },
+    )
+
+    expect(await RevokedToken.exists({ jti: viejo.jti })).toBeTruthy()
+    expect(await RevokedToken.exists({ jti: nuevo.jti })).toBeFalsy()
+
+    const doc = await RevokedToken.findOne({ jti: viejo.jti }).lean()
+    // El motivo distingue "te expulsaron" de "cerraste sesión": sin él no se
+    // puede avisar al usuario de que alguien entró con sus credenciales.
+    expect(doc.reason).toBe('nueva_sesion')
+  })
+
+  test('la caducidad de una expulsión cubre el peor caso de 7 días', async () => {
+    // Al expulsar NO se conoce el `exp` del token anterior: pudo pedirse
+    // "mantener sesión" (7 días). Guardar menos lo reviviría al borrarlo el TTL.
+    const userId = new mongoose.Types.ObjectId()
+    const viejo  = jwt.decode(emitirToken(userId))
+
+    await RevokedToken.create({
+      jti: viejo.jti, userId,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      reason: 'nueva_sesion',
+    })
+
+    const doc  = await RevokedToken.findOne({ jti: viejo.jti }).lean()
+    const dias = (doc.expiresAt - Date.now()) / (24 * 3600 * 1000)
+    expect(dias).toBeGreaterThan(6.9)
+  })
+
   test('un token anterior al cambio no lleva jti y no rompe nada', () => {
     const userId = new mongoose.Types.ObjectId()
     const antiguo = jwt.sign(

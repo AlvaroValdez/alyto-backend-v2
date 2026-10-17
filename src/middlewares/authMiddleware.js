@@ -77,17 +77,18 @@ export const clearJtiCache = () => jtiCache.clear();
  * @returns {Promise<boolean>} true si esa sesión concreta fue cerrada
  */
 async function tokenRevocado(jti) {
-  if (!jti) return false;   // token anterior al cambio: no identifica sesión
+  if (!jti) return null;   // token anterior al cambio: no identifica sesión
 
   const enCache = jtiCache.get(jti);
   if (enCache) {
-    if (enCache.revocado) return true;
-    if (Date.now() - enCache.visto < VIGENTE_TTL_MS) return false;
+    if (enCache.motivo) return enCache.motivo;
+    if (Date.now() - enCache.visto < VIGENTE_TTL_MS) return null;
   }
 
-  const hallado = await RevokedToken.exists({ jti });
-  jtiCache.set(jti, { revocado: !!hallado, visto: Date.now() });
-  return !!hallado;
+  const doc = await RevokedToken.findOne({ jti }).select('reason').lean();
+  const motivo = doc ? (doc.reason ?? 'logout') : null;
+  jtiCache.set(jti, { motivo, visto: Date.now() });
+  return motivo;
 }
 
 // ─── protect ─────────────────────────────────────────────────────────────────
@@ -191,13 +192,20 @@ export async function protect(req, res, next) {
     // Revocación POR SESIÓN. Va después de la de `tokenVersion` porque esta
     // consulta la base cuando el cache no responde, y no tiene sentido pagarla
     // si el token ya cayó por la revocación global, que se resuelve en memoria.
-    if (await tokenRevocado(decoded.jti)) {
-      console.warn('[Protect] REJECT: sesión cerrada | jti:', decoded.jti,
-        '| userId:', decoded.id, '| path:', req.path);
+    const motivoRevocacion = await tokenRevocado(decoded.jti);
+    if (motivoRevocacion) {
+      // El código distingue los dos casos porque el usuario merece saber cuál
+      // es: "te expulsaron desde otro equipo" es una señal de seguridad, y
+      // confundirla con "tu sesión caducó" la desperdicia.
+      const expulsado = motivoRevocacion === 'nueva_sesion';
+      console.warn('[Protect] REJECT: sesión revocada |', motivoRevocacion,
+        '| jti:', decoded.jti, '| userId:', decoded.id, '| path:', req.path);
       return res.status(401).json({
         success: false,
-        message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
-        code:    'SESSION_REVOKED',
+        message: expulsado
+          ? 'Se inició sesión en otro dispositivo.'
+          : 'Sesión expirada. Por favor inicia sesión nuevamente.',
+        code: expulsado ? 'SESSION_REPLACED' : 'SESSION_REVOKED',
       });
     }
 
