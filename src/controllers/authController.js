@@ -16,7 +16,8 @@ import mongoose from 'mongoose';
 import bcrypt   from 'bcryptjs';
 import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
-import User     from '../models/User.js';
+import User          from '../models/User.js';
+import RevokedToken  from '../models/RevokedToken.js';
 import { resolveDocumentNumberStorage } from '../utils/clientDocument.js';
 import { phoneTail }                    from '../services/clientIdentityIndex.js';
 import { revisarClienteDuplicado }      from '../services/clientDuplicateAlert.js';
@@ -80,6 +81,11 @@ const ENTITY_DEFAULT_DOC = {
 
 /**
  * Genera un JWT firmado con id + tokenVersion (para revocación server-side).
+ *
+ * El claim `jti` identifica a ESTA sesión en concreto y es lo que permite
+ * cerrarla sin tocar las demás. `tokenVersion` sigue existiendo para lo que sí
+ * debe ser global: cambio de contraseña y suspensión administrativa.
+ *
  * @param {string|ObjectId} userId
  * @param {number}          tokenVersion — valor actual del contador del user
  * @param {string}          [expiresIn]  — sobreescribe JWT_EXPIRES_IN del entorno
@@ -90,6 +96,9 @@ function generateToken(userId, tokenVersion, expiresIn, amr) {
     {
       id: userId,
       tokenVersion: tokenVersion ?? 0,
+      // Identificador único de ESTA sesión. Sin él, la única forma de revocar
+      // era subir tokenVersion, que mata todas las del usuario a la vez.
+      jti: crypto.randomUUID(),
       // Métodos que acreditó la sesión. Sin segundo factor exigido queda sólo
       // 'pwd'; con él, la sesión lleva además la marca del factor que la
       // habilitó y `checkAdmin` la exige para entrar al panel.
@@ -802,20 +811,54 @@ export async function registerFcmToken(req, res) {
 
 /**
  * POST /api/v1/auth/logout
- * Incrementa tokenVersion (revocando todos los JWTs activos del usuario),
- * limpia el cache del middleware y la cookie HttpOnly.
+ *
+ * Cierra ÚNICAMENTE la sesión desde la que se llama. Anota su `jti` en la lista
+ * de revocación, limpia el cache del middleware y borra la cookie.
+ *
+ * ⚠️ Antes esto incrementaba `tokenVersion`, que es un contador POR USUARIO, así
+ * que cerrar sesión en el teléfono tumbaba también la del navegador, en silencio
+ * y sin que nadie hubiera decidido ese comportamiento. Era un efecto colateral
+ * de usar una revocación global para cerrar una sola sesión.
+ *
+ * Lo que sigue siendo global, y debe serlo, es el cambio de contraseña y la
+ * suspensión administrativa: esos siguen subiendo `tokenVersion`. La política de
+ * privacidad publicada promete exactamente eso ("revocamos todas las sesiones
+ * abiertas cuando cambias la contraseña") y no cambia.
+ *
+ * Compatibilidad: un token emitido antes de este cambio no lleva `jti`. En ese
+ * caso se mantiene el comportamiento anterior, porque no hay forma de
+ * identificar la sesión concreta. Esos tokens se agotan solos en 24 h, o 7 días
+ * con "mantener sesión".
  */
 export async function logoutUser(req, res) {
   try {
     const userId = req.user?.id ?? req.user?._id;
+    const jti    = req.authClaims?.jti ?? null;
+    const exp    = req.authClaims?.exp ?? null;
+
     if (userId) {
-      // Sólo incrementar tokenVersion en producción. En dev, logout/login
-      // repetidos generan drift en el contador y rompen tokens cacheados.
-      if (process.env.NODE_ENV === 'production') {
+      if (jti) {
+        // Caducidad real del token. Si falta `exp` (no debería), se usa el
+        // máximo de 7 días: es preferible que el registro sobreviva de más a
+        // que se borre antes de tiempo y el token revocado reviva.
+        const expiresAt = exp
+          ? new Date(exp * 1000)
+          : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+        await RevokedToken.updateOne(
+          { jti },
+          { $setOnInsert: { jti, userId, expiresAt, reason: 'logout' } },
+          { upsert: true },
+        );
+      } else if (process.env.NODE_ENV === 'production') {
+        // Token antiguo sin `jti`: no se puede cerrar solo esta sesión, así que
+        // se conserva el comportamiento de antes. Ver la nota de compatibilidad.
+        console.warn('[Auth] logout de un token sin jti — revocación global por compatibilidad');
         await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
       }
       invalidateUserCache(String(userId));
     }
+
     if (!IS_HEADER_MODE) {
       const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
       res.clearCookie(AUTH_COOKIE_NAME, clearOpts);

@@ -16,6 +16,7 @@
 
 import jwt  from 'jsonwebtoken';
 import User from '../models/User.js';
+import RevokedToken from '../models/RevokedToken.js';
 import { setSentryUser } from './sentryContext.js';
 import { BoundedCache } from '../utils/boundedCache.js';
 import { checkAdmin } from './checkAdmin.js';
@@ -51,6 +52,43 @@ export const clearUserCache = () => {
   userCache.clear();
   console.log('[Auth] userCache cleared');
 };
+
+// ─── Cache de tokens revocados ───────────────────────────────────────────────
+// Al cerrar sesión se anota el `jti` del token en `revoked_tokens`. Comprobarlo
+// contra la base en CADA petición sería una consulta extra por request, así que
+// se cachea el resultado.
+//
+// ⚠️ La asimetría de los plazos es deliberada:
+//   - "revocado" se cachea 5 min: una vez revocado, lo sigue estando
+//   - "vigente"  se cachea 10 s: acota a 10 s la ventana en la que un token
+//     recién cerrado podría seguir entrando
+//
+// Al revés, cerrar sesión no surtiría efecto hasta pasados minutos, que es justo
+// lo que no se puede permitir cuando alguien cierra porque le robaron el equipo.
+const REVOKED_TTL_MS = 5 * 60 * 1000;
+const VIGENTE_TTL_MS = 10 * 1000;
+const jtiCache = new BoundedCache(5000, REVOKED_TTL_MS);
+
+/** Vacía el cache de revocaciones. Para pruebas y para forzar relectura. */
+export const clearJtiCache = () => jtiCache.clear();
+
+/**
+ * @param  {string|null} jti
+ * @returns {Promise<boolean>} true si esa sesión concreta fue cerrada
+ */
+async function tokenRevocado(jti) {
+  if (!jti) return false;   // token anterior al cambio: no identifica sesión
+
+  const enCache = jtiCache.get(jti);
+  if (enCache) {
+    if (enCache.revocado) return true;
+    if (Date.now() - enCache.visto < VIGENTE_TTL_MS) return false;
+  }
+
+  const hallado = await RevokedToken.exists({ jti });
+  jtiCache.set(jti, { revocado: !!hallado, visto: Date.now() });
+  return !!hallado;
+}
 
 // ─── protect ─────────────────────────────────────────────────────────────────
 
@@ -148,6 +186,19 @@ export async function protect(req, res, next) {
           code:    'TOKEN_VERSION_MISMATCH',
         });
       }
+    }
+
+    // Revocación POR SESIÓN. Va después de la de `tokenVersion` porque esta
+    // consulta la base cuando el cache no responde, y no tiene sentido pagarla
+    // si el token ya cayó por la revocación global, que se resuelve en memoria.
+    if (await tokenRevocado(decoded.jti)) {
+      console.warn('[Protect] REJECT: sesión cerrada | jti:', decoded.jti,
+        '| userId:', decoded.id, '| path:', req.path);
+      return res.status(401).json({
+        success: false,
+        message: 'Sesión expirada. Por favor inicia sesión nuevamente.',
+        code:    'SESSION_REVOKED',
+      });
     }
 
     req.user = user;
