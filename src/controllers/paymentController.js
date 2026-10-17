@@ -552,8 +552,27 @@ const FALLBACK_WITHDRAWAL_RULES = {
   ],
 };
 
-/** Normaliza un campo de la respuesta de Vita al formato canónico del frontend */
-function transformVitaField(f) {
+/**
+ * Normaliza un campo de la respuesta de Vita al formato canónico del frontend.
+ *
+ * ⚠️ `pattern` y `hint` salen de `regex_validate` y `regex_message`, que Vita
+ * envía emparejados en 89 de sus 363 campos. Antes se descartaban aquí, y como
+ * el frontend valida contra `field.pattern`, esa comprobación NUNCA se disparaba
+ * para ningún destino de Vita: la validación de formato llevaba muerta desde
+ * siempre en los 27 destinos, no solo en los que dieron problemas.
+ *
+ * Se descubrió con los envíos a Venezuela que Vita rechazó por `account_bank`.
+ * Su propia expresión es
+ *     ^(0102|0156|0172|…|0116)\d{16}$
+ * o sea, código de banco válido más 16 dígitos, con la lista de bancos
+ * mantenida por ellos. Copiarla es mejor que escribirla a mano, porque la
+ * actualizan en origen y a nosotros se nos quedaría vieja.
+ *
+ * `regex_message` es el texto legible que acompaña a cada expresión. El frontend
+ * lo muestra como ayuda bajo el campo ANTES de escribir, no solo como error
+ * después de fallar.
+ */
+export function transformVitaField(f) {
   if (!f?.key) return null;
   let type = (f.type ?? 'text').toLowerCase();
   if (!['text', 'select', 'email', 'phone'].includes(type)) type = 'text';
@@ -567,6 +586,8 @@ function transformVitaField(f) {
     min:         f.min  ?? null,
     max:         f.max  ?? null,
     placeholder: f.placeholder ?? placeholder,
+    pattern:     f.regex_validate ?? null,
+    hint:        f.regex_message  ?? null,
     when:        f.when ?? null,
   };
 }
