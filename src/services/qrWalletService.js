@@ -117,7 +117,10 @@ export async function generateQR({
 
   const qrBase64 = await QRCode.toDataURL(JSON.stringify(payload), {
     width:                400,
-    margin:               2,
+    // 4 módulos es el mínimo que exige la especificación de QR (ISO/IEC 18004)
+    // para la zona silenciosa. Con 2 el código escanea en condiciones buenas y
+    // falla con poca luz, pantalla sucia o impreso sobre un fondo con textura.
+    margin:               4,
     errorCorrectionLevel: 'H',
     color: { dark: '#000000', light: '#ffffff' },
   });
