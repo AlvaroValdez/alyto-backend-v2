@@ -546,6 +546,20 @@ const userSchema = new Schema(
       required: true,
     },
 
+    /**
+     * `jti` de la sesión vigente. Sostiene la regla de UN SOLO DISPOSITIVO:
+     * al iniciar sesión se revoca la anterior y se anota aquí la nueva.
+     *
+     * Es contabilidad, no un control: la comprobación la sigue haciendo la lista
+     * `revoked_tokens` desde el middleware. Este campo solo responde a "cuál hay
+     * que revocar la próxima vez". Sin él, un segundo login revocaría un
+     * identificador viejo y dejaría viva la sesión que pretendía cerrar.
+     */
+    activeSessionJti: {
+      type:    String,
+      default: null,
+    },
+
     // ── Segundo factor de autenticación ──────────────────────────────────────
     /**
      * Segundo factor TOTP. Obligatorio para los accesos con privilegios de

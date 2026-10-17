@@ -378,7 +378,10 @@ export async function changePassword(req, res) {
     const vigenciaS  = (claims.exp ?? 0) - (claims.iat ?? 0);
     const rememberMe = vigenciaS > 24 * 60 * 60;   // 7d vs 24h
 
-    const { token, user: publicUser } = issueSession(res, updated, {
+    // Sin `unicaSesion`: esto es una REEMISION en el mismo equipo tras cambiar
+    // el perfil, no un login. Revocar aqui echaria al usuario si su cliente no
+    // llega a guardar el token nuevo.
+    const { token, user: publicUser } = await issueSession(res, updated, {
       rememberMe,
       amr: claims.amr,
     });
