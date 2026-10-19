@@ -63,6 +63,11 @@ const JOBS = {
     import('./reconcileBecDisbursements.js').then((m) => m.reconcileBecDisbursements),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
+  // Recarga semanal de OFAC y ONU. Sin esto la lista envejece en silencio: la
+  // coleccion sigue pareciendo poblada mientras deja de reflejar el origen, que
+  // es el estado del que se venia (2 entradas sin tocar desde marzo).
+  'refresh-sanctions': () =>
+    import('./refreshSanctionsLists.js').then((m) => m.refreshSanctionsLists),
   // Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
   // sin `stellarTxId` (Horizon caído al completar). Sin esta entrada quedaría huérfano
   // en producción (setInterval apagado por JOBS_EXTERNAL_SCHEDULER + Lambda respondería

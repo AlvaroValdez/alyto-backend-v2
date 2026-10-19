@@ -887,6 +887,20 @@ async function startServer() {
       setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
       console.info('[Server] Refresh exchange rates job programado cada 30 min');
 
+      // Recarga semanal de las listas de sanciones (OFAC y ONU).
+      //
+      // Se agenda aqui ADEMAS de registrarlo en jobRegistry: sin esto quedaria
+      // huerfano en produccion cuando JOBS_EXTERNAL_SCHEDULER=true apaga los
+      // setInterval y la regla de EventBridge aun no existe. Es el fallo que ya
+      // dejo sin correr a reconcile-bank-qr.
+      //
+      // La primera corrida va a los 5 min para no competir con el arranque, y
+      // es idempotente: si EventBridge tambien la dispara, no pasa nada.
+      const { refreshSanctionsLists } = await import('./jobs/refreshSanctionsLists.js');
+      setTimeout(refreshSanctionsLists, 5 * 60 * 1000);
+      setInterval(refreshSanctionsLists, 7 * 24 * 60 * 60 * 1000);
+      console.info('[Server] Refresh sanctions lists job programado cada 7 dias');
+
       // Red de seguridad del sello on-chain — re-sella operaciones completadas que
       // quedaron sin stellarTxId por un fallo transitorio de Horizon. Garantiza que
       // ninguna operación completada quede sin su sello de existencia (ASFI).
