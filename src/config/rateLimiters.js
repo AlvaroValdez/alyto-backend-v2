@@ -47,11 +47,16 @@ function skip(req) {
 
 // ─── Factory helper ───────────────────────────────────────────────────────────
 
-function makeLimiter({ windowMs, max, maxPermissive, message }) {
+function makeLimiter({ windowMs, max, maxPermissive, message, soloFallos = false }) {
   return rateLimit({
     windowMs,
     max: IS_STRICT ? max : (maxPermissive ?? max * 10),
     skip,
+    // soloFallos: no gastar cupo con las peticiones que salieron bien (<400).
+    // Un limitador contra fuerza bruta tiene que contar INTENTOS FALLIDOS; si
+    // cuenta tambien los aciertos, castiga al usuario legitimo que entra varias
+    // veces y no frena mejor al atacante, que falla igual.
+    skipSuccessfulRequests: soloFallos,
     standardHeaders: true,
     legacyHeaders:   false,
     message:         { error: message },
@@ -98,6 +103,11 @@ export const loginLimiter = makeLimiter({
   windowMs:      15 * 60 * 1000,
   max:           5,
   maxPermissive: 50,
+  // Solo cuentan los fallos. Antes contaba todo: entrar cinco veces bien en
+  // quince minutos dejaba al usuario bloqueado sin haber equivocado nunca la
+  // contraseña. Con operadores moviles bolivianos compartiendo IP por CGNAT,
+  // varios probadores agotaban el cupo entre ellos.
+  soloFallos:    true,
   message:       'Demasiados intentos de inicio de sesión. Espera 15 minutos e intenta de nuevo.',
 });
 
@@ -115,6 +125,7 @@ export const twoFactorLimiter = makeLimiter({
   windowMs:      15 * 60 * 1000,
   max:           5,
   maxPermissive: 50,
+  soloFallos:    true,
   message:       'Demasiados intentos de verificación. Espera 15 minutos e intenta de nuevo.',
 });
 
