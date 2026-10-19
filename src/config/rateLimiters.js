@@ -186,6 +186,16 @@ export const supportChatLimiter = makeLimiter({
   message:       'Demasiados mensajes al asistente. Espera un momento e intenta de nuevo.',
 });
 
+// ─── Limiter: Denuncia de contenido generado por la IA ────────────────────────
+// Mas holgado que el chat porque no cuesta tokens, pero acotado: es un endpoint
+// que escribe en base y manda correo, y el correo tiene cuota diaria.
+export const supportReportLimiter = makeLimiter({
+  windowMs:      60 * 60 * 1000,
+  max:           20,
+  maxPermissive: 100,
+  message:       'Demasiadas denuncias seguidas. Intenta de nuevo mas tarde.',
+});
+
 // ─── Limiter: Lista de espera del lanzamiento (endpoint público sin auth) ──────
 
 // Alta en la waitlist de alyto.io. Es público y sin sesión, así que la IP es el
