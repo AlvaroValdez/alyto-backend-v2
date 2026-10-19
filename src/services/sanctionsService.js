@@ -12,6 +12,7 @@
 
 import * as Sentry   from '@sentry/node'
 import SanctionsList from '../models/SanctionsList.js'
+import { tokens, coincideNombre, normalizarDocumento } from '../utils/sanctionsMatch.js'
 
 /**
  * Normaliza un string para comparación:
@@ -43,55 +44,51 @@ function escapeRegex(str = '') {
  */
 export async function screenUser({ firstName, lastName, documentNumber } = {}) {
   try {
-    const orConditions = []
+    const tConsulta = tokens([firstName, lastName].filter(Boolean).join(' '))
+    const docNorm   = normalizarDocumento(documentNumber ?? '')
 
-    if (firstName?.trim()) {
-      const safeFirst = escapeRegex(firstName.trim())
-      orConditions.push(
-        { fullName: { $regex: safeFirst, $options: 'i' } },
-        { aliases:  { $elemMatch: { $regex: safeFirst, $options: 'i' } } },
-      )
+    const or = []
+    // Por documento: exacto, es la senal fuerte. Se consulta normalizado y crudo
+    // porque las entradas antiguas no tienen el campo normalizado.
+    if (docNorm) {
+      or.push({ documentsNormalized: docNorm })
+      or.push({ documentNumbers: documentNumber.trim() })
     }
-    if (lastName?.trim()) {
-      orConditions.push(
-        { fullName: { $regex: escapeRegex(lastName.trim()), $options: 'i' } },
-      )
-    }
-    if (documentNumber?.trim()) {
-      orConditions.push({ documentNumbers: documentNumber.trim() })
+    // Por nombre: la entrada tiene que contener TODOS los tokens del consultado.
+    // $all sobre un array indexado: ni regex ni recorrido de la coleccion.
+    if (tConsulta.length >= 2) {
+      or.push({ nameTokens: { $all: tConsulta } })
     }
 
-    if (orConditions.length === 0) {
+    if (or.length === 0) {
       return { isClean: true, hits: [], screenedAt: new Date() }
     }
 
-    const hits = await SanctionsList.find({ isActive: true, $or: orConditions })
-      .select('entryId fullName listSource reason type documentNumbers')
+    const candidatos = await SanctionsList.find({ isActive: true, $or: or })
+      .select('entryId fullName listSource reason type documentNumbers documentsNormalized nameTokens')
+      .limit(50)
       .lean()
 
-    // Filtro adicional para reducir falsos positivos:
-    // - Hits por documento exacto → siempre confirmados (match preciso, sin ambigüedad)
-    // - Hits por nombre/alias → requieren que al menos firstName o lastName aparezca en fullName
-    const docQuery = documentNumber?.trim()
-    const confirmed = hits.filter(hit => {
-      if (docQuery && hit.documentNumbers?.includes(docQuery)) return true
-      const hitName = normalize(hit.fullName)
-      const hasFirst = !firstName || hitName.includes(normalize(firstName))
-      const hasLast  = !lastName  || hitName.includes(normalize(lastName))
-      return hasFirst || hasLast
+    // Confirmacion. El acierto por documento es inapelable. El de nombre se
+    // vuelve a comprobar aqui para que la regla viva en un solo sitio
+    // (utils/sanctionsMatch) y sea testeable sin base de datos.
+    const confirmados = candidatos.filter(hit => {
+      if (docNorm && (hit.documentsNormalized?.includes(docNorm) ||
+                      hit.documentNumbers?.includes(documentNumber.trim()))) return true
+      return coincideNombre(tConsulta, hit.nameTokens ?? tokens(hit.fullName))
     })
 
     return {
-      isClean:    confirmed.length === 0,
-      hits:       confirmed,
+      isClean:    confirmados.length === 0,
+      hits:       confirmados,
       screenedAt: new Date(),
     }
 
   } catch (err) {
     console.error('[Sanctions] Error en screenUser:', err.message)
     Sentry.captureException(err, { tags: { service: 'sanctionsService', fn: 'screenUser' } })
-    // En caso de error: retornar clean para no bloquear flujo
-    // Sentry registra para revisión manual del Oficial de Cumplimiento
+    // Se devuelve `error`: checkSanctions lo convierte en 503 (fail-closed) en
+    // produccion. Este "clean" NO es un cribado real.
     return { isClean: true, hits: [], screenedAt: new Date(), error: err.message }
   }
 }

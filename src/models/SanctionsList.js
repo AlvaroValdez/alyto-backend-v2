@@ -26,6 +26,20 @@ const sanctionsListSchema = new mongoose.Schema({
   fullName:     { type: String, required: true, index: true },
   aliases:      [String],
   documentNumbers: [String],
+  /**
+   * Tokens normalizados del nombre y de TODOS los alias, en un solo array.
+   *
+   * Es el campo contra el que se criba. Existe porque buscar por $regex sobre
+   * `fullName` recorría la coleccion entera y, peor, casaba por subcadena: con
+   * las ~20.500 entradas reales de OFAC y ONU eso bloquea a usuarios legitimos
+   * cuyo nombre aparece DENTRO de otra palabra. Indexado multikey, la consulta
+   * por $all usa indice y es exacta por palabra.
+   */
+  nameTokens:   { type: [String], default: [], index: true },
+  /** Documentos normalizados (sin guiones ni puntos) para comparar de verdad. */
+  documentsNormalized: { type: [String], default: [], index: true },
+  /** Identificador estable en la lista de origen. Permite recargar sin duplicar. */
+  sourceId:     { type: String, default: null, index: true },
   nationality:  { type: String, default: null },
   dateOfBirth:  { type: String, default: null },
   listSource: {
@@ -42,5 +56,9 @@ const sanctionsListSchema = new mongoose.Schema({
 // Índice de texto para búsqueda rápida por nombre y aliases
 sanctionsListSchema.index({ fullName: 'text', aliases: 'text' })
 sanctionsListSchema.index({ listSource: 1, isActive: 1 })
+// El que de verdad sirve al cribado: multikey sobre tokens, filtrando activos.
+sanctionsListSchema.index({ isActive: 1, nameTokens: 1 })
+// Recarga idempotente: una entrada por (fuente, id de origen).
+sanctionsListSchema.index({ listSource: 1, sourceId: 1 }, { unique: true, sparse: true })
 
 export default mongoose.model('SanctionsList', sanctionsListSchema)
