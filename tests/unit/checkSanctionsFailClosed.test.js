@@ -16,6 +16,16 @@ const mockScreenUser = jest.fn();
 await jest.unstable_mockModule('../../src/services/sanctionsService.js', () => ({
   screenUser: mockScreenUser,
 }));
+// El middleware deja constancia de los aciertos por nombre. Aqui se simula:
+// el test comprueba la POLITICA (pasa o no pasa), no la escritura de la alerta.
+await jest.unstable_mockModule('../../src/models/ROSAlert.js', () => ({
+  default: {
+    findOne: () => ({ select: () => ({ lean: async () => null }) }),
+    updateOne: async () => ({}),
+    create: async () => ({}),
+  },
+}));
+
 await jest.unstable_mockModule('../../src/utils/clientDocument.js', () => ({
   readDocumentNumber: () => '12345678',   // evita la ruta a base de datos
 }));
@@ -49,14 +59,44 @@ describe('contraste contra listas restrictivas — fail-closed en producción', 
     expect(res.body.code).toBe('SCREENING_UNAVAILABLE');
   });
 
-  it('coincidencia confirmada → 403, la operación NO continúa', async () => {
+  it('coincidencia por DOCUMENTO → 403, la operación NO continúa', async () => {
+    process.env.NODE_ENV = 'production';
+    mockScreenUser.mockResolvedValue({
+      isClean: false,
+      hasDocumentMatch: true,
+      hits: [{ entryId: 'x', listSource: 'OFAC', matchType: 'document' }],
+    });
+    const res = fakeRes(); let siguio = false;
+    await checkSanctions(req(), res, () => { siguio = true; });
+    expect(siguio).toBe(false);
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('SANCTIONS_HIT');
+  });
+
+  // Politica decidida el 2026-10-19: el nombre no identifica por si solo.
+  // Medido contra las listas reales, 1 de cada 23 usuarios casa por nombre con
+  // un ALIAS del SDN; bloquear por eso dejaria sin operar a gente legitima.
+  it('coincidencia SOLO por nombre → deja pasar y queda para revisión', async () => {
+    process.env.NODE_ENV = 'production';
+    mockScreenUser.mockResolvedValue({
+      isClean: false,
+      hasDocumentMatch: false,
+      hits: [{ entryId: 'x', listSource: 'OFAC', matchType: 'name' }],
+    });
+    const res = fakeRes(); let siguio = false;
+    await checkSanctions(req(), res, () => { siguio = true; });
+    expect(siguio).toBe(true);
+    expect(res.statusCode).toBeNull();
+  });
+
+  // Ante una forma inesperada, el control se cierra.
+  it('acierto SIN etiquetar → 403, no se asume que sea por nombre', async () => {
     process.env.NODE_ENV = 'production';
     mockScreenUser.mockResolvedValue({ isClean: false, hits: [{ entryId: 'x', listSource: 'OFAC' }] });
     const res = fakeRes(); let siguio = false;
     await checkSanctions(req(), res, () => { siguio = true; });
     expect(siguio).toBe(false);
     expect(res.statusCode).toBe(403);
-    expect(res.body.code).toBe('SANCTIONS_HIT');
   });
 
   it('screening limpio → la operación continúa', async () => {

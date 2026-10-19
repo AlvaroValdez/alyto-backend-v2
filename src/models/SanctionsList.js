@@ -36,6 +36,13 @@ const sanctionsListSchema = new mongoose.Schema({
    * por $all usa indice y es exacta por palabra.
    */
   nameTokens:   { type: [String], default: [], index: true },
+  /**
+   * Nombre principal y cada alias, POR SEPARADO. `nameTokens` sirve de prefiltro
+   * indexado; la confirmacion se hace contra estas variantes una a una, porque
+   * mezclarlas produce coincidencias cruzadas (un token del alias con otro del
+   * nombre principal) que senalan a gente que no esta en la lista.
+   */
+  nameVariants: { type: [String], default: [] },
   /** Documentos normalizados (sin guiones ni puntos) para comparar de verdad. */
   documentsNormalized: { type: [String], default: [], index: true },
   /** Identificador estable en la lista de origen. Permite recargar sin duplicar. */

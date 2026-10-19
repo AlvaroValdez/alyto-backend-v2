@@ -156,11 +156,15 @@ function parsearOnu(xml) {
 }
 
 function aDocumento(e) {
-  const nombres = [e.fullName, ...(e.aliases ?? [])].join(' ')
+  // Variantes SIN mezclar: el nombre principal y cada alias por separado. La
+  // bolsa comun `nameTokens` solo sirve de prefiltro indexado en Mongo; la
+  // confirmacion se hace variante a variante para no cruzar tokens.
+  const variantes = [e.fullName, ...(e.aliases ?? [])].filter(Boolean)
   return {
     ...e,
     entryId:    `${e.listSource}-${e.sourceId}`,
-    nameTokens: tokens(nombres),
+    nameVariants: variantes,
+    nameTokens: tokens(variantes.join(' ')),
     documentsNormalized: (e.documentNumbers ?? [])
       .map(normalizarDocumento).filter(d => d.length >= 4),
     isActive:   true,

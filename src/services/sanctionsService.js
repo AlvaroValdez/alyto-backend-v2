@@ -12,7 +12,7 @@
 
 import * as Sentry   from '@sentry/node'
 import SanctionsList from '../models/SanctionsList.js'
-import { tokens, coincideNombre, normalizarDocumento } from '../utils/sanctionsMatch.js'
+import { tokens, coincideAlgunaVariante, normalizarDocumento } from '../utils/sanctionsMatch.js'
 
 /**
  * Normaliza un string para comparación:
@@ -65,22 +65,35 @@ export async function screenUser({ firstName, lastName, documentNumber } = {}) {
     }
 
     const candidatos = await SanctionsList.find({ isActive: true, $or: or })
-      .select('entryId fullName listSource reason type documentNumbers documentsNormalized nameTokens')
+      .select('entryId fullName listSource reason type documentNumbers documentsNormalized nameTokens nameVariants')
       .limit(50)
       .lean()
 
     // Confirmacion. El acierto por documento es inapelable. El de nombre se
     // vuelve a comprobar aqui para que la regla viva en un solo sitio
     // (utils/sanctionsMatch) y sea testeable sin base de datos.
-    const confirmados = candidatos.filter(hit => {
-      if (docNorm && (hit.documentsNormalized?.includes(docNorm) ||
-                      hit.documentNumbers?.includes(documentNumber.trim()))) return true
-      return coincideNombre(tConsulta, hit.nameTokens ?? tokens(hit.fullName))
-    })
+    // Cada acierto se etiqueta con COMO coincidio, porque la politica depende de
+    // eso: el documento es exacto y bloquea; el nombre no identifica por si solo
+    // y va a revision humana. Ver checkSanctions.
+    const confirmados = []
+    for (const hit of candidatos) {
+      const porDocumento = !!docNorm && (
+        hit.documentsNormalized?.includes(docNorm) ||
+        hit.documentNumbers?.includes(documentNumber.trim())
+      )
+      if (porDocumento) { confirmados.push({ ...hit, matchType: 'document' }); continue }
+      // Variante a variante, nunca contra la bolsa comun de tokens.
+      const variantes = hit.nameVariants?.length ? hit.nameVariants : [hit.fullName]
+      if (coincideAlgunaVariante(tConsulta, variantes)) {
+        confirmados.push({ ...hit, matchType: 'name' })
+      }
+    }
 
     return {
       isClean:    confirmados.length === 0,
       hits:       confirmados,
+      // Atajo para quien decide: ¿hay algun acierto por documento?
+      hasDocumentMatch: confirmados.some(h => h.matchType === 'document'),
       screenedAt: new Date(),
     }
 

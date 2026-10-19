@@ -41,7 +41,8 @@ const rosAlertSchema = new mongoose.Schema({
    */
   rule: {
     type:     String,
-    enum:     ['single_tx_high', 'daily_cumulative', 'high_frequency', 'new_account_volume', 'velocity_spike'],
+    enum:     ['single_tx_high', 'daily_cumulative', 'high_frequency', 'new_account_volume', 'velocity_spike',
+               'sanctions_name_match'],
     required: true,
     index:    true,
   },
@@ -59,7 +60,7 @@ const rosAlertSchema = new mongoose.Schema({
    */
   source: {
     type:    String,
-    enum:    ['crossborder', 'wallet'],
+    enum:    ['crossborder', 'wallet', 'sanctions'],
     default: 'crossborder',
     index:   true,
   },
