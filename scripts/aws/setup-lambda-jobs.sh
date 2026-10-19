@@ -174,6 +174,9 @@ RULES=(
   "alyto-cron-reconcile-bank-qr|rate(2 minutes)|reconcile-bank-qr"
   "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
+  # Semanal: OFAC y ONU publican cambios varias veces por semana, pero una
+  # recarga completa cuesta ~20 s y 18.500 upserts. Semanal es el equilibrio.
+  "alyto-cron-refresh-sanctions|rate(7 days)|refresh-sanctions"
   # Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
   # sin stellarTxId por un fallo transitorio de Horizon (garantía ASFI de sello por
   # operación completada). Ver src/jobs/resealAuditTrails.js.
