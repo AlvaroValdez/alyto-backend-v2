@@ -22,6 +22,7 @@ import { isRealDocumentNumber, readDocumentNumber, applyDocumentNumberToSet } fr
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { phoneTail } from '../services/clientIdentityIndex.js';
 import { revisarClienteDuplicado } from '../services/clientDuplicateAlert.js';
+import { clasificarRiesgo, RELACIONES_PEP } from '../services/pepService.js';
 
 // select:false → hay que pedir explícitamente el ciphertext del CI para poder descifrarlo.
 const DOC_CIPHERTEXT_SELECT = '+identityDocument.numberCiphertext';
@@ -584,5 +585,73 @@ export async function processKyc(req, res) {
     return res.status(500).json({
       error: 'Error interno al procesar la verificación de identidad.',
     });
+  }
+}
+
+/**
+ * POST /api/v1/users/pep-declaration  (protect)
+ *   body: { esPep: boolean, relacion?: 'self'|'family'|'associate', cargo?: string }
+ *
+ * Declaración de Persona Expuesta Políticamente.
+ *
+ * Es el control PRIMARIO de identificación de PEP, no un complemento: no existe
+ * lista pública fiable de PEPs bolivianos, y construir el control sobre una lista
+ * vacía sería declarar algo que no funciona.
+ *
+ * Declararse PEP NO bloquea nada. Clasifica el riesgo como alto y abre una
+ * revisión de diligencia reforzada. Ser PEP no es ilegal; excluirlos seria tan
+ * incorrecto como ignorarlos.
+ */
+export async function declararPep(req, res) {
+  try {
+    const { esPep, relacion, cargo } = req.body ?? {};
+
+    if (typeof esPep !== 'boolean') {
+      return res.status(400).json({ error: 'Se requiere "esPep" (true o false).' });
+    }
+    if (esPep && !RELACIONES_PEP.includes(relacion)) {
+      return res.status(400).json({
+        error: `Si declaras ser PEP, "relacion" debe ser uno de: ${RELACIONES_PEP.join(', ')}.`,
+      });
+    }
+
+    const clasificacion = clasificarRiesgo({
+      declarado: esPep,
+      relacion:  esPep ? relacion : null,
+      // El cruce contra la lista se hace al aprobar el KYC, con el documento ya
+      // verificado. Aquí solo pesa lo declarado.
+      enLista:   false,
+    });
+
+    await User.findByIdAndUpdate(req.user._id, {
+      $set: {
+        'pep.declared':     esPep,
+        'pep.relationship': esPep ? relacion : null,
+        'pep.position':     esPep ? (typeof cargo === 'string' ? cargo.trim().slice(0, 300) : null) : null,
+        'pep.declaredAt':   new Date(),
+        riskLevel:          clasificacion.riskLevel,
+        eddStatus:          clasificacion.eddStatus,
+      },
+    });
+    invalidateUserCache(req.user._id);
+
+    if (clasificacion.eddStatus === 'pending') {
+      console.info('[PEP] Declaración recibida — abre diligencia reforzada:', {
+        userId: req.user._id?.toString(), relacion,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      riskLevel: clasificacion.riskLevel,
+      eddStatus: clasificacion.eddStatus,
+      // Se le dice al usuario qué significa, para que declarar no se sienta un castigo.
+      mensaje: esPep
+        ? 'Gracias. Tu declaración queda registrada. Puedes seguir operando con normalidad; nuestro equipo de cumplimiento revisará tu caso.'
+        : 'Gracias, tu declaración queda registrada.',
+    });
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'userController', fn: 'declararPep' } });
+    return res.status(500).json({ error: 'No se pudo registrar la declaración.' });
   }
 }

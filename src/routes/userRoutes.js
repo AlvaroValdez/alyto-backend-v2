@@ -15,6 +15,7 @@ import { Router } from 'express';
 import multer     from 'multer';
 import { protect, requireEmailVerified } from '../middlewares/authMiddleware.js';
 import {
+  declararPep,
   getProfile,
   updateProfile,
   updateKycProfile,
@@ -64,6 +65,10 @@ router.patch('/kyc-profile', protect, requireEmailVerified, updateKycProfile);
 
 // POST /api/v1/user/change-password
 router.post('/change-password', protect, changePassword);
+
+// Declaracion de Persona Expuesta Politicamente. Control primario de
+// identificacion de PEP: no hay lista publica fiable para Bolivia.
+router.post('/pep-declaration', protect, declararPep);
 
 // DELETE /api/v1/user/fcm-token
 router.delete('/fcm-token', protect, deleteFcmToken);

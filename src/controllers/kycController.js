@@ -11,6 +11,7 @@ import Stripe          from 'stripe';
 import User             from '../models/User.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
 import { screenUser }   from '../services/sanctionsService.js';
+import { buscarEnListaPep, clasificarRiesgo } from '../services/pepService.js';
 import { readDocumentNumber } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
 import { approveKycFromSession } from '../webhooks/stripeWebhook.js';
@@ -307,6 +308,13 @@ export async function recordKycClientEvent(req, res) {
  * Nunca lanza excepciones — cualquier error queda en consola/Sentry.
  */
 function runSanctionsScreening(userId, firstName, lastName, documentNumber) {
+  // El cruce contra la lista de PEP va aqui y no en el alta: es el primer punto
+  // donde el documento esta verificado, que es lo unico que identifica de verdad.
+  // Separado del cribado de sanciones a proposito: un acierto de PEP clasifica
+  // riesgo, uno de sanciones puede bloquear, y mezclarlos daria al Oficial de
+  // Cumplimiento un expediente rotulado al reves.
+  clasificarPep(userId, firstName, lastName, documentNumber).catch(() => {})
+
   screenUser({ firstName, lastName, documentNumber })
     .then(result => {
       if (!result.isClean) {
@@ -444,5 +452,44 @@ export async function getKycDebug(req, res) {
   } catch (err) {
     console.error('[KYC Debug] Error:', err.message);
     return res.status(500).json({ error: err.message });
+  }
+}
+
+/**
+ * Cruza al usuario contra la lista de PEP y recalcula su riesgo.
+ *
+ * Respeta lo que el usuario ya declaro: si se declaro PEP, sigue siendo alto
+ * aunque no aparezca en ninguna lista. La declaracion es el control primario.
+ *
+ * No bloquea nada: ser PEP obliga a diligencia reforzada, no a exclusion.
+ */
+async function clasificarPep(userId, firstName, lastName, documentNumber) {
+  const { hit, entradas, error } = await buscarEnListaPep({ firstName, lastName, documentNumber })
+  if (error) return  // ya quedo registrado en el log del servicio
+
+  const usuario = await User.findById(userId).select('pep riskLevel eddStatus').lean()
+  const clasificacion = clasificarRiesgo({
+    declarado: usuario?.pep?.declared ?? null,
+    relacion:  usuario?.pep?.relationship ?? null,
+    enLista:   hit,
+  })
+
+  // Nunca se BAJA un estado ya resuelto por un humano: si el Oficial de
+  // Cumplimiento aprobo o rechazo, un recalculo automatico no lo deshace.
+  const yaResuelto = usuario?.eddStatus === 'approved' || usuario?.eddStatus === 'rejected'
+
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      'pep.listMatch': hit,
+      riskLevel:       clasificacion.riskLevel,
+      ...(yaResuelto ? {} : { eddStatus: clasificacion.eddStatus }),
+    },
+  })
+
+  if (hit) {
+    console.warn('[PEP] Coincidencia en lista de PEP al aprobar KYC:', {
+      userId: userId?.toString(),
+      entradas: entradas.map(e => e.entryId),
+    })
   }
 }
