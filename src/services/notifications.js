@@ -9,14 +9,19 @@
  *   await sendPushNotification(userId, NOTIFICATIONS.payinConfirmed(50000, 'CLP'))
  */
 
-import User from '../models/User.js';
-import Notification from '../models/Notification.js';
+import * as Sentry    from '@sentry/node';
+import User           from '../models/User.js';
+import Notification   from '../models/Notification.js';
+import { logger }     from '../utils/logger.js';
 
 // ─── Inicialización lazy (dinámica) de Firebase ───────────────────────────────
 // Se usa import() dinámico para que un fallo de Firebase NO bloquee el arranque
 // del servidor ni impida el envío de emails transaccionales.
 
 let firebaseAdmin = null;
+
+/** Evita repetir en Sentry el mismo aviso de "Firebase sin configurar" por proceso. */
+let avisoFirebaseEnviado = false;
 
 const initFirebase = async () => {
   try {
@@ -36,12 +41,12 @@ const initFirebase = async () => {
         });
       }
       firebaseAdmin = admin;
-      console.log('[FCM] Firebase inicializado ✅');
+      logger.info('[FCM] Firebase inicializado ✅');
     } else {
-      console.warn('[FCM] Variables Firebase no configuradas — push deshabilitado');
+      logger.warn('[FCM] Variables Firebase no configuradas — push deshabilitado');
     }
   } catch (error) {
-    console.warn('[FCM] Firebase no disponible:', error.message);
+    logger.warn('[FCM] Firebase no disponible', { error: error.message });
     firebaseAdmin = null;
   }
 };
@@ -60,17 +65,35 @@ const INVALID_TOKEN_ERRORS = new Set([
 
 /**
  * Envía una notificación push a todos los dispositivos del usuario.
- * Limpia tokens expirados automáticamente.
- * Falla silenciosamente si el usuario no tiene tokens o FCM no está configurado.
+ * Limpia tokens expirados automáticamente. Nunca lanza.
+ *
+ * ⚠️ **Siempre devuelve un resultado, nunca `undefined`.** Antes salía con `return`
+ * pelado en cuatro caminos distintos y ninguno dejaba rastro: el que más pesa es
+ * "el usuario no tiene ningún token", que en producción era la mayoría (45 de 64
+ * notificaciones en 7 días no salieron por eso, con 18 de 25 usuarios sin token).
+ * El resultado quedaba indistinguible de un envío exitoso, y así es como las push
+ * de Android estuvieron caídas desde que existe la app sin que nada avisara.
+ *
+ * `reason` es la razón por la que NO se entregó; si se intentó, viene `'enviado'`.
  *
  * @param {string|import('mongoose').Types.ObjectId} userId
  * @param {{ title: string, body: string, data?: Record<string,string> }} notification
- * @returns {Promise<void>}
+ * @returns {Promise<{ delivered: number, attempted: number, reason: string }>}
  */
 export async function sendPushNotification(userId, notification) {
+  const tipo = notification?.data?.type ?? 'unknown';
+  const uid  = userId?.toString();
+
   if (!firebaseAdmin) {
-    console.warn('[FCM] Firebase Admin not initialized — push disabled. Check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY in env. userId:', userId?.toString());
-    return null;
+    // Sistémico y accionable: si falta una credencial, NINGÚN usuario recibe push.
+    // Se avisa a Sentry una sola vez por proceso para que el aviso no se ahogue en
+    // repeticiones, pero el log sí sale en cada intento.
+    logger.warn('[Alyto FCM] NO ENTREGADA: Firebase no está inicializado — revisar FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY', { userId: uid, type: tipo });
+    if (!avisoFirebaseEnviado) {
+      avisoFirebaseEnviado = true;
+      Sentry.captureMessage('FCM deshabilitado: Firebase Admin no inicializado', { level: 'error' });
+    }
+    return { delivered: 0, attempted: 0, reason: 'firebase_no_configurado' };
   }
 
   // ── 1. Buscar usuario, tokens FCM y preferencias ─────────────────────────
@@ -78,21 +101,24 @@ export async function sendPushNotification(userId, notification) {
   try {
     user = await User.findById(userId).select('fcmTokens preferences').lean();
   } catch (err) {
-    console.error('[Alyto FCM] Error buscando usuario para notificación:', {
-      userId: userId?.toString(),
-      error:  err.message,
-    });
-    return;
+    logger.error('[Alyto FCM] NO ENTREGADA: error buscando al usuario', { userId: uid, type: tipo, error: err.message });
+    Sentry.captureException(err, { tags: { service: 'notifications', fn: 'sendPushNotification' } });
+    return { delivered: 0, attempted: 0, reason: 'usuario_ilegible' };
   }
 
-  if (!user?.fcmTokens?.length) return; // Sin dispositivos registrados — salida silenciosa
+  if (!user?.fcmTokens?.length) {
+    // El caso mayoritario, y el que estaba completamente mudo. NO va a Sentry: hoy
+    // son 18 de 25 usuarios y lo ahogaría todo. El log con marca fija alcanza para
+    // medirlo (`grep 'SIN TOKENS'`) y para que deje de ser invisible.
+    logger.warn('[Alyto FCM] NO ENTREGADA: SIN TOKENS — el usuario no tiene ningún dispositivo registrado', { userId: uid, type: tipo });
+    return { delivered: 0, attempted: 0, reason: 'sin_tokens' };
+  }
 
-  // Respetar preferencia del usuario — undefined/true = enviar, false = no enviar
+  // Respetar preferencia del usuario — undefined/true = enviar, false = no enviar.
+  // Esta es la ÚNICA no-entrega legítima: la pidió el usuario.
   if (user.preferences?.notifications?.push === false) {
-    console.info('[FCM] Push deshabilitado por preferencia del usuario — omitido.', {
-      userId: userId?.toString(),
-    });
-    return;
+    logger.info('[Alyto FCM] No entregada por preferencia del usuario', { userId: uid, type: tipo });
+    return { delivered: 0, attempted: 0, reason: 'push_desactivado_por_usuario' };
   }
 
   // ── 2. Enviar a cada token en paralelo ───────────────────────────────────
@@ -146,14 +172,36 @@ export async function sendPushNotification(userId, notification) {
   const successful = results.filter(r => r.status === 'fulfilled' && r.value?.ok).length;
   const failed     = results.length - successful;
 
-  console.info('[Alyto FCM] Notificación enviada.', {
+  // Los motivos de fallo, no solo el conteo. Antes el log decía "failed: 2" sin
+  // decir por qué, así que un fallo sistémico (credencial mala, cuota agotada,
+  // remitente que no corresponde al proyecto) se veía igual que un token viejo.
+  const motivosFallo = results
+    .map(r => (r.status === 'rejected'
+      ? (r.reason?.code ?? r.reason?.message ?? 'promesa_rechazada')
+      : (r.value?.ok ? null : (r.value?.stale ? 'token_expirado' : (r.value?.error ?? 'desconocido')))))
+    .filter(Boolean);
+
+  const entregada = successful > 0;
+  const detalle = {
     userId:      userId?.toString(),
     type:        notification.data?.type ?? 'unknown',
     total:       results.length,
     successful,
     failed,
     staleTokens: staleTokens.length,
-  });
+    ...(motivosFallo.length ? { motivosFallo } : {}),
+  };
+
+  if (entregada) {
+    logger.info('[Alyto FCM] Notificación enviada.', detalle);
+  } else {
+    // Tenía tokens y ninguno recibió: esto sí es una falla, no una ausencia.
+    logger.error('[Alyto FCM] NO ENTREGADA: tenía tokens y ninguno aceptó el envío', detalle);
+    Sentry.captureMessage('FCM: notificación no entregada a ningún dispositivo', {
+      level: 'warning',
+      extra: detalle,
+    });
+  }
 
   // ── 4. Limpiar tokens expirados de MongoDB ───────────────────────────────
   if (staleTokens.length > 0) {
@@ -162,17 +210,19 @@ export async function sendPushNotification(userId, notification) {
         { _id: userId },
         { $pull: { fcmTokens: { $in: staleTokens } } },
       );
-      console.info('[Alyto FCM] Tokens expirados eliminados.', {
+      logger.info('[Alyto FCM] Tokens expirados eliminados.', {
         userId: userId?.toString(),
         count:  staleTokens.length,
       });
     } catch (err) {
-      console.error('[Alyto FCM] Error eliminando tokens expirados:', {
+      logger.error('[Alyto FCM] Error eliminando tokens expirados:', {
         userId: userId?.toString(),
         error:  err.message,
       });
     }
   }
+
+  return { delivered: successful, attempted: results.length, reason: 'enviado' };
 }
 
 // ─── notify() — Persiste + Push en un solo paso ──────────────────────────────
@@ -180,6 +230,11 @@ export async function sendPushNotification(userId, notification) {
 /**
  * Persiste la notificación en MongoDB y envía push vía FCM.
  * Nunca lanza excepción — ambos pasos son fire-and-forget.
+ *
+ * Los dos pasos son independientes a propósito: la notificación tiene que quedar
+ * en la campana de la app aunque la push falle. Pero eso crea una trampa — el
+ * usuario la ve al abrir y nadie nota que nunca recibió el aviso. Por eso el
+ * resultado del envío ya no se descarta.
  *
  * @param {string|import('mongoose').Types.ObjectId} userId
  * @param {{ title: string, body: string, data?: Record<string,string> }} notification
@@ -195,15 +250,24 @@ export async function notify(userId, notification) {
       data:  notification.data ?? {},
     });
   } catch (err) {
-    console.error('[Alyto Notify] Error persistiendo notificación:', {
+    logger.error('[Alyto Notify] Error persistiendo notificación:', {
       userId: userId?.toString(),
       type:   notification.data?.type,
       error:  err.message,
     });
   }
 
-  // 2. Enviar push FCM (existente, ya fire-and-forget)
-  sendPushNotification(userId, notification).catch(() => {});
+  // 2. Enviar push FCM — sigue siendo fire-and-forget (no debe frenar el flujo de
+  //    dinero que lo invoca), pero un fallo inesperado ya no se descarta: antes
+  //    había un `.catch(() => {})` que borraba toda huella de la excepción.
+  sendPushNotification(userId, notification).catch((err) => {
+    logger.error('[Alyto Notify] Error inesperado enviando push', {
+      userId: userId?.toString(),
+      type:   notification.data?.type,
+      error:  err?.message,
+    });
+    Sentry.captureException(err, { tags: { service: 'notifications', fn: 'notify' } });
+  });
 }
 
 // ─── notifyAdmins() — Persiste + Push + Email a todos los admins ─────────────
@@ -219,19 +283,19 @@ export async function notifyAdmins(notification, opts = {}) {
   try {
     const admins = await User.find({ role: 'admin' }).select('_id').lean();
     if (!admins.length) {
-      console.warn('[Alyto NotifyAdmins] No hay usuarios admin registrados.');
+      logger.warn('[Alyto NotifyAdmins] No hay usuarios admin registrados.');
       return;
     }
 
     // In-app + push para cada admin (en paralelo, fire-and-forget)
     await Promise.allSettled(admins.map(a => notify(a._id, notification)));
 
-    console.info('[Alyto NotifyAdmins] Notificación enviada.', {
+    logger.info('[Alyto NotifyAdmins] Notificación enviada.', {
       type:       notification.data?.type ?? 'general',
       adminCount: admins.length,
     });
   } catch (err) {
-    console.error('[Alyto NotifyAdmins] Error:', err.message);
+    logger.error('[Alyto NotifyAdmins] Error', { error: err.message });
   }
 
   // Email al admin (opcional)
@@ -240,7 +304,7 @@ export async function notifyAdmins(notification, opts = {}) {
       const { sendEmail } = await import('./email.js');
       await sendEmail(...opts.email);
     } catch (err) {
-      console.error('[Alyto NotifyAdmins] Error enviando email:', err.message);
+      logger.error('[Alyto NotifyAdmins] Error enviando email', { error: err.message });
     }
   }
 }
