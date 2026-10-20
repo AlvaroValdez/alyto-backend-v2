@@ -630,6 +630,59 @@ const userSchema = new Schema(
       default: null,
     },
 
+    // ── PEP y debida diligencia reforzada (EDD) ───────────────────────────────
+    //
+    // Ser PEP NO es ilegal y NO excluye: obliga a diligencia REFORZADA. Por eso
+    // nada de esto bloquea operaciones; clasifica el riesgo y abre una revision.
+    // Bloquear a un PEP seria tan incorrecto como ignorarlo.
+    pep: {
+      /** Declaracion del propio usuario en el alta. Es el control primario:
+       *  ninguna lista publica de PEP cubre Bolivia con fiabilidad. */
+      declared: {
+        type:    Boolean,
+        default: null,   // null = todavia no se le preguntó
+      },
+      /** Relacion con el cargo publico: uno mismo, familiar o allegado. */
+      relationship: {
+        type:    String,
+        enum:    ['self', 'family', 'associate', null],
+        default: null,
+      },
+      /** Cargo e institucion, en texto libre: lo que el usuario declare. */
+      position:  { type: String, default: null, maxlength: 300 },
+      declaredAt: { type: Date, default: null },
+      /** true si ademas coincidio contra una entrada de listSource='PEP'. */
+      listMatch: { type: Boolean, default: false },
+    },
+
+    /**
+     * Clasificacion de riesgo del cliente. La calcula el sistema; el Oficial de
+     * Cumplimiento puede elevarla a mano, nunca bajarla sin dejar nota.
+     */
+    riskLevel: {
+      type:    String,
+      enum:    ['low', 'medium', 'high'],
+      default: 'low',
+      index:   true,
+    },
+
+    /**
+     * Estado de la diligencia reforzada.
+     *   not_required → riesgo normal
+     *   pending      → hace falta revision del Oficial de Cumplimiento
+     *   approved     → revisada y aceptada, la relacion continua
+     *   rejected     → revisada y rechazada
+     */
+    eddStatus: {
+      type:    String,
+      enum:    ['not_required', 'pending', 'approved', 'rejected'],
+      default: 'not_required',
+      index:   true,
+    },
+    eddReviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    eddReviewedAt: { type: Date,   default: null },
+    eddNotes:      { type: String, default: null, maxlength: 2000 },
+
     // ── Eliminación de cuenta (requisito Google Play + GDPR / Ley 19.628) ──────
     /**
      * Estado del ciclo de eliminación de cuenta solicitada por el usuario.
