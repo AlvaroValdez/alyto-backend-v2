@@ -5,9 +5,15 @@
  * perdido. Consulta el status real de Harbor via API y reconcilia.
  *
  * Casos cubiertos:
+ *   completed (últimas 72h)                           → poll Harbor → detecta REVERSIÓN
  *   payout_sent (>15 min sin transition)              → poll Harbor → completed | failed
  *   payout_pending_usdc_send (>2h sin USDC send)      → alert admin
  *   failed + failureRetryable=true + TRANSIENT_ERROR  → reintento automático (hasta 3x, backoff 5 min)
+ *
+ * El primero existe porque declarar finalidad y dejar de mirar ya costó una
+ * operación real en Vita (ALY-C-1792511020004-YDNVM3): el proveedor revirtió el
+ * payout 4 horas después de reportarlo completado y el usuario siguió viendo
+ * "Entregado". Acá el agravante es que el USDC salió on-chain de la tesorería.
  *
  * Triggers:
  *   - setInterval en server.js cada 15 min
@@ -32,6 +38,33 @@ const MAX_AGE_BEFORE_GIVEUP_MS   = 7  * 24 * 60 * 60 * 1000; // 7 días (auto-fa
 // Parámetros de reintento automático para TRANSIENT_ERROR
 const MAX_RECONCILE_RETRIES = 3;
 const RETRY_BACKOFF_MS      = 5 * 60 * 1000; // 5 min mínimo entre reintentos
+
+// ── Vigilancia de reversiones tras finalización ───────────────────────────────
+// Mismo hueco que se cerró en Vita el 2026-10-20: el job solo miraba estados no
+// terminales, así que una vez `completed` nada volvía a mirar la operación. Si el
+// proveedor revierte después, seguimos diciéndole "Entregado" al usuario.
+//
+// Harbor NO es igual a Vita y por eso esto no es una copia:
+//
+//   1. **El ancla temporal tiene que ser `updatedAt`, no `completedAt`.** Las 3
+//      transacciones Harbor completadas de producción tienen `completedAt` NULO
+//      (las 4 de Vita lo tienen). Filtrar por `completedAt` habría dejado la fase
+//      inerte sin que nada avisara, que es el peor resultado posible para una red
+//      de seguridad: parece puesta y no mira nada.
+//   2. **Acá el dinero se movió de verdad.** En Vita el payout va contra saldo
+//      prefondeado de la SpA; en Harbor sale USDC on-chain de la tesorería SRL
+//      (`sendUSDCToHarbor`). Una reversión deja USDC fuera, así que la alerta tiene
+//      que apuntar a dónde fue: Harbor publica `refund_address` en el transfer.
+//   3. **Harbor tiene `refunded` propio**, que Vita no tiene. Aun así la operación
+//      queda en `failed` — ver `handleHarborReversal` para el motivo.
+//
+// Al 2026-10-20 las 3 completadas siguen `completed` en Harbor: no hay ninguna
+// reversión pendiente de detectar. Esto es prevención, no limpieza.
+const REVERSAL_RECHECK_GRACE_MS = 10 * 60 * 1000;      // 10 min tras finalizar
+const REVERSAL_WATCH_MS         = 72 * 60 * 60 * 1000; // 72 h de vigilancia
+
+/** Estados de Harbor que, sobre una tx ya completada, significan reversión. */
+const HARBOR_REVERSAL_STATUSES = new Set(['failed', 'expired', 'cancelled', 'canceled', 'refunded']);
 
 // Mapeo Harbor status → Alyto status
 const HARBOR_TO_ALYTO_STATUS = {
@@ -65,9 +98,158 @@ export async function reconcileHarborTransfers() {
   }
 }
 
+/**
+ * Una transacción que ya habíamos declarado `completed` resultó revertida por Harbor.
+ *
+ * **Queda en `failed`, no en `refunded`, incluso cuando Harbor dice `refunded`.**
+ * Parece contradictorio y es deliberado: lo que Harbor devuelve es el USDC a la
+ * tesorería (a su `refund_address`), no los bolivianos al usuario. Marcar `refunded`
+ * afirmaría que el cliente recuperó su dinero, y no lo recuperó. Mismo criterio que
+ * en la reversión de Vita.
+ *
+ * Es aditivo: el comprobante y el sello en Stellar ya emitidos se conservan y la
+ * reversión se asienta encima. No se retira evidencia.
+ *
+ * @param {object} tx — documento Mongoose
+ * @param {string} harborStatus — estado que informó Harbor
+ * @param {object} data — cuerpo del transfer de Harbor
+ */
+async function handleHarborReversal(tx, harborStatus, data) {
+  const completadaEl = tx.completedAt ?? tx.updatedAt;
+  const refundAddress = data?.refund_address ?? null;
+
+  tx.status        = 'failed';
+  tx.failureReason =
+    `REVERSIÓN tras finalización: Harbor pasó el transfer a "${harborStatus}" después de ` +
+    `haberlo reportado completado${completadaEl ? ` (${new Date(completadaEl).toISOString()})` : ''}. ` +
+    `El USDC salió de la tesorería on-chain, así que hay que verificar dónde quedó.`;
+  tx.userFailureReason = 'No pudimos completar tu transferencia. Nuestro equipo ya está revisando el caso.';
+  tx.failureCategory   = 'PROVIDER_REVERSAL';
+  tx.failureRetryable  = false;
+
+  tx.ipnLog = tx.ipnLog ?? [];
+  tx.ipnLog.push({
+    provider:   'owlPay',
+    eventType:  'payout_reverted_after_completed',
+    status:     'failed',
+    rawPayload: {
+      source:        'reconcileHarborTransfers',
+      harborStatus,
+      harborSubStatus: data?.sub_status ?? null,
+      refundAddress,
+      transferId:    tx.harborTransfer?.transferId ?? null,
+      usdcEnviado:   tx.digitalAssetAmount ?? null,
+      completadaEl,
+      comprobanteYaEmitido: Boolean(tx.comprobanteUrl ?? tx.stellarTxId),
+    },
+    receivedAt: new Date(),
+  });
+  await tx.save();
+
+  console.error('[Reconcile] 🔴 REVERSIÓN tras finalización detectada (Harbor)', {
+    transactionId: tx.alytoTransactionId,
+    transferId:    tx.harborTransfer?.transferId,
+    harborStatus,
+    usdcEnviado:   tx.digitalAssetAmount,
+    refundAddress,
+  });
+
+  await alertAdminHarborReversal(tx, harborStatus, refundAddress);
+
+  // Corregirle al usuario lo que ya se le había informado como entregado.
+  notifyTransactionFailed(tx).catch(() => {});
+}
+
+/**
+ * Alerta de reversión Harbor. Va aparte de los avisos del job porque acá hay USDC
+ * que salió de la tesorería y hay que ir a buscarlo.
+ */
+async function alertAdminHarborReversal(tx, harborStatus, refundAddress) {
+  const destinatario = process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app';
+  const cuerpo = `
+[Alyto] REVERSIÓN DE PAYOUT HARBOR TRAS HABERLO DECLARADO ENTREGADO
+
+Transacción:     ${tx.alytoTransactionId}
+Transfer Harbor: ${tx.harborTransfer?.transferId ?? 'n/a'}
+Estado Harbor:   ${harborStatus}
+USDC enviado:    ${tx.digitalAssetAmount ?? '?'} USDC
+Cobrado:         ${tx.originalAmount} ${tx.originCurrency}
+Destino:         ${tx.destinationCountry ?? 'n/a'}
+
+Qué revisar, en este orden:
+  1. DÓNDE ESTÁ EL USDC. Salió on-chain de la tesorería SRL. Harbor declara como
+     dirección de devolución: ${refundAddress ?? '(no la publicó)'}
+     Verificar en Stellar si volvió; si no volvió, reclamarlo a OwlPay.
+  2. El cobro al usuario SIGUE TOMADO: corresponde devolución, aún pendiente.
+  3. El comprobante y el sello en Stellar ya estaban emitidos y NO se retiran: la
+     reversión queda asentada encima, sin borrar evidencia.
+  4. La operación quedó en 'failed' (no 'refunded': el usuario no recuperó nada).
+
+Alyto Backend — ${new Date().toISOString()}
+`.trim();
+
+  await sendRawEmail(
+    destinatario,
+    `[Alyto] 🔴 Reversión Harbor tras entrega — ${tx.alytoTransactionId}`,
+    `<pre style="font-family:monospace;white-space:pre-wrap">${cuerpo}</pre>`,
+  ).catch(e => console.error('[Reconcile] Error email de reversión Harbor:', e.message));
+}
+
+/**
+ * FASE 0 — vigila reversiones de Harbor sobre operaciones ya finalizadas.
+ *
+ * Ancla en `updatedAt` a propósito: ver el bloque de constantes. Un error al
+ * consultar Harbor NO cuenta como reversión — sin dato no se afirma nada.
+ */
+async function _faseReversiones(stats, now) {
+  const desde = new Date(now - REVERSAL_WATCH_MS);
+  const hasta = new Date(now - REVERSAL_RECHECK_GRACE_MS);
+
+  const completadas = await Transaction.find({
+    status: 'completed',
+    'harborTransfer.transferId': { $exists: true, $ne: null },
+    updatedAt: { $gte: desde, $lt: hasta },
+  }).limit(50);
+
+  if (!completadas.length) return;
+
+  console.info(`[Reconcile] ${completadas.length} tx Harbor completadas bajo vigilancia de reversión`);
+  stats.rechecked = completadas.length;
+
+  for (const tx of completadas) {
+    let data;
+    try {
+      const result = await getTransferStatus(tx.harborTransfer.transferId);
+      data = result?.data ?? result;
+    } catch (err) {
+      console.warn(`[Reconcile] No se pudo re-verificar ${tx.alytoTransactionId}:`, err.message);
+      continue;
+    }
+
+    const harborStatus = data?.status;
+    if (HARBOR_REVERSAL_STATUSES.has(harborStatus)) {
+      await handleHarborReversal(tx, harborStatus, data);
+      stats.reverted++;
+    }
+    // `completed` o cualquier estado intermedio → sigue en pie, nada que hacer.
+  }
+}
+
 async function _reconcileHarborTransfers() {
   const now = Date.now();
-  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0, retried: 0, retriedFailed: 0, retriedExhausted: 0 };
+  const stats = { reconciled: 0, completed: 0, failed: 0, unchanged: 0, errors: 0, expired: 0, unknown: 0, retried: 0, retriedFailed: 0, retriedExhausted: 0, rechecked: 0, reverted: 0 };
+
+  // ── 0. Reversiones tras finalización ────────────────────────────────────
+  // Va PRIMERO y con su propio try/catch, por dos razones: nada de lo que sigue
+  // puede impedir que corra (las secciones de abajo no están envueltas, así que un
+  // fallo en la primera se llevaba puestas las demás), y un fallo suyo no toca al
+  // resto. Es la fase que detecta dinero no entregado, así que no puede quedar
+  // detrás de nada.
+  try {
+    await _faseReversiones(stats, now);
+  } catch (err) {
+    console.error('[Reconcile] Error en la fase de reversiones:', err.message);
+  }
 
   // ── 1. payout_sent atascadas (webhook perdido) ──────────────────────────
   const stuckSent = await Transaction.find({
@@ -297,7 +479,7 @@ async function _reconcileHarborTransfers() {
     } catch (e) { console.error('[Reconcile] Error email admin (exhausted):', e.message); }
   }
 
-  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0 || stats.unknown > 0 || stats.retried > 0 || stats.retriedFailed > 0) {
+  if (stats.reconciled > 0 || stats.errors > 0 || stats.expired > 0 || stats.unknown > 0 || stats.retried > 0 || stats.retriedFailed > 0 || stats.reverted > 0) {
     console.info('[Reconcile] Stats:', stats);
   }
   return stats;
