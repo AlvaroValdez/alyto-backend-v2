@@ -2785,3 +2785,90 @@ export async function getComprobanteDevolucion(req, res) {
   res.setHeader('Content-Disposition', `inline; filename="${t.refund.proof.filename ?? 'devolucion'}"`);
   return res.send(t.refund.proof.data);
 }
+
+// ─── Diligencia reforzada (EDD) ───────────────────────────────────────────────
+//
+// El control de PEP no sirve de nada si nadie puede resolverlo: una cola que
+// solo crece es un hallazgo de auditoría, no un control. Esto es lo que permite
+// al Oficial de Cumplimiento cerrar cada caso dejando rastro de quién y cuándo.
+
+/**
+ * GET /api/v1/admin/edd?status=pending
+ *
+ * Cola de revisión. Por defecto solo lo pendiente, que es lo accionable.
+ */
+export async function listarEdd(req, res) {
+  try {
+    const estado = typeof req.query?.status === 'string' ? req.query.status : 'pending';
+    const validos = ['pending', 'approved', 'rejected', 'not_required'];
+    if (!validos.includes(estado)) {
+      return res.status(400).json({ error: `"status" debe ser uno de: ${validos.join(', ')}.` });
+    }
+
+    const usuarios = await User.find({ eddStatus: estado })
+      .select('firstName lastName email riskLevel eddStatus eddReviewedAt eddNotes pep sanctionsFlag createdAt')
+      .sort({ createdAt: 1 })   // lo más antiguo primero: es lo que lleva más tiempo esperando
+      .limit(200)
+      .lean();
+
+    return res.json({ total: usuarios.length, status: estado, usuarios });
+  } catch (err) {
+    console.error('[Admin] listarEdd error:', err.message);
+    return res.status(500).json({ error: 'No se pudo obtener la cola de revisión.' });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/users/:userId/edd
+ *   body: { decision: 'approved'|'rejected', notes: string }
+ *
+ * Resuelve una revisión. La nota es OBLIGATORIA: una decisión de cumplimiento
+ * sin motivo escrito no es auditable, y es justo lo que un revisor externo pide
+ * ver. Rechazar NO da de baja la cuenta — eso es una decisión aparte y más
+ * grave, que debe tomarse explícitamente.
+ */
+export async function resolverEdd(req, res) {
+  try {
+    const { decision, notes } = req.body ?? {};
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ error: '"decision" debe ser "approved" o "rejected".' });
+    }
+    if (typeof notes !== 'string' || notes.trim().length < 10) {
+      return res.status(400).json({
+        error: 'Se requiere "notes" con al menos 10 caracteres explicando la decisión.',
+      });
+    }
+
+    const usuario = await User.findById(req.params.userId).select('eddStatus').lean();
+    if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (usuario.eddStatus !== 'pending') {
+      return res.status(409).json({
+        error: `Esta revisión ya está en estado "${usuario.eddStatus}". Solo se resuelve lo pendiente.`,
+      });
+    }
+
+    await User.findByIdAndUpdate(req.params.userId, {
+      $set: {
+        eddStatus:     decision,
+        eddReviewedBy: req.user._id,
+        eddReviewedAt: new Date(),
+        eddNotes:      notes.trim().slice(0, 2000),
+      },
+    });
+    // Import perezoso, como el resto del archivo: `protect` cachea el usuario
+    // 2 minutos, y sin invalidar el estado de EDD seguiria viejo ese rato.
+    const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
+    invalidateUserCache(req.params.userId);
+
+    console.info('[EDD] Revisión resuelta:', {
+      userId:   req.params.userId,
+      decision,
+      por:      req.user._id?.toString(),
+    });
+
+    return res.json({ ok: true, eddStatus: decision });
+  } catch (err) {
+    console.error('[Admin] resolverEdd error:', err.message);
+    return res.status(500).json({ error: 'No se pudo resolver la revisión.' });
+  }
+}

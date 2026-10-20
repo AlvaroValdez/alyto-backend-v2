@@ -29,6 +29,8 @@ import { auditAdmin } from '../middlewares/auditAdmin.js';
 import { idempotencyCheck } from '../middlewares/idempotency.js';
 import { recordAdminAction } from '../services/adminAuditService.js';
 import {
+  listarEdd,
+  resolverEdd,
   getAllUsers,
   getUser,
   updateUser,
@@ -254,6 +256,14 @@ router.patch('/users/:userId', updateUser);
  * Resetea tokenVersion del usuario a 0 (rescate de sesiones desincronizadas).
  */
 router.patch('/users/:userId/reset-token-version', auditAdmin('user.reset_token_version', { targetType: 'User', targetParam: 'userId' }), resetUserTokenVersion);
+
+// ── Diligencia reforzada (EDD) ───────────────────────────────────────────────
+// Cola de revision de PEP y alto riesgo. Sin esto el control existiria pero
+// nadie podria ejercerlo, que es un hallazgo de auditoria por si solo.
+router.get('/edd', listarEdd);
+router.patch('/users/:userId/edd',
+  auditAdmin('user.edd.resolve', { targetType: 'User', targetParam: 'userId' }),
+  resolverEdd);
 
 // ─── Ledger legacy ────────────────────────────────────────────────────────────
 
