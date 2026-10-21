@@ -173,6 +173,7 @@ RULES=(
   # media hora a un par de minutos. Volver a 30 min cuando el IPN funcione.
   "alyto-cron-reconcile-bank-qr|rate(2 minutes)|reconcile-bank-qr"
   "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
+  "alyto-cron-alert-pending-withdrawals|rate(30 minutes)|alert-pending-withdrawals"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
   # Semanal: OFAC y ONU publican cambios varias veces por semana, pero una
   # recarga completa cuesta ~20 s y 18.500 upserts. Semanal es el equilibrio.
