@@ -66,6 +66,10 @@ const JOBS = {
   // humano y por eso nada lo destrababa solo.
   'alert-pending-withdrawals': () =>
     import('./alertPendingWithdrawals.js').then((m) => m.alertPendingWithdrawals),
+  // Vigila el saldo reservado: operaciones paradas que lo retienen y descuadres
+  // entre lo reservado y lo realmente comprometido.
+  'audit-wallet-reserves': () =>
+    import('./auditWalletReserves.js').then((m) => m.auditWalletReserves),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
   // Recarga semanal de OFAC y ONU. Sin esto la lista envejece en silencio: la

@@ -890,6 +890,12 @@ async function startServer() {
       setInterval(alertPendingWithdrawals, 30 * 60 * 1000);            // cada 30 min
       console.info('[Server] Alerta de retiros pendientes programada cada 30 min');
 
+      // Auditoria del saldo reservado: conversiones detenidas y descuadres.
+      const { auditWalletReserves } = await import('./jobs/auditWalletReserves.js');
+      setTimeout(auditWalletReserves, 9 * 60 * 1000);
+      setInterval(auditWalletReserves, 6 * 60 * 60 * 1000);
+      console.info('[Server] Auditoria de reservas programada cada 6 h');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
