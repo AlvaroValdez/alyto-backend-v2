@@ -881,6 +881,21 @@ async function startServer() {
       setInterval(reconcileBecDisbursements, 30 * 60 * 1000);          // cada 30 min
       console.info('[Server] Reconcile BEC disbursements programado cada 30 min');
 
+      // Aviso de retiros parados en 'pending'. El de arriba cubre 'dispatched';
+      // este cubre el estado anterior, donde el paso que falta es humano. Se
+      // agenda AQUI ademas de registrarlo en jobRegistry: registrar sin agendar
+      // deja el job huerfano, que es lo que ya le paso a reconcile-bank-qr.
+      const { alertPendingWithdrawals } = await import('./jobs/alertPendingWithdrawals.js');
+      setTimeout(alertPendingWithdrawals, 8 * 60 * 1000);              // primera corrida 8 min post-start
+      setInterval(alertPendingWithdrawals, 30 * 60 * 1000);            // cada 30 min
+      console.info('[Server] Alerta de retiros pendientes programada cada 30 min');
+
+      // Auditoria del saldo reservado: conversiones detenidas y descuadres.
+      const { auditWalletReserves } = await import('./jobs/auditWalletReserves.js');
+      setTimeout(auditWalletReserves, 9 * 60 * 1000);
+      setInterval(auditWalletReserves, 6 * 60 * 60 * 1000);
+      console.info('[Server] Auditoria de reservas programada cada 6 h');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start

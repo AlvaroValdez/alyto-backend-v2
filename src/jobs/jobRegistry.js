@@ -61,6 +61,15 @@ const JOBS = {
     import('./reconcileBankQrPayments.js').then((m) => m.reconcileBankQrPayments),
   'reconcile-bec-disbursements': () =>
     import('./reconcileBecDisbursements.js').then((m) => m.reconcileBecDisbursements),
+  // Avisa de retiros que llevan demasiado en 'pending'. El job hermano de arriba
+  // cubre 'dispatched'; este cubre el estado ANTERIOR, donde el paso que falta es
+  // humano y por eso nada lo destrababa solo.
+  'alert-pending-withdrawals': () =>
+    import('./alertPendingWithdrawals.js').then((m) => m.alertPendingWithdrawals),
+  // Vigila el saldo reservado: operaciones paradas que lo retienen y descuadres
+  // entre lo reservado y lo realmente comprometido.
+  'audit-wallet-reserves': () =>
+    import('./auditWalletReserves.js').then((m) => m.auditWalletReserves),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
   // Recarga semanal de OFAC y ONU. Sin esto la lista envejece en silencio: la
