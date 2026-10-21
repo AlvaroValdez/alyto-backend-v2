@@ -23,8 +23,9 @@ import { logger }        from '../utils/logger.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import WalletTransaction from '../models/WalletTransaction.js';
+import WalletBOB         from '../models/WalletBOB.js';
 import { dispatchPayout } from './ipnController.js';
-import { confirmBankQrDeposit } from './walletController.js';
+import { confirmBankQrDeposit, getOrCreateWallet, fireAuditTrail } from './walletController.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS }    from '../services/email.js';
 import {
@@ -2688,15 +2689,134 @@ export async function listKycAttempts(req, res) {
  *   reason        opcional
  *   proof         archivo opcional (campo de multer)
  */
+/**
+ * Devolución a la billetera en UN SOLO ACTO: acredita el saldo y registra la
+ * devolución dentro de la misma transacción de Mongo.
+ *
+ * Por qué existe. Antes `registrarDevolucion` exigía un `wtxId` que el admin tenía
+ * que conseguir desde otra pantalla, así que la devolución eran dos pasos manuales
+ * con una ventana en medio: si acreditabas y no registrabas, el monto quedaba
+ * contado como pasivo además de ya devuelto (deuda duplicada en el respaldo); si
+ * registrabas sin acreditar, el pasivo se liberaba sin que el usuario cobrara.
+ * Acá las dos mitades commitean juntas o no pasa ninguna.
+ *
+ * El `wtxId` ya no se pide: se genera y se devuelve. Y es la evidencia que
+ * `getBOBCommitted` necesita para dejar de contar el monto como pasivo, así que la
+ * deuda se cierra con el mismo movimiento que le paga al usuario.
+ *
+ * Frente a una transferencia bancaria esto es mejor en cuatro cosas: es inmediato,
+ * no pasa por las firmas del banco, la evidencia la produce el sistema (no una
+ * captura que alguien tiene que adjuntar), y el usuario decide si lo retira o lo
+ * vuelve a enviar.
+ */
+async function acreditarDevolucionEnBilletera({ req, res, transactionId, monto, reason }) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    // Se relee DENTRO de la sesión: la comprobación de más arriba corrió fuera y
+    // dos pedidos simultáneos podrían haberla pasado los dos. Acá los dos
+    // escribirían el mismo documento y Mongo aborta uno por conflicto.
+    const tx = await Transaction.findOne({ alytoTransactionId: transactionId }).session(session);
+    if (!tx) {
+      await session.abortTransaction();
+      return res.status(404).json({ error: 'Transacción no encontrada.' });
+    }
+    if (tx.refund?.wtxId || tx.refund?.bankReference) {
+      await session.abortTransaction();
+      return res.status(409).json({ error: 'Esta transacción ya tiene una devolución registrada con evidencia.' });
+    }
+
+    const estadoPrevio = tx.status;
+    const wallet       = await getOrCreateWallet(tx.userId, session);
+    const saldoPrevio  = wallet.balance;
+
+    await WalletBOB.updateOne(
+      { _id: wallet._id },
+      { $inc: { balance: monto } },
+      { session },
+    );
+
+    const [wtx] = await WalletTransaction.create([{
+      walletId:      wallet._id,
+      userId:        tx.userId,
+      type:          'refund',
+      currency:      'BOB',
+      amount:        monto,
+      balanceBefore: saldoPrevio,
+      balanceAfter:  saldoPrevio + monto,
+      status:        'completed',
+      description:   `Devolución de ${tx.alytoTransactionId}`,
+      reference:     tx.alytoTransactionId,
+      confirmedAt:   new Date(),
+    }], { session, ordered: true });
+
+    tx.status = 'refunded';
+    tx.refund = {
+      method:   'walletBOB',
+      wtxId:    wtx.wtxId,
+      amount:   monto,
+      currency: tx.originCurrency ?? 'BOB',
+      at:       new Date(),
+      by:       req.user?._id,
+      reason:   String(reason ?? 'Devolución acreditada en la billetera por admin').slice(0, 300),
+    };
+    await tx.save({ session });
+
+    // El asiento va DENTRO de la sesión: si la auditoría no se puede escribir, el
+    // dinero NO se mueve. Mismo criterio que las 9 acciones de Tier 1.
+    await recordAdminAction({
+      req, session,
+      action:     'transaction.refund.wallet',
+      targetType: 'Transaction',
+      targetId:   tx.alytoTransactionId,
+      before:     { status: estadoPrevio, saldoBilletera: saldoPrevio },
+      after:      { status: 'refunded',   saldoBilletera: saldoPrevio + monto },
+      reason:     String(reason ?? '').slice(0, 300),
+      metadata:   { userId: String(tx.userId), montoBOB: monto, wtxId: wtx.wtxId },
+    });
+
+    await session.commitTransaction();
+
+    logger.info('[Admin] Devolución acreditada en billetera', {
+      alytoTransactionId: tx.alytoTransactionId,
+      wtxId: wtx.wtxId, monto, by: req.user?.email,
+    });
+
+    // Sello en Stellar y aviso al usuario — fuera de la sesión y sin bloquear.
+    fireAuditTrail(wtx.wtxId, 'refund', monto, tx.alytoTransactionId);
+    notify(tx.userId, NOTIFICATIONS.refundCredited?.(monto, tx.originCurrency ?? 'BOB') ?? {
+      title: 'Devolución acreditada',
+      body:  `Te devolvimos Bs ${monto.toFixed(2)} a tu saldo de Alyto.`,
+      type:  'wallet',
+    }).catch(() => {});
+
+    return res.status(200).json({
+      message: 'Saldo acreditado y devolución registrada. El monto deja de contarse como pasivo.',
+      refund: {
+        method: 'walletBOB', amount: monto, wtxId: wtx.wtxId,
+        saldoAnterior: saldoPrevio, saldoNuevo: saldoPrevio + monto,
+        at: tx.refund.at,
+      },
+    });
+
+  } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    logger.error('[Admin] Falló la devolución a billetera — nada se movió', {
+      transactionId, error: err.message,
+    });
+    return res.status(500).json({ error: `No se pudo acreditar la devolución: ${err.message}` });
+  } finally {
+    session.endSession();
+  }
+}
+
 export async function registrarDevolucion(req, res) {
   const { transactionId } = req.params;
   const { method, wtxId, bankReference, amount, reason } = req.body ?? {};
 
   if (!['walletBOB', 'bankTransfer', 'external'].includes(method)) {
     return res.status(400).json({ error: 'method debe ser walletBOB, bankTransfer o external.' });
-  }
-  if (method === 'walletBOB' && !String(wtxId ?? '').trim()) {
-    return res.status(400).json({ error: 'Una devolución a la billetera exige el wtxId del movimiento.' });
   }
   if (method === 'bankTransfer' && !String(bankReference ?? '').trim()) {
     return res.status(400).json({ error: 'Una devolución por transferencia exige la referencia del banco.' });
@@ -2721,6 +2841,13 @@ export async function registrarDevolucion(req, res) {
   const monto = Number(amount ?? transaction.originalAmount);
   if (!Number.isFinite(monto) || monto <= 0) {
     return res.status(400).json({ error: 'Monto de devolución inválido.' });
+  }
+
+  // Devolución a la billetera SIN wtxId = "acreditá vos y registralo", en un solo
+  // acto atómico. Con wtxId se interpreta que el crédito ya se hizo por otra vía y
+  // acá solo se asienta, que es el comportamiento original.
+  if (method === 'walletBOB' && !String(wtxId ?? '').trim()) {
+    return acreditarDevolucionEnBilletera({ req, res, transactionId, monto, reason });
   }
 
   transaction.status = 'refunded';

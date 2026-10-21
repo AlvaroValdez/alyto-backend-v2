@@ -34,6 +34,7 @@ const { default: WalletBOB }         = await import('../../src/models/WalletBOB.
 const { default: WalletUSDC }        = await import('../../src/models/WalletUSDC.js');
 const { default: WalletTransaction } = await import('../../src/models/WalletTransaction.js');
 const { default: AdminAuditLog }     = await import('../../src/models/AdminAuditLog.js');
+const { default: Transaction }       = await import('../../src/models/Transaction.js');
 
 let replSet;
 
@@ -236,5 +237,107 @@ describe('wallet.withdrawal.attach_comprobante — asiento del adjunto excepcion
     expect(String(asiento.actorId)).toBe(String(adminU._id));
     expect(asiento.before.teniaComprobante).toBe(false);
     expect(asiento.after.filename).toBe('transferencia.jpg');
+  });
+});
+
+// ─── Devolución a la billetera (atómica) ──────────────────────────────────────
+
+/**
+ * Acreditar y registrar la devolución eran dos pasos manuales con una ventana en
+ * medio: acreditar sin registrar dejaba el monto contado como pasivo además de ya
+ * devuelto, y registrar sin acreditar liberaba el pasivo sin pagarle al usuario.
+ * Lo que se prueba acá es que las dos mitades commitean juntas.
+ */
+describe('transaction.refund.wallet — acreditar y registrar en un solo acto', () => {
+  async function seedCobradaYFallida(user, monto = 240) {
+    const wallet = await WalletBOB.create({ userId: user._id, balance: 100, balanceReserved: 0 });
+    const tx = await Transaction.create({
+      alytoTransactionId: nextId('ALY-C'),
+      userId:         user._id,
+      legalEntity:    'SRL',
+      operationType:  'crossBorderPayment',
+      status:         'failed',
+      originalAmount: monto,
+      originCurrency: 'BOB',
+      destinationCurrency: 'VES',
+      destinationCountry:  'VE',
+      bankQr:         { paidAt: new Date() },
+    });
+    return { wallet, tx };
+  }
+
+  test('acredita el saldo, crea el movimiento y cierra el pasivo de una vez', async () => {
+    const { user }  = await createSRLUser();
+    const { token } = await createAdminUser();
+    const { wallet, tx } = await seedCobradaYFallida(user, 240);
+
+    const res = await post(token, `/api/v1/admin/transactions/${tx.alytoTransactionId}/refund`,
+      { method: 'walletBOB', reason: 'Vita revirtió el payout' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.refund.wtxId).toMatch(/^WTX-/);     // lo genera el sistema
+    expect(res.body.refund.saldoNuevo).toBe(340);
+
+    // El saldo del usuario subió
+    const w = await WalletBOB.findById(wallet._id).lean();
+    expect(w.balance).toBe(340);
+
+    // Existe el movimiento, con los saldos antes/despues
+    const mov = await WalletTransaction.findOne({ type: 'refund' }).lean();
+    expect(mov.amount).toBe(240);
+    expect(mov.balanceBefore).toBe(100);
+    expect(mov.balanceAfter).toBe(340);
+    expect(mov.reference).toBe(tx.alytoTransactionId);
+
+    // Y la evidencia que `getBOBCommitted` necesita para dejar de contar el pasivo
+    const despues = await Transaction.findById(tx._id).lean();
+    expect(despues.status).toBe('refunded');
+    expect(despues.refund.wtxId).toBe(mov.wtxId);
+    expect(despues.refund.method).toBe('walletBOB');
+  });
+
+  test('deja asiento de auditoría con el actor y los saldos', async () => {
+    const { user }  = await createSRLUser();
+    const { user: adminU, token } = await createAdminUser();
+    const { tx } = await seedCobradaYFallida(user, 240);
+
+    await post(token, `/api/v1/admin/transactions/${tx.alytoTransactionId}/refund`,
+      { method: 'walletBOB', reason: 'devolución acordada' });
+
+    const asiento = await AdminAuditLog.findOne({ action: 'transaction.refund.wallet' }).lean();
+    expect(asiento).not.toBeNull();
+    expect(String(asiento.actorId)).toBe(String(adminU._id));
+    expect(asiento.targetId).toBe(tx.alytoTransactionId);
+    expect(asiento.metadata.montoBOB).toBe(240);
+    expect(asiento.before.saldoBilletera).toBe(100);
+    expect(asiento.after.saldoBilletera).toBe(340);
+  });
+
+  test('no acredita dos veces: el segundo intento responde 409', async () => {
+    const { user }  = await createSRLUser();
+    const { token } = await createAdminUser();
+    const { wallet, tx } = await seedCobradaYFallida(user, 240);
+    const ruta = `/api/v1/admin/transactions/${tx.alytoTransactionId}/refund`;
+
+    expect((await post(token, ruta, { method: 'walletBOB' })).status).toBe(200);
+    expect((await post(token, ruta, { method: 'walletBOB' })).status).toBe(409);
+
+    const w = await WalletBOB.findById(wallet._id).lean();
+    expect(w.balance).toBe(340);  // una sola acreditación
+  });
+
+  test('con wtxId explícito solo asienta, sin tocar el saldo', async () => {
+    // Camino original: el crédito ya se hizo por otra vía y acá solo se registra.
+    const { user }  = await createSRLUser();
+    const { token } = await createAdminUser();
+    const { wallet, tx } = await seedCobradaYFallida(user, 240);
+
+    const res = await post(token, `/api/v1/admin/transactions/${tx.alytoTransactionId}/refund`,
+      { method: 'walletBOB', wtxId: 'WTX-YA-EXISTENTE' });
+
+    expect(res.status).toBe(200);
+    const w = await WalletBOB.findById(wallet._id).lean();
+    expect(w.balance).toBe(100);  // intacto
+    expect(await WalletTransaction.countDocuments({ type: 'refund' })).toBe(0);
   });
 });
