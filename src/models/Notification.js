@@ -82,6 +82,13 @@ const notificationSchema = new mongoose.Schema(
         // ningún administrador.
         'admin_account_deletion',
         'admin_disbursement_stuck',
+        // Retiro que lleva demasiado en 'pending': el paso que falta es humano
+        // (transferir y confirmar con comprobante), asi que nada lo destraba solo.
+        'admin_withdrawal_pending',
+        // Conversion detenida que mantiene saldo reservado al usuario, y
+        // descuadre entre lo reservado y las operaciones vivas.
+        'admin_wallet_op_stuck',
+        'admin_reserve_mismatch',
         'treasury_funding_unmatched',
         // Un usuario que no consigue pasar la verificación de identidad por un
         // fallo que no es suyo. Ver [kycBlockedAlert].
