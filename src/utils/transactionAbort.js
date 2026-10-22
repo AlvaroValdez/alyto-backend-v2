@@ -37,14 +37,20 @@
 
 export class AbortoDeliberado extends Error {
   /**
-   * @param {string} code    — identificador estable para decidir la respuesta.
-   * @param {string} [reason] — explicación; por omisión, el propio código.
+   * @param {string} code     — identificador estable para decidir la respuesta.
+   * @param {string} [reason]  — explicación; por omisión, el propio código.
+   * @param {object} [payload] — valor exacto a devolver, para los casos en que el
+   *   `ok` no se deduce del código. En `settleDispatchedWithdrawal`, por ejemplo,
+   *   'already-settled' y 'race' son resultados correctos (`ok: true`) mientras
+   *   'not-found' y 'bad-status' son fallas: sin esto, los cuatro colapsarían en
+   *   la misma respuesta y un webhook repetido pasaría por error.
    */
-  constructor(code, reason = code) {
+  constructor(code, reason = code, payload = undefined) {
     super(reason);
-    this.name   = 'AbortoDeliberado';
-    this.code   = code;
-    this.reason = reason;
+    this.name    = 'AbortoDeliberado';
+    this.code    = code;
+    this.reason  = reason;
+    this.payload = payload;
   }
 }
 

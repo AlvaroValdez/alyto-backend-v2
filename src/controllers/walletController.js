@@ -2097,75 +2097,115 @@ export async function adminDispatchWithdrawal(req, res) {
  */
 export async function settleDispatchedWithdrawal(wtxId, { accepted, bankReference, reason } = {}) {
   const session = await mongoose.startSession()
-  session.startTransaction()
+
+  // Lo que necesitan los efectos posteriores al commit. Se llena dentro del
+  // callback y se consume afuera: `withTransaction` puede reintentar, y mandar
+  // dos veces la notificación de un retiro acreditado una sola vez sería peor
+  // que no mandarla.
+  let post
+
+  /**
+   * Corta la transacción devolviendo un valor exacto.
+   *
+   * Con `withTransaction` un `return` haría commit, así que hay que lanzar. Y el
+   * valor viaja en el error porque acá los abortos NO son equivalentes: un
+   * webhook repetido ('already-settled') y una carrera ('race') son resultados
+   * correctos, mientras 'not-found' y 'bad-status' son fallas que el job de
+   * conciliación trata distinto, alertando a una persona.
+   */
+  const abortar = (payload) => {
+    throw new AbortoDeliberado(payload.reason ?? 'abort', payload.reason, payload)
+  }
+
   try {
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx || wtx.type !== 'withdrawal') { await session.abortTransaction(); return { ok: false, reason: 'not-found' } }
-    if (wtx.status === 'completed' || wtx.status === 'failed') {
-      await session.abortTransaction(); return { ok: true, reason: 'already-settled', status: wtx.status }
-    }
-    if (wtx.status !== 'dispatched') { await session.abortTransaction(); return { ok: false, reason: `bad-status-${wtx.status}` } }
+    await session.withTransaction(async () => {
+      // Todo se relee adentro: en un reintento el estado de afuera ya es viejo,
+      // y de ese estado salen el debito y los saldos que se registran.
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx || wtx.type !== 'withdrawal') abortar({ ok: false, reason: 'not-found' })
+      if (wtx.status === 'completed' || wtx.status === 'failed') {
+        abortar({ ok: true, reason: 'already-settled', status: wtx.status })
+      }
+      if (wtx.status !== 'dispatched') abortar({ ok: false, reason: `bad-status-${wtx.status}` })
 
-    const wallet      = await WalletBOB.findById(wtx.walletId).session(session)
-    const prevBalance = wallet?.balance ?? wtx.balanceAfter ?? 0
+      const wallet      = await WalletBOB.findById(wtx.walletId).session(session)
+      const prevBalance = wallet?.balance ?? wtx.balanceAfter ?? 0
 
-    if (accepted) {
-      const newBalance = prevBalance - wtx.amount
+      if (accepted) {
+        const newBalance = prevBalance - wtx.amount
+        const claim = await WalletTransaction.updateOne(
+          { _id: wtx._id, status: 'dispatched' },
+          {
+            status:        'completed',
+            balanceBefore: prevBalance,
+            balanceAfter:  newBalance,
+            confirmedAt:   new Date(),
+            reference:     bankReference ?? wtx.reference,
+            metadata:      { ...(wtx.metadata ?? {}), bankReference: bankReference ?? wtx.metadata?.bankReference, settledVia: 'baneco-notifyStatus' },
+          },
+          { session },
+        )
+        if (claim.modifiedCount === 0) abortar({ ok: true, reason: 'race' })
+
+        await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } }, { session })
+
+        post = {
+          status:    'completed',
+          userId:    wtx.userId,
+          amount:    wtx.amount,
+          reference: bankReference ?? wtx.reference,
+        }
+        return
+      }
+
+      // Rechazado por el banco: liberar reserva, no debitar.
       const claim = await WalletTransaction.updateOne(
         { _id: wtx._id, status: 'dispatched' },
         {
-          status:        'completed',
+          status:        'failed',
           balanceBefore: prevBalance,
-          balanceAfter:  newBalance,
-          confirmedAt:   new Date(),
-          reference:     bankReference ?? wtx.reference,
-          metadata:      { ...(wtx.metadata ?? {}), bankReference: bankReference ?? wtx.metadata?.bankReference, settledVia: 'baneco-notifyStatus' },
+          balanceAfter:  prevBalance,
+          metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? 'Rechazado por el banco', settledVia: 'baneco-notifyStatus' },
         },
         { session },
       )
-      if (claim.modifiedCount === 0) { await session.abortTransaction(); return { ok: true, reason: 'race' } }
-      await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } }, { session })
-      await session.commitTransaction()
-      // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). Mismo registro
-      // on-chain que send/deposit; faltaba en el cierre vía dispersión BANECO.
-      fireAuditTrail(wtx.wtxId, 'withdrawal', wtx.amount, bankReference ?? wtx.reference)
-      notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
-        title: 'Retiro procesado',
-        body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
-        type:  'wallet',
-      }).catch(() => {})
-      return { ok: true, status: 'completed' }
-    }
+      if (claim.modifiedCount === 0) abortar({ ok: true, reason: 'race' })
 
-    // Rechazado por el banco: liberar reserva, no debitar.
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'dispatched' },
-      {
-        status:        'failed',
-        balanceBefore: prevBalance,
-        balanceAfter:  prevBalance,
-        metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? 'Rechazado por el banco', settledVia: 'baneco-notifyStatus' },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) { await session.abortTransaction(); return { ok: true, reason: 'race' } }
-    await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balanceReserved: -wtx.amount } }, { session })
-    await session.commitTransaction()
-    notify(wtx.userId, {
-      title: 'Retiro rechazado',
-      body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} no pudo procesarse en el banco. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
-      type:  'wallet',
-    }).catch(() => {})
-    return { ok: true, status: 'failed' }
+      await WalletBOB.updateOne({ _id: wtx.walletId }, { $inc: { balanceReserved: -wtx.amount } }, { session })
 
+      post = { status: 'failed', userId: wtx.userId, amount: wtx.amount }
+    })
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return err.payload
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'settleDispatchedWithdrawal' } })
     console.error('[Wallet] Error en settleDispatchedWithdrawal:', err.message)
     return { ok: false, reason: err.message }
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // Fuera del try: un fallo notificando no puede parecer un fallo de la
+  // liquidación, que ya está firme en la base.
+  if (post.status === 'completed') {
+    // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). Mismo registro
+    // on-chain que send/deposit; faltaba en el cierre vía dispersión BANECO.
+    fireAuditTrail(wtxId, 'withdrawal', post.amount, post.reference)
+    notify(post.userId, NOTIFICATIONS.withdrawalCompleted?.(post.amount) ?? {
+      title: 'Retiro procesado',
+      body:  `Tu retiro de Bs. ${post.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
+      type:  'wallet',
+    }).catch(() => {})
+    return { ok: true, status: 'completed' }
+  }
+
+  notify(post.userId, {
+    title: 'Retiro rechazado',
+    body:  `Tu retiro de Bs. ${post.amount.toFixed(2)} no pudo procesarse en el banco. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
+    type:  'wallet',
+  }).catch(() => {})
+  return { ok: true, status: 'failed' }
 }
 
 /**
