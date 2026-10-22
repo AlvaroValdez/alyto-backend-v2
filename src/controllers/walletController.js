@@ -38,7 +38,7 @@ import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
 import { getSrlBankData }   from '../services/srlBankData.js'
 import { recordAdminAction } from '../services/adminAuditService.js'
-import { AbortoDeliberado }  from '../utils/transactionAbort.js'
+import { AbortoDeliberado, abortarHttp } from '../utils/transactionAbort.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
 
@@ -431,148 +431,129 @@ export async function initiateDeposit(req, res) {
  * Operación atómica con mongoose session.
  */
 export async function sendP2P(req, res) {
+  const sender         = req.user
+  const { recipientEmail, amount: rawAmount, description } = req.body
+  const amount = Number(rawAmount)
+
+  // Validación de entrada ANTES de abrir la transacción: no toca la base, así que
+  // no hay nada que abortar, y abrir una sesión para rechazar un cuerpo mal
+  // formado es trabajo al vacío.
+  if (sender.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'La wallet BOB es exclusiva para usuarios Bolivia (SRL).' })
+  }
+  if (!recipientEmail || !amount) {
+    return res.status(400).json({ error: 'recipientEmail y amount son requeridos.' })
+  }
+  if (amount < 1) {
+    return res.status(400).json({ error: 'El monto mínimo de envío es Bs. 1.' })
+  }
+  if (recipientEmail.toLowerCase() === sender.email.toLowerCase()) {
+    return res.status(400).json({ error: 'No puedes enviarte dinero a ti mismo.' })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const sender         = req.user
-    const { recipientEmail, amount: rawAmount, description } = req.body
-    const amount = Number(rawAmount)
-
-    if (sender.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'La wallet BOB es exclusiva para usuarios Bolivia (SRL).' })
-    }
-    if (!recipientEmail || !amount) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'recipientEmail y amount son requeridos.' })
-    }
-    if (amount < 1) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El monto mínimo de envío es Bs. 1.' })
-    }
-    if (recipientEmail.toLowerCase() === sender.email.toLowerCase()) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'No puedes enviarte dinero a ti mismo.' })
-    }
-
-    // ── Límite diario de envío (mismo cálculo que getDailyLimits) ──────────
-    const SEND_LIMIT = parseFloat(process.env.WALLET_DAILY_SEND_LIMIT ?? '5000')
-    if (SEND_LIMIT > 0) {
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
-      const sentAgg = await WalletTransaction.aggregate([
-        { $match: { userId: sender._id, type: 'send', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
-      ]).session(session)
-      const sentToday = sentAgg[0]?.total ?? 0
-      if (sentToday + amount > SEND_LIMIT) {
-        await session.abortTransaction()
-        return res.status(400).json({
-          error: `Superas tu límite diario de envío de Bs. ${SEND_LIMIT.toFixed(2)} (enviado hoy: Bs. ${sentToday.toFixed(2)}).`,
-        })
+    // `withTransaction` reintenta los conflictos de escritura en vez de pedirle
+    // al usuario que reintente él. Antes este camino devolvía 409 "operación
+    // concurrente, intenta de nuevo" ante un WriteConflict; ahora eso se
+    // resuelve solo y el 409 queda para lo que el driver no pueda reintentar.
+    //
+    // Para abortar hay que LANZAR: un `return` haría commit.
+    await session.withTransaction(async () => {
+      // ── Límite diario de envío (mismo cálculo que getDailyLimits) ──────────
+      const SEND_LIMIT = parseFloat(process.env.WALLET_DAILY_SEND_LIMIT ?? '5000')
+      if (SEND_LIMIT > 0) {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+        const sentAgg = await WalletTransaction.aggregate([
+          { $match: { userId: sender._id, type: 'send', status: 'completed', currency: 'BOB', createdAt: { $gte: todayStart } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } },
+        ]).session(session)
+        const sentToday = sentAgg[0]?.total ?? 0
+        if (sentToday + amount > SEND_LIMIT) {
+          abortarHttp(400, {
+            error: `Superas tu límite diario de envío de Bs. ${SEND_LIMIT.toFixed(2)} (enviado hoy: Bs. ${sentToday.toFixed(2)}).`,
+          })
+        }
       }
-    }
 
-    // Verificar destinatario
-    const recipient = await User.findOne({ email: recipientEmail.toLowerCase() }).lean()
-    if (!recipient) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Usuario destinatario no encontrado.' })
-    }
-    if (recipient.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Solo puedes enviar a otros usuarios Bolivia (SRL).' })
-    }
+      // Verificar destinatario
+      const recipient = await User.findOne({ email: recipientEmail.toLowerCase() }).lean()
+      if (!recipient) abortarHttp(404, { error: 'Usuario destinatario no encontrado.' })
+      if (recipient.legalEntity !== 'SRL') {
+        abortarHttp(400, { error: 'Solo puedes enviar a otros usuarios Bolivia (SRL).' })
+      }
 
-    // Nota: secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
-    const walletOrigen  = await getOrCreateWallet(sender._id, session)
-    const walletDestino = await getOrCreateWallet(recipient._id, session)
+      // Nota: secuencial — MongoDB no permite operaciones concurrentes en la misma sesión
+      const walletOrigen  = await getOrCreateWallet(sender._id, session)
+      const walletDestino = await getOrCreateWallet(recipient._id, session)
 
-    if (walletOrigen.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet no está activa.' })
-    }
-    if (walletDestino.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La wallet del destinatario no está activa.' })
-    }
-    const balanceAvailable = Math.max(0, walletOrigen.balance - walletOrigen.balanceReserved)
-    if (balanceAvailable < amount) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
-    }
+      if (walletOrigen.status !== 'active')  abortarHttp(403, { error: 'Tu wallet no está activa.' })
+      if (walletDestino.status !== 'active') abortarHttp(400, { error: 'La wallet del destinatario no está activa.' })
 
-    // Operación atómica
-    const prevBalanceOrigen  = walletOrigen.balance
-    const prevBalanceDestino = walletDestino.balance
+      const balanceAvailable = Math.max(0, walletOrigen.balance - walletOrigen.balanceReserved)
+      if (balanceAvailable < amount) {
+        abortarHttp(400, { error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
+      }
 
-    // Débito condicional: re-verifica saldo disponible EN el update (atómico) —
-    // dos requests concurrentes no pueden pasar ambos el check de saldo.
-    const debitResult = await WalletBOB.updateOne(
-      {
-        _id: walletOrigen._id,
-        $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
-      },
-      { $inc: { balance: -amount } },
-      { session },
-    )
-    if (debitResult.modifiedCount !== 1) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Saldo insuficiente.' })
-    }
-    await WalletBOB.updateOne({ _id: walletDestino._id }, { $inc: { balance:  amount } }, { session })
+      // Operación atómica
+      const prevBalanceOrigen  = walletOrigen.balance
+      const prevBalanceDestino = walletDestino.balance
 
-    const [wtxSend, wtxReceive] = await WalletTransaction.create([
-      {
-        walletId:           walletOrigen._id,
-        userId:             sender._id,
-        type:               'send',
-        amount,
-        balanceBefore:      prevBalanceOrigen,
-        balanceAfter:       prevBalanceOrigen - amount,
-        status:             'completed',
-        description:        description ?? `Envío a ${recipient.firstName} ${recipient.lastName}`,
-        counterpartyUserId: recipient._id,
-        confirmedAt:        new Date(),
-      },
-      {
-        walletId:           walletDestino._id,
-        userId:             recipient._id,
-        type:               'receive',
-        amount,
-        balanceBefore:      prevBalanceDestino,
-        balanceAfter:       prevBalanceDestino + amount,
-        status:             'completed',
-        description:        `Recibido de ${sender.firstName} ${sender.lastName}`,
-        counterpartyUserId: sender._id,
-        confirmedAt:        new Date(),
-      },
-    ], { session, ordered: true })
+      // Débito condicional: re-verifica saldo disponible EN el update (atómico) —
+      // dos requests concurrentes no pueden pasar ambos el check de saldo.
+      const debitResult = await WalletBOB.updateOne(
+        {
+          _id: walletOrigen._id,
+          $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
+        },
+        { $inc: { balance: -amount } },
+        { session },
+      )
+      if (debitResult.modifiedCount !== 1) abortarHttp(400, { error: 'Saldo insuficiente.' })
 
-    await session.commitTransaction()
+      await WalletBOB.updateOne({ _id: walletDestino._id }, { $inc: { balance:  amount } }, { session })
 
-    // Audit trail Stellar — fire and forget
-    fireAuditTrail(wtxSend.wtxId, 'send', amount)
+      const [wtxSend] = await WalletTransaction.create([
+        {
+          walletId:           walletOrigen._id,
+          userId:             sender._id,
+          type:               'send',
+          amount,
+          balanceBefore:      prevBalanceOrigen,
+          balanceAfter:       prevBalanceOrigen - amount,
+          status:             'completed',
+          description:        description ?? `Envío a ${recipient.firstName} ${recipient.lastName}`,
+          counterpartyUserId: recipient._id,
+          confirmedAt:        new Date(),
+        },
+        {
+          walletId:           walletDestino._id,
+          userId:             recipient._id,
+          type:               'receive',
+          amount,
+          balanceBefore:      prevBalanceDestino,
+          balanceAfter:       prevBalanceDestino + amount,
+          status:             'completed',
+          description:        `Recibido de ${sender.firstName} ${sender.lastName}`,
+          counterpartyUserId: sender._id,
+          confirmedAt:        new Date(),
+        },
+      ], { session, ordered: true })
 
-    // Push notification al destinatario
-    notify(recipient._id, NOTIFICATIONS.p2pReceived(amount, `${sender.firstName} ${sender.lastName}`)).catch(() => {})
-
-    // Notificar a admins — push + in-app
-    const senderName   = `${sender.firstName} ${sender.lastName}`.trim();
-    const receiverName = `${recipient.firstName} ${recipient.lastName}`.trim();
-    notifyAdmins(NOTIFICATIONS.adminP2PTransfer(amount, senderName, receiverName)).catch(() => {});
-
-    return res.json({
-      wtxId:        wtxSend.wtxId,
-      amount,
-      recipientEmail,
-      balanceAfter: prevBalanceOrigen - amount,
+      post = {
+        wtxId:        wtxSend.wtxId,
+        recipientId:  recipient._id,
+        recipientName: `${recipient.firstName} ${recipient.lastName}`.trim(),
+        balanceAfter: prevBalanceOrigen - amount,
+      }
     })
-
   } catch (err) {
-    await session.abortTransaction()
-    // WriteConflict: dos operaciones concurrentes sobre la misma wallet — la
-    // perdedora se aborta limpiamente (los fondos están protegidos). 409 + retry.
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
+    // Un WriteConflict que el driver ya reintentó sin éxito. Antes este camino
+    // era habitual; ahora solo se llega acá si los reintentos se agotaron.
     if (err.code === 112 || err.errorLabels?.includes('TransientTransactionError')) {
       return res.status(409).json({ error: 'Operación concurrente detectada. Intenta de nuevo.' })
     }
@@ -580,8 +561,24 @@ export async function sendP2P(req, res) {
     console.error('[Wallet] Error en sendP2P:', err.message)
     return res.status(500).json({ error: 'Error al procesar el envío.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // Posterior al commit y fuera del try: `withTransaction` puede reintentar, y
+  // notificar dos veces un envío que ocurrió una sola vez sería peor que no
+  // notificar. Un fallo acá tampoco debe parecer un fallo del envío.
+  fireAuditTrail(post.wtxId, 'send', amount)
+  notify(post.recipientId, NOTIFICATIONS.p2pReceived(amount, `${sender.firstName} ${sender.lastName}`)).catch(() => {})
+  notifyAdmins(NOTIFICATIONS.adminP2PTransfer(
+    amount, `${sender.firstName} ${sender.lastName}`.trim(), post.recipientName,
+  )).catch(() => {})
+
+  return res.json({
+    wtxId:        post.wtxId,
+    amount,
+    recipientEmail,
+    balanceAfter: post.balanceAfter,
+  })
 }
 
 // ─── FUNCIÓN 6: POST /api/v1/wallet/withdraw/request ─────────────────────────
@@ -591,164 +588,152 @@ export async function sendP2P(req, res) {
  * Reserva el monto y crea un WalletTransaction pending para aprobación manual.
  */
 export async function requestWithdrawal(req, res) {
+  const user = req.user
+  const { amount: rawAmount, bankName, accountNumber, accountHolder, accountType } = req.body
+  const amount = Number(rawAmount)
+  // Dos métodos de retiro (mismas dos pestañas que la carga): 'bank' = el usuario
+  // declara su cuenta bancaria; 'qr' = el usuario adjunta el QR de SU cuenta y el
+  // admin lo escanea para transferirle. El QR ya contiene la cuenta destino.
+  const method = req.body.method === 'qr' ? 'qr' : 'bank'
+
+  // Validación de entrada fuera de la transacción: no lee ni escribe nada, así
+  // que no hay nada que abortar.
+  if (user.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'La wallet BOB es exclusiva para usuarios Bolivia (SRL).' })
+  }
+  if (!amount || isNaN(amount)) {
+    return res.status(400).json({ error: 'El campo amount es requerido.' })
+  }
+  if (method === 'bank') {
+    if (!bankName || !accountNumber || !accountHolder || !accountType) {
+      return res.status(400).json({ error: 'Para retiro a cuenta bancaria: bankName, accountNumber, accountHolder y accountType son requeridos.' })
+    }
+  } else if (!req.file) {
+    // method === 'qr' → exige la imagen del QR de la cuenta del usuario
+    return res.status(400).json({ error: 'Adjunta el QR de tu cuenta bancaria para el retiro vía QR.' })
+  }
+  if (amount < 100) {
+    return res.status(400).json({ error: 'El monto mínimo de retiro es Bs. 100.' })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const user = req.user
-    const { amount: rawAmount, bankName, accountNumber, accountHolder, accountType } = req.body
-    const amount = Number(rawAmount)
-    // Dos métodos de retiro (mismas dos pestañas que la carga): 'bank' = el usuario
-    // declara su cuenta bancaria; 'qr' = el usuario adjunta el QR de SU cuenta y el
-    // admin lo escanea para transferirle. El QR ya contiene la cuenta destino.
-    const method = req.body.method === 'qr' ? 'qr' : 'bank'
+    await session.withTransaction(async () => {
+      const wallet = await getOrCreateWallet(user._id, session)
+      if (wallet.status !== 'active') abortarHttp(403, { error: 'Tu wallet no está activa.' })
 
-    if (user.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'La wallet BOB es exclusiva para usuarios Bolivia (SRL).' })
-    }
-    if (!amount || isNaN(amount)) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El campo amount es requerido.' })
-    }
-    if (method === 'bank') {
-      if (!bankName || !accountNumber || !accountHolder || !accountType) {
-        await session.abortTransaction()
-        return res.status(400).json({ error: 'Para retiro a cuenta bancaria: bankName, accountNumber, accountHolder y accountType son requeridos.' })
+      const balanceAvailable = Math.max(0, wallet.balance - wallet.balanceReserved)
+      if (balanceAvailable < amount) {
+        abortarHttp(400, { error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
       }
-    } else if (!req.file) {
-      // method === 'qr' → exige la imagen del QR de la cuenta del usuario
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Adjunta el QR de tu cuenta bancaria para el retiro vía QR.' })
-    }
-    if (amount < 100) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El monto mínimo de retiro es Bs. 100.' })
-    }
 
-    const wallet = await getOrCreateWallet(user._id, session)
-    if (wallet.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet no está activa.' })
-    }
-    const balanceAvailable = Math.max(0, wallet.balance - wallet.balanceReserved)
-    if (balanceAvailable < amount) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
-    }
-
-    // ── Límite diario de retiro (mismo cálculo que getDailyLimits) ──────────
-    const WITHDRAW_LIMIT = parseFloat(process.env.WALLET_DAILY_WITHDRAW_LIMIT ?? '10000')
-    if (WITHDRAW_LIMIT > 0) {
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
-      const wAgg = await WalletTransaction.aggregate([
-        { $match: { userId: user._id, type: 'withdrawal', status: { $in: ['pending', 'completed'] }, currency: 'BOB', createdAt: { $gte: todayStart } } },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
-      ]).session(session)
-      const withdrawnToday = wAgg[0]?.total ?? 0
-      if (withdrawnToday + amount > WITHDRAW_LIMIT) {
-        await session.abortTransaction()
-        return res.status(400).json({
-          error: `Superas tu límite diario de retiro de Bs. ${WITHDRAW_LIMIT.toFixed(2)} (solicitado hoy: Bs. ${withdrawnToday.toFixed(2)}).`,
-        })
-      }
-    }
-
-    // ── Límites KYB (solo cuentas business con perfil aprobado) ──────────────
-    if (user.accountType === 'business') {
-      const bizProfile = await BusinessProfile.findOne({ userId: user._id, kybStatus: 'approved' }).lean()
-      if (bizProfile?.transactionLimits) {
-        const { maxSingleTransaction, currency: limitCurrency } = bizProfile.transactionLimits
-        let limitInBOB = maxSingleTransaction
-        if (limitCurrency !== 'BOB') {
-          // Convertir límite a BOB usando tasa configurada
-          const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } }).lean()
-          const bobRate = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE ?? '9.31')
-          limitInBOB = maxSingleTransaction * (limitCurrency === 'USD' ? bobRate : 1)
-        }
-        if (amount > limitInBOB) {
-          await session.abortTransaction()
-          return res.status(400).json({
-            error: `Monto excede el límite por transacción de tu cuenta. Máximo permitido: Bs. ${limitInBOB.toFixed(2)}.`,
+      // ── Límite diario de retiro (mismo cálculo que getDailyLimits) ──────────
+      const WITHDRAW_LIMIT = parseFloat(process.env.WALLET_DAILY_WITHDRAW_LIMIT ?? '10000')
+      if (WITHDRAW_LIMIT > 0) {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+        const wAgg = await WalletTransaction.aggregate([
+          { $match: { userId: user._id, type: 'withdrawal', status: { $in: ['pending', 'completed'] }, currency: 'BOB', createdAt: { $gte: todayStart } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } },
+        ]).session(session)
+        const withdrawnToday = wAgg[0]?.total ?? 0
+        if (withdrawnToday + amount > WITHDRAW_LIMIT) {
+          abortarHttp(400, {
+            error: `Superas tu límite diario de retiro de Bs. ${WITHDRAW_LIMIT.toFixed(2)} (solicitado hoy: Bs. ${withdrawnToday.toFixed(2)}).`,
           })
         }
       }
-    }
 
-    // Reservar monto — condicional: re-verifica disponible EN el update (atómico)
-    const reserveResult = await WalletBOB.updateOne(
-      {
-        _id: wallet._id,
-        $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
-      },
-      { $inc: { balanceReserved: amount } },
-      { session },
-    )
-    if (reserveResult.modifiedCount !== 1) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Saldo insuficiente.' })
-    }
+      // ── Límites KYB (solo cuentas business con perfil aprobado) ──────────────
+      if (user.accountType === 'business') {
+        const bizProfile = await BusinessProfile.findOne({ userId: user._id, kybStatus: 'approved' }).lean()
+        if (bizProfile?.transactionLimits) {
+          const { maxSingleTransaction, currency: limitCurrency } = bizProfile.transactionLimits
+          let limitInBOB = maxSingleTransaction
+          if (limitCurrency !== 'BOB') {
+            // Convertir límite a BOB usando tasa configurada
+            const rateDoc = await ExchangeRate.findOne({ pair: { $in: ['BOB-USDC', 'BOB-USDT'] } }).lean()
+            const bobRate = rateDoc?.rate ?? parseFloat(process.env.BOB_USD_RATE ?? '9.31')
+            limitInBOB = maxSingleTransaction * (limitCurrency === 'USD' ? bobRate : 1)
+          }
+          if (amount > limitInBOB) {
+            abortarHttp(400, {
+              error: `Monto excede el límite por transacción de tu cuenta. Máximo permitido: Bs. ${limitInBOB.toFixed(2)}.`,
+            })
+          }
+        }
+      }
 
-    // Imagen QR bancaria opcional (adjunta por el usuario para facilitar el pago
-    // del admin). Se persiste DENTRO de la creación transaccional para que el QR no
-    // pueda perderse: o queda guardado junto con el retiro, o el retiro no se crea.
-    // (Antes se guardaba con un updateOne post-commit fire-and-forget que, si fallaba,
-    //  dejaba el retiro sin QR y el admin no podía procesar la devolución.)
-    const bankQrImage = req.file ? {
-      data:       req.file.buffer.toString('base64'),
-      mimetype:   req.file.mimetype,
-      filename:   req.file.originalname,
-      size:       req.file.size,
-      uploadedAt: new Date(),
-    } : null
+      // Reservar monto — condicional: re-verifica disponible EN el update (atómico)
+      const reserveResult = await WalletBOB.updateOne(
+        {
+          _id: wallet._id,
+          $expr: { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
+        },
+        { $inc: { balanceReserved: amount } },
+        { session },
+      )
+      if (reserveResult.modifiedCount !== 1) abortarHttp(400, { error: 'Saldo insuficiente.' })
 
-    const [wtx] = await WalletTransaction.create([{
-      walletId:      wallet._id,
-      userId:        user._id,
-      type:          'withdrawal',
-      amount,
-      balanceBefore: wallet.balance,
-      balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
-      status:        'pending',
-      description:   method === 'qr'
-        ? 'Retiro vía QR bancario'
-        : `Retiro a ${bankName} — ${accountHolder}`,
-      metadata:      {
-        method,
-        ...(bankName      ? { bankName }      : {}),
-        ...(accountNumber ? { accountNumber } : {}),
-        ...(accountHolder ? { accountHolder } : {}),
-        ...(accountType   ? { accountType }   : {}),
-        ...(bankQrImage   ? { bankQrImage }   : {}),
-      },
-      expiresAt:     new Date(Date.now() + 72 * 60 * 60 * 1000),  // 72h para retiros
-    }], { session })
-    await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
+      // Imagen QR bancaria opcional (adjunta por el usuario para facilitar el pago
+      // del admin). Se persiste DENTRO de la creación transaccional para que el QR no
+      // pueda perderse: o queda guardado junto con el retiro, o el retiro no se crea.
+      // (Antes se guardaba con un updateOne post-commit fire-and-forget que, si fallaba,
+      //  dejaba el retiro sin QR y el admin no podía procesar la devolución.)
+      const bankQrImage = req.file ? {
+        data:       req.file.buffer.toString('base64'),
+        mimetype:   req.file.mimetype,
+        filename:   req.file.originalname,
+        size:       req.file.size,
+        uploadedAt: new Date(),
+      } : null
 
-    await session.commitTransaction()
+      const [wtx] = await WalletTransaction.create([{
+        walletId:      wallet._id,
+        userId:        user._id,
+        type:          'withdrawal',
+        amount,
+        balanceBefore: wallet.balance,
+        balanceAfter:  wallet.balance,  // se actualiza cuando admin confirme
+        status:        'pending',
+        description:   method === 'qr'
+          ? 'Retiro vía QR bancario'
+          : `Retiro a ${bankName} — ${accountHolder}`,
+        metadata:      {
+          method,
+          ...(bankName      ? { bankName }      : {}),
+          ...(accountNumber ? { accountNumber } : {}),
+          ...(accountHolder ? { accountHolder } : {}),
+          ...(accountType   ? { accountType }   : {}),
+          ...(bankQrImage   ? { bankQrImage }   : {}),
+        },
+        expiresAt:     new Date(Date.now() + 72 * 60 * 60 * 1000),  // 72h para retiros
+      }], { session })
+      await WalletTransaction.updateOne({ _id: wtx._id }, { reference: wtx.wtxId }, { session })
 
-    // Push notification al usuario
-    notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
-
-    // Notificar a admins — push + in-app
-    const fullName = `${user.firstName} ${user.lastName}`.trim();
-    notifyAdmins(NOTIFICATIONS.adminWithdrawalRequest(amount, fullName)).catch(() => {})
-
-    return res.status(201).json({
-      wtxId:   wtx.wtxId,
-      amount,
-      status:  'pending',
-      message: 'Retiro en proceso. AV Finance SRL procesará la transferencia en 1-2 días hábiles.',
+      post = { wtxId: wtx.wtxId }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'requestWithdrawal' } })
     console.error('[Wallet] Error en requestWithdrawal:', err.message)
     return res.status(500).json({ error: 'Error al solicitar el retiro.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // Posterior al commit y fuera del try.
+  notify(user._id, NOTIFICATIONS.withdrawalRequested(amount)).catch(() => {})
+  notifyAdmins(NOTIFICATIONS.adminWithdrawalRequest(amount, `${user.firstName} ${user.lastName}`.trim())).catch(() => {})
+
+  return res.status(201).json({
+    wtxId:   post.wtxId,
+    amount,
+    status:  'pending',
+    message: 'Retiro en proceso. AV Finance SRL procesará la transferencia en 1-2 días hábiles.',
+  })
 }
 
 // ─── FUNCIÓN 7 (ADMIN): POST /api/v1/admin/wallet/deposit/confirm ─────────────
@@ -758,95 +743,94 @@ export async function requestWithdrawal(req, res) {
  * Operación atómica + audit trail Stellar.
  */
 export async function adminConfirmDeposit(req, res) {
+  const admin                          = req.user
+  const { wtxId, bankReference, note } = req.body
+
+  if (!wtxId || !bankReference) {
+    return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin                   = req.user
-    const { wtxId, bankReference, note } = req.body
+    // El guard de estado se relee DENTRO del callback, y eso importa: esta
+    // función no tiene filtro condicional en el update, así que su protección
+    // contra doble crédito es la lectura. Con `withTransaction`, dos
+    // confirmaciones simultáneas chocan, la perdedora reintenta, vuelve a leer y
+    // cae en el guard de 'ya fue procesado'. Sacar la lectura de acá rompería eso.
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx)                    abortarHttp(404, { error: 'Transacción no encontrada.' })
+      if (wtx.type !== 'deposit')  abortarHttp(400, { error: 'La transacción no es un depósito.' })
+      // Los depósitos vía QR bancario se acreditan automáticamente (IPN del banco /
+      // job de reconciliación). Bloquear la confirmación manual evita doble crédito.
+      if (wtx.bankQr?.qrId) {
+        abortarHttp(400, { error: 'Este depósito es automático (QR bancario); no se confirma manualmente.' })
+      }
+      if (wtx.status === 'awaiting_proof') {
+        abortarHttp(400, { error: 'El depósito aún no tiene comprobante adjunto.' })
+      }
+      if (wtx.status !== 'pending') {
+        abortarHttp(400, { error: `El depósito ya fue procesado (status: ${wtx.status}).` })
+      }
 
-    if (!wtxId || !bankReference) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
-    }
+      const wallet = await WalletBOB.findById(wtx.walletId).session(session)
+      if (!wallet) abortarHttp(404, { error: 'Wallet no encontrada.' })
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Transacción no encontrada.' })
-    }
-    if (wtx.type !== 'deposit') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La transacción no es un depósito.' })
-    }
-    // Los depósitos vía QR bancario se acreditan automáticamente (IPN del banco /
-    // job de reconciliación). Bloquear la confirmación manual evita doble crédito.
-    if (wtx.bankQr?.qrId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Este depósito es automático (QR bancario); no se confirma manualmente.' })
-    }
-    if (wtx.status === 'awaiting_proof') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El depósito aún no tiene comprobante adjunto.' })
-    }
-    if (wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `El depósito ya fue procesado (status: ${wtx.status}).` })
-    }
+      const prevBalance = wallet.balance
+      const newBalance  = prevBalance + wtx.amount
 
-    const wallet = await WalletBOB.findById(wtx.walletId).session(session)
-    if (!wallet) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Wallet no encontrada.' })
-    }
+      await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: wtx.amount } }, { session })
+      await WalletTransaction.updateOne({ _id: wtx._id }, {
+        status:        'completed',
+        balanceBefore: prevBalance,
+        balanceAfter:  newBalance,
+        confirmedBy:   admin._id,
+        confirmedAt:   new Date(),
+        reference:     bankReference,
+        metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
+      }, { session })
 
-    const prevBalance = wallet.balance
-    const newBalance  = prevBalance + wtx.amount
+      post = { userId: wtx.userId, amount: wtx.amount, newBalance }
+    })
+  } catch (err) {
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
 
-    await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: wtx.amount } }, { session })
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:        'completed',
-      balanceBefore: prevBalance,
-      balanceAfter:  newBalance,
-      confirmedBy:   admin._id,
-      confirmedAt:   new Date(),
-      reference:     bankReference,
-      metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
-    }, { session })
+    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminConfirmDeposit' } })
+    console.error('[Wallet] Error en adminConfirmDeposit:', err.message)
+    return res.status(500).json({ error: 'Error al confirmar el depósito.' })
+  } finally {
+    await session.endSession()
+  }
 
-    await session.commitTransaction()
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  const { amount, newBalance } = post
 
-    // Audit trail Stellar — fire and forget
-    fireAuditTrail(wtxId, 'deposit', wtx.amount, bankReference)
+  // Audit trail Stellar — fire and forget
+  fireAuditTrail(wtxId, 'deposit', amount, bankReference)
 
-    // Notificar al usuario
-    const depositUser = await User.findById(wtx.userId).lean()
+  // Notificar al usuario
+  {
+    const depositUser = await User.findById(post.userId).lean()
     if (depositUser?.email) {
       sendEmail(...EMAILS.walletDepositConfirmed(depositUser, {
-        amount:     wtx.amount,
+        amount,
         currency:   'BOB',
         newBalance,
         wtxId,
       })).catch(err => console.error('[Wallet] Error email depósito confirmado:', err.message))
     }
-
-    // Push + in-app notification — depósito confirmado
-    notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
-
-    return res.json({
-      wtxId,
-      balanceNew:  newBalance,
-      confirmedAt: new Date(),
-    })
-
-  } catch (err) {
-    await session.abortTransaction()
-    Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminConfirmDeposit' } })
-    console.error('[Wallet] Error en adminConfirmDeposit:', err.message)
-    return res.status(500).json({ error: 'Error al confirmar el depósito.' })
-  } finally {
-    session.endSession()
   }
+
+  // Push + in-app notification — depósito confirmado
+  notify(post.userId, NOTIFICATIONS.depositConfirmed(amount)).catch(() => {})
+
+  return res.json({
+    wtxId,
+    balanceNew:  newBalance,
+    confirmedAt: new Date(),
+  })
 }
 
 // ─── bankQr: confirmación automática de depósito BOB ──────────────────────────
@@ -1359,132 +1343,135 @@ export async function adminTraceUserWithdrawals(req, res) {
  * Fase 26: refleja el congelamiento on-chain (freezeUserTrustline, fire-and-forget).
  */
 export async function adminFreezeWallet(req, res) {
+  const { userId } = req.params
+  const { reason } = req.body
+  // Referencia del oficio/instrucción regulatoria — obligatoria (§4.7).
+  // Acepta `regulatoryRef` o el alias legacy `reportNumber`.
+  const regulatoryRef = req.body.regulatoryRef ?? req.body.reportNumber
+  const admin         = req.user
+
+  if (!reason) {
+    return res.status(400).json({ error: 'El campo reason es obligatorio para congelar una wallet.' })
+  }
+  if (!regulatoryRef || !String(regulatoryRef).trim()) {
+    return res.status(400).json({ error: 'La referencia del oficio o instrucción regulatoria es obligatoria para congelar una wallet.' })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const { userId }                     = req.params
-    const { reason }                     = req.body
-    // Referencia del oficio/instrucción regulatoria — obligatoria (§4.7).
-    // Acepta `regulatoryRef` o el alias legacy `reportNumber`.
-    const regulatoryRef                  = req.body.regulatoryRef ?? req.body.reportNumber
-    const admin                          = req.user
+    await session.withTransaction(async () => {
+      const wallet = await WalletBOB.findOne({ userId }).session(session)
+      if (!wallet)                      abortarHttp(404, { error: 'Wallet no encontrada para este usuario.' })
+      if (wallet.status === 'frozen')   abortarHttp(400, { error: 'La wallet ya está congelada.' })
 
-    if (!reason) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El campo reason es obligatorio para congelar una wallet.' })
-    }
-    if (!regulatoryRef || !String(regulatoryRef).trim()) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La referencia del oficio o instrucción regulatoria es obligatoria para congelar una wallet.' })
-    }
-
-    const wallet = await WalletBOB.findOne({ userId }).session(session)
-    if (!wallet) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Wallet no encontrada para este usuario.' })
-    }
-    if (wallet.status === 'frozen') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La wallet ya está congelada.' })
-    }
-
-    const now = new Date()
-    await WalletBOB.updateOne({ _id: wallet._id }, {
-      status:        'frozen',
-      balanceFrozen: wallet.balance,
-      balance:       0,
-      frozenReason:  reason,
-      frozenAt:      now,
-      frozenBy:      admin._id,
-    }, { session })
-
-    await WalletTransaction.create([{
-      walletId:      wallet._id,
-      userId,
-      type:          'freeze',
-      amount:        wallet.balance,
-      balanceBefore: wallet.balance,
-      balanceAfter:  0,
-      status:        'completed',
-      description:   `Wallet congelada por compliance. Razón: ${reason}`,
-      confirmedBy:   admin._id,
-      confirmedAt:   now,
-      metadata:      { reason, regulatoryRef },
-    }], { session })
-
-    // Congelar también el ledger USDC (si el usuario tiene wallet USDC).
-    const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
-    if (walletUsdc && walletUsdc.status !== 'frozen') {
-      await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+      const now = new Date()
+      await WalletBOB.updateOne({ _id: wallet._id }, {
         status:        'frozen',
-        balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0),
+        balanceFrozen: wallet.balance,
         balance:       0,
         frozenReason:  reason,
         frozenAt:      now,
         frozenBy:      admin._id,
       }, { session })
-    }
 
-    // Auditoría de acción sensible — atómica con el congelamiento (misma sesión).
-    await recordAdminAction({
-      req, session,
-      action:     'wallet.freeze',
-      targetType: 'User',
-      targetId:   userId,
-      before: {
-        bob:  { status: wallet.status, balance: wallet.balance, balanceFrozen: wallet.balanceFrozen ?? 0 },
-        usdc: walletUsdc ? { status: walletUsdc.status, balance: walletUsdc.balance, balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
-      },
-      after: {
-        bob:  { status: 'frozen', balance: 0, balanceFrozen: wallet.balance },
-        usdc: walletUsdc ? { status: 'frozen', balance: 0, balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0) } : null,
-      },
-      reason,
-      metadata: { regulatoryRef },
-    })
+      await WalletTransaction.create([{
+        walletId:      wallet._id,
+        userId,
+        type:          'freeze',
+        amount:        wallet.balance,
+        balanceBefore: wallet.balance,
+        balanceAfter:  0,
+        status:        'completed',
+        description:   `Wallet congelada por compliance. Razón: ${reason}`,
+        confirmedBy:   admin._id,
+        confirmedAt:   now,
+        metadata:      { reason, regulatoryRef },
+      }], { session })
 
-    await session.commitTransaction()
+      // Congelar también el ledger USDC (si el usuario tiene wallet USDC).
+      const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
+      if (walletUsdc && walletUsdc.status !== 'frozen') {
+        await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+          status:        'frozen',
+          balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0),
+          balance:       0,
+          frozenReason:  reason,
+          frozenAt:      now,
+          frozenBy:      admin._id,
+        }, { session })
+      }
 
-    // Fase 26: registrar congelamiento en Stellar como evidencia ASFI (fire-and-forget)
-    if (wallet.stellarPublicKey) {
-      freezeUserTrustline(wallet.stellarPublicKey, 'USDC').catch(() => {})
-    }
-
-    // Notificar al usuario
-    const frozenUser = await User.findById(userId).lean()
-    if (frozenUser && process.env.SENDGRID_TEMPLATE_FAILED) {
-      sendEmail(
-        frozenUser.email,
-        process.env.SENDGRID_TEMPLATE_FAILED,
-        {
-          firstName: frozenUser.firstName,
-          subject:   'Tu wallet ha sido suspendida temporalmente',
-          message:   'Por cumplimiento regulatorio, tu wallet ha sido suspendida. Contacta a soporte para más información.',
+      // Auditoría de acción sensible — atómica con el congelamiento (misma sesión).
+      // Queda DENTRO del callback a propósito: si no se pudo registrar quién
+      // congeló y con qué oficio, la wallet no debe quedar congelada. Al
+      // reintentar se reescribe junto con todo lo demás, no se duplica.
+      await recordAdminAction({
+        req, session,
+        action:     'wallet.freeze',
+        targetType: 'User',
+        targetId:   userId,
+        before: {
+          bob:  { status: wallet.status, balance: wallet.balance, balanceFrozen: wallet.balanceFrozen ?? 0 },
+          usdc: walletUsdc ? { status: walletUsdc.status, balance: walletUsdc.balance, balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
         },
-      ).catch(() => {})
-    }
+        after: {
+          bob:  { status: 'frozen', balance: 0, balanceFrozen: wallet.balance },
+          usdc: walletUsdc ? { status: 'frozen', balance: 0, balanceFrozen: (walletUsdc.balanceFrozen ?? 0) + (walletUsdc.balance ?? 0) } : null,
+        },
+        reason,
+        metadata: { regulatoryRef },
+      })
 
-    // Push notification — wallet congelada
-    notify(userId, NOTIFICATIONS.walletFrozen()).catch(() => {})
-
-    return res.json({
-      walletId:     wallet.walletId,
-      status:       'frozen',
-      frozenAt:     now,
-      reason,
-      regulatoryRef,
-      usdcFrozen:   !!walletUsdc,
+      post = {
+        walletId:         wallet.walletId,
+        stellarPublicKey: wallet.stellarPublicKey,
+        frozenAt:         now,
+        usdcFrozen:       !!walletUsdc,
+      }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminFreezeWallet' } })
     console.error('[Wallet] Error en adminFreezeWallet:', err.message)
     return res.status(500).json({ error: 'Error al congelar la wallet.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // Fase 26: registrar congelamiento en Stellar como evidencia ASFI (fire-and-forget)
+  if (post.stellarPublicKey) {
+    freezeUserTrustline(post.stellarPublicKey, 'USDC').catch(() => {})
+  }
+
+  // Notificar al usuario
+  const frozenUser = await User.findById(userId).lean()
+  if (frozenUser && process.env.SENDGRID_TEMPLATE_FAILED) {
+    sendEmail(
+      frozenUser.email,
+      process.env.SENDGRID_TEMPLATE_FAILED,
+      {
+        firstName: frozenUser.firstName,
+        subject:   'Tu wallet ha sido suspendida temporalmente',
+        message:   'Por cumplimiento regulatorio, tu wallet ha sido suspendida. Contacta a soporte para más información.',
+      },
+    ).catch(() => {})
+  }
+
+  // Push notification — wallet congelada
+  notify(userId, NOTIFICATIONS.walletFrozen()).catch(() => {})
+
+  return res.json({
+    walletId:   post.walletId,
+    status:     'frozen',
+    frozenAt:   post.frozenAt,
+    reason,
+    regulatoryRef,
+    usdcFrozen: post.usdcFrozen,
+  })
 }
 
 // ─── FUNCIÓN 11 (ADMIN): PATCH /api/v1/admin/wallet/:userId/unfreeze ──────────
@@ -1494,115 +1481,116 @@ export async function adminFreezeWallet(req, res) {
  * Mueve balanceFrozen → balance.
  */
 export async function adminUnfreezeWallet(req, res) {
+  const { userId } = req.params
+  const { reason } = req.body   // motivo del descongelamiento (opcional)
+  const admin      = req.user
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const { userId } = req.params
-    const { reason } = req.body   // motivo del descongelamiento (opcional)
-    const admin      = req.user
+    await session.withTransaction(async () => {
+      const wallet = await WalletBOB.findOne({ userId }).session(session)
+      if (!wallet)                      abortarHttp(404, { error: 'Wallet no encontrada para este usuario.' })
+      if (wallet.status !== 'frozen')   abortarHttp(400, { error: 'La wallet no está congelada.' })
 
-    const wallet = await WalletBOB.findOne({ userId }).session(session)
-    if (!wallet) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Wallet no encontrada para este usuario.' })
-    }
-    if (wallet.status !== 'frozen') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La wallet no está congelada.' })
-    }
-
-    const now = new Date()
-    await WalletBOB.updateOne({ _id: wallet._id }, {
-      status:        'active',
-      balance:       wallet.balanceFrozen,
-      balanceFrozen: 0,
-      frozenReason:  null,
-      frozenAt:      null,
-      frozenBy:      null,
-    }, { session })
-
-    await WalletTransaction.create([{
-      walletId:      wallet._id,
-      userId,
-      type:          'unfreeze',
-      amount:        wallet.balanceFrozen,
-      balanceBefore: 0,
-      balanceAfter:  wallet.balanceFrozen,
-      status:        'completed',
-      description:   'Wallet descongelada por admin',
-      confirmedBy:   admin._id,
-      confirmedAt:   now,
-    }], { session })
-
-    // Descongelar también el ledger USDC (si estaba congelado).
-    const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
-    if (walletUsdc && walletUsdc.status === 'frozen') {
-      await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+      const now = new Date()
+      await WalletBOB.updateOne({ _id: wallet._id }, {
         status:        'active',
-        balance:       (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0),
+        balance:       wallet.balanceFrozen,
         balanceFrozen: 0,
         frozenReason:  null,
         frozenAt:      null,
         frozenBy:      null,
       }, { session })
-    }
 
-    // Auditoría de acción sensible — atómica con el descongelamiento.
-    await recordAdminAction({
-      req, session,
-      action:     'wallet.unfreeze',
-      targetType: 'User',
-      targetId:   userId,
-      before: {
-        bob:  { status: 'frozen', balanceFrozen: wallet.balanceFrozen },
-        usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'frozen', balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
-      },
-      after: {
-        bob:  { status: 'active', balance: wallet.balanceFrozen },
-        usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'active', balance: (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0) } : null,
-      },
-      reason: reason ?? '',
-    })
+      await WalletTransaction.create([{
+        walletId:      wallet._id,
+        userId,
+        type:          'unfreeze',
+        amount:        wallet.balanceFrozen,
+        balanceBefore: 0,
+        balanceAfter:  wallet.balanceFrozen,
+        status:        'completed',
+        description:   'Wallet descongelada por admin',
+        confirmedBy:   admin._id,
+        confirmedAt:   now,
+      }], { session })
 
-    await session.commitTransaction()
+      // Descongelar también el ledger USDC (si estaba congelado).
+      const walletUsdc = await WalletUSDC.findOne({ userId }).session(session)
+      if (walletUsdc && walletUsdc.status === 'frozen') {
+        await WalletUSDC.updateOne({ _id: walletUsdc._id }, {
+          status:        'active',
+          balance:       (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0),
+          balanceFrozen: 0,
+          frozenReason:  null,
+          frozenAt:      null,
+          frozenBy:      null,
+        }, { session })
+      }
 
-    // Fase 26: registrar descongelamiento en Stellar como evidencia ASFI (fire-and-forget)
-    if (wallet.stellarPublicKey) {
-      unfreezeUserTrustline(wallet.stellarPublicKey, 'USDC').catch(() => {})
-    }
-
-    // Notificar al usuario
-    const unfrozenUser = await User.findById(userId).lean()
-    if (unfrozenUser && process.env.SENDGRID_TEMPLATE_COMPLETED) {
-      sendEmail(
-        unfrozenUser.email,
-        process.env.SENDGRID_TEMPLATE_COMPLETED,
-        {
-          firstName: unfrozenUser.firstName,
-          subject:   'Tu wallet ha sido reactivada',
-          message:   'Tu wallet BOB ha sido reactivada. Ya puedes operar normalmente.',
+      // Auditoría de acción sensible — atómica con el descongelamiento.
+      await recordAdminAction({
+        req, session,
+        action:     'wallet.unfreeze',
+        targetType: 'User',
+        targetId:   userId,
+        before: {
+          bob:  { status: 'frozen', balanceFrozen: wallet.balanceFrozen },
+          usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'frozen', balanceFrozen: walletUsdc.balanceFrozen ?? 0 } : null,
         },
-      ).catch(() => {})
-    }
+        after: {
+          bob:  { status: 'active', balance: wallet.balanceFrozen },
+          usdc: walletUsdc && walletUsdc.status === 'frozen' ? { status: 'active', balance: (walletUsdc.balance ?? 0) + (walletUsdc.balanceFrozen ?? 0) } : null,
+        },
+        reason: reason ?? '',
+      })
 
-    // Push notification — wallet reactivada
-    notify(userId, NOTIFICATIONS.walletUnfrozen(wallet.balanceFrozen)).catch(() => {})
-
-    return res.json({
-      walletId: wallet.walletId,
-      status:   'active',
-      balance:  wallet.balanceFrozen,
+      post = {
+        walletId:         wallet.walletId,
+        stellarPublicKey: wallet.stellarPublicKey,
+        balanceRestituido: wallet.balanceFrozen,
+      }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminUnfreezeWallet' } })
     console.error('[Wallet] Error en adminUnfreezeWallet:', err.message)
     return res.status(500).json({ error: 'Error al descongelar la wallet.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // Fase 26: registrar descongelamiento en Stellar como evidencia ASFI (fire-and-forget)
+  if (post.stellarPublicKey) {
+    unfreezeUserTrustline(post.stellarPublicKey, 'USDC').catch(() => {})
+  }
+
+  // Notificar al usuario
+  const unfrozenUser = await User.findById(userId).lean()
+  if (unfrozenUser && process.env.SENDGRID_TEMPLATE_COMPLETED) {
+    sendEmail(
+      unfrozenUser.email,
+      process.env.SENDGRID_TEMPLATE_COMPLETED,
+      {
+        firstName: unfrozenUser.firstName,
+        subject:   'Tu wallet ha sido reactivada',
+        message:   'Tu wallet BOB ha sido reactivada. Ya puedes operar normalmente.',
+      },
+    ).catch(() => {})
+  }
+
+  // Push notification — wallet reactivada
+  notify(userId, NOTIFICATIONS.walletUnfrozen(post.balanceRestituido)).catch(() => {})
+
+  return res.json({
+    walletId: post.walletId,
+    status:   'active',
+    balance:  post.balanceRestituido,
+  })
 }
 
 // ─── FUNCIÓN 12: GET /api/v1/wallet/deposit/qr-images ────────────────────────
@@ -1815,163 +1803,160 @@ export async function adminListAllWithdrawals(req, res) {
 // ─── FUNCIÓN 13 (ADMIN): POST /api/v1/admin/wallet/withdrawal/confirm ────────
 
 export async function adminConfirmWithdrawal(req, res) {
+  const admin                          = req.user
+  const { wtxId, bankReference, note } = req.body
+
+  if (!wtxId || !bankReference) {
+    return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
+  }
+
+  // El comprobante de la transferencia es OBLIGATORIO: queda como respaldo ASFI y
+  // lo ve el usuario en su perfil. Sin él no se puede confirmar el retiro.
+  if (!req.file) {
+    return res.status(400).json({ error: 'El comprobante de la transferencia es obligatorio para confirmar el retiro.' })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin                         = req.user
-    const { wtxId, bankReference, note } = req.body
+    // Igual que en adminConfirmDeposit, el guard de estado es la LECTURA de acá
+    // (el update no lleva filtro condicional). Con `withTransaction` dos
+    // confirmaciones simultáneas chocan, la perdedora reintenta, relee y cae en
+    // el 404 de 'retiro pendiente no encontrado'. Por eso la lectura no puede
+    // salir del callback.
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
+        abortarHttp(404, { error: 'Retiro pendiente no encontrado.' })
+      }
 
-    if (!wtxId || !bankReference) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId y bankReference son requeridos.' })
-    }
+      const wallet = await WalletBOB.findById(wtx.walletId).session(session)
+      if (!wallet) abortarHttp(404, { error: 'Wallet no encontrada.' })
 
-    // El comprobante de la transferencia es OBLIGATORIO: queda como respaldo ASFI y
-    // lo ve el usuario en su perfil. Sin él no se puede confirmar el retiro.
-    if (!req.file) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El comprobante de la transferencia es obligatorio para confirmar el retiro.' })
-    }
+      const prevBalance = wallet.balance
+      const newBalance  = prevBalance - wtx.amount
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
-    }
+      // Comprobante de la transferencia subido por el admin: queda guardado para
+      // que el usuario lo vea en su perfil como respaldo del retiro.
+      const withdrawalProof = {
+        data:       req.file.buffer.toString('base64'),
+        mimetype:   req.file.mimetype,
+        filename:   req.file.originalname,
+        size:       req.file.size,
+        uploadedAt: new Date(),
+      }
 
-    const wallet = await WalletBOB.findById(wtx.walletId).session(session)
-    if (!wallet) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Wallet no encontrada.' })
-    }
+      // Descontar del saldo real y liberar reserva
+      await WalletBOB.updateOne(
+        { _id: wallet._id },
+        { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } },
+        { session },
+      )
+      await WalletTransaction.updateOne({ _id: wtx._id }, {
+        status:        'completed',
+        balanceBefore: prevBalance,
+        balanceAfter:  newBalance,
+        confirmedBy:   admin._id,
+        confirmedAt:   new Date(),
+        reference:     bankReference,
+        metadata:      {
+          ...(wtx.metadata ?? {}),
+          bankReference,
+          note: note ?? '',
+          withdrawalProof,
+        },
+      }, { session })
 
-    const prevBalance = wallet.balance
-    const newBalance  = prevBalance - wtx.amount
-
-    // Comprobante de la transferencia subido por el admin (opcional pero recomendado):
-    // queda guardado para que el usuario lo vea en su perfil como respaldo del retiro.
-    const withdrawalProof = req.file ? {
-      data:       req.file.buffer.toString('base64'),
-      mimetype:   req.file.mimetype,
-      filename:   req.file.originalname,
-      size:       req.file.size,
-      uploadedAt: new Date(),
-    } : null
-
-    // Descontar del saldo real y liberar reserva
-    await WalletBOB.updateOne(
-      { _id: wallet._id },
-      { $inc: { balance: -wtx.amount, balanceReserved: -wtx.amount } },
-      { session },
-    )
-    await WalletTransaction.updateOne({ _id: wtx._id }, {
-      status:        'completed',
-      balanceBefore: prevBalance,
-      balanceAfter:  newBalance,
-      confirmedBy:   admin._id,
-      confirmedAt:   new Date(),
-      reference:     bankReference,
-      metadata:      {
-        ...(wtx.metadata ?? {}),
-        bankReference,
-        note: note ?? '',
-        ...(withdrawalProof ? { withdrawalProof } : {}),
-      },
-    }, { session })
-
-    await session.commitTransaction()
-
-    // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). El retiro también
-    // debe registrarse on-chain igual que send/deposit; antes faltaba esta llamada
-    // y por eso los retiros quedaban con stellarTxId = null.
-    fireAuditTrail(wtxId, 'withdrawal', wtx.amount, bankReference)
-
-    notify(wtx.userId, NOTIFICATIONS.withdrawalCompleted?.(wtx.amount) ?? {
-      title:   'Retiro procesado',
-      body:    `Tu retiro de Bs. ${wtx.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
-      type:    'wallet',
-    }).catch(() => {})
-
-    return res.json({ wtxId, newBalance, confirmedAt: new Date() })
-
+      post = { userId: wtx.userId, amount: wtx.amount, newBalance }
+    })
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminConfirmWithdrawal' } })
     console.error('[Wallet] Error en adminConfirmWithdrawal:', err.message)
     return res.status(500).json({ error: 'Error al confirmar el retiro.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). El retiro también
+  // debe registrarse on-chain igual que send/deposit; antes faltaba esta llamada
+  // y por eso los retiros quedaban con stellarTxId = null.
+  fireAuditTrail(wtxId, 'withdrawal', post.amount, bankReference)
+
+  notify(post.userId, NOTIFICATIONS.withdrawalCompleted?.(post.amount) ?? {
+    title:   'Retiro procesado',
+    body:    `Tu retiro de Bs. ${post.amount.toFixed(2)} fue transferido a tu cuenta bancaria.`,
+    type:    'wallet',
+  }).catch(() => {})
+
+  return res.json({ wtxId, newBalance: post.newBalance, confirmedAt: new Date() })
 }
 
 // ─── FUNCIÓN 14 (ADMIN): POST /api/v1/admin/wallet/withdrawal/reject ─────────
 
 export async function adminRejectWithdrawal(req, res) {
+  const { wtxId, reason } = req.body
+
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const { wtxId, reason } = req.body
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
+        abortarHttp(404, { error: 'Retiro pendiente no encontrado.' })
+      }
 
-    if (!wtxId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId es requerido.' })
-    }
+      // Saldo actual para el audit trail (el rechazo es neutro en balance: solo
+      // libera la reserva, no descuenta saldo). ASFI: toda op registra balances.
+      const walletBOB = await WalletBOB.findById(wtx.walletId).session(session)
+      const balNow    = walletBOB?.balance ?? wtx.balanceAfter ?? 0
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
-    }
+      // Guard atómico: transición pending → failed condicional (evita doble
+      // liberación de reserva en una carrera confirm/reject concurrente).
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'pending' },
+        {
+          status:        'failed',
+          balanceBefore: balNow,
+          balanceAfter:  balNow,
+          metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
+        },
+        { session },
+      )
+      if (claim.modifiedCount === 0) abortarHttp(409, { error: 'El retiro ya fue procesado.' })
 
-    // Saldo actual para el audit trail (el rechazo es neutro en balance: solo
-    // libera la reserva, no descuenta saldo). ASFI: toda op registra balances.
-    const walletBOB = await WalletBOB.findById(wtx.walletId).session(session)
-    const balNow    = walletBOB?.balance ?? wtx.balanceAfter ?? 0
+      // Liberar la reserva sin descontar el saldo
+      await WalletBOB.updateOne(
+        { _id: wtx.walletId },
+        { $inc: { balanceReserved: -wtx.amount } },
+        { session },
+      )
 
-    // Guard atómico: transición pending → failed condicional (evita doble
-    // liberación de reserva en una carrera confirm/reject concurrente).
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      {
-        status:        'failed',
-        balanceBefore: balNow,
-        balanceAfter:  balNow,
-        metadata:      { ...(wtx.metadata ?? {}), rejectReason: reason ?? '' },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'El retiro ya fue procesado.' })
-    }
-
-    // Liberar la reserva sin descontar el saldo
-    await WalletBOB.updateOne(
-      { _id: wtx.walletId },
-      { $inc: { balanceReserved: -wtx.amount } },
-      { session },
-    )
-
-    await session.commitTransaction()
-
-    notify(wtx.userId, {
-      title: 'Retiro rechazado',
-      body:  `Tu retiro de Bs. ${wtx.amount.toFixed(2)} no pudo procesarse. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
-      type:  'wallet',
-    }).catch(() => {})
-
-    return res.json({ wtxId, status: 'failed' })
-
+      post = { userId: wtx.userId, amount: wtx.amount }
+    })
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminRejectWithdrawal' } })
     console.error('[Wallet] Error en adminRejectWithdrawal:', err.message)
     return res.status(500).json({ error: 'Error al rechazar el retiro.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  notify(post.userId, {
+    title: 'Retiro rechazado',
+    body:  `Tu retiro de Bs. ${post.amount.toFixed(2)} no pudo procesarse. ${reason ? `Motivo: ${reason}` : 'Contáctanos para más información.'}`,
+    type:  'wallet',
+  }).catch(() => {})
+
+  return res.json({ wtxId, status: 'failed' })
 }
 
 // ─── DISPERSIÓN BANCARIA (salida de dinero a cuenta del usuario) ─────────────

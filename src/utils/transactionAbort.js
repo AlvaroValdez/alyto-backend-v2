@@ -54,4 +54,26 @@ export class AbortoDeliberado extends Error {
   }
 }
 
+/**
+ * Corta la transacción de un controlador HTTP devolviendo un código y un cuerpo.
+ *
+ * Es el caso más común: validaciones y guards que antes hacían
+ * `await session.abortTransaction(); return res.status(400).json(...)`. Ahora el
+ * `return` no sirve (haría commit), así que la respuesta viaja en el error y el
+ * `catch` la emite:
+ *
+ *     catch (err) {
+ *       if (err instanceof AbortoDeliberado) {
+ *         return res.status(err.payload.http).json(err.payload.body)
+ *       }
+ *       ...
+ *     }
+ *
+ * @param {number} http — código de estado.
+ * @param {object} body — cuerpo JSON tal cual se quiere responder.
+ */
+export function abortarHttp(http, body) {
+  throw new AbortoDeliberado(`http-${http}`, body?.error ?? `http-${http}`, { http, body });
+}
+
 export default AbortoDeliberado;
