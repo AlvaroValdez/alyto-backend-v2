@@ -48,7 +48,8 @@ import mongoose from 'mongoose';
 import Transaction       from '../models/Transaction.js';
 import WalletTransaction from '../models/WalletTransaction.js';
 import WalletBOB         from '../models/WalletBOB.js';
-import { logger }        from '../utils/logger.js';
+import { logger }           from '../utils/logger.js';
+import { AbortoDeliberado } from '../utils/transactionAbort.js';
 
 import { orderPayout, PURPOSES, PAYOUT_ERRORS } from './bank/disbursementService.js';
 
@@ -164,72 +165,85 @@ async function refundToWallet({ tx, amount, reason, actorId }) {
   const wallet = await getOrCreateWallet(tx.userId);
 
   const session = await mongoose.startSession();
-  session.startTransaction();
+  let resultado;
+
   try {
-    const prevBalance = wallet.balance;
-    const newBalance  = prevBalance + amount;
+    // `withTransaction` reintenta los fallos transitorios del propio MongoDB
+    // (conflictos de escritura, cambios de catálogo, un primario que rota). El
+    // callback puede correr más de una vez, así que adentro no va nada que no
+    // tolere repetirse: el log y el valor de retorno quedan afuera.
+    await session.withTransaction(async () => {
+      // Se relee adentro, no se usa el `wallet` de afuera: en un reintento ese
+      // saldo ya es viejo y `balanceBefore/After` quedarían mintiendo.
+      const w = await WalletBOB.findById(wallet._id).session(session);
+      if (!w) throw new AbortoDeliberado('no_wallet', 'La billetera desapareció entre la creación y el crédito.');
 
-    const [wtx] = await WalletTransaction.create([{
-      walletId:      wallet._id,
-      userId:        tx.userId,
-      // 'refund' y no 'deposit': el usuario no trajo dinero nuevo, se le
-      // devuelve el que ya había entregado. Contarlo como depósito inflaría el
-      // volumen de captación, que es una de las cifras que se reporta.
-      type:          'refund',
-      currency:      'BOB',
-      walletModel:   'WalletBOB',
-      amount,
-      status:        'completed',
-      balanceBefore: prevBalance,
-      balanceAfter:  newBalance,
-      confirmedAt:   new Date(),
-      reference:     tx.alytoTransactionId,
-      metadata:      { refundFor: tx.alytoTransactionId, refundMethod: REFUND_METHODS.WALLET, reason, by: actorId },
-    }], { session });
+      const prevBalance = w.balance;
+      const newBalance  = prevBalance + amount;
 
-    await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: amount } }, { session });
+      const [wtx] = await WalletTransaction.create([{
+        walletId:      w._id,
+        userId:        tx.userId,
+        // 'refund' y no 'deposit': el usuario no trajo dinero nuevo, se le
+        // devuelve el que ya había entregado. Contarlo como depósito inflaría el
+        // volumen de captación, que es una de las cifras que se reporta.
+        type:          'refund',
+        currency:      'BOB',
+        walletModel:   'WalletBOB',
+        amount,
+        status:        'completed',
+        balanceBefore: prevBalance,
+        balanceAfter:  newBalance,
+        confirmedAt:   new Date(),
+        reference:     tx.alytoTransactionId,
+        metadata:      { refundFor: tx.alytoTransactionId, refundMethod: REFUND_METHODS.WALLET, reason, by: actorId },
+      }], { session });
 
-    // Guard atómico: solo una devolución puede escribir la evidencia. Si otra
-    // la escribió entre la lectura y acá, esto no modifica nada y se aborta.
-    const claim = await Transaction.updateOne(
-      { _id: tx._id, $or: [{ 'refund.wtxId': { $exists: false } }, { 'refund.wtxId': { $in: [null, ''] } }] },
-      {
-        $set: {
-          status: 'refunded',
-          refund: {
-            method: REFUND_METHODS.WALLET,
-            wtxId:  wtx.wtxId,
-            amount,
-            currency: 'BOB',
-            at:     new Date(),
-            by:     actorId,
-            reason,
+      await WalletBOB.updateOne({ _id: w._id }, { $inc: { balance: amount } }, { session });
+
+      // Guard atómico: solo una devolución puede escribir la evidencia.
+      const claim = await Transaction.updateOne(
+        { _id: tx._id, $or: [{ 'refund.wtxId': { $exists: false } }, { 'refund.wtxId': { $in: [null, ''] } }] },
+        {
+          $set: {
+            status: 'refunded',
+            refund: {
+              method: REFUND_METHODS.WALLET,
+              wtxId:  wtx.wtxId,
+              amount,
+              currency: 'BOB',
+              at:     new Date(),
+              by:     actorId,
+              reason,
+            },
           },
         },
-      },
-      { session },
-    );
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction();
-      return fail('race', 'Otra devolución escribió la evidencia primero; no se acreditó nada.');
-    }
+        { session },
+      );
+      // Lanzar, no retornar: un `return` acá haría commit del crédito que
+      // justamente se quiere descartar.
+      if (claim.modifiedCount === 0) {
+        throw new AbortoDeliberado('race', 'Otra devolución escribió la evidencia primero; no se acreditó nada.');
+      }
 
-    await session.commitTransaction();
-
-    logger.info('[devolución] Saldo acreditado en billetera', {
-      transactionId: tx.alytoTransactionId, wtxId: wtx.wtxId, amount,
+      resultado = { ok: true, method: REFUND_METHODS.WALLET, state: 'settled', wtxId: wtx.wtxId };
     });
-
-    return { ok: true, method: REFUND_METHODS.WALLET, state: 'settled', wtxId: wtx.wtxId };
   } catch (err) {
-    await session.abortTransaction().catch(() => {});
+    if (err instanceof AbortoDeliberado) return fail(err.code, err.reason);
+
     logger.error('[devolución] Falló el crédito en billetera', {
       transactionId: tx.alytoTransactionId, error: err.message,
     });
     return fail('credit_failed', `No se pudo acreditar el saldo: ${err.message}`);
   } finally {
-    session.endSession();
+    await session.endSession();
   }
+
+  logger.info('[devolución] Saldo acreditado en billetera', {
+    transactionId: tx.alytoTransactionId, wtxId: resultado.wtxId, amount,
+  });
+
+  return resultado;
 }
 
 /**
@@ -395,55 +409,57 @@ export async function settleDispatchedRefund(wtxId, { accepted, bankReference, r
   }
 
   const session = await mongoose.startSession();
-  session.startTransaction();
   try {
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'dispatched' },
-      { $set: { status: 'completed', confirmedAt: new Date(), 'metadata.bankReference': bankReference } },
-      { session },
-    );
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction();
-      return { ok: false, reason: 'already-settled' };
-    }
-
-    // Recién acá la operación sale del pasivo: el banco confirmó que el dinero
-    // volvió. Antes de esto habría sido una afirmación sin respaldo.
-    if (transactionId) {
-      await Transaction.updateOne(
-        { alytoTransactionId: transactionId },
-        {
-          $set: {
-            status: 'refunded',
-            refund: {
-              method:   REFUND_METHODS.BANK,
-              wtxId:    wtx.wtxId,
-              amount:   wtx.amount,
-              currency: 'BOB',
-              at:       new Date(),
-              by:       wtx.metadata?.by,
-              reason:   wtx.metadata?.reason,
-            },
-          },
-        },
+    await session.withTransaction(async () => {
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'dispatched' },
+        { $set: { status: 'completed', confirmedAt: new Date(), 'metadata.bankReference': bankReference } },
         { session },
       );
-    }
+      // Lanzar y no retornar: acá todavía no hay nada escrito, pero el `return`
+      // igual haría commit, y si mañana se agrega una escritura antes de este
+      // punto el error sería silencioso.
+      if (claim.modifiedCount === 0) {
+        throw new AbortoDeliberado('already-settled', 'already-settled');
+      }
 
-    await session.commitTransaction();
-
-    logger.info('[devolución] Confirmada por el banco; pasivo liberado', {
-      wtxId, transactionId, amount: wtx.amount, bankReference,
+      // Recién acá la operación sale del pasivo: el banco confirmó que el dinero
+      // volvió. Antes de esto habría sido una afirmación sin respaldo.
+      if (transactionId) {
+        await Transaction.updateOne(
+          { alytoTransactionId: transactionId },
+          {
+            $set: {
+              status: 'refunded',
+              refund: {
+                method:   REFUND_METHODS.BANK,
+                wtxId:    wtx.wtxId,
+                amount:   wtx.amount,
+                currency: 'BOB',
+                at:       new Date(),
+                by:       wtx.metadata?.by,
+                reason:   wtx.metadata?.reason,
+              },
+            },
+          },
+          { session },
+        );
+      }
     });
-
-    return { ok: true, status: 'completed' };
   } catch (err) {
-    await session.abortTransaction().catch(() => {});
+    if (err instanceof AbortoDeliberado) return { ok: false, reason: err.reason };
+
     logger.error('[devolución] Falló el cierre de la devolución confirmada', { wtxId, error: err.message });
     return { ok: false, reason: err.message };
   } finally {
-    session.endSession();
+    await session.endSession();
   }
+
+  logger.info('[devolución] Confirmada por el banco; pasivo liberado', {
+    wtxId, transactionId, amount: wtx.amount, bankReference,
+  });
+
+  return { ok: true, status: 'completed' };
 }
 
 export { PAYOUT_ERRORS };

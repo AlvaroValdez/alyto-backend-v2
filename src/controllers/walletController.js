@@ -38,6 +38,7 @@ import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
 import { getSrlBankData }   from '../services/srlBankData.js'
 import { recordAdminAction } from '../services/adminAuditService.js'
+import { AbortoDeliberado }  from '../utils/transactionAbort.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
 
@@ -865,76 +866,80 @@ export async function adminConfirmDeposit(req, res) {
  */
 export async function confirmBankQrDeposit(wtx, payment, bankId, source) {
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let newBalance
   try {
-    const wallet = await WalletBOB.findById(wtx.walletId).session(session)
-    if (!wallet) {
-      await session.abortTransaction()
-      return { ok: false, reason: 'wallet_not_found' }
-    }
+    // `withTransaction` reintenta los fallos transitorios de MongoDB en vez de
+    // perder la acreditación de un depósito que el banco ya cobró. El callback
+    // puede correr más de una vez: adentro solo va lo que tolera repetirse, y
+    // para abortar hay que LANZAR, porque un `return` haría commit.
+    await session.withTransaction(async () => {
+      const wallet = await WalletBOB.findById(wtx.walletId).session(session)
+      if (!wallet) throw new AbortoDeliberado('wallet_not_found')
 
-    // `paidAt` ya viene resuelto y con la zona horaria de Bolivia desde el
-    // servicio del banco; la concatenación queda como respaldo.
-    const parsed = payment?.paidAt ?? (payment?.paymentDate && payment?.paymentTime
-      ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
-      : new Date())
-    const paidAt = isNaN(parsed) ? new Date() : parsed
+      // `paidAt` ya viene resuelto y con la zona horaria de Bolivia desde el
+      // servicio del banco; la concatenación queda como respaldo.
+      const parsed = payment?.paidAt ?? (payment?.paymentDate && payment?.paymentTime
+        ? new Date(`${payment.paymentDate.split('T')[0]}T${payment.paymentTime}`)
+        : new Date())
+      const paidAt = isNaN(parsed) ? new Date() : parsed
 
-    const prevBalance = wallet.balance
-    const newBalance  = prevBalance + wtx.amount
+      const prevBalance = wallet.balance
+      newBalance        = prevBalance + wtx.amount
 
-    // Claim atómico — solo procede si la tx sigue pending (anti doble crédito)
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, type: 'deposit', status: 'pending' },
-      {
-        $set: {
-          status:           'completed',
-          balanceBefore:    prevBalance,
-          balanceAfter:     newBalance,
-          confirmedAt:      new Date(),
-          reference:        payment?.qrId ?? wtx.bankQr?.qrId,
-          'bankQr.paidAt':  paidAt,
-          'bankQr.payment': payment,
-          metadata:         { ...(wtx.metadata ?? {}), bankQrSource: source },
+      // Claim atómico — solo procede si la tx sigue pending (anti doble crédito)
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, type: 'deposit', status: 'pending' },
+        {
+          $set: {
+            status:           'completed',
+            balanceBefore:    prevBalance,
+            balanceAfter:     newBalance,
+            confirmedAt:      new Date(),
+            reference:        payment?.qrId ?? wtx.bankQr?.qrId,
+            'bankQr.paidAt':  paidAt,
+            'bankQr.payment': payment,
+            metadata:         { ...(wtx.metadata ?? {}), bankQrSource: source },
+          },
         },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return { ok: false, reason: 'already_processed' }
-    }
+        { session },
+      )
+      if (claim.modifiedCount === 0) throw new AbortoDeliberado('already_processed')
 
-    await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: wtx.amount } }, { session })
-    await session.commitTransaction()
-
-    // Audit trail Stellar — fire and forget
-    fireAuditTrail(wtx.wtxId, 'deposit', wtx.amount, payment?.qrId ?? wtx.bankQr?.qrId)
-
-    // Notificar al usuario (email + push/in-app) — fire and forget
-    User.findById(wtx.userId).lean().then((u) => {
-      if (u?.email) {
-        sendEmail(...EMAILS.walletDepositConfirmed(u, {
-          amount:     wtx.amount,
-          currency:   'BOB',
-          newBalance,
-          wtxId:      wtx.wtxId,
-        })).catch(() => {})
-      }
-    }).catch(() => {})
-    notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
-
-    console.log(`[Wallet] ✅ Depósito bankQr acreditado (${source})`, { wtxId: wtx.wtxId, bankId, amount: wtx.amount })
-    return { ok: true, newBalance }
-
+      await WalletBOB.updateOne({ _id: wallet._id }, { $inc: { balance: wtx.amount } }, { session })
+    })
   } catch (err) {
-    await session.abortTransaction().catch(() => {})
+    // Un aborto deliberado no es una falla: es la respuesta. No se reporta a
+    // Sentry ni se propaga, porque el llamador ya distingue por `reason`.
+    if (err instanceof AbortoDeliberado) return { ok: false, reason: err.reason }
+
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'confirmBankQrDeposit' } })
     console.error('[Wallet] Error en confirmBankQrDeposit:', err.message)
     throw err
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // Todo lo que sigue es posterior al commit y fuera del try: un fallo mandando
+  // un correo no puede parecer un fallo de la acreditación, que ya ocurrió.
+
+  // Audit trail Stellar — fire and forget
+  fireAuditTrail(wtx.wtxId, 'deposit', wtx.amount, payment?.qrId ?? wtx.bankQr?.qrId)
+
+  // Notificar al usuario (email + push/in-app) — fire and forget
+  User.findById(wtx.userId).lean().then((u) => {
+    if (u?.email) {
+      sendEmail(...EMAILS.walletDepositConfirmed(u, {
+        amount:     wtx.amount,
+        currency:   'BOB',
+        newBalance,
+        wtxId:      wtx.wtxId,
+      })).catch(() => {})
+    }
+  }).catch(() => {})
+  notify(wtx.userId, NOTIFICATIONS.depositConfirmed(wtx.amount)).catch(() => {})
+
+  console.log(`[Wallet] ✅ Depósito bankQr acreditado (${source})`, { wtxId: wtx.wtxId, bankId, amount: wtx.amount })
+  return { ok: true, newBalance }
 }
 
 /**

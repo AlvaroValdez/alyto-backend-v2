@@ -23,6 +23,7 @@ import { jest } from '@jest/globals'
 import '../setup.env.js'
 import mongoose from 'mongoose'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
+import { MongoServerError } from 'mongodb'
 
 // El riel bancario se intercepta: lo que importa es la coreografía y la
 // contabilidad, no ATC. El servicio compartido de dispersión sí corre de verdad.
@@ -169,6 +170,55 @@ describe('devolución a la billetera', () => {
 
     expect(r).toMatchObject({ ok: true, state: 'settled' })
     expect((await WalletBOB.findOne({ userId })).balance).toBe(500)
+  })
+})
+
+describe('transacciones: reintento y aborto', () => {
+  // Estas dos cubren el cambio de `startTransaction` manual a `withTransaction`.
+  // El riesgo del cambio es que ahí retornar hace commit: para abortar hay que
+  // lanzar. Si alguien vuelve a poner un `return`, la segunda prueba falla.
+  afterEach(() => jest.restoreAllMocks())
+
+  it('un fallo transitorio de MongoDB se reintenta en vez de perder la devolución', async () => {
+    const tx = await sembrarOperacion()
+    await sembrarBilletera(100)
+
+    const real = WalletBOB.updateOne.bind(WalletBOB)
+    let intentos = 0
+    jest.spyOn(WalletBOB, 'updateOne').mockImplementation((...args) => {
+      if (++intentos === 1) {
+        // Tiene que ser un error del driver, no un Error pelado con la etiqueta
+        // puesta: `withTransaction` exige `instanceof MongoError` antes de mirar
+        // las etiquetas, así que un impostor no se reintenta.
+        const err = new MongoServerError({ message: 'conflicto de escritura simulado' })
+        err.addErrorLabel('TransientTransactionError')
+        throw err
+      }
+      return real(...args)
+    })
+
+    const r = await executeRefund({ transactionId: tx.alytoTransactionId, reason: MOTIVO })
+
+    expect(r).toMatchObject({ ok: true, state: 'settled' })
+    expect(intentos).toBeGreaterThan(1)
+    expect((await WalletBOB.findOne({ userId })).balance).toBe(600)
+    // El reintento no puede dejar dos movimientos ni acreditar dos veces.
+    expect(await WalletTransaction.countDocuments({ type: 'refund' })).toBe(1)
+  })
+
+  it('si pierde la carrera por la evidencia, NO acredita el saldo', async () => {
+    const tx = await sembrarOperacion()
+    await sembrarBilletera(100)
+
+    // Simula que otra devolución escribió la evidencia justo antes del guard.
+    jest.spyOn(Transaction, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const r = await executeRefund({ transactionId: tx.alytoTransactionId, reason: MOTIVO })
+
+    expect(r).toMatchObject({ ok: false, code: 'race' })
+    // Lo que importa: el crédito y el movimiento se descartaron con el aborto.
+    expect((await WalletBOB.findOne({ userId })).balance).toBe(100)
+    expect(await WalletTransaction.countDocuments({ type: 'refund' })).toBe(0)
   })
 })
 
