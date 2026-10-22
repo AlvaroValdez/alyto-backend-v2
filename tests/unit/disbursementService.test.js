@@ -26,13 +26,14 @@ import '../setup.env.js'
 const transferSpy  = jest.fn(async () => ({ bankBatchId: 'lote-1', reference: '100000042' }))
 const balanceSpy   = jest.fn(async () => ({ available: 10_000, ok: true }))
 let   adapterPresente = true
+let   adapterSinSaldo   = false   // simula Red Enlace: no sabe responder el saldo
 
 await jest.unstable_mockModule('../../src/services/bank/bankRegistry.js', () => ({
   getDisbursementAdapter: (provider) => {
     if (!adapterPresente) return null
     return {
       provider: provider ?? 'redenlace',
-      adapter:      { tryGetAvailableBalance: balanceSpy },
+      adapter:      adapterSinSaldo ? {} : { tryGetAvailableBalance: balanceSpy },
       disbursement: { transfer: transferSpy },
     }
   },
@@ -55,6 +56,7 @@ const ordenValida = (extra = {}) => ({
 
 beforeEach(() => {
   adapterPresente = true
+  adapterSinSaldo = false
   transferSpy.mockClear()
   balanceSpy.mockClear()
   transferSpy.mockResolvedValue({ bankBatchId: 'lote-1', reference: '100000042' })
@@ -183,6 +185,34 @@ describe('proveedor y liquidez', () => {
     balanceSpy.mockResolvedValue({ available: 1, ok: true })
     const r = await orderPayout(ordenValida({ amount: 100, liquidityCheck: true }))
     expect(r.code).toBe(PAYOUT_ERRORS.INSUFFICIENT_LIQUIDITY)
+  })
+
+  it('cuando se verifica de verdad, el resultado lo dice', async () => {
+    const r = await orderPayout(ordenValida({ liquidityCheck: true }))
+    expect(r).toMatchObject({ ok: true, liquidityChecked: true })
+  })
+
+  // Este es el caso que antes pasaba en silencio y es el de Red Enlace hoy: el
+  // gate encendido contra un proveedor que no sabe responder el saldo. No debe
+  // bloquear, pero tampoco puede hacerse pasar por verificado.
+  it('proveedor que NO sabe responder el saldo: sale igual pero marcado como no verificado', async () => {
+    adapterSinSaldo = true
+    const r = await orderPayout(ordenValida({ liquidityCheck: true }))
+
+    expect(r.ok).toBe(true)
+    expect(r.liquidityChecked).toBe(false)
+    expect(balanceSpy).not.toHaveBeenCalled()
+  })
+
+  it('con el gate apagado tampoco se declara verificado', async () => {
+    const r = await orderPayout(ordenValida())
+    expect(r).toMatchObject({ ok: true, liquidityChecked: false })
+  })
+
+  it('si la consulta responde ok:false, no se declara verificado', async () => {
+    balanceSpy.mockResolvedValue({ available: null, ok: false })
+    const r = await orderPayout(ordenValida({ liquidityCheck: true }))
+    expect(r).toMatchObject({ ok: true, liquidityChecked: false })
   })
 })
 

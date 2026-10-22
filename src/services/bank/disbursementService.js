@@ -193,15 +193,39 @@ export async function orderPayout(p = {}) {
   // Fail-open deliberado: solo bloquea si la consulta responde y el saldo no
   // alcanza. Un proveedor que no contesta no debe frenar una salida legítima,
   // porque el riel igual rechaza el lote si no hay fondos.
+  //
+  // Hay una tercera posibilidad que antes pasaba en silencio: que el proveedor
+  // NO SEPA responder el saldo. Red Enlace está así hoy, porque su producto de
+  // cuentas de comercio no está integrado. La condición `typeof` saltaba el
+  // bloque sin dejar rastro, así que encender el gate con ese proveedor daba una
+  // falsa sensación de control: ni chequeo ni aviso. Ahora se dice, y el
+  // resultado lo lleva para que el panel pueda mostrarlo.
   const checkLiquidity = liquidityCheck ?? liquidityCheckEnabled();
-  if (checkLiquidity && typeof resolved.adapter.tryGetAvailableBalance === 'function') {
+  const puedeConsultar = typeof resolved.adapter.tryGetAvailableBalance === 'function';
+  let liquidezVerificada = false;
+
+  if (checkLiquidity && !puedeConsultar) {
+    logger.warn(
+      '[dispersión] ⚠️ El pre-check de liquidez está encendido pero el proveedor no sabe responder el saldo: la orden sale SIN verificar fondos',
+      { provider: resolved.provider, purpose, reference },
+    );
+  }
+
+  if (checkLiquidity && puedeConsultar) {
     const { available, ok } = await resolved.adapter.tryGetAvailableBalance();
-    if (ok && available != null && available < Number(amount)) {
-      return fail(
-        PAYOUT_ERRORS.INSUFFICIENT_LIQUIDITY,
-        `Liquidez BOB insuficiente en ${resolved.provider}. Disponible: Bs. ${Number(available).toFixed(2)}, requerido: Bs. ${Number(amount).toFixed(2)}.`,
-        true,
-      );
+    if (ok && available != null) {
+      liquidezVerificada = true;
+      if (available < Number(amount)) {
+        return fail(
+          PAYOUT_ERRORS.INSUFFICIENT_LIQUIDITY,
+          `Liquidez BOB insuficiente en ${resolved.provider}. Disponible: Bs. ${Number(available).toFixed(2)}, requerido: Bs. ${Number(amount).toFixed(2)}.`,
+          true,
+        );
+      }
+    } else {
+      logger.warn('[dispersión] No se pudo leer el saldo del proveedor; la orden sale sin verificar', {
+        provider: resolved.provider, purpose, reference,
+      });
     }
   }
 
@@ -289,5 +313,9 @@ export async function orderPayout(p = {}) {
     bankBatchId: result.bankBatchId,
     reference:   result.reference,
     mock:        !!result._mock,
+    // `false` cuando el gate estaba apagado O cuando el proveedor no supo
+    // responder. Que viaje en el resultado es a propósito: el panel puede decir
+    // "ordenado sin verificar fondos" en vez de dar a entender que se verificó.
+    liquidityChecked: liquidezVerificada,
   };
 }
