@@ -27,6 +27,7 @@ import crypto from 'crypto';
 import { runJob, jobNames } from '../jobs/jobRegistry.js';
 import { internalJobsLimiter } from '../config/rateLimiters.js';
 import { logger } from '../utils/logger.js';
+import { buildInfo } from '../utils/buildInfo.js';
 
 const router = express.Router();
 
@@ -75,6 +76,22 @@ router.use(internalJobsLimiter);
 router.get('/jobs', (req, res) => {
   if (!tokenValid(req)) return rechazar(req, res, 'token inválido o ausente');
   res.json({ jobs: jobNames() });
+});
+
+/**
+ * Qué commit está corriendo este proceso.
+ *
+ * Va acá y NO en `/api/health`, que es público, porque **el repo es público**: un
+ * SHA abierto apunta al código exacto y, comparado contra `main`, delata qué
+ * arreglos todavía NO están desplegados. Ver src/utils/buildInfo.js.
+ *
+ * Nace de una necesidad concreta: el 2026-10-22 no hubo forma de saber si staging
+ * había tomado un cambio, porque `/api/health` devuelve un `version` fijo de
+ * `package.json` y el cambio no era observable por HTTP.
+ */
+router.get('/version', (req, res) => {
+  if (!tokenValid(req)) return rechazar(req, res, 'token inválido o ausente');
+  res.json(buildInfo());
 });
 
 // Disparar un job por nombre.

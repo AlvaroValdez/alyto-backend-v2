@@ -59,9 +59,14 @@ fi
 # ── 2. Construir ──────────────────────────────────────────────────────────────
 # `up` por sí solo reutiliza la imagen existente: sin `build` el despliegue no
 # incluye ningún cambio de código.
-log "Construyendo imágenes: ${SERVICIOS[*]}"
+# GIT_COMMIT se hornea en la imagen para que GET /api/v1/internal/version pueda
+# decir qué commit corre. No se resuelve dentro del contenedor porque la imagen no
+# copia `.git`. Si no se pudo leer el repo queda vacío y el endpoint informa
+# `commit: null`, que es mejor que un valor inventado.
+GIT_COMMIT="$(git -C "$COMPOSE_DIR" rev-parse HEAD 2>/dev/null || true)"
+log "Construyendo imágenes: ${SERVICIOS[*]} (commit ${GIT_COMMIT:-desconocido})"
 docker compose -f "$COMPOSE_DIR/docker-compose.yml" --project-directory "$COMPOSE_DIR" \
-  build "${SERVICIOS[@]}"
+  build --build-arg "GIT_COMMIT=${GIT_COMMIT}" "${SERVICIOS[@]}"
 
 # ── 3. Recrear ────────────────────────────────────────────────────────────────
 log "Recreando contenedores"
