@@ -85,6 +85,7 @@ import {
   updateCLPBOBRate,
   deleteBOBUSDCOverride,
 } from '../controllers/exchangeRateController.js';
+import { getEcpStatus } from '../controllers/ecpAdminController.js';
 import {
   listKYBApplications,
   getKYBApplication,
@@ -489,6 +490,21 @@ router.get('/wallet-fees/revenue', getWalletFeeRevenue);
 router.post('/wallet-fees/harvest-revenue', harvestRevenueToTreasury);
 router.get('/wallet-fees', getWalletFeeConfig);
 router.put('/wallet-fees', updateWalletFeeConfig);
+
+// ─── Entorno Controlado de Pruebas (ASFI) ─────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/ecp/status
+ *
+ * Alcance autorizado, límites, consumo y remanente del ECP. Solo lectura.
+ *
+ * Los límites ya se aplicaban en el camino de la cotización, pero no había forma
+ * de mirarlos. La no objeción ASFI/DSC/R-184706/2026 exige entre sus criterios de
+ * aprobación que "los límites autorizados sean respetados" y que exista
+ * "trazabilidad completa": poder mostrar el consumo contra el tope en cualquier
+ * momento es parte de poder demostrarlo.
+ */
+router.get('/ecp/status', getEcpStatus);
 
 // ─── Tasas de Cambio ──────────────────────────────────────────────────────────
 
