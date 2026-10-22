@@ -12,8 +12,58 @@
 import sgMail from '@sendgrid/mail';
 import Sentry  from './sentry.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
+import { isRealProductionEnv } from '../utils/environment.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? '');
+
+/**
+ * ¿Debe salir correo desde ESTE proceso?
+ *
+ * ── Por qué existe ───────────────────────────────────────────────────────────
+ *
+ * La cuenta de SendGrid es de plan gratuito con tope DURO de 100 correos al día,
+ * y **staging comparte la misma clave que producción**, así que le come el cupo.
+ * Medido el 2026-10-22: de 108 correos del día, 38 fueron a `@test.alyto.io`
+ * (altas de prueba de staging), 55 a `admin@alyto.app` (en buena parte alertas
+ * sobre transacciones de prueba que en producción no existen), 12 a cuentas
+ * desechables de una sonda… y **cero a un usuario real**. Ese mismo día el tope
+ * bloqueó tres cosas que sí importaban: el aviso a una clienta de que su dinero
+ * no se había entregado, la alerta al admin de esa reversión, y una alerta de
+ * seguridad.
+ *
+ * El cupo es de producción. Staging no tiene por qué gastarlo, y encima sus
+ * correos van a direcciones que no existen: `test.alyto.io` no tiene MX y rebotan.
+ *
+ * ── El discriminante ─────────────────────────────────────────────────────────
+ *
+ * `isRealProductionEnv()`, el canónico del repo, que NO se apoya en `NODE_ENV` a
+ * secas porque Render staging también corre `NODE_ENV=production` a propósito. La
+ * señal real es la presencia de `AWS_SECRETS_NAME`, que solo tiene el VPS.
+ * Verificado en el contenedor de producción ANTES de activar esto:
+ * `AWS_SECRETS_NAME=alyto/production` y `NODE_ENV=production`, así que producción
+ * sigue enviando.
+ *
+ * ── La salida de emergencia ──────────────────────────────────────────────────
+ *
+ * `EMAIL_FORCE_SEND=true` reactiva el envío en cualquier entorno, para cuando
+ * haya que probar un correo de verdad en staging. Explícita y reversible.
+ *
+ * @param {object} ctx — para que el log diga QUÉ se omitió
+ * @returns {boolean}
+ */
+function puedeEnviarCorreo(ctx = {}) {
+  if (isRealProductionEnv()) return true;
+  if (String(process.env.EMAIL_FORCE_SEND ?? '').trim().toLowerCase() === 'true') return true;
+
+  // Se avisa en CADA omisión, no una sola vez por proceso: si alguien espera un
+  // correo en staging, tiene que poder encontrar el motivo en el log.
+  console.warn(
+    '[Alyto Email] OMITIDO: este proceso no es producción real y el cupo de SendGrid es de producción. ' +
+    'Para enviar de verdad desde acá: EMAIL_FORCE_SEND=true',
+    ctx,
+  );
+  return false;
+}
 
 /**
  * Extrae el motivo REAL de un fallo de SendGrid.
@@ -184,9 +234,13 @@ function maskDocument(doc) {
  * Envía un email transaccional usando una Dynamic Template de SendGrid.
  * Nunca lanza excepción — maneja errores internamente.
  *
+ * ⚠️ Devuelve si el correo SALIÓ, igual que `sendRawEmail`. Fuera de producción
+ * real no sale nada y devuelve `false` — ver `puedeEnviarCorreo`.
+ *
  * @param {string} to          — Email destinatario
  * @param {string} templateId  — ID del Dynamic Template en SendGrid
  * @param {object} dynamicData — Variables dinámicas del template
+ * @returns {Promise<boolean>} true solo si SendGrid lo aceptó
  */
 export async function sendEmail(to, templateId, dynamicData) {
   if (!process.env.SENDGRID_API_KEY) {
@@ -194,8 +248,9 @@ export async function sendEmail(to, templateId, dynamicData) {
       to,
       templateId,
     });
-    return;
+    return false;
   }
+  if (!puedeEnviarCorreo({ to, templateId })) return false;
 
   const msg = {
     to,
@@ -210,6 +265,7 @@ export async function sendEmail(to, templateId, dynamicData) {
   try {
     await sgMail.send(msg);
     console.info('[Alyto Email] Email enviado.', { to, templateId });
+    return true;
   } catch (err) {
     const detalle = detalleSendGrid(err);
     console.error('[Alyto Email] Error enviando email:', { to, templateId, ...detalle });
@@ -217,6 +273,7 @@ export async function sendEmail(to, templateId, dynamicData) {
       tags:  { component: 'emailService' },
       extra: { to, templateId, ...detalle },
     });
+    return false;
   }
 }
 
@@ -245,6 +302,8 @@ export async function sendRawEmail(to, subject, html) {
     console.warn('[Alyto Email] SENDGRID_API_KEY no configurado — email raw omitido.', { to, subject });
     return false;
   }
+  if (!puedeEnviarCorreo({ to, subject })) return false;
+
   try {
     await sgMail.send({
       to,
