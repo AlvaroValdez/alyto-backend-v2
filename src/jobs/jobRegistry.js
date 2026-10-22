@@ -52,6 +52,13 @@ const JOBS = {
     import('./reclamosVencimientosMonitor.js').then((m) => m.reclamosVencimientosMonitor),
   'ros-monitor-wallet': () =>
     import('./rosMonitorWallet.js').then((m) => m.rosMonitorWallet),
+  // Reconocimiento contra el acceso: una IP tocando muchas cuentas distintas a lo
+  // largo de horas. Ni el límite por cuenta (`failedStreak`) ni el por IP
+  // (`loginLimiter`) lo ven, porque el patrón no es volumen sino dispersión. Solo
+  // AVISA: bloquear por IP rompería a los usuarios detrás de un CGNAT, que es el
+  // bug que se arregló en el PR #36. Ver jobs/monitorAuthAnomalies.js.
+  'auth-anomalies': () =>
+    import('./monitorAuthAnomalies.js').then((m) => m.monitorAuthAnomalies),
   // Red de seguridad del QR bancario boliviano (BEC/BANECO) ante IPN perdidos, y
   // alerta de retiros 'dispatched' sin confirmar. Ambos se programan dentro del gate
   // `if (!externalScheduler)` de app.js: sin esta entrada quedaban HUÉRFANOS en

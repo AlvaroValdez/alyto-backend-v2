@@ -869,6 +869,14 @@ async function startServer() {
       console.info('[Server] Reclamos vencimientos monitor programado cada 6h');
       console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
 
+      // Reconocimiento contra el acceso — una IP tocando muchas cuentas distintas.
+      // Solo avisa; bloquear por IP rompería a los usuarios detrás de un CGNAT.
+      // Ver jobs/monitorAuthAnomalies.js.
+      const { monitorAuthAnomalies } = await import('./jobs/monitorAuthAnomalies.js');
+      setTimeout(monitorAuthAnomalies, 6 * 60 * 1000);            // primera corrida 6 min post-start
+      setInterval(monitorAuthAnomalies, 60 * 60 * 1000);          // cada 1h
+      console.info('[Server] Monitor de anomalías de acceso programado cada 1h');
+
       // Reconciliación QR bancario boliviano — safety net para IPN perdidos
       const { reconcileBankQrPayments } = await import('./jobs/reconcileBankQrPayments.js');
       setTimeout(reconcileBankQrPayments, 5 * 60 * 1000);              // primera corrida 5 min post-start

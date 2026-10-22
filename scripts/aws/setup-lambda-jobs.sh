@@ -176,6 +176,9 @@ RULES=(
   "alyto-cron-alert-pending-withdrawals|rate(30 minutes)|alert-pending-withdrawals"
   "alyto-cron-audit-wallet-reserves|rate(6 hours)|audit-wallet-reserves"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
+  # Cada hora, no más seguido: la ventana que mira es de 24 h y el throttle del
+  # aviso es de 6 h por IP, así que correr más a menudo no adelanta nada.
+  "alyto-cron-auth-anomalies|rate(1 hour)|auth-anomalies"
   # Semanal: OFAC y ONU publican cambios varias veces por semana, pero una
   # recarga completa cuesta ~20 s y 18.500 upserts. Semanal es el equilibrio.
   "alyto-cron-refresh-sanctions|rate(7 days)|refresh-sanctions"
