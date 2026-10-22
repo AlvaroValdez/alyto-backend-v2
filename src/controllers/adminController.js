@@ -2414,57 +2414,67 @@ export async function cancelExpiredSep24(req, res) {
       `(sin transacción Stellar, sin referencia externa y sin eventos de proveedor). Cierre administrativo. ` +
       `Sin impacto patrimonial para el usuario.`;
 
+    // Una sesión POR instrucción: el cierre de una no debe arrastrar a las otras.
     const session = await mongoose.startSession();
-    session.startTransaction();
     try {
-      // Guard atómico: la transición solo procede si el documento sigue en un
-      // estado SEP-24 pendiente. Si otro operador ganó la carrera, no hacemos nada.
-      const updated = await Transaction.findOneAndUpdate(
-        { _id: tx._id, status: { $in: SEP24_PENDING_STATUSES } },
-        {
-          $set:  { status: 'cancelled', statusReason },
-          $push: {
-            ipnLog: {
-              provider:   'manual',
-              eventType:  'sep24_expired_cancelled',
-              status:     'cancelled',
-              rawPayload: { reason: justification, previousStatus: tx.status },
-              receivedAt: now,
+      // `withTransaction` reintenta el conflicto de escritura en vez de reportar
+      // la instrucción como 'error' y obligar al operador a repetir la llamada.
+      // El callback puede correr más de una vez, así que `results.push` queda
+      // AFUERA: adentro acumularía una entrada por intento.
+      let cerrada = false;
+
+      await session.withTransaction(async () => {
+        // Guard atómico: la transición solo procede si el documento sigue en un
+        // estado SEP-24 pendiente. Si otro operador ganó la carrera, no hacemos nada.
+        const updated = await Transaction.findOneAndUpdate(
+          { _id: tx._id, status: { $in: SEP24_PENDING_STATUSES } },
+          {
+            $set:  { status: 'cancelled', statusReason },
+            $push: {
+              ipnLog: {
+                provider:   'manual',
+                eventType:  'sep24_expired_cancelled',
+                status:     'cancelled',
+                rawPayload: { reason: justification, previousStatus: tx.status },
+                receivedAt: now,
+              },
             },
           },
-        },
-        { session, returnDocument: 'after' },
-      );
+          { session, returnDocument: 'after' },
+        );
 
-      if (!updated) {
-        await session.abortTransaction();
-        results.push({
+        // Perder la carrera no es un error: no se escribió nada, así que salir
+        // por `return` es correcto acá y el commit queda vacío.
+        if (!updated) return;
+
+        // La auditoría va en la misma transacción: si no se puede registrar
+        // quién cerró la instrucción y por qué, el cierre se revierte.
+        await recordAdminAction({
+          req, session,
+          action:     'transaction.sep24_expired_cancel',
+          targetType: 'Transaction',
+          targetId:   tx.alytoTransactionId ?? String(tx._id),
+          before:     { status: tx.status, expiresAt: tx.expiresAt },
+          after:      { status: 'cancelled', statusReason },
+          reason:     justification,
+          metadata:   {
+            sep24Type: tx.sep24Type ?? null,
+            amount:    tx.originalAmount ?? null,
+            currency:  tx.originCurrency ?? null,
+          },
+        });
+
+        cerrada = true;
+      });
+
+      results.push(cerrada
+        ? { id: tx.alytoTransactionId ?? String(tx._id), outcome: 'cancelled' }
+        : {
           id: tx.alytoTransactionId ?? String(tx._id),
           outcome: 'skipped',
           blockers: ['otro proceso modificó el estado durante la operación'],
         });
-        continue;
-      }
-
-      await recordAdminAction({
-        req, session,
-        action:     'transaction.sep24_expired_cancel',
-        targetType: 'Transaction',
-        targetId:   tx.alytoTransactionId ?? String(tx._id),
-        before:     { status: tx.status, expiresAt: tx.expiresAt },
-        after:      { status: 'cancelled', statusReason },
-        reason:     justification,
-        metadata:   {
-          sep24Type: tx.sep24Type ?? null,
-          amount:    tx.originalAmount ?? null,
-          currency:  tx.originCurrency ?? null,
-        },
-      });
-
-      await session.commitTransaction();
-      results.push({ id: tx.alytoTransactionId ?? String(tx._id), outcome: 'cancelled' });
     } catch (err) {
-      await session.abortTransaction().catch(() => {});
       console.error('[Admin cancelExpiredSep24] Error cerrando instrucción:', {
         id: tx.alytoTransactionId ?? String(tx._id), error: err.message,
       });

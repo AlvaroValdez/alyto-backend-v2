@@ -28,6 +28,7 @@ import User              from '../models/User.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
+import { AbortoDeliberado, abortarHttp } from '../utils/transactionAbort.js'
 import { normalizeAlias } from './aliasController.js'
 
 // Comisión P2P USDC — configurable desde WalletFeeConfig (P3). Arranca en 0
@@ -309,134 +310,139 @@ function isUSDCtoBOBAutoEligible(user, usdcAmount) {
  * Body: { amount: number } — monto en BOB a convertir
  */
 export async function requestBOBtoUSDC(req, res) {
+  const user        = req.user
+  const amount      = Number(req.body.amount)
+  const MIN_CONVERT = 50   // Bs. mínimo para conversión
+
+  // Validación de entrada fuera de la transacción: no toca la base.
+  if (user.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'La conversión BOB→USDC es exclusiva para usuarios Bolivia (SRL).' })
+  }
+  if (user.kycStatus !== 'approved') {
+    return res.status(403).json({ error: 'Debes completar la verificación de identidad (KYC) para convertir fondos.' })
+  }
+  if (!amount || isNaN(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'El campo amount es requerido y debe ser mayor a 0.' })
+  }
+  if (amount < MIN_CONVERT) {
+    return res.status(400).json({ error: `El monto mínimo de conversión es Bs. ${MIN_CONVERT}.` })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const user        = req.user
-    const amount      = Number(req.body.amount)
-    const MIN_CONVERT = 50   // Bs. mínimo para conversión
-
-    if (user.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'La conversión BOB→USDC es exclusiva para usuarios Bolivia (SRL).' })
-    }
-    if (user.kycStatus !== 'approved') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Debes completar la verificación de identidad (KYC) para convertir fondos.' })
-    }
-    if (!amount || isNaN(amount) || amount <= 0) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El campo amount es requerido y debe ser mayor a 0.' })
-    }
-    if (amount < MIN_CONVERT) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `El monto mínimo de conversión es Bs. ${MIN_CONVERT}.` })
-    }
-
-    // Verificar wallet BOB activa
-    const walletBOBCheck = await WalletBOB.findOne({ userId: user._id }).session(session).lean()
-    if (!walletBOBCheck) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'No tienes una wallet BOB activa. Deposita primero.' })
-    }
-    if (walletBOBCheck.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
-    }
-
-    // Obtener tasa de cambio BOB/USDC (con desglose para registrar la ganancia por spread)
-    const rate        = await getBOBtoUSDCRate()
-    const bobPerUsdc  = rate.bobPerUsdc
-    const usdcAmount  = parseFloat((amount / bobPerUsdc).toFixed(6))
-
-    // Obtener o crear WalletUSDC (por si es la primera vez)
-    const walletUSDC = await getOrCreateWalletUSDC(user._id, session)
-    if (walletUSDC.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
-    }
-
-    // Reservar el monto BOB atómicamente — verifica saldo disponible en la misma operación
-    // para prevenir double-spend por requests concurrentes del mismo usuario.
-    const walletBOB = await WalletBOB.findOneAndUpdate(
-      {
-        _id:    walletBOBCheck._id,
-        status: 'active',
-        $expr:  { $gte: [{ $subtract: ['$balance', '$balanceReserved'] }, amount] },
-      },
-      { $inc: { balanceReserved: amount } },
-      { returnDocument: 'after', session },
-    )
-    if (!walletBOB) {
-      const available = Math.max(0, walletBOBCheck.balance - walletBOBCheck.balanceReserved)
-      await session.abortTransaction()
-      return res.status(400).json({ error: `Saldo BOB insuficiente. Disponible: Bs. ${available.toFixed(2)}.` })
-    }
-
-    // Crear WalletTransaction pending
-    const [wtx] = await WalletTransaction.create([{
-      walletId:     walletBOB._id,
-      walletModel:  'WalletBOB',
-      userId:       user._id,
-      currency:     'BOB',
-      type:         'bob_to_usdc',
-      amount,
-      balanceBefore: walletBOB.balance,
-      balanceAfter:  walletBOB.balance,  // se actualiza cuando admin confirme
-      status:        'pending',
-      description:   `Conversión BOB→USDC: Bs. ${amount.toFixed(2)} → ${usdcAmount.toFixed(6)} USDC`,
-      metadata: {
-        bobAmount:   amount,
-        usdcAmount,
-        bobPerUsdc,
-        marketRate:  rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
-        spreadPct:   rate.spreadPct,
-        walletUSDCId: walletUSDC._id.toString(),
-        walletBOBId:  walletBOB._id.toString(),
-      },
-    }], { session })
-
-    await session.commitTransaction()
-
-    // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard de
-    // liquidez de tesorería). Si la tesorería no alcanza, el confirm devuelve 409 → la
-    // conversión queda 'pending' (cola admin) automáticamente.
-    if (isBOBtoUSDCAutoEligible(user, amount)) {
-      const { res: capRes, out } = captureRes()
-      await adminConfirmBOBtoUSDC({ user: { _id: null }, body: { wtxId: wtx.wtxId, note: 'auto' } }, capRes)
-      if (out.statusCode === 200 && out.body && !out.body.error) {
-        return res.status(201).json({
-          ...out.body,
-          bobAmount: amount, usdcAmount, bobPerUsdc,
-          status: 'completed', auto: true,
-          message: 'Conversión completada al instante.',
-        })
+    // `withTransaction` reintenta los conflictos de escritura. El callback puede
+    // correr más de una vez: adentro solo va lo que tolera repetirse, y para
+    // abortar hay que LANZAR porque un `return` haría commit.
+    await session.withTransaction(async () => {
+      // Verificar wallet BOB activa
+      const walletBOBCheck = await WalletBOB.findOne({ userId: user._id }).session(session).lean()
+      if (!walletBOBCheck) {
+        abortarHttp(400, { error: 'No tienes una wallet BOB activa. Deposita primero.' })
       }
-      // No se pudo auto-confirmar (p. ej. liquidez) → degradar a cola admin (pending).
-    }
+      if (walletBOBCheck.status !== 'active') {
+        abortarHttp(403, { error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
+      }
 
-    // Notificar a admins — push + in-app
-    const fullName = `${user.firstName} ${user.lastName}`.trim();
-    notifyAdmins(NOTIFICATIONS.adminConversionRequest(amount, usdcAmount, fullName)).catch(() => {});
+      // Obtener tasa de cambio BOB/USDC (con desglose para registrar la ganancia por spread)
+      const rate        = await getBOBtoUSDCRate()
+      const bobPerUsdc  = rate.bobPerUsdc
+      const usdcAmount  = parseFloat((amount / bobPerUsdc).toFixed(6))
 
-    return res.status(201).json({
-      wtxId:       wtx.wtxId,
-      bobAmount:   amount,
-      usdcAmount,
-      bobPerUsdc,
-      status:      'pending',
-      message:     'Solicitud de conversión recibida. El equipo Alyto procesará la conversión en 1-4 horas hábiles.',
+      // Obtener o crear WalletUSDC (por si es la primera vez)
+      const walletUSDC = await getOrCreateWalletUSDC(user._id, session)
+      if (walletUSDC.status !== 'active') {
+        abortarHttp(403, { error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
+      }
+
+      // Reservar el monto BOB atómicamente — verifica saldo disponible en la misma operación
+      // para prevenir double-spend por requests concurrentes del mismo usuario.
+      const walletBOB = await WalletBOB.findOneAndUpdate(
+        {
+          _id:    walletBOBCheck._id,
+          status: 'active',
+          $expr:  { $gte: [{ $subtract: ['$balance', '$balanceReserved'] }, amount] },
+        },
+        { $inc: { balanceReserved: amount } },
+        { returnDocument: 'after', session },
+      )
+      if (!walletBOB) {
+        const available = Math.max(0, walletBOBCheck.balance - walletBOBCheck.balanceReserved)
+        abortarHttp(400, { error: `Saldo BOB insuficiente. Disponible: Bs. ${available.toFixed(2)}.` })
+      }
+
+      // Crear WalletTransaction pending
+      const [wtx] = await WalletTransaction.create([{
+        walletId:     walletBOB._id,
+        walletModel:  'WalletBOB',
+        userId:       user._id,
+        currency:     'BOB',
+        type:         'bob_to_usdc',
+        amount,
+        balanceBefore: walletBOB.balance,
+        balanceAfter:  walletBOB.balance,  // se actualiza cuando admin confirme
+        status:        'pending',
+        description:   `Conversión BOB→USDC: Bs. ${amount.toFixed(2)} → ${usdcAmount.toFixed(6)} USDC`,
+        metadata: {
+          bobAmount:   amount,
+          usdcAmount,
+          bobPerUsdc,
+          marketRate:  rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
+          spreadPct:   rate.spreadPct,
+          walletUSDCId: walletUSDC._id.toString(),
+          walletBOBId:  walletBOB._id.toString(),
+        },
+      }], { session })
+
+      post = { wtxId: wtx.wtxId, usdcAmount, bobPerUsdc }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'requestBOBtoUSDC' } })
     console.error('[WalletUSDC] Error en requestBOBtoUSDC:', err.message)
     return res.status(500).json({ error: 'Error al procesar la solicitud de conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  const { wtxId, usdcAmount, bobPerUsdc } = post
+
+  // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard de
+  // liquidez de tesorería). Si la tesorería no alcanza, el confirm devuelve 409 → la
+  // conversión queda 'pending' (cola admin) automáticamente.
+  //
+  // Va acá y no dentro del callback por dos razones: abre su propia transacción,
+  // y un reintento la dispararía dos veces.
+  if (isBOBtoUSDCAutoEligible(user, amount)) {
+    const { res: capRes, out } = captureRes()
+    await adminConfirmBOBtoUSDC({ user: { _id: null }, body: { wtxId, note: 'auto' } }, capRes)
+    if (out.statusCode === 200 && out.body && !out.body.error) {
+      return res.status(201).json({
+        ...out.body,
+        bobAmount: amount, usdcAmount, bobPerUsdc,
+        status: 'completed', auto: true,
+        message: 'Conversión completada al instante.',
+      })
+    }
+    // No se pudo auto-confirmar (p. ej. liquidez) → degradar a cola admin (pending).
+  }
+
+  // Notificar a admins — push + in-app
+  notifyAdmins(NOTIFICATIONS.adminConversionRequest(
+    amount, usdcAmount, `${user.firstName} ${user.lastName}`.trim(),
+  )).catch(() => {});
+
+  return res.status(201).json({
+    wtxId,
+    bobAmount:   amount,
+    usdcAmount,
+    bobPerUsdc,
+    status:      'pending',
+    message:     'Solicitud de conversión recibida. El equipo Alyto procesará la conversión en 1-4 horas hábiles.',
+  })
 }
 
 // ─── FUNCIÓN 4 (ADMIN): POST /api/v1/admin/wallet/usdc/conversions/confirm ───
@@ -453,50 +459,37 @@ export async function requestBOBtoUSDC(req, res) {
  * Body: { wtxId, note? }
  */
 export async function adminConfirmBOBtoUSDC(req, res) {
+  const admin = req.user
+  const { wtxId, note } = req.body
+
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin = req.user
-    const { wtxId, note } = req.body
+    // La lectura del estado va DENTRO del callback: es lo que, junto al claim
+    // condicional de abajo, impide una doble acreditación. Un reintento relee y
+    // cae en el guard de 'ya fue procesada'.
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx)                        abortarHttp(404, { error: 'Transacción no encontrada.' })
+      if (wtx.type !== 'bob_to_usdc')  abortarHttp(400, { error: 'La transacción no es una conversión BOB→USDC.' })
+      if (wtx.status !== 'pending') {
+        abortarHttp(400, { error: `La conversión ya fue procesada (status: ${wtx.status}).` })
+      }
 
-    if (!wtxId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId es requerido.' })
-    }
+      const { bobAmount, usdcAmount, walletUSDCId, walletBOBId } = wtx.metadata ?? {}
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Transacción no encontrada.' })
-    }
-    if (wtx.type !== 'bob_to_usdc') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La transacción no es una conversión BOB→USDC.' })
-    }
-    if (wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `La conversión ya fue procesada (status: ${wtx.status}).` })
-    }
+      if (!bobAmount || !usdcAmount || !walletUSDCId || !walletBOBId) {
+        abortarHttp(400, { error: 'Metadata de conversión incompleta. No se puede procesar.' })
+      }
 
-    const { bobAmount, usdcAmount, walletUSDCId, walletBOBId } = wtx.metadata ?? {}
+      const walletBOB  = await WalletBOB.findById(walletBOBId).session(session)
+      const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
 
-    if (!bobAmount || !usdcAmount || !walletUSDCId || !walletBOBId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Metadata de conversión incompleta. No se puede procesar.' })
-    }
-
-    const walletBOB  = await WalletBOB.findById(walletBOBId).session(session)
-    const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
-
-    if (!walletBOB) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletBOB no encontrada.' })
-    }
-    if (!walletUSDC) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletUSDC no encontrada.' })
-    }
+      if (!walletBOB)  abortarHttp(404, { error: 'WalletBOB no encontrada.' })
+      if (!walletUSDC) abortarHttp(404, { error: 'WalletUSDC no encontrada.' })
 
     // 0a. Guard de liquidez de tesorería — prevención de sub-colateralización.
     // La conversión BOB→USDC acredita USDC respaldado por la TESORERÍA (el usuario paga
@@ -513,138 +506,143 @@ export async function adminConfirmBOBtoUSDC(req, res) {
     //     que es exactamente el camino manual de antes. Se pospone, no se pierde.
     // Sin esta distinción, activar la auto-conversión convertía una caída de Horizon en
     // acreditación de USDC sin verificar colateral y sin que nadie lo revise.
-    const isAutoConfirm = note === 'auto'
-    if (process.env.USDC_CONVERT_LIQUIDITY_GUARD !== 'false') {
-      try {
-        const { getUSDCAvailableNow } = await import('../services/treasuryLiquidity.js')
-        const { available } = await getUSDCAvailableNow('SRL')
-        if (available != null && available < usdcAmount) {
-          await session.abortTransaction()
-          return res.status(409).json({
-            error: `Liquidez de tesorería USDC insuficiente para respaldar la conversión. Disponible: ${available.toFixed(2)} USDC · requerido: ${usdcAmount.toFixed(2)} USDC. Fondea la tesorería antes de confirmar.`,
-            code:      'INSUFFICIENT_TREASURY_USDC',
-            available: Number(available.toFixed(6)),
-            required:  usdcAmount,
-          })
+      const isAutoConfirm = note === 'auto'
+      if (process.env.USDC_CONVERT_LIQUIDITY_GUARD !== 'false') {
+        try {
+          const { getUSDCAvailableNow } = await import('../services/treasuryLiquidity.js')
+          const { available } = await getUSDCAvailableNow('SRL')
+          if (available != null && available < usdcAmount) {
+            abortarHttp(409, {
+              error: `Liquidez de tesorería USDC insuficiente para respaldar la conversión. Disponible: ${available.toFixed(2)} USDC · requerido: ${usdcAmount.toFixed(2)} USDC. Fondea la tesorería antes de confirmar.`,
+              code:      'INSUFFICIENT_TREASURY_USDC',
+              available: Number(available.toFixed(6)),
+              required:  usdcAmount,
+            })
+          }
+        } catch (guardErr) {
+          // El aborto por déficit confirmado viaja como AbortoDeliberado y NO es
+          // un fallo del guard: hay que dejarlo pasar o el fail-open de abajo se
+          // lo comería y acreditaría igual.
+          if (guardErr instanceof AbortoDeliberado) throw guardErr
+
+          if (isAutoConfirm) {
+            // Sin humano en el circuito no se acredita a ciegas: queda 'pending' para el admin.
+            console.warn('[WalletUSDC] guard liquidez tesorería fail-closed (auto):', guardErr.message)
+            abortarHttp(409, {
+              error: 'No se pudo verificar la liquidez de la tesorería. La conversión queda pendiente de confirmación manual.',
+              code:  'TREASURY_CHECK_UNAVAILABLE',
+            })
+          }
+          // Confirmación de admin: fail-open, hay un humano evaluando la operación.
+          console.warn('[WalletUSDC] guard liquidez tesorería fail-open (admin):', guardErr.message)
         }
-      } catch (guardErr) {
-        if (isAutoConfirm) {
-          // Sin humano en el circuito no se acredita a ciegas: queda 'pending' para el admin.
-          await session.abortTransaction()
-          console.warn('[WalletUSDC] guard liquidez tesorería fail-closed (auto):', guardErr.message)
-          return res.status(409).json({
-            error: 'No se pudo verificar la liquidez de la tesorería. La conversión queda pendiente de confirmación manual.',
-            code:  'TREASURY_CHECK_UNAVAILABLE',
-          })
-        }
-        // Confirmación de admin: fail-open, hay un humano evaluando la operación.
-        console.warn('[WalletUSDC] guard liquidez tesorería fail-open (admin):', guardErr.message)
       }
-    }
 
-    const now              = new Date()
-    const prevBalanceBOB   = walletBOB.balance
-    const newBalanceBOB    = prevBalanceBOB - bobAmount
-    const prevBalanceUSDC  = walletUSDC.balance
-    const newBalanceUSDC   = prevBalanceUSDC + usdcAmount
+      const now              = new Date()
+      const prevBalanceBOB   = walletBOB.balance
+      const newBalanceBOB    = prevBalanceBOB - bobAmount
+      const prevBalanceUSDC  = walletUSDC.balance
+      const newBalanceUSDC   = prevBalanceUSDC + usdcAmount
 
-    // 0. Guard atómico: transición pending → completed condicional. Si un
-    // confirm/reject concurrente ganó la carrera, modifiedCount === 0 → abortamos
-    // limpio con 409 (no dependemos solo de la detección de write-conflict, que
-    // produciría un 500 opaco).
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      {
+      // 0. Guard atómico: transición pending → completed condicional. Si un
+      // confirm/reject concurrente ganó la carrera, modifiedCount === 0 → abortamos
+      // limpio con 409 (no dependemos solo de la detección de write-conflict, que
+      // produciría un 500 opaco).
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'pending' },
+        {
+          status:        'completed',
+          balanceBefore: prevBalanceBOB,
+          balanceAfter:  newBalanceBOB,
+          confirmedBy:   admin._id,
+          confirmedAt:   now,
+          metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
+        },
+        { session },
+      )
+      if (claim.modifiedCount === 0) abortarHttp(409, { error: 'La conversión ya fue procesada.' })
+
+      // 1. Debitar BOB y liberar reserva
+      await WalletBOB.updateOne({ _id: walletBOB._id }, {
+        $inc: { balance: -bobAmount, balanceReserved: -bobAmount },
+      }, { session })
+
+      // 2. Acreditar USDC
+      await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
+        $inc: { balance: usdcAmount },
+      }, { session })
+
+      // 3b. Ganancia por spread (swap revenue) — buy (BOB→USDC). En BOB.
+      const swap = computeSwapRevenue('buy', wtx.metadata)
+
+      // 4. Crear WalletTransaction de crédito en WalletUSDC
+      const [wtxUSDC] = await WalletTransaction.create([{
+        walletId:      walletUSDC._id,
+        walletModel:   'WalletUSDC',
+        userId:        wtx.userId,
+        currency:      'USDC',
+        type:          'usdc_deposit',
+        amount:        usdcAmount,
+        balanceBefore: prevBalanceUSDC,
+        balanceAfter:  newBalanceUSDC,
         status:        'completed',
-        balanceBefore: prevBalanceBOB,
-        balanceAfter:  newBalanceBOB,
+        description:   `Conversión BOB→USDC confirmada: ${bobAmount.toFixed(2)} BOB → ${usdcAmount.toFixed(6)} USDC`,
         confirmedBy:   admin._id,
         confirmedAt:   now,
-        metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
-    }
+        metadata: {
+          sourceBOBWtxId: wtxId,
+          bobAmount,
+          bobPerUsdc:     wtx.metadata?.bobPerUsdc,
+          ...(swap ? {
+            kind:           'swap_revenue',
+            swapDirection:  'buy',
+            swapRevenueBob: swap.swapRevenueBob,
+            marketRate:     swap.marketRate,
+            appliedRate:    swap.appliedRate,
+          } : {}),
+        },
+      }], { session })
 
-    // 1. Debitar BOB y liberar reserva
-    await WalletBOB.updateOne({ _id: walletBOB._id }, {
-      $inc: { balance: -bobAmount, balanceReserved: -bobAmount },
-    }, { session })
+      // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
+      if (swap && swap.swapRevenueBob > 0) {
+        await WalletFeeConfig.updateOne(
+          { _id: 'singleton' },
+          { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
+          { session, upsert: true },
+        )
+      }
 
-    // 2. Acreditar USDC
-    await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
-      $inc: { balance: usdcAmount },
-    }, { session })
-
-    // 3b. Ganancia por spread (swap revenue) — buy (BOB→USDC). En BOB.
-    const swap = computeSwapRevenue('buy', wtx.metadata)
-
-    // 4. Crear WalletTransaction de crédito en WalletUSDC
-    const [wtxUSDC] = await WalletTransaction.create([{
-      walletId:      walletUSDC._id,
-      walletModel:   'WalletUSDC',
-      userId:        wtx.userId,
-      currency:      'USDC',
-      type:          'usdc_deposit',
-      amount:        usdcAmount,
-      balanceBefore: prevBalanceUSDC,
-      balanceAfter:  newBalanceUSDC,
-      status:        'completed',
-      description:   `Conversión BOB→USDC confirmada: ${bobAmount.toFixed(2)} BOB → ${usdcAmount.toFixed(6)} USDC`,
-      confirmedBy:   admin._id,
-      confirmedAt:   now,
-      metadata: {
-        sourceBOBWtxId: wtxId,
-        bobAmount,
-        bobPerUsdc:     wtx.metadata?.bobPerUsdc,
-        ...(swap ? {
-          kind:           'swap_revenue',
-          swapDirection:  'buy',
-          swapRevenueBob: swap.swapRevenueBob,
-          marketRate:     swap.marketRate,
-          appliedRate:    swap.appliedRate,
-        } : {}),
-      },
-    }], { session })
-
-    // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
-    if (swap && swap.swapRevenueBob > 0) {
-      await WalletFeeConfig.updateOne(
-        { _id: 'singleton' },
-        { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
-        { session, upsert: true },
-      )
-    }
-
-    await session.commitTransaction()
-
-    // 5. Audit trail Stellar — fire and forget
-    fireUSDCAuditTrail(wtxUSDC.wtxId)
-
-    // 6. Notificación al usuario
-    notify(wtx.userId, NOTIFICATIONS.conversionConfirmed(bobAmount, usdcAmount)).catch(() => {})
-
-    return res.json({
-      wtxId,
-      wtxUSDCId:     wtxUSDC.wtxId,
-      bobDebited:    bobAmount,
-      usdcCredited:  usdcAmount,
-      newBalanceBOB,
-      newBalanceUSDC,
-      confirmedAt:   now,
+      post = {
+        userId: wtx.userId, bobAmount, usdcAmount,
+        wtxUSDCId: wtxUSDC.wtxId, newBalanceBOB, newBalanceUSDC, confirmedAt: now,
+      }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminConfirmBOBtoUSDC' } })
     console.error('[WalletUSDC] Error en adminConfirmBOBtoUSDC:', err.message)
     return res.status(500).json({ error: 'Error al confirmar la conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // 5. Audit trail Stellar — fire and forget
+  fireUSDCAuditTrail(post.wtxUSDCId)
+
+  // 6. Notificación al usuario
+  notify(post.userId, NOTIFICATIONS.conversionConfirmed(post.bobAmount, post.usdcAmount)).catch(() => {})
+
+  return res.json({
+    wtxId,
+    wtxUSDCId:     post.wtxUSDCId,
+    bobDebited:    post.bobAmount,
+    usdcCredited:  post.usdcAmount,
+    newBalanceBOB: post.newBalanceBOB,
+    newBalanceUSDC: post.newBalanceUSDC,
+    confirmedAt:   post.confirmedAt,
+  })
 }
 
 // ─── FUNCIÓN 5 (ADMIN): GET /api/v1/admin/wallet/usdc/conversions/pending ────
@@ -680,96 +678,76 @@ export async function adminListPendingConversions(req, res) {
  * Body: { wtxId, rejectReason? }
  */
 export async function adminRejectBOBtoUSDC(req, res) {
+  const admin = req.user
+  const { wtxId, rejectReason } = req.body
+
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin = req.user
-    const { wtxId, rejectReason } = req.body
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx)                       abortarHttp(404, { error: 'Transacción no encontrada.' })
+      if (wtx.type !== 'bob_to_usdc') abortarHttp(400, { error: 'La transacción no es una conversión BOB→USDC.' })
+      if (wtx.status !== 'pending') {
+        abortarHttp(400, { error: `La conversión ya fue procesada (status: ${wtx.status}).` })
+      }
 
-    if (!wtxId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId es requerido.' })
-    }
+      const { bobAmount, walletBOBId } = wtx.metadata ?? {}
+      if (!bobAmount || !walletBOBId) abortarHttp(400, { error: 'Metadata de conversión incompleta.' })
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Transacción no encontrada.' })
-    }
-    if (wtx.type !== 'bob_to_usdc') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La transacción no es una conversión BOB→USDC.' })
-    }
-    if (wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `La conversión ya fue procesada (status: ${wtx.status}).` })
-    }
+      const walletBOB = await WalletBOB.findById(walletBOBId).session(session)
+      if (!walletBOB) abortarHttp(404, { error: 'WalletBOB no encontrada.' })
 
-    const { bobAmount, walletBOBId } = wtx.metadata ?? {}
+      const now = new Date()
 
-    if (!bobAmount || !walletBOBId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Metadata de conversión incompleta.' })
-    }
-
-    const walletBOB = await WalletBOB.findById(walletBOBId).session(session)
-    if (!walletBOB) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletBOB no encontrada.' })
-    }
-
-    const now = new Date()
-
-    // 0. Guard atómico: transición pending → failed condicional. Evita doble
-    // liberación de reserva si un confirm/reject concurrente ya procesó la tx.
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      {
-        status:   'failed',
-        metadata: {
-          ...(wtx.metadata ?? {}),
-          rejectReason: rejectReason ?? '',
-          rejectedBy:   admin._id,
-          rejectedAt:   now,
+      // 0. Guard atómico: transición pending → failed condicional. Evita doble
+      // liberación de reserva si un confirm/reject concurrente ya procesó la tx.
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'pending' },
+        {
+          status:   'failed',
+          metadata: {
+            ...(wtx.metadata ?? {}),
+            rejectReason: rejectReason ?? '',
+            rejectedBy:   admin._id,
+            rejectedAt:   now,
+          },
         },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
-    }
+        { session },
+      )
+      if (claim.modifiedCount === 0) abortarHttp(409, { error: 'La conversión ya fue procesada.' })
 
-    // 1. Liberar reserva — devolver BOB al saldo disponible
-    await WalletBOB.updateOne({ _id: walletBOB._id }, {
-      $inc: { balanceReserved: -bobAmount },
-    }, { session })
+      // 1. Liberar reserva — devolver BOB al saldo disponible
+      await WalletBOB.updateOne({ _id: walletBOB._id }, {
+        $inc: { balanceReserved: -bobAmount },
+      }, { session })
 
-    await session.commitTransaction()
-
-    // 3. Audit trail Stellar — fire and forget
-    fireUSDCAuditTrail(wtxId)
-
-    // 4. Notificación al usuario
-    notify(wtx.userId, NOTIFICATIONS.conversionRejected(bobAmount, rejectReason ?? '')).catch(() => {})
-
-    return res.json({
-      wtxId,
-      status:       'failed',
-      bobReleased:  bobAmount,
-      rejectReason: rejectReason ?? '',
-      rejectedAt:   now,
+      post = { userId: wtx.userId, bobAmount, rejectedAt: now }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminRejectBOBtoUSDC' } })
     console.error('[WalletUSDC] Error en adminRejectBOBtoUSDC:', err.message)
     return res.status(500).json({ error: 'Error al rechazar la conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  fireUSDCAuditTrail(wtxId)
+  notify(post.userId, NOTIFICATIONS.conversionRejected(post.bobAmount, rejectReason ?? '')).catch(() => {})
+
+  return res.json({
+    wtxId,
+    status:       'failed',
+    bobReleased:  post.bobAmount,
+    rejectReason: rejectReason ?? '',
+    rejectedAt:   post.rejectedAt,
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -817,135 +795,133 @@ async function checkBOBLiquidity(bobAmount) {
  * Body: { amount: number }  — monto en USDC a convertir
  */
 export async function requestUSDCtoBOB(req, res) {
+  const user     = req.user
+  const amount   = Number(req.body.amount)              // monto en USDC
+  const MIN_USDC = Number(process.env.USDC_TO_BOB_MIN ?? 5)
+
+  // Validación de entrada fuera de la transacción.
+  if (user.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'La conversión USDC→BOB es exclusiva para usuarios Bolivia (SRL).' })
+  }
+  if (user.kycStatus !== 'approved') {
+    return res.status(403).json({ error: 'Debes completar la verificación de identidad (KYC) para convertir fondos.' })
+  }
+  if (!amount || isNaN(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'El campo amount es requerido y debe ser mayor a 0.' })
+  }
+  if (amount < MIN_USDC) {
+    return res.status(400).json({ error: `El monto mínimo de conversión es ${MIN_USDC} USDC.` })
+  }
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const user    = req.user
-    const amount  = Number(req.body.amount)              // monto en USDC
-    const MIN_USDC = Number(process.env.USDC_TO_BOB_MIN ?? 5)
-
-    if (user.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'La conversión USDC→BOB es exclusiva para usuarios Bolivia (SRL).' })
-    }
-    if (user.kycStatus !== 'approved') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Debes completar la verificación de identidad (KYC) para convertir fondos.' })
-    }
-    if (!amount || isNaN(amount) || amount <= 0) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'El campo amount es requerido y debe ser mayor a 0.' })
-    }
-    if (amount < MIN_USDC) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `El monto mínimo de conversión es ${MIN_USDC} USDC.` })
-    }
-
-    // Wallet USDC activa con saldo
-    const walletUSDCCheck = await WalletUSDC.findOne({ userId: user._id }).session(session).lean()
-    if (!walletUSDCCheck) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'No tienes saldo USDC para convertir.' })
-    }
-    if (walletUSDCCheck.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
-    }
-
-    // Tasa de venta + monto BOB resultante (con desglose para registrar la ganancia por spread)
-    const rate       = await getUSDCtoBOBRate()
-    const bobPerUsdc = rate.bobPerUsdc
-    const bobAmount  = parseFloat((amount * bobPerUsdc).toFixed(2))
-
-    // Wallet BOB destino — crear si el usuario aún no tiene
-    let walletBOB = await WalletBOB.findOne({ userId: user._id }).session(session)
-    if (!walletBOB) {
-      const created = await WalletBOB.create([{ userId: user._id }], { session })
-      walletBOB = created[0]
-    } else if (walletBOB.status !== 'active') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
-    }
-
-    // Reservar el USDC atómicamente — verifica disponible en la misma operación
-    // para prevenir double-spend por requests concurrentes.
-    const walletUSDC = await WalletUSDC.findOneAndUpdate(
-      {
-        _id:    walletUSDCCheck._id,
-        status: 'active',
-        $expr:  { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
-      },
-      { $inc: { balanceReserved: amount } },
-      { returnDocument: 'after', session },
-    )
-    if (!walletUSDC) {
-      const available = Math.max(0, walletUSDCCheck.balance - (walletUSDCCheck.balanceReserved ?? 0))
-      await session.abortTransaction()
-      return res.status(400).json({ error: `Saldo USDC insuficiente. Disponible: ${available.toFixed(6)} USDC.` })
-    }
-
-    // WalletTransaction pending
-    const [wtx] = await WalletTransaction.create([{
-      walletId:      walletUSDC._id,
-      walletModel:   'WalletUSDC',
-      userId:        user._id,
-      currency:      'USDC',
-      type:          'usdc_to_bob',
-      amount,
-      balanceBefore: walletUSDC.balance,
-      balanceAfter:  walletUSDC.balance,   // se actualiza al confirmar
-      status:        'pending',
-      description:   `Conversión USDC→BOB: ${amount.toFixed(6)} USDC → Bs. ${bobAmount.toFixed(2)}`,
-      metadata: {
-        usdcAmount:   amount,
-        bobAmount,
-        bobPerUsdc,
-        marketRate:   rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
-        spreadPct:    rate.spreadPct,
-        walletUSDCId: walletUSDC._id.toString(),
-        walletBOBId:  walletBOB._id.toString(),
-      },
-    }], { session })
-
-    await session.commitTransaction()
-
-    // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard
-    // checkBOBLiquidity). Si falla, queda 'pending' (cola admin).
-    if (isUSDCtoBOBAutoEligible(user, amount)) {
-      const { res: capRes, out } = captureRes()
-      await adminConfirmUSDCtoBOB({ user: { _id: null }, body: { wtxId: wtx.wtxId, note: 'auto' } }, capRes)
-      if (out.statusCode === 200 && out.body && !out.body.error) {
-        return res.status(201).json({
-          ...out.body,
-          usdcAmount: amount, bobAmount, bobPerUsdc,
-          status: 'completed', auto: true,
-          message: 'Conversión completada al instante.',
-        })
+    await session.withTransaction(async () => {
+      // Wallet USDC activa con saldo
+      const walletUSDCCheck = await WalletUSDC.findOne({ userId: user._id }).session(session).lean()
+      if (!walletUSDCCheck) abortarHttp(400, { error: 'No tienes saldo USDC para convertir.' })
+      if (walletUSDCCheck.status !== 'active') {
+        abortarHttp(403, { error: 'Tu wallet USDC no está activa. Contacta a soporte.' })
       }
-      // No se pudo auto-confirmar → degradar a cola admin (pending).
-    }
 
-    const fullName = `${user.firstName} ${user.lastName}`.trim()
-    notifyAdmins(NOTIFICATIONS.adminUsdcToBobRequest(amount, bobAmount, fullName)).catch(() => {})
+      // Tasa de venta + monto BOB resultante (con desglose para registrar la ganancia por spread)
+      const rate       = await getUSDCtoBOBRate()
+      const bobPerUsdc = rate.bobPerUsdc
+      const bobAmount  = parseFloat((amount * bobPerUsdc).toFixed(2))
 
-    return res.status(201).json({
-      wtxId:      wtx.wtxId,
-      usdcAmount: amount,
-      bobAmount,
-      bobPerUsdc,
-      status:     'pending',
-      message:    'Solicitud de conversión recibida. El equipo Alyto procesará la conversión en 1-4 horas hábiles.',
+      // Wallet BOB destino — crear si el usuario aún no tiene
+      let walletBOB = await WalletBOB.findOne({ userId: user._id }).session(session)
+      if (!walletBOB) {
+        const created = await WalletBOB.create([{ userId: user._id }], { session })
+        walletBOB = created[0]
+      } else if (walletBOB.status !== 'active') {
+        abortarHttp(403, { error: 'Tu wallet BOB no está activa. Contacta a soporte.' })
+      }
+
+      // Reservar el USDC atómicamente — verifica disponible en la misma operación
+      // para prevenir double-spend por requests concurrentes.
+      const walletUSDC = await WalletUSDC.findOneAndUpdate(
+        {
+          _id:    walletUSDCCheck._id,
+          status: 'active',
+          $expr:  { $gte: [{ $subtract: ['$balance', { $ifNull: ['$balanceReserved', 0] }] }, amount] },
+        },
+        { $inc: { balanceReserved: amount } },
+        { returnDocument: 'after', session },
+      )
+      if (!walletUSDC) {
+        const available = Math.max(0, walletUSDCCheck.balance - (walletUSDCCheck.balanceReserved ?? 0))
+        abortarHttp(400, { error: `Saldo USDC insuficiente. Disponible: ${available.toFixed(6)} USDC.` })
+      }
+
+      // WalletTransaction pending
+      const [wtx] = await WalletTransaction.create([{
+        walletId:      walletUSDC._id,
+        walletModel:   'WalletUSDC',
+        userId:        user._id,
+        currency:      'USDC',
+        type:          'usdc_to_bob',
+        amount,
+        balanceBefore: walletUSDC.balance,
+        balanceAfter:  walletUSDC.balance,   // se actualiza al confirmar
+        status:        'pending',
+        description:   `Conversión USDC→BOB: ${amount.toFixed(6)} USDC → Bs. ${bobAmount.toFixed(2)}`,
+        metadata: {
+          usdcAmount:   amount,
+          bobAmount,
+          bobPerUsdc,
+          marketRate:   rate.marketRate,   // tasa de mercado bloqueada → permite calcular el spread
+          spreadPct:    rate.spreadPct,
+          walletUSDCId: walletUSDC._id.toString(),
+          walletBOBId:  walletBOB._id.toString(),
+        },
+      }], { session })
+
+      post = { wtxId: wtx.wtxId, bobAmount, bobPerUsdc }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'requestUSDCtoBOB' } })
     console.error('[WalletUSDC] Error en requestUSDCtoBOB:', err.message)
     return res.status(500).json({ error: 'Error al procesar la solicitud de conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  const { wtxId, bobAmount, bobPerUsdc } = post
+
+  // Auto-conversión (Fase 39, gated). Reutiliza el confirm de admin (atómico + guard
+  // checkBOBLiquidity). Si falla, queda 'pending' (cola admin). Va fuera del
+  // callback porque abre su propia transacción y un reintento la duplicaría.
+  if (isUSDCtoBOBAutoEligible(user, amount)) {
+    const { res: capRes, out } = captureRes()
+    await adminConfirmUSDCtoBOB({ user: { _id: null }, body: { wtxId, note: 'auto' } }, capRes)
+    if (out.statusCode === 200 && out.body && !out.body.error) {
+      return res.status(201).json({
+        ...out.body,
+        usdcAmount: amount, bobAmount, bobPerUsdc,
+        status: 'completed', auto: true,
+        message: 'Conversión completada al instante.',
+      })
+    }
+    // No se pudo auto-confirmar → degradar a cola admin (pending).
+  }
+
+  notifyAdmins(NOTIFICATIONS.adminUsdcToBobRequest(
+    amount, bobAmount, `${user.firstName} ${user.lastName}`.trim(),
+  )).catch(() => {})
+
+  return res.status(201).json({
+    wtxId,
+    usdcAmount: amount,
+    bobAmount,
+    bobPerUsdc,
+    status:     'pending',
+    message:    'Solicitud de conversión recibida. El equipo Alyto procesará la conversión en 1-4 horas hábiles.',
+  })
 }
 
 /**
@@ -960,153 +936,136 @@ export async function requestUSDCtoBOB(req, res) {
  * Body: { wtxId, note? }
  */
 export async function adminConfirmUSDCtoBOB(req, res) {
+  const admin = req.user
+  const { wtxId, note } = req.body
+
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin = req.user
-    const { wtxId, note } = req.body
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx)                       abortarHttp(404, { error: 'Transacción no encontrada.' })
+      if (wtx.type !== 'usdc_to_bob') abortarHttp(400, { error: 'La transacción no es una conversión USDC→BOB.' })
+      if (wtx.status !== 'pending') {
+        abortarHttp(400, { error: `La conversión ya fue procesada (status: ${wtx.status}).` })
+      }
 
-    if (!wtxId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId es requerido.' })
-    }
+      const { usdcAmount, bobAmount, walletUSDCId, walletBOBId } = wtx.metadata ?? {}
+      if (!usdcAmount || !bobAmount || !walletUSDCId || !walletBOBId) {
+        abortarHttp(400, { error: 'Metadata de conversión incompleta. No se puede procesar.' })
+      }
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Transacción no encontrada.' })
-    }
-    if (wtx.type !== 'usdc_to_bob') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La transacción no es una conversión USDC→BOB.' })
-    }
-    if (wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `La conversión ya fue procesada (status: ${wtx.status}).` })
-    }
+      // 0. Pre-check de liquidez BOB (BEC-ready). Hoy ok=true (respaldo operativo).
+      const liq = await checkBOBLiquidity(bobAmount)
+      if (!liq.ok) abortarHttp(409, { error: 'Liquidez BOB insuficiente para confirmar la conversión.' })
 
-    const { usdcAmount, bobAmount, walletUSDCId, walletBOBId } = wtx.metadata ?? {}
-    if (!usdcAmount || !bobAmount || !walletUSDCId || !walletBOBId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Metadata de conversión incompleta. No se puede procesar.' })
-    }
+      const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
+      const walletBOB  = await WalletBOB.findById(walletBOBId).session(session)
+      if (!walletUSDC) abortarHttp(404, { error: 'WalletUSDC no encontrada.' })
+      if (!walletBOB)  abortarHttp(404, { error: 'WalletBOB no encontrada.' })
 
-    // 0. Pre-check de liquidez BOB (BEC-ready). Hoy ok=true (respaldo operativo).
-    const liq = await checkBOBLiquidity(bobAmount)
-    if (!liq.ok) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'Liquidez BOB insuficiente para confirmar la conversión.' })
-    }
+      const now             = new Date()
+      const prevBalanceUSDC = walletUSDC.balance
+      const newBalanceUSDC  = prevBalanceUSDC - usdcAmount
+      const prevBalanceBOB  = walletBOB.balance
+      const newBalanceBOB   = prevBalanceBOB + bobAmount
 
-    const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
-    const walletBOB  = await WalletBOB.findById(walletBOBId).session(session)
-    if (!walletUSDC) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletUSDC no encontrada.' })
-    }
-    if (!walletBOB) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletBOB no encontrada.' })
-    }
+      // 0b. Guard atómico pending → completed.
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'pending' },
+        {
+          status:        'completed',
+          balanceBefore: prevBalanceUSDC,
+          balanceAfter:  newBalanceUSDC,
+          confirmedBy:   admin._id,
+          confirmedAt:   now,
+          metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
+        },
+        { session },
+      )
+      if (claim.modifiedCount === 0) abortarHttp(409, { error: 'La conversión ya fue procesada.' })
 
-    const now             = new Date()
-    const prevBalanceUSDC = walletUSDC.balance
-    const newBalanceUSDC  = prevBalanceUSDC - usdcAmount
-    const prevBalanceBOB  = walletBOB.balance
-    const newBalanceBOB   = prevBalanceBOB + bobAmount
+      // 1. Debitar USDC y liberar reserva
+      await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
+        $inc: { balance: -usdcAmount, balanceReserved: -usdcAmount },
+      }, { session })
 
-    // 0b. Guard atómico pending → completed.
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      {
+      // 2. Acreditar BOB
+      await WalletBOB.updateOne({ _id: walletBOB._id }, {
+        $inc: { balance: bobAmount },
+      }, { session })
+
+      // 2b. Ganancia por spread (swap revenue) — sell (USDC→BOB). En BOB.
+      const swap = computeSwapRevenue('sell', wtx.metadata)
+
+      // 3. Crear WalletTransaction de crédito en WalletBOB
+      const [wtxBOB] = await WalletTransaction.create([{
+        walletId:      walletBOB._id,
+        walletModel:   'WalletBOB',
+        userId:        wtx.userId,
+        currency:      'BOB',
+        type:          'deposit',
+        amount:        bobAmount,
+        balanceBefore: prevBalanceBOB,
+        balanceAfter:  newBalanceBOB,
         status:        'completed',
-        balanceBefore: prevBalanceUSDC,
-        balanceAfter:  newBalanceUSDC,
+        description:   `Conversión USDC→BOB confirmada: ${usdcAmount.toFixed(6)} USDC → Bs. ${bobAmount.toFixed(2)}`,
         confirmedBy:   admin._id,
         confirmedAt:   now,
-        metadata:      { ...(wtx.metadata ?? {}), note: note ?? '', confirmedBy: admin._id },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
-    }
+        metadata: {
+          sourceUSDCWtxId: wtxId,
+          usdcAmount,
+          bobPerUsdc:      wtx.metadata?.bobPerUsdc,
+          ...(swap ? {
+            kind:           'swap_revenue',
+            swapDirection:  'sell',
+            swapRevenueBob: swap.swapRevenueBob,
+            marketRate:     swap.marketRate,
+            appliedRate:    swap.appliedRate,
+          } : {}),
+        },
+      }], { session })
 
-    // 1. Debitar USDC y liberar reserva
-    await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
-      $inc: { balance: -usdcAmount, balanceReserved: -usdcAmount },
-    }, { session })
+      // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
+      if (swap && swap.swapRevenueBob > 0) {
+        await WalletFeeConfig.updateOne(
+          { _id: 'singleton' },
+          { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
+          { session, upsert: true },
+        )
+      }
 
-    // 2. Acreditar BOB
-    await WalletBOB.updateOne({ _id: walletBOB._id }, {
-      $inc: { balance: bobAmount },
-    }, { session })
-
-    // 2b. Ganancia por spread (swap revenue) — sell (USDC→BOB). En BOB.
-    const swap = computeSwapRevenue('sell', wtx.metadata)
-
-    // 3. Crear WalletTransaction de crédito en WalletBOB
-    const [wtxBOB] = await WalletTransaction.create([{
-      walletId:      walletBOB._id,
-      walletModel:   'WalletBOB',
-      userId:        wtx.userId,
-      currency:      'BOB',
-      type:          'deposit',
-      amount:        bobAmount,
-      balanceBefore: prevBalanceBOB,
-      balanceAfter:  newBalanceBOB,
-      status:        'completed',
-      description:   `Conversión USDC→BOB confirmada: ${usdcAmount.toFixed(6)} USDC → Bs. ${bobAmount.toFixed(2)}`,
-      confirmedBy:   admin._id,
-      confirmedAt:   now,
-      metadata: {
-        sourceUSDCWtxId: wtxId,
-        usdcAmount,
-        bobPerUsdc:      wtx.metadata?.bobPerUsdc,
-        ...(swap ? {
-          kind:           'swap_revenue',
-          swapDirection:  'sell',
-          swapRevenueBob: swap.swapRevenueBob,
-          marketRate:     swap.marketRate,
-          appliedRate:    swap.appliedRate,
-        } : {}),
-      },
-    }], { session })
-
-    // Acumulador de ganancia de swap (BOB) — en la misma sesión atómica.
-    if (swap && swap.swapRevenueBob > 0) {
-      await WalletFeeConfig.updateOne(
-        { _id: 'singleton' },
-        { $inc: { swapRevenueAccruedBob: swap.swapRevenueBob } },
-        { session, upsert: true },
-      )
-    }
-
-    await session.commitTransaction()
-
-    // 4. Audit trail + notificación — fire and forget
-    fireUSDCAuditTrail(wtxBOB.wtxId)
-    notify(wtx.userId, NOTIFICATIONS.conversionToBobConfirmed(usdcAmount, bobAmount)).catch(() => {})
-
-    return res.json({
-      wtxId,
-      wtxBOBId:    wtxBOB.wtxId,
-      usdcDebited: usdcAmount,
-      bobCredited: bobAmount,
-      status:      'completed',
-      confirmedAt: now,
+      post = {
+        userId: wtx.userId, usdcAmount, bobAmount,
+        wtxBOBId: wtxBOB.wtxId, confirmedAt: now,
+      }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminConfirmUSDCtoBOB' } })
     console.error('[WalletUSDC] Error en adminConfirmUSDCtoBOB:', err.message)
     return res.status(500).json({ error: 'Error al confirmar la conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  // 4. Audit trail + notificación — fire and forget
+  fireUSDCAuditTrail(post.wtxBOBId)
+  notify(post.userId, NOTIFICATIONS.conversionToBobConfirmed(post.usdcAmount, post.bobAmount)).catch(() => {})
+
+  return res.json({
+    wtxId,
+    wtxBOBId:    post.wtxBOBId,
+    usdcDebited: post.usdcAmount,
+    bobCredited: post.bobAmount,
+    status:      'completed',
+    confirmedAt: post.confirmedAt,
+  })
 }
 
 /**
@@ -1115,90 +1074,74 @@ export async function adminConfirmUSDCtoBOB(req, res) {
  * Body: { wtxId, rejectReason? }
  */
 export async function adminRejectUSDCtoBOB(req, res) {
+  const admin = req.user
+  const { wtxId, rejectReason } = req.body
+
+  if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const admin = req.user
-    const { wtxId, rejectReason } = req.body
+    await session.withTransaction(async () => {
+      const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
+      if (!wtx)                       abortarHttp(404, { error: 'Transacción no encontrada.' })
+      if (wtx.type !== 'usdc_to_bob') abortarHttp(400, { error: 'La transacción no es una conversión USDC→BOB.' })
+      if (wtx.status !== 'pending') {
+        abortarHttp(400, { error: `La conversión ya fue procesada (status: ${wtx.status}).` })
+      }
 
-    if (!wtxId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'wtxId es requerido.' })
-    }
+      const { usdcAmount, walletUSDCId } = wtx.metadata ?? {}
+      if (!usdcAmount || !walletUSDCId) abortarHttp(400, { error: 'Metadata de conversión incompleta.' })
 
-    const wtx = await WalletTransaction.findOne({ wtxId }).session(session)
-    if (!wtx) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'Transacción no encontrada.' })
-    }
-    if (wtx.type !== 'usdc_to_bob') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'La transacción no es una conversión USDC→BOB.' })
-    }
-    if (wtx.status !== 'pending') {
-      await session.abortTransaction()
-      return res.status(400).json({ error: `La conversión ya fue procesada (status: ${wtx.status}).` })
-    }
+      const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
+      if (!walletUSDC) abortarHttp(404, { error: 'WalletUSDC no encontrada.' })
 
-    const { usdcAmount, walletUSDCId } = wtx.metadata ?? {}
-    if (!usdcAmount || !walletUSDCId) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'Metadata de conversión incompleta.' })
-    }
+      const now = new Date()
 
-    const walletUSDC = await WalletUSDC.findById(walletUSDCId).session(session)
-    if (!walletUSDC) {
-      await session.abortTransaction()
-      return res.status(404).json({ error: 'WalletUSDC no encontrada.' })
-    }
-
-    const now = new Date()
-
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      {
-        status:   'failed',
-        metadata: {
-          ...(wtx.metadata ?? {}),
-          rejectReason: rejectReason ?? '',
-          rejectedBy:   admin._id,
-          rejectedAt:   now,
+      const claim = await WalletTransaction.updateOne(
+        { _id: wtx._id, status: 'pending' },
+        {
+          status:   'failed',
+          metadata: {
+            ...(wtx.metadata ?? {}),
+            rejectReason: rejectReason ?? '',
+            rejectedBy:   admin._id,
+            rejectedAt:   now,
+          },
         },
-      },
-      { session },
-    )
-    if (claim.modifiedCount === 0) {
-      await session.abortTransaction()
-      return res.status(409).json({ error: 'La conversión ya fue procesada.' })
-    }
+        { session },
+      )
+      if (claim.modifiedCount === 0) abortarHttp(409, { error: 'La conversión ya fue procesada.' })
 
-    // Liberar reserva — devolver USDC al saldo disponible
-    await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
-      $inc: { balanceReserved: -usdcAmount },
-    }, { session })
+      // Liberar reserva — devolver USDC al saldo disponible
+      await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
+        $inc: { balanceReserved: -usdcAmount },
+      }, { session })
 
-    await session.commitTransaction()
-
-    fireUSDCAuditTrail(wtxId)
-    notify(wtx.userId, NOTIFICATIONS.conversionToBobRejected(usdcAmount, rejectReason ?? '')).catch(() => {})
-
-    return res.json({
-      wtxId,
-      status:       'failed',
-      usdcReleased: usdcAmount,
-      rejectReason: rejectReason ?? '',
-      rejectedAt:   now,
+      post = { userId: wtx.userId, usdcAmount, rejectedAt: now }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
+
     Sentry.captureException(err, { tags: { controller: 'walletUSDCController', fn: 'adminRejectUSDCtoBOB' } })
     console.error('[WalletUSDC] Error en adminRejectUSDCtoBOB:', err.message)
     return res.status(500).json({ error: 'Error al rechazar la conversión.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  fireUSDCAuditTrail(wtxId)
+  notify(post.userId, NOTIFICATIONS.conversionToBobRejected(post.usdcAmount, rejectReason ?? '')).catch(() => {})
+
+  return res.json({
+    wtxId,
+    status:       'failed',
+    usdcReleased: post.usdcAmount,
+    rejectReason: rejectReason ?? '',
+    rejectedAt:   post.rejectedAt,
+  })
 }
 
 /**
@@ -1667,52 +1610,39 @@ export async function executeUsdcP2pTransfer(session, { sender, recipient, amoun
  * Body: { recipientAlias, amount, description? }. Comisión 0 en P1 (lista para P3).
  */
 export async function sendUSDC(req, res) {
+  const sender = req.user
+  const { recipientAlias, amount: rawAmount, description } = req.body
+  const amount = Number(rawAmount)
+
+  // Validación de entrada fuera de la transacción.
+  if (sender.legalEntity !== 'SRL') {
+    return res.status(403).json({ error: 'La wallet USDC es exclusiva para usuarios Bolivia (SRL).' })
+  }
+  if (!recipientAlias || !Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'recipientAlias y amount (> 0) son requeridos.' })
+  }
+  // Límites (mín/máx por-tx, diario) se enforce en executeUsdcP2pTransfer (config).
+
   const session = await mongoose.startSession()
-  session.startTransaction()
+  let post
 
   try {
-    const sender = req.user
-    const { recipientAlias, amount: rawAmount, description } = req.body
-    const amount = Number(rawAmount)
+    await session.withTransaction(async () => {
+      const { recipient, error } = await resolveRecipientByAlias(recipientAlias)
+      if (error) abortarHttp(404, { error })
+      if (String(recipient._id) === String(sender._id)) {
+        abortarHttp(400, { error: 'No podés enviarte USDC a vos mismo.' })
+      }
 
-    if (sender.legalEntity !== 'SRL') {
-      await session.abortTransaction()
-      return res.status(403).json({ error: 'La wallet USDC es exclusiva para usuarios Bolivia (SRL).' })
-    }
-    if (!recipientAlias || !Number.isFinite(amount) || amount <= 0) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'recipientAlias y amount (> 0) son requeridos.' })
-    }
-    // Límites (mín/máx por-tx, diario) se enforce en executeUsdcP2pTransfer (config).
+      // Los errores de límites y saldo los lanza `executeUsdcP2pTransfer` con un
+      // `httpStatus` propio. No llevan la etiqueta de transitorio, así que
+      // `withTransaction` NO los reintenta: salen al catch como antes.
+      const result = await executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source: 'alias' })
 
-    const { recipient, error } = await resolveRecipientByAlias(recipientAlias)
-    if (error) {
-      await session.abortTransaction()
-      return res.status(404).json({ error })
-    }
-    if (String(recipient._id) === String(sender._id)) {
-      await session.abortTransaction()
-      return res.status(400).json({ error: 'No podés enviarte USDC a vos mismo.' })
-    }
-
-    const result = await executeUsdcP2pTransfer(session, { sender, recipient, amount, description, source: 'alias' })
-    await session.commitTransaction()
-
-    fireUSDCAuditTrail(result.wtxSend.wtxId)
-    notify(recipient._id, NOTIFICATIONS.usdcReceived(amount, result.senderName)).catch(() => {})
-    notifyAdmins(NOTIFICATIONS.adminUsdcP2pTransfer(amount, result.senderName, result.recipientName)).catch(() => {})
-
-    return res.json({
-      wtxId:        result.wtxSend.wtxId,
-      amount,
-      fee:          result.fee,
-      total:        result.total,
-      recipient:    { alias: recipient.alytoAlias, name: result.recipientName },
-      balanceAfter: result.prevOrigen - result.total,
+      post = { result, recipient }
     })
-
   } catch (err) {
-    await session.abortTransaction()
+    if (err instanceof AbortoDeliberado) return res.status(err.payload.http).json(err.payload.body)
     if (err.httpStatus) return res.status(err.httpStatus).json({ error: err.message })
     // WriteConflict por concurrencia — fondos protegidos, pedir retry
     if (err.code === 112 || err.errorLabels?.includes('TransientTransactionError')) {
@@ -1722,6 +1652,22 @@ export async function sendUSDC(req, res) {
     console.error('[WalletUSDC] Error en sendUSDC:', err.message)
     return res.status(500).json({ error: 'Error al procesar la transferencia USDC.' })
   } finally {
-    session.endSession()
+    await session.endSession()
   }
+
+  // ── Posterior al commit ───────────────────────────────────────────────────
+  const { result, recipient } = post
+
+  fireUSDCAuditTrail(result.wtxSend.wtxId)
+  notify(recipient._id, NOTIFICATIONS.usdcReceived(amount, result.senderName)).catch(() => {})
+  notifyAdmins(NOTIFICATIONS.adminUsdcP2pTransfer(amount, result.senderName, result.recipientName)).catch(() => {})
+
+  return res.json({
+    wtxId:        result.wtxSend.wtxId,
+    amount,
+    fee:          result.fee,
+    total:        result.total,
+    recipient:    { alias: recipient.alytoAlias, name: result.recipientName },
+    balanceAfter: result.prevOrigen - result.total,
+  })
 }
