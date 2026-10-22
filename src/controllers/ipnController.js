@@ -3320,15 +3320,26 @@ export function handleBankDisbursementIPN(provider) {
       }
     }
 
+    // El mismo webhook trae retiros y devoluciones: ante el banco son dos
+    // débitos idénticos. Lo que NO es idéntico es cómo se cierran. El settle del
+    // retiro debita la billetera del usuario; aplicado a una devolución le
+    // cobraría justo el dinero que se le está devolviendo. Se enruta por tipo.
+    const seguimiento = await WalletTransaction.findOne({ wtxId }).select('type').lean();
+    const esDevolucion = seguimiento?.type === 'refund';
+
     try {
-      const result = await settleDispatchedWithdrawal(wtxId, {
+      const settle = esDevolucion
+        ? (await import('../services/refundService.js')).settleDispatchedRefund
+        : settleDispatchedWithdrawal;
+
+      const result = await settle(wtxId, {
         accepted:      outcome === 'accepted',
         bankReference: confirmado?.bankReference ?? norm.bankReference ?? b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
         reason:        norm.reason ?? b.descriptionStatus,
       });
-      logger.info(`[${tag}] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
+      logger.info(`[${tag}] ${esDevolucion ? 'Devolución' : 'Retiro'} ${outcome} → ${result.status ?? result.reason}`, { wtxId });
     } catch (err) {
-      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider }, extra: { wtxId } });
+      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider, kind: esDevolucion ? 'refund' : 'withdrawal' }, extra: { wtxId } });
     }
 
     return res.status(200).json(OK);

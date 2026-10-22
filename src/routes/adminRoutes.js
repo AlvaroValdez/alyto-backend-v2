@@ -86,6 +86,7 @@ import {
   deleteBOBUSDCOverride,
 } from '../controllers/exchangeRateController.js';
 import { getEcpStatus } from '../controllers/ecpAdminController.js';
+import { adminRefundTransaction } from '../controllers/refundAdminController.js';
 import {
   listKYBApplications,
   getKYBApplication,
@@ -743,6 +744,17 @@ router.post('/wallet/withdrawals/:wtxId/comprobante', proofUpload.single('compro
 router.post('/wallet/withdrawal/confirm',  proofUpload.single('comprobante'), adminConfirmWithdrawal);
 router.post('/wallet/withdrawal/reject',   adminRejectWithdrawal);
 router.post('/wallet/withdrawal/dispatch', adminDispatchWithdrawal);
+
+/**
+ * POST /api/v1/admin/transactions/:transactionId/refund
+ * Devuelve el dinero de una operación cobrada y no ejecutada.
+ * Body: { method?: 'walletBOB' | 'bankTransfer', reason, bank?, provider? }
+ *
+ * Reemplaza forzar `status:'refunded'` desde /admin/transactions/:id/status, que
+ * no movía dinero. 'walletBOB' acredita el saldo y cierra; 'bankTransfer'
+ * dispersa y espera la confirmación del banco.
+ */
+router.post('/transactions/:transactionId/refund', adminRefundTransaction);
 // ⚠️ SANDBOX ONLY — cierra un retiro como si el banco lo hubiera liquidado.
 // El handler ya bloquea cuando la dispersión real está activa; `sandboxOnly`
 // cierra el caso restante (producción con dispersión aún manual).

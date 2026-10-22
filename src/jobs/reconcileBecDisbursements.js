@@ -102,22 +102,28 @@ async function intentarResolver(wtx) {
     return { resuelto: false, detalle: `REVERTIDO: el banco devolvió el pago (${estado.mensaje ?? ''})` };
   }
 
-  const { settleDispatchedWithdrawal } = await import('../controllers/walletController.js');
-  const r = await settleDispatchedWithdrawal(wtx.wtxId, {
+  // Ante el banco un retiro y una devolución son el mismo débito; cómo se
+  // cierran no. El settle del retiro debita la billetera, y aplicado a una
+  // devolución le cobraría al usuario el dinero que se le devuelve.
+  const settle = wtx.type === 'refund'
+    ? (await import('../services/refundService.js')).settleDispatchedRefund
+    : (await import('../controllers/walletController.js')).settleDispatchedWithdrawal;
+
+  const r = await settle(wtx.wtxId, {
     accepted:      outcome === 'accepted',
     bankReference: estado.numeroAch,
     reason:        estado.mensaje,
   });
 
-  // `settleDispatchedWithdrawal` NO lanza ante un fallo: devuelve `{ok:false}`.
-  // Dar por resuelto sin mirarlo dejaría el retiro colgado, sin reintento y sin
+  // Ninguno de los dos settle LANZA ante un fallo: devuelven `{ok:false}`. Dar
+  // por resuelto sin mirarlo dejaría la operación colgada, sin reintento y sin
   // alerta, que es la peor combinación posible cuando el dinero ya salió.
   if (!r.ok) {
     return { resuelto: false, detalle: `el banco dijo ${estado.estado} pero la liquidación falló: ${r.reason}` };
   }
 
-  logger.info('[ReconcileDisbursement] Retiro resuelto por consulta al banco', {
-    wtxId: wtx.wtxId, provider, estado: estado.estado, outcome, resultado: r.status ?? r.reason,
+  logger.info('[ReconcileDisbursement] Resuelto por consulta al banco', {
+    wtxId: wtx.wtxId, tipo: wtx.type, provider, estado: estado.estado, outcome, resultado: r.status ?? r.reason,
   });
 
   return { resuelto: true, detalle: `${estado.estado} → ${outcome}` };
@@ -133,9 +139,15 @@ export async function reconcileBankDisbursements() {
   try {
     const cutoff = new Date(Date.now() - STUCK_MS);
 
-    // Retiros enviados al banco hace más de STUCK_MS, aún sin confirmar, no alertados.
+    // Salidas enviadas al banco hace más de STUCK_MS, aún sin confirmar, no alertadas.
+    //
+    // Incluye devoluciones por transferencia, y no por simetría: el webhook de
+    // dispersión de ATC sigue en revisión en certificación, y el de payout de
+    // Vita nunca se disparó en producción. Sin esta red una devolución ordenada
+    // se quedaría en 'dispatched' para siempre, con el pasivo correctamente
+    // reconocido y nadie mirándolo.
     const stuck = await WalletTransaction.find({
-      type:      'withdrawal',
+      type:      { $in: ['withdrawal', 'refund'] },
       status:    'dispatched',
       'metadata.dispatchedAt':          { $lte: cutoff },
       'metadata.disbursementAlertedAt': { $exists: false },
@@ -146,7 +158,7 @@ export async function reconcileBankDisbursements() {
       return;
     }
 
-    logger.warn(`[ReconcileDisbursement] ${stuck.length} retiro(s) dispersado(s) sin confirmación`);
+    logger.warn(`[ReconcileDisbursement] ${stuck.length} salida(s) dispersada(s) sin confirmación`);
 
     for (const wtx of stuck) {
       let resultado;
@@ -160,13 +172,18 @@ export async function reconcileBankDisbursements() {
       if (resultado.resuelto) continue;   // resuelto o en curso: no se molesta a nadie
 
       const provider = wtx.metadata?.disbursementProvider ?? 'desconocido';
+      // Al admin le cambia qué hacer: un retiro atascado deja saldo reservado
+      // al usuario; una devolución atascada deja un pasivo sin restituir.
+      const etiqueta = wtx.type === 'refund' ? 'La devolución' : 'El retiro';
 
       Sentry.captureMessage('Dispersión atascada sin confirmación', {
         level: 'warning',
         extra: {
           wtxId:        wtx.wtxId,
+          tipo:         wtx.type,
           amount:       wtx.amount,
           provider,
+          refundFor:    wtx.metadata?.refundFor,
           motivo:       resultado.detalle,
           bankBatchId:  wtx.metadata?.bankBatchId,
           dispatchedAt: wtx.metadata?.dispatchedAt,
@@ -175,8 +192,8 @@ export async function reconcileBankDisbursements() {
 
       await notifyAdmins(NOTIFICATIONS.adminDisbursementStuck?.(wtx.amount, wtx.wtxId) ?? {
         title: 'Dispersión sin confirmar',
-        body:  `El retiro ${wtx.wtxId} (Bs. ${Number(wtx.amount).toFixed(2)}) fue enviado a ${provider} pero no llegó la confirmación. ${resultado.detalle}. Verificar en el banco y liquidar.`,
-        data:  { type: 'admin_disbursement_stuck', wtxId: wtx.wtxId, provider },
+        body:  `${etiqueta} ${wtx.wtxId} (Bs. ${Number(wtx.amount).toFixed(2)}) fue enviada a ${provider} pero no llegó la confirmación. ${resultado.detalle}. Verificar en el banco y liquidar.`,
+        data:  { type: 'admin_disbursement_stuck', wtxId: wtx.wtxId, provider, kind: wtx.type },
       }).catch(() => {});
 
       // Marcar alertado para no spamear en cada corrida (una alerta por retiro).
