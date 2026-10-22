@@ -205,3 +205,12 @@ export async function resolveByReference(reference) {
   if (!reference) return null;
   return ProviderReference.findOne({ reference: String(reference) });
 }
+
+/**
+ * El alias emitido para un objetivo nuestro: la vuelta desde el `wtxId` hacia
+ * los datos que el proveedor necesita para hablar de esa operación.
+ */
+export async function resolveByTarget(provider, kind, targetId) {
+  if (!targetId) return null;
+  return ProviderReference.findOne({ provider, kind, targetId: String(targetId) });
+}

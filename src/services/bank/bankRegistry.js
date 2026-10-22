@@ -115,6 +115,13 @@ const redenlaceAdapter = {
      * resolver el retiro atascado preguntándole al banco.
      */
     getBatchStatus:     (p)   => redenlaceDisbursement.getBatchStatus(p),
+
+    /**
+     * Segunda capa del webhook: reconfirma contra el banco antes de mover saldo.
+     * BANECO no la tiene porque no expone consulta de estado; acá sí, y es
+     * dinero saliente, que es donde más falta hace.
+     */
+    confirmOutcome:     (p)   => redenlaceDisbursement.confirmOutcome(p),
   },
 };
 

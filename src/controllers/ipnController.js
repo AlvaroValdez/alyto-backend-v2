@@ -3293,10 +3293,37 @@ export function handleBankDisbursementIPN(provider) {
       return res.status(200).json(OK);
     }
 
+    // ── Segunda capa: que lo diga también el banco ────────────────────────────
+    // La autenticidad del webhook (capa 1) prueba quién llama, no que el hecho
+    // haya ocurrido. Para el dinero saliente eso no alcanza: si el secreto se
+    // filtra, una notificación forjada debitaría el saldo de un usuario por un
+    // retiro que el banco nunca pagó. Los proveedores que saben responder el
+    // estado lo reconfirman acá; BANECO no puede y mantiene su camino.
+    //
+    // Falla cerrada a propósito. No deja el retiro colgado: el job de
+    // conciliación consulta el mismo estado y lo cierra cuando el banco confirme.
+    let confirmado = null;
+    if (typeof disbursement.confirmOutcome === 'function') {
+      try {
+        confirmado = await disbursement.confirmOutcome({ wtxId, outcome });
+      } catch (err) {
+        confirmado = { ok: false, reason: `error confirmando: ${err.message}` };
+      }
+      if (!confirmado.ok) {
+        logger.warn(`[${tag}] No se pudo confirmar con el banco — no se liquida`, {
+          wtxId, outcome, reason: confirmado.reason,
+        });
+        Sentry.captureMessage(`${tag} sin confirmación del banco: ${confirmado.reason}`, {
+          level: 'warning', extra: { wtxId, outcome, provider },
+        });
+        return res.status(200).json(OK);
+      }
+    }
+
     try {
       const result = await settleDispatchedWithdrawal(wtxId, {
         accepted:      outcome === 'accepted',
-        bankReference: norm.bankReference ?? b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
+        bankReference: confirmado?.bankReference ?? norm.bankReference ?? b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
         reason:        norm.reason ?? b.descriptionStatus,
       });
       logger.info(`[${tag}] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });

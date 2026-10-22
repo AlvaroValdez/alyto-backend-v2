@@ -43,7 +43,7 @@
 import crypto from 'node:crypto';
 import { logger } from '../../utils/logger.js';
 import { apiFetch, isAvailable as clientAvailable, isMockMode } from './redenlaceClient.js';
-import { issueReference, attachExternalReference, resolveByReference } from './providerReference.js';
+import { issueReference, attachExternalReference, resolveByReference, resolveByTarget } from './providerReference.js';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 // Regla 21: siempre dentro de funciones.
@@ -324,7 +324,17 @@ export async function getBatchStatus({ processId, transaccionId }) {
   const t = lista.find((x) => String(x.transaccionId) === String(transaccionId)) ?? lista[0];
   if (!t) return null;
 
-  return { estado: t.estado, mensaje: t.mensaje, numeroAch: t.numeroAch, raw: t };
+  // ⚠️ La documentación llama al campo `numeroAch`; la API devuelve
+  // `numOrdenAch`. Leer solo el nombre documentado deja la referencia del
+  // banco en undefined, y el retiro se liquida sin el número de orden ACH, que
+  // es justamente lo que permite rastrearlo en el extracto. Verificado contra
+  // el sandbox el 2026-10-22: llegó `numOrdenAch: 14262610226260197908`.
+  return {
+    estado:    t.estado,
+    mensaje:   t.mensaje,
+    numeroAch: t.numOrdenAch || t.numeroAch || undefined,
+    raw:       t,
+  };
 }
 
 // ── Catálogo de bancos ───────────────────────────────────────────────────────
@@ -409,9 +419,61 @@ export async function normalizeNotify(req) {
   return {
     wtxId:         ref.targetId,
     status:        b.estado,
-    bankReference: b.numeroAch ?? b.numeroReferencia ?? b.nroLote,
+    // El webhook documenta `numeroAch`, la consulta de estado devuelve
+    // `numOrdenAch`. Se aceptan los dos para no depender de cuál use cada uno.
+    bankReference: b.numOrdenAch ?? b.numeroAch ?? b.numeroReferencia ?? b.nroLote,
     reason:        b.mensaje,
   };
+}
+
+/**
+ * Segunda capa: antes de mover saldo, le pregunta a ATC si realmente pasó eso.
+ *
+ * ── Por qué hace falta
+ *
+ * ATC autentica su webhook con un token en el query string y nada más. No firma
+ * el cuerpo. Eso significa que quien consiga esa URL puede afirmar que un retiro
+ * se pagó, y sin esta verificación el sistema le creería: debitaría el saldo del
+ * usuario y daría el retiro por cerrado.
+ *
+ * El cobro por QR ya tenía esta capa —valida la cabecera Y reconfirma con el
+ * banco— y la dispersión no. La asimetría estaba al revés de lo que el riesgo
+ * aconseja: el control más débil estaba en el dinero que SALE.
+ *
+ * ── Falla cerrada, y eso no deja el retiro colgado
+ *
+ * Si no se puede confirmar, no se liquida. Es seguro hacerlo porque existe una
+ * segunda vía: el job de conciliación consulta el mismo estado cada 30 minutos y
+ * cierra el retiro cuando ATC lo confirme. Se pierde inmediatez, no el retiro.
+ *
+ * @param {{ wtxId: string, outcome: 'accepted'|'rejected' }} p
+ * @returns {Promise<{ok:boolean, reason:string, bankReference?:string}>}
+ */
+export async function confirmOutcome({ wtxId, outcome }) {
+  if (disburseMock()) return { ok: true, reason: 'mock' };
+
+  const ref = await resolveByTarget('redenlace', 'payout', wtxId);
+  if (!ref?.meta?.processId) {
+    return { ok: false, reason: 'sin processId para consultar' };
+  }
+
+  let estado;
+  try {
+    estado = await getBatchStatus({ processId: ref.meta.processId, transaccionId: ref.reference });
+  } catch (err) {
+    return { ok: false, reason: `no se pudo consultar: ${err.message}` };
+  }
+  if (!estado) return { ok: false, reason: 'el proveedor no devolvió la transacción' };
+
+  const real = mapNotifyStatus(estado.estado);
+  if (real !== outcome) {
+    // La notificación dice una cosa y el banco otra. Puede ser una carrera (el
+    // webhook llegó antes de que el estado se asiente) o una notificación
+    // forjada. En los dos casos la respuesta correcta es no mover el saldo.
+    return { ok: false, reason: `el webhook dice '${outcome}' y el banco dice '${estado.estado}'` };
+  }
+
+  return { ok: true, reason: 'confirmado con el banco', bankReference: estado.numeroAch };
 }
 
 /**
@@ -433,7 +495,11 @@ export function mapNotifyStatus(estado) {
   const s = String(estado ?? '').toUpperCase();
   if (s === 'PAGADO' || s === 'COMPLETADO') return 'accepted';
   if (s === 'RECHAZADO' || s === 'CANCELADO') return 'rejected';
-  // PENDIENTE, PROCESO, ENVIADO, PENDIENTE_CONFIRMACION → todavía no hay nada que hacer.
+  // Intermedios documentados: PENDIENTE, PROCESO, ENVIADO, PENDIENTE_CONFIRMACION.
+  // Intermedios NO documentados, vistos contra el sandbox: INICIALIZADO (estado de
+  // alta del lote, que el manual llama PENDIENTE en su ejemplo) y TRANSITO
+  // (confirmado por ATC el 2026-10-22: "es un estado transitorio hasta que se
+  // procese correctamente o se rechace"). En ninguno hay algo que hacer.
   // REVERTIDO → ver el comentario de arriba.
   return 'unknown';
 }

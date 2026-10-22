@@ -94,6 +94,16 @@ function stubFetch(loteResponse) {
   return calls
 }
 
+/** Hace que la consulta de estado devuelva un estado concreto. */
+function stubEstado(estado, extra = {}) {
+  globalThis.fetch = async (url) => {
+    const body = String(url).includes('/oauth-client-credentials/')
+      ? { access_token: 'tok', expires_in: 3600 }
+      : { code: '00', transacciones: [{ transaccionId: '100000001', estado, ...extra }] }
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
+  }
+}
+
 const LOTE_OK = {
   code: '00', message: 'success',
   data: {
@@ -318,6 +328,85 @@ describe('webhook de confirmación', () => {
   })
 })
 
+describe('segunda capa: reconfirmar con el banco', () => {
+  // ATC autentica su webhook con un token en el query string y nada más. Si ese
+  // token se filtra, una notificación forjada debitaría el saldo de un usuario
+  // por un retiro que el banco nunca pagó. Esto es dinero SALIENDO.
+  beforeEach(configurarReal)
+
+  /** Deja emitido el alias de un retiro, como después de despacharlo. */
+  async function retiroDespachado() {
+    stubFetch(LOTE_OK)
+    await svc.transfer(ORDEN())
+    return 'WTX-1'
+  }
+
+  test('si el banco confirma lo mismo, se habilita la liquidación', async () => {
+    const wtxId = await retiroDespachado()
+    stubEstado('PAGADO', { numOrdenAch: 'ACH-9' })
+
+    const r = await svc.confirmOutcome({ wtxId, outcome: 'accepted' })
+
+    expect(r.ok).toBe(true)
+    expect(r.bankReference).toBe('ACH-9')
+  })
+
+  // La documentación llama al campo `numeroAch` y la API devuelve `numOrdenAch`.
+  // Leer solo el nombre documentado dejaba el retiro liquidado SIN el número de
+  // orden ACH, que es lo único que permite encontrarlo en el extracto.
+  test('toma la referencia ACH con el nombre real del campo, no el documentado', async () => {
+    const wtxId = await retiroDespachado()
+    stubEstado('PAGADO', { numOrdenAch: '14262610226260197908' })
+
+    expect((await svc.confirmOutcome({ wtxId, outcome: 'accepted' })).bankReference)
+      .toBe('14262610226260197908')
+  })
+
+  test('si algún día usan el nombre documentado, también lo toma', async () => {
+    const wtxId = await retiroDespachado()
+    stubEstado('PAGADO', { numeroAch: 'ACH-DOC' })
+
+    expect((await svc.confirmOutcome({ wtxId, outcome: 'accepted' })).bankReference).toBe('ACH-DOC')
+  })
+
+  test('una notificación de pago que el banco no respalda NO se liquida', async () => {
+    const wtxId = await retiroDespachado()
+    stubEstado('TRANSITO')            // el banco todavía no pagó
+
+    const r = await svc.confirmOutcome({ wtxId, outcome: 'accepted' })
+
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/TRANSITO/)
+  })
+
+  test('tampoco se acepta un rechazo que el banco contradice', async () => {
+    const wtxId = await retiroDespachado()
+    stubEstado('PAGADO')
+
+    // Invertir esto liberaría la reserva de un retiro que sí se pagó.
+    expect((await svc.confirmOutcome({ wtxId, outcome: 'rejected' })).ok).toBe(false)
+  })
+
+  test('si no se puede consultar, falla cerrada', async () => {
+    const wtxId = await retiroDespachado()
+    globalThis.fetch = async (url) => String(url).includes('/oauth-client-credentials/')
+      ? { ok: true, status: 200, json: async () => ({ access_token: 'tok', expires_in: 3600 }), text: async () => '' }
+      : { ok: false, status: 503, json: async () => ({}), text: async () => 'caído' }
+
+    const r = await svc.confirmOutcome({ wtxId, outcome: 'accepted' })
+
+    // No liquidar es seguro: el job de conciliación lo cierra más tarde.
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/no se pudo consultar/)
+  })
+
+  test('un retiro sin alias emitido no se puede confirmar', async () => {
+    const r = await svc.confirmOutcome({ wtxId: 'WTX-INEXISTENTE', outcome: 'accepted' })
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/processId/)
+  })
+})
+
 describe('traducción de estados', () => {
   test.each([
     ['PAGADO',     'accepted'],
@@ -330,6 +419,16 @@ describe('traducción de estados', () => {
 
   test.each(['PENDIENTE', 'PROCESO', 'ENVIADO', 'PENDIENTE_CONFIRMACION'])(
     '%s no dispara ninguna acción todavía', (estado) => {
+      expect(svc.mapNotifyStatus(estado)).toBe('unknown')
+    })
+
+  // Dos estados que la tabla del manual NO lista y que el sandbox sí devuelve.
+  // INICIALIZADO es el que responde el alta del lote (el ejemplo del manual dice
+  // PENDIENTE). TRANSITO lo confirmó ATC el 2026-10-22: "estado transitorio hasta
+  // que se procese correctamente o se rechace". Van acá para que quede claro que
+  // caen en 'unknown' por decisión y no porque nadie los haya visto.
+  test.each(['INICIALIZADO', 'TRANSITO'])(
+    '%s es intermedio aunque el manual no lo liste', (estado) => {
       expect(svc.mapNotifyStatus(estado)).toBe('unknown')
     })
 

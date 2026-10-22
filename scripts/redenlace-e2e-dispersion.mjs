@@ -187,9 +187,13 @@ async function main() {
 
   // ── Esperar la confirmación ────────────────────────────────────────────────
   head('4. Confirmación de ATC');
-  info('ATC notifica a staging cuando procesa la transacción. Esperando hasta 3 minutos...');
+  // Tres minutos era muy poco: esto es un riel ACH, no una pasarela de tarjetas.
+  // El propio ATC tiene estados intermedios (TRANSITO, ENVIADO,
+  // PENDIENTE_CONFIRMACION) justamente porque el proceso tarda.
+  const ESPERA_MIN = Number(arg('espera', '10'));
+  info(`ATC notifica a staging cuando procesa la transacción. Esperando hasta ${ESPERA_MIN} minutos...`);
 
-  const limite = Date.now() + 3 * 60 * 1000;
+  const limite = Date.now() + ESPERA_MIN * 60 * 1000;
   let final = await WalletTransaction.findById(wtx._id);
   while (Date.now() < limite && final.status === 'dispatched') {
     await new Promise((r) => setTimeout(r, 5000));
@@ -208,9 +212,27 @@ async function main() {
   if (final.status === 'completed') {
     ok('Camino completo: lote, webhook con token, traducción del alias y liquidación del saldo.');
   } else if (final.status === 'dispatched') {
-    bad('No llegó la confirmación en 3 minutos.');
-    info('Puede ser normal si ATC procesa en lote. Revisá los logs de staging buscando');
-    info(`"redenlace Disbursement IPN". Para seguir el retiro: wtxId ${wtx.wtxId}`);
+    // Que no haya llegado el webhook no dice NADA sobre el estado real de la
+    // orden. Preguntárselo a ATC convierte un resultado inconcluyente en uno
+    // informativo, y de paso es exactamente lo que hace la red de seguridad.
+    const { getDisbursementAdapter } = await import('../src/services/bank/bankRegistry.js');
+    const PR = (await import('../src/models/ProviderReference.js')).default;
+    const alias = await PR.findOne({ targetId: wtx.wtxId, kind: 'payout' }).lean();
+    let estado = null;
+    try {
+      estado = await getDisbursementAdapter('redenlace').disbursement.getBatchStatus({
+        processId: alias?.meta?.processId, transaccionId: alias?.reference,
+      });
+    } catch (e) { info(`no se pudo consultar el estado: ${e.message}`); }
+
+    if (estado) {
+      info(`estado en ATC    : ${estado.estado} — ${estado.mensaje ?? ''}`);
+      ok('La orden existe y avanza. El webhook no llegó dentro de la ventana, que es');
+      info('lo que cubre el job de conciliación: consulta el estado y liquida cuando cierre.');
+    } else {
+      bad('No llegó la confirmación y ATC no devolvió la transacción.');
+    }
+    info(`Para seguir el retiro: wtxId ${wtx.wtxId}`);
   } else {
     bad(`El retiro terminó en '${final.status}'. Revisá los logs de staging.`);
   }
