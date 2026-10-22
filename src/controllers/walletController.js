@@ -1990,12 +1990,6 @@ export async function adminDispatchWithdrawal(req, res) {
     const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId, provider } = req.body
     if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
 
-    const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js')
-    const resolved = getDisbursementAdapter(provider)
-    if (!resolved) {
-      return res.status(501).json({ error: `Sin proveedor de dispersión para '${provider ?? 'default'}'.` })
-    }
-
     const wtx = await WalletTransaction.findOne({ wtxId })
     if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
       return res.status(404).json({ error: 'Retiro pendiente no encontrado.' })
@@ -2010,60 +2004,64 @@ export async function adminDispatchWithdrawal(req, res) {
       return res.status(400).json({ error: 'bankCode (código ASFI de la entidad financiera destino) es requerido para dispersar.' })
     }
 
-    // Pre-check de liquidez en la cuenta de origen (gated). Solo bloquea si la consulta
-    // responde y el saldo es insuficiente; un error del proveedor no bloquea (fail-open).
-    // WALLET_BANECO_LIQUIDITY_CHECK se mantiene por compatibilidad con lo provisionado.
-    const liquidityCheckOn = process.env.WALLET_BANK_LIQUIDITY_CHECK === 'true'
-      || process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true'
-    if (liquidityCheckOn && typeof resolved.adapter.tryGetAvailableBalance === 'function') {
-      const { available, ok } = await resolved.adapter.tryGetAvailableBalance()
-      if (ok && available != null && available < wtx.amount) {
-        return res.status(409).json({ error: `Liquidez BOB insuficiente en ${resolved.provider}. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
-      }
-    }
-
-    // Guard atómico pending → dispatched ANTES de llamar al banco — previene
-    // doble dispersión si dos admins disparan a la vez.
-    const claim = await WalletTransaction.updateOne(
-      { _id: wtx._id, status: 'pending' },
-      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, disbursementProvider: resolved.provider, dispatchedBy: admin._id, dispatchedAt: new Date() } },
-    )
-    if (claim.modifiedCount === 0) return res.status(409).json({ error: 'El retiro ya fue procesado.' })
-
     const user = await User.findById(wtx.userId).lean()
 
-    let result
-    try {
-      result = await resolved.disbursement.transfer({
-        batchId:       wtx.wtxId,
-        batchDetailId: wtx.wtxId,
-        amount:        wtx.amount,
-        currency:      'BOB',
-        description:   `Retiro Alyto ${wtx.wtxId}`,
-        beneficiary: {
-          accountCode: meta.accountNumber,
-          bankCode:    destBankCode,
-          name:        meta.accountHolder,
-          accountType: meta.accountType,
-          ...(beneficiaryDocId ? { docId: beneficiaryDocId } : {}),
-          ...(user?.email ? { email: user.email } : {}),
-        },
-        amlData: {
-          source:      amlSource ?? 'Conversión de activos virtuales en billetera Alyto (PSAV)',
-          destination: amlDestination ?? `Retiro a cuenta bancaria del titular ${meta.accountHolder ?? ''}`.trim(),
-        },
-      })
-    } catch (err) {
-      // Revertir a pending para permitir reintento — no se movió dinero.
-      await WalletTransaction.updateOne({ _id: wtx._id, status: 'dispatched' }, { status: 'pending' }).catch(() => {})
-      Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })
-      console.error('[Wallet] Error dispersando retiro:', err.message)
-      return res.status(502).json({ error: `Error al dispersar el retiro en el banco: ${err.message}` })
+    // La secuencia (validar → liquidez → reclamar → ordenar → revertir si falló)
+    // vive en el servicio compartido. Acá queda solo lo que es propio del retiro:
+    // qué transición de estado es válida y qué se le responde al admin.
+    const { orderPayout, PURPOSES, PAYOUT_ERRORS, httpStatusFor } = await import('../services/bank/disbursementService.js')
+
+    const result = await orderPayout({
+      provider,
+      reference:   wtx.wtxId,
+      targetModel: 'WalletTransaction',
+      amount:      wtx.amount,
+      currency:    'BOB',
+      purpose:     PURPOSES.WALLET_WITHDRAWAL,
+      description: `Retiro Alyto ${wtx.wtxId}`,
+      beneficiary: {
+        accountCode: meta.accountNumber,
+        bankCode:    destBankCode,
+        name:        meta.accountHolder,
+        accountType: meta.accountType,
+        ...(beneficiaryDocId ? { docId: beneficiaryDocId } : {}),
+        ...(user?.email ? { email: user.email } : {}),
+      },
+      amlData: {
+        source:      amlSource ?? 'Conversión de activos virtuales en billetera Alyto (PSAV)',
+        destination: amlDestination ?? `Retiro a cuenta bancaria del titular ${meta.accountHolder ?? ''}`.trim(),
+      },
+
+      // Guard atómico pending → dispatched antes de llamar al banco: previene
+      // doble dispersión si dos admins disparan a la vez.
+      claim: async ({ provider: resolvedProvider }) => {
+        const claimed = await WalletTransaction.updateOne(
+          { _id: wtx._id, status: 'pending' },
+          { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, disbursementProvider: resolvedProvider, dispatchedBy: admin._id, dispatchedAt: new Date() } },
+        )
+        return claimed.modifiedCount > 0
+      },
+      revert: async () => {
+        await WalletTransaction.updateOne({ _id: wtx._id, status: 'dispatched' }, { status: 'pending' })
+      },
+    })
+
+    if (!result.ok) {
+      // Que otro admin se haya quedado con el retiro es operación normal, no incidente.
+      if (result.code !== PAYOUT_ERRORS.ALREADY_CLAIMED) {
+        console.error('[Wallet] Error dispersando retiro:', result.reason)
+        Sentry.captureMessage(`Dispersión de retiro fallida: ${result.code}`, {
+          level: result.retryable ? 'warning' : 'error',
+          tags:  { controller: 'walletController', fn: 'adminDispatchWithdrawal', code: result.code },
+          extra: { wtxId, reason: result.reason, retryable: result.retryable },
+        })
+      }
+      return res.status(httpStatusFor(result.code)).json({ error: result.reason })
     }
 
     await WalletTransaction.updateOne(
       { _id: wtx._id },
-      { $set: { 'metadata.bankBatchId': result.bankBatchId, 'metadata.dispatchMock': !!result._mock } },
+      { $set: { 'metadata.bankBatchId': result.bankBatchId, 'metadata.dispatchMock': result.mock } },
     )
 
     notify(wtx.userId, {
@@ -2072,7 +2070,7 @@ export async function adminDispatchWithdrawal(req, res) {
       type:  'wallet',
     }).catch(() => {})
 
-    return res.json({ wtxId, status: 'dispatched', provider: resolved.provider, bankBatchId: result.bankBatchId, mock: !!result._mock })
+    return res.json({ wtxId, status: 'dispatched', provider: result.provider, bankBatchId: result.bankBatchId, mock: result.mock })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })

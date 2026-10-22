@@ -126,10 +126,19 @@ function fechaBolivia() {
  * @param {string} [p.currency]     — 'BOB' | 'USD'
  * @param {string} p.description    — glosa
  * @param {object} p.beneficiary    — { accountCode, bankCode, name, docId }
+ * @param {'Transaction'|'WalletTransaction'} [p.targetModel] — dónde vive `batchDetailId`
  * @returns {Promise<{bankBatchId:string, reference:string, numeroReferencia?:string, _mock?:boolean}>}
  */
 export async function transfer(p) {
-  const { batchId, batchDetailId, amount, currency = 'BOB', description, beneficiary } = p;
+  // `targetModel` cae a 'WalletTransaction' porque el retiro de billetera fue el
+  // primer flujo que dispersó, y durante un tiempo el único. Una devolución vive
+  // en 'Transaction', y etiquetarla mal anularía la protección del índice único:
+  // el mismo identificador bajo dos modelos distintos obtiene dos alias, y el
+  // banco vería dos órdenes donde hay una sola.
+  const {
+    batchId, batchDetailId, amount, currency = 'BOB', description, beneficiary,
+    targetModel = 'WalletTransaction',
+  } = p;
 
   // ── Validación previa ──────────────────────────────────────────────────────
   // Todo lo que ATC rechaza se chequea acá. Un error de formato descubierto por
@@ -167,12 +176,12 @@ export async function transfer(p) {
 
   // ── Alias numérico ─────────────────────────────────────────────────────────
   // `transaccionId` admite 14 caracteres y debe entrar en un int de 32 bits.
-  // Idempotente por retiro: dos dispatch del mismo wtxId reusan el mismo alias,
-  // así que ATC nunca ve dos identificadores para una sola orden.
+  // Idempotente por operación: dos dispatch del mismo identificador reusan el
+  // mismo alias, así que ATC nunca ve dos identificadores para una sola orden.
   const alias = await issueReference({
     provider:    'redenlace',
     kind:        'payout',
-    targetModel: 'WalletTransaction',
+    targetModel,
     targetId:    String(batchDetailId),
     amount:      amt,
     currency,
