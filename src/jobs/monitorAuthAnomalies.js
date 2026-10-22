@@ -188,10 +188,10 @@ Alyto Backend — ${new Date().toISOString()}
 
 /**
  * Job principal. Nunca lanza.
- * @returns {Promise<{revisadas:number, marcadas:number, avisadas:number}>}
+ * @returns {Promise<{revisadas:number, marcadas:number, avisadas:number, avisosNoEntregados:number}>}
  */
 export async function monitorAuthAnomalies() {
-  const stats = { revisadas: 0, marcadas: 0, avisadas: 0 };
+  const stats = { revisadas: 0, marcadas: 0, avisadas: 0, avisosNoEntregados: 0 };
 
   try {
     const horas = ventanaHoras();
@@ -227,15 +227,25 @@ export async function monitorAuthAnomalies() {
       // El correo sí se limita: una IP insistente generaría un aviso por corrida.
       if (!(await debeAlertar(`auth-anomaly:${d.ip}`, COOLDOWN_MS))) continue;
 
-      try {
-        await sendRawEmail(
-          destinatario,
-          `[Alyto] ⚠️ Acceso anómalo desde ${d.ip}${d.adminApuntado ? ' — APUNTÓ A UN ADMIN' : ''}`,
-          `<pre style="font-family:monospace;white-space:pre-wrap">${construirAviso(d.ip, d, horas)}</pre>`,
-        );
+      // Se mira el valor de retorno: `sendRawEmail` no lanza, así que un `await`
+      // a secas resolvía igual hubiera enviado o no. Contar sin comprobar produjo
+      // un `avisadas: 1` falso en la primera corrida real, con SendGrid
+      // rechazando por cuota agotada.
+      const enviado = await sendRawEmail(
+        destinatario,
+        `[Alyto] ⚠️ Acceso anómalo desde ${d.ip}${d.adminApuntado ? ' — APUNTÓ A UN ADMIN' : ''}`,
+        `<pre style="font-family:monospace;white-space:pre-wrap">${construirAviso(d.ip, d, horas)}</pre>`,
+      );
+
+      if (enviado) {
         stats.avisadas++;
-      } catch (err) {
-        logger.error('[AuthAnomaly] No se pudo enviar el aviso', { ip: d.ip, error: err.message });
+      } else {
+        stats.avisosNoEntregados++;
+        // El hallazgo NO se pierde: Sentry ya se disparó más arriba y el log de
+        // la anomalía quedó. Lo que falló es el canal, y hay que decirlo.
+        logger.error('[AuthAnomaly] Anomalía detectada pero el AVISO NO SE ENTREGÓ — revisar la cuota de SendGrid', {
+          ip: d.ip, senales: d.senales,
+        });
       }
     }
 

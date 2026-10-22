@@ -225,14 +225,25 @@ export async function sendEmail(to, templateId, dynamicData) {
  * Útil para alertas admin que no necesitan template formal.
  * Nunca lanza excepción.
  *
+ * ⚠️ **Devuelve si el correo SALIÓ.** Antes devolvía `undefined` siempre y se
+ * tragaba el error, así que `await sendRawEmail(...)` resolvía igual hubiera
+ * enviado o no, y el llamador no tenía forma de distinguir "avisado" de "no
+ * avisado". Eso ya produjo un reporte falso: el monitor de anomalías de acceso
+ * contaba `avisadas: 1` mientras SendGrid rechazaba el envío con "Maximum credits
+ * exceeded" (cuota del plan gratuito, 100/día).
+ *
+ * El cambio es aditivo: quien ignore el valor de retorno sigue igual que antes.
+ * Pero si el aviso importa, hay que mirarlo.
+ *
  * @param {string} to
  * @param {string} subject
  * @param {string} html
+ * @returns {Promise<boolean>} true solo si SendGrid lo aceptó
  */
 export async function sendRawEmail(to, subject, html) {
   if (!process.env.SENDGRID_API_KEY) {
     console.warn('[Alyto Email] SENDGRID_API_KEY no configurado — email raw omitido.', { to, subject });
-    return;
+    return false;
   }
   try {
     await sgMail.send({
@@ -245,10 +256,12 @@ export async function sendRawEmail(to, subject, html) {
       html,
     });
     console.info('[Alyto Email] Email raw enviado.', { to, subject });
+    return true;
   } catch (err) {
     const detalle = detalleSendGrid(err);
     console.error('[Alyto Email] Error enviando email raw:', { to, subject, ...detalle });
     Sentry.captureException(err, { tags: { component: 'emailService' }, extra: { to, subject, ...detalle } });
+    return false;
   }
 }
 
