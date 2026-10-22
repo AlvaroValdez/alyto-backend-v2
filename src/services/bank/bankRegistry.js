@@ -42,6 +42,7 @@ import * as becAccount from './becAccountService.js';
 import * as becDisbursement from './becDisbursementService.js';
 import { isMockMode as becIsMock } from './becClient.js';
 import * as redenlaceDisbursement from './redenlaceDisbursementService.js';
+import * as redenlaceAccount      from './redenlaceAccountService.js';
 import { isMockMode as redenlaceIsMock } from './redenlaceClient.js';
 
 // ── Adapter: Banco Económico (BANECO / BEC) ─────────────────────────────────────
@@ -84,20 +85,32 @@ const banecoAdapter = {
 
 // ── Adapter: ATC S.A. (Red Enlace) ─────────────────────────────────────────────
 //
-// Solo dispersión. El cobro por QR vive en el otro registro (`bankQrRegistry`),
-// que es donde el resto del sistema lo busca.
+// Dispersión + saldos y movimientos. El cobro por QR vive en el otro registro
+// (`bankQrRegistry`), que es donde el resto del sistema lo busca.
 //
-// `balance` y `movements` quedan en false porque el producto que los da
-// (`/cuentas-comercios/v1/*`, cuentas de comercio y saldos) todavía no está
-// integrado. Cuando lo esté, el pre-check de liquidez del despacho pasa a
-// consultar el `saldoDisponible` neto de retenciones, que es mejor número que
-// el que da BANECO.
+// `balance` y `movements` pasaron a true con la integración de Cuentas de
+// Comercio (`/cuentas-comercios/v1/*`). Eso es lo que hace que el pre-check de
+// liquidez del despacho EXISTA para este proveedor: antes el guard se salteaba
+// en silencio porque no había a quién preguntarle, y encender el gate daba una
+// falsa sensación de control.
+//
+// El número de ATC es mejor que el de BANECO: `saldoDisponible` viene neto de
+// retenciones y `saldoRetenido` llega aparte, así que se distingue "no hay
+// plata" de "hay plata retenida".
 const redenlaceAdapter = {
   provider: 'redenlace',
-  capabilities: { balance: false, movements: false, disburse: true },
+  capabilities: { balance: true, movements: true, disburse: true },
 
+  // `isAvailable` mira la dispersión, que es la capacidad que gobierna el
+  // despacho. La consulta de cuentas exige además el NIT y tiene su propio
+  // `isAvailable`, que el servicio chequea antes de salir a la red.
   isAvailable: () => redenlaceDisbursement.isAvailable(),
   isMock:      () => redenlaceIsMock(),
+
+  getBalance:             ()    => redenlaceAccount.getBalance(),
+  tryGetAvailableBalance: ()    => redenlaceAccount.tryGetAvailableBalance(),
+  getMovements:           (a, b) => redenlaceAccount.getMovements(a, b),
+  normalizeMovement:      (m, currency) => redenlaceAccount.normalizeMovement(m, currency),
 
   /** Pay Out Asíncrono — lote ACH a cuenta bancaria. */
   disbursement: {
