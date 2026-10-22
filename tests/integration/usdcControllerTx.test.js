@@ -17,6 +17,7 @@ import { jest } from '@jest/globals'
 import '../setup.env.js'
 import mongoose from 'mongoose'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
+import { MongoServerError } from 'mongodb'
 
 await jest.unstable_mockModule('../../src/services/notifications.js', () => ({
   notify:               jest.fn(async () => {}),
@@ -46,6 +47,20 @@ await jest.unstable_mockModule('../../src/services/stellarService.js', () => ({
   submitTransaction:        jest.fn(async () => ({ hash: 'h' })),
   submitWithRetry:          jest.fn(async () => ({ hash: 'h' })),
   unfreezeUserTrustline:    jest.fn(async () => {}),
+}))
+// La liquidez de tesorería se intercepta para poder forzar un déficit: es la
+// única manera de ejercitar el guard, que en el entorno real se consulta
+// on-chain. `getBOBCommitted` se deja pasando al módulo real no haría falta acá,
+// así que se devuelve un valor inocuo.
+const usdcDisponible = jest.fn(async () => ({ available: 1_000_000 }))
+await jest.unstable_mockModule('../../src/services/treasuryLiquidity.js', () => ({
+  getUSDCAvailableNow:      usdcDisponible,
+  getBOBCommitted:          jest.fn(async () => ({ committed: 0, operations: 0 })),
+  getCustodialUSDCBacking:  jest.fn(async () => ({ backing: 0 })),
+  getTreasuryReserveUSDC:   jest.fn(async () => 0),
+  coldPubKey:               jest.fn(() => null),
+  minHotUSDC:               jest.fn(() => 0),
+  default:                  {},
 }))
 await jest.unstable_mockModule('../../src/services/email.js', () => ({
   sendEmail:                jest.fn(async () => {}),
@@ -125,12 +140,34 @@ const usdc = (userId, over = {}) => WalletUSDC.create({ userId, balance: 100, ba
 
 beforeEach(async () => {
   jest.restoreAllMocks()
+  usdcDisponible.mockResolvedValue({ available: 1_000_000 })
+  // En el entorno real el guard está apagado (`=false` en .env), así que sin esto
+  // su código no se ejecutaría nunca en pruebas.
+  delete process.env.USDC_CONVERT_LIQUIDITY_GUARD
   await Promise.all([
     User.deleteMany({}), WalletBOB.deleteMany({}), WalletUSDC.deleteMany({}),
     WalletTransaction.deleteMany({}),
     mongoose.connection.db.collection(AdminAuditLog.collection.name).deleteMany({}),
   ])
 })
+
+/** Error que el driver SÍ reintenta. Un Error pelado con la etiqueta no sirve. */
+function errorTransitorio(msg = 'conflicto simulado') {
+  const err = new MongoServerError({ message: msg })
+  err.addErrorLabel('TransientTransactionError')
+  return err
+}
+
+/** Hace fallar la primera llamada a `metodo` del modelo y deja pasar el resto. */
+function fallarUnaVez(Model, metodo) {
+  const real = Model[metodo].bind(Model)
+  const contador = { intentos: 0 }
+  jest.spyOn(Model, metodo).mockImplementation((...args) => {
+    if (++contador.intentos === 1) throw errorTransitorio()
+    return real(...args)
+  })
+  return contador
+}
 
 // ─── 1. requestBOBtoUSDC ──────────────────────────────────────────────────────
 
@@ -269,6 +306,113 @@ describe('adminConfirmBOBtoUSDC / adminRejectBOBtoUSDC', () => {
     const res = resStub()
     await U.adminConfirmBOBtoUSDC(reqStub({ user: admin, body: { wtxId: 'WTX-NO' } }), res)
     expect(res.code).toBe(404)
+  })
+})
+
+// ─── Reintento, carrera y el guard de tesorería ───────────────────────────────
+
+describe('BOB→USDC: reintento, carrera y guard de liquidez', () => {
+  async function sembrar(over = {}) {
+    const u     = await crearUsuario()
+    const admin = await crearUsuario()
+    const wb = await bob(u._id,  { balance: 1000, balanceReserved: 500 })
+    const wu = await usdc(u._id, { balance: 10 })
+    const wtx = await WalletTransaction.create({
+      walletId: wb._id, userId: u._id, type: 'bob_to_usdc', currency: 'BOB',
+      walletModel: 'WalletBOB', amount: 500, status: 'pending',
+      balanceBefore: 1000, balanceAfter: 1000,
+      metadata: {
+        bobAmount: 500, usdcAmount: 50, walletBOBId: String(wb._id),
+        walletUSDCId: String(wu._id), bobPerUsdc: 10, marketRate: 10, spreadPct: 0,
+      },
+      ...over,
+    })
+    return { admin, wb, wu, wtx }
+  }
+
+  // ── El defecto que el refactor estuvo a punto de introducir ────────────────
+  // El guard corre dentro de un try/catch con fail-open deliberado para el admin.
+  // Al convertir el aborto por déficit en un throw, ese catch se lo comía y caía
+  // al fail-open: acreditaba USDC sin respaldo, que es lo único que el guard
+  // existe para impedir. Si alguien quita el re-throw, esta prueba falla.
+  it('déficit de tesorería confirmado: 409 y NO acredita, pese al fail-open del catch', async () => {
+    process.env.USDC_CONVERT_LIQUIDITY_GUARD = 'true'
+    usdcDisponible.mockResolvedValue({ available: 1 })   // se necesitan 50
+    const { admin, wb, wu, wtx } = await sembrar()
+
+    const res = resStub()
+    await U.adminConfirmBOBtoUSDC(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(409)
+    expect(res.body.code).toBe('INSUFFICIENT_TREASURY_USDC')
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(10)     // sin acreditar
+    expect((await WalletBOB.findById(wb._id)).balance).toBe(1000)    // sin debitar
+    expect((await WalletTransaction.findById(wtx._id)).status).toBe('pending')
+  })
+
+  it('si NO se puede leer la tesorería y confirma un admin: fail-open, acredita', async () => {
+    // Hay una persona evaluando la operación; Horizon caído no debe tumbarla.
+    process.env.USDC_CONVERT_LIQUIDITY_GUARD = 'true'
+    usdcDisponible.mockRejectedValue(new Error('horizon caído'))
+    const { admin, wu, wtx } = await sembrar()
+
+    const res = resStub()
+    await U.adminConfirmBOBtoUSDC(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(200)
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(60)
+  })
+
+  it('si NO se puede leer la tesorería y es automática: fail-closed, queda pendiente', async () => {
+    // Sin checkpoint humano no se acredita a ciegas.
+    process.env.USDC_CONVERT_LIQUIDITY_GUARD = 'true'
+    usdcDisponible.mockRejectedValue(new Error('horizon caído'))
+    const { wu, wtx } = await sembrar()
+
+    const res = resStub()
+    await U.adminConfirmBOBtoUSDC(reqStub({ user: { _id: null }, body: { wtxId: wtx.wtxId, note: 'auto' } }), res)
+
+    expect(res.code).toBe(409)
+    expect(res.body.code).toBe('TREASURY_CHECK_UNAVAILABLE')
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(10)
+    expect((await WalletTransaction.findById(wtx._id)).status).toBe('pending')
+  })
+
+  it('si pierde la carrera por el claim: 409, sin debitar ni acreditar', async () => {
+    const { admin, wb, wu, wtx } = await sembrar()
+    jest.spyOn(WalletTransaction, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await U.adminConfirmBOBtoUSDC(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(409)
+    expect((await WalletBOB.findById(wb._id)).balance).toBe(1000)
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(10)
+  })
+
+  it('un fallo transitorio se reintenta y acredita UNA sola vez', async () => {
+    const { admin, wb, wu, wtx } = await sembrar()
+    const c = fallarUnaVez(WalletUSDC, 'updateOne')
+
+    const res = resStub()
+    await U.adminConfirmBOBtoUSDC(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(200)
+    expect(c.intentos).toBeGreaterThan(1)
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(60)   // 50 una vez, no 100
+    expect((await WalletBOB.findById(wb._id)).balance).toBe(500)
+    expect(await WalletTransaction.countDocuments({ type: 'usdc_deposit' })).toBe(1)
+  })
+
+  it('rechazar perdiendo la carrera: 409 y la reserva NO se libera dos veces', async () => {
+    const { admin, wb, wtx } = await sembrar()
+    jest.spyOn(WalletTransaction, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await U.adminRejectBOBtoUSDC(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(409)
+    expect((await WalletBOB.findById(wb._id)).balanceReserved).toBe(500)
   })
 })
 
@@ -514,6 +658,81 @@ describe('scanAndPayQR', () => {
   })
 })
 
+describe('USDC→BOB y QR: reintento y carrera', () => {
+  it('confirmar USDC→BOB perdiendo la carrera: 409, sin debitar ni acreditar', async () => {
+    const u     = await crearUsuario()
+    const admin = await crearUsuario()
+    const wu = await usdc(u._id, { balance: 100, balanceReserved: 40 })
+    const wb = await bob(u._id,  { balance: 200 })
+    const wtx = await WalletTransaction.create({
+      walletId: wu._id, userId: u._id, type: 'usdc_to_bob', currency: 'USDC',
+      walletModel: 'WalletUSDC', amount: 40, status: 'pending',
+      balanceBefore: 100, balanceAfter: 100,
+      metadata: {
+        usdcAmount: 40, bobAmount: 400, walletUSDCId: String(wu._id),
+        walletBOBId: String(wb._id), bobPerUsdc: 10, marketRate: 10, spreadPct: 0,
+      },
+    })
+    jest.spyOn(WalletTransaction, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await U.adminConfirmUSDCtoBOB(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(409)
+    expect((await WalletUSDC.findById(wu._id)).balance).toBe(100)
+    expect((await WalletBOB.findById(wb._id)).balance).toBe(200)
+  })
+
+  it('pago por QR: si el débito condicional no entra, NO acredita al cobrador', async () => {
+    const cobrador = await crearUsuario()
+    const pagador  = await crearUsuario()
+    const wc = await bob(cobrador._id, { balance: 0 })
+    const wp = await bob(pagador._id,  { balance: 500 })
+
+    const { generateQR } = await import('../../src/services/qrWalletService.js')
+    const qr = await generateQR({
+      type: 'charge', asset: 'BOB', creatorUserId: String(cobrador._id),
+      creatorName: 'Juana Pérez', amount: 50, description: 'cobro',
+    })
+
+    // Simula que otro pago ganó la carrera y dejó el saldo sin alcanzar.
+    jest.spyOn(WalletBOB, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await Q.scanAndPayQR(reqStub({ user: pagador, body: { qrContent: JSON.stringify(qr.payload) } }), res)
+
+    expect(res.code).toBe(400)
+    jest.restoreAllMocks()
+    expect((await WalletBOB.findById(wp._id)).balance).toBe(500)
+    expect((await WalletBOB.findById(wc._id)).balance).toBe(0)
+    expect(await WalletTransaction.countDocuments({})).toBe(0)
+  })
+
+  it('pago por QR: un fallo transitorio se reintenta y cobra UNA sola vez', async () => {
+    const cobrador = await crearUsuario()
+    const pagador  = await crearUsuario()
+    const wc = await bob(cobrador._id, { balance: 0 })
+    const wp = await bob(pagador._id,  { balance: 500 })
+
+    const { generateQR } = await import('../../src/services/qrWalletService.js')
+    const qr = await generateQR({
+      type: 'charge', asset: 'BOB', creatorUserId: String(cobrador._id),
+      creatorName: 'Juana Pérez', amount: 50, description: 'cobro',
+    })
+
+    const c = fallarUnaVez(WalletTransaction, 'create')
+
+    const res = resStub()
+    await Q.scanAndPayQR(reqStub({ user: pagador, body: { qrContent: JSON.stringify(qr.payload) } }), res)
+
+    expect(res.code).toBe(200)
+    expect(c.intentos).toBeGreaterThan(1)
+    expect((await WalletBOB.findById(wp._id)).balance).toBe(450)   // 50 una vez
+    expect((await WalletBOB.findById(wc._id)).balance).toBe(50)
+    expect(await WalletTransaction.countDocuments({ type: 'send' })).toBe(1)
+  })
+})
+
 // ─── 9. cancelExpiredSep24 ────────────────────────────────────────────────────
 
 describe('cancelExpiredSep24', () => {
@@ -527,6 +746,60 @@ describe('cancelExpiredSep24', () => {
     const res = resStub()
     await A.cancelExpiredSep24(reqStub({ user: admin, body }), res)
     expect(res.code).toBe(400)
+  })
+
+  // ── Alcance real de esta prueba, para no engañar a quien la lea ────────────
+  //
+  // Verifica que un fallo transitorio se reintente y deje UNA sola entrada. Eso
+  // sí lo cubre.
+  //
+  // Lo que NO cubre: el motivo por el que el `results.push` se sacó del callback.
+  // Ese duplicado solo ocurre si el callback corre completo y después falla el
+  // COMMIT, porque entonces `withTransaction` repite el callback entero. Acá el
+  // fallo se inyecta en la primera escritura, así que el push nunca se alcanza en
+  // el primer intento.
+  //
+  // Se intentó simular el fallo de commit parcheando `commitTransaction` en la
+  // sesión y no funciona: el driver no reintenta a través de ese método público.
+  // Dejar el push afuera queda entonces como medida defensiva SIN prueba que
+  // demuestre el defecto original. Si alguien lo vuelve a meter adentro, esta
+  // prueba no lo va a detectar.
+  it('un reintento NO duplica la entrada en el resultado', async () => {
+    const Transaction = (await import('../../src/models/Transaction.js')).default
+    await Transaction.createCollection().catch(() => {})
+    await Transaction.init()
+    await Transaction.deleteMany({})
+
+    const admin = await crearUsuario()
+    const tx = await Transaction.create({
+      alytoTransactionId: `ALY-S-${Date.now()}`,
+      userId:         admin._id,
+      legalEntity:    'SRL',
+      operationType:  'crossBorderPayment',
+      originCurrency: 'BOB',
+      originalAmount: 100,
+      status:         'sep24_deposit_pending',
+      sep24Type:      'deposit',
+      expiresAt:      new Date(Date.now() - 86_400_000),   // caducada ayer
+      ipnLog:         [],
+    })
+
+    const c = fallarUnaVez(Transaction, 'findOneAndUpdate')
+
+    const res = resStub()
+    await A.cancelExpiredSep24(reqStub({
+      user: admin,
+      body: { transactionIds: [tx.alytoTransactionId], reason: 'cierre administrativo de instrucción caducada' },
+    }), res)
+
+    expect(res.code).toBe(200)
+    expect(c.intentos).toBeGreaterThan(1)          // se reintentó de verdad
+    expect(res.body.results).toHaveLength(1)       // UNA entrada, no una por intento
+    expect(res.body.results[0].outcome).toBe('cancelled')
+    expect(res.body.cancelled).toBe(1)
+    expect((await Transaction.findById(tx._id)).status).toBe('cancelled')
+
+    await Transaction.deleteMany({})
   })
 
   it('un identificador que no existe se reporta como not_found, sin fallar la llamada', async () => {

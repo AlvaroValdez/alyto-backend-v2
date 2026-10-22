@@ -21,6 +21,7 @@ import { jest } from '@jest/globals'
 import '../setup.env.js'
 import mongoose from 'mongoose'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
+import { MongoServerError } from 'mongodb'
 
 // Efectos de borde fuera: no son el objeto de la prueba y saldrían a la red.
 await jest.unstable_mockModule('../../src/services/notifications.js', () => ({
@@ -114,6 +115,146 @@ beforeEach(async () => {
     // registro de auditoría no se puede alterar desde la aplicación.
     mongoose.connection.db.collection(AdminAuditLog.collection.name).deleteMany({}),
   ])
+})
+
+/** Error que el driver SÍ reintenta. Un Error pelado con la etiqueta no sirve. */
+function errorTransitorio(msg = 'conflicto simulado') {
+  const err = new MongoServerError({ message: msg })
+  err.addErrorLabel('TransientTransactionError')
+  return err
+}
+
+/** Hace fallar la primera llamada a `metodo` del modelo y deja pasar el resto. */
+function fallarUnaVez(Model, metodo) {
+  const real = Model[metodo].bind(Model)
+  const contador = { intentos: 0 }
+  jest.spyOn(Model, metodo).mockImplementation((...args) => {
+    if (++contador.intentos === 1) throw errorTransitorio()
+    return real(...args)
+  })
+  return contador
+}
+
+// ─── Reintento y carrera ──────────────────────────────────────────────────────
+
+describe('reintento y carrera', () => {
+  it('sendP2P: un fallo transitorio se reintenta y mueve el saldo UNA vez', async () => {
+    const emisor = await crearUsuario()
+    const dest   = await crearUsuario()
+    const wo = await crearBilletera(emisor._id, { balance: 500 })
+    const wd = await crearBilletera(dest._id,   { balance: 100 })
+
+    const c = fallarUnaVez(WalletTransaction, 'create')
+
+    const res = resStub()
+    await C.sendP2P(reqStub({ user: emisor, body: { recipientEmail: dest.email, amount: 200 } }), res)
+
+    expect(res.code).toBe(200)
+    expect(c.intentos).toBeGreaterThan(1)
+    expect((await WalletBOB.findById(wo._id)).balance).toBe(300)   // 200 una vez
+    expect((await WalletBOB.findById(wd._id)).balance).toBe(300)
+    expect(await WalletTransaction.countDocuments({ type: 'send' })).toBe(1)
+  })
+
+  it('sendP2P: si el débito condicional no entra, no acredita al destinatario', async () => {
+    // Es la carrera real: dos envíos simultáneos del mismo emisor. El `$expr` del
+    // update deja pasar solo a uno; el otro no debe acreditar nada.
+    const emisor = await crearUsuario()
+    const dest   = await crearUsuario()
+    const wo = await crearBilletera(emisor._id, { balance: 500 })
+    const wd = await crearBilletera(dest._id,   { balance: 100 })
+
+    jest.spyOn(WalletBOB, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await C.sendP2P(reqStub({ user: emisor, body: { recipientEmail: dest.email, amount: 200 } }), res)
+
+    expect(res.code).toBe(400)
+    jest.restoreAllMocks()
+    expect((await WalletBOB.findById(wo._id)).balance).toBe(500)
+    expect((await WalletBOB.findById(wd._id)).balance).toBe(100)
+    expect(await WalletTransaction.countDocuments({})).toBe(0)
+  })
+
+  it('requestWithdrawal: un fallo transitorio reserva UNA vez, no dos', async () => {
+    const user = await crearUsuario()
+    const w = await crearBilletera(user._id, { balance: 1000 })
+
+    const c = fallarUnaVez(WalletTransaction, 'create')
+
+    const res = resStub()
+    await C.requestWithdrawal(reqStub({ user, body: { amount: 300, ...CUENTA } }), res)
+
+    expect(res.code).toBe(201)
+    expect(c.intentos).toBeGreaterThan(1)
+    const f = await WalletBOB.findById(w._id)
+    expect(f.balance).toBe(1000)
+    expect(f.balanceReserved).toBe(300)   // 300 una vez, no 600
+    expect(await WalletTransaction.countDocuments({ type: 'withdrawal' })).toBe(1)
+  })
+
+  it('adminConfirmDeposit: un fallo transitorio acredita UNA vez', async () => {
+    const user  = await crearUsuario()
+    const admin = await crearUsuario()
+    const w = await crearBilletera(user._id, { balance: 100 })
+    const wtx = await WalletTransaction.create({
+      walletId: w._id, userId: user._id, type: 'deposit', currency: 'BOB',
+      walletModel: 'WalletBOB', amount: 400, status: 'pending',
+      balanceBefore: 100, balanceAfter: 100,
+    })
+
+    const c = fallarUnaVez(WalletTransaction, 'updateOne')
+
+    const res = resStub()
+    await C.adminConfirmDeposit(reqStub({ user: admin, body: { wtxId: wtx.wtxId, bankReference: 'TRX-1' } }), res)
+
+    expect(res.code).toBe(200)
+    expect(c.intentos).toBeGreaterThan(1)
+    expect((await WalletBOB.findById(w._id)).balance).toBe(500)   // 400 una vez
+  })
+
+  it('adminRejectWithdrawal: si pierde la carrera, NO libera la reserva', async () => {
+    const user  = await crearUsuario()
+    const admin = await crearUsuario()
+    const w = await crearBilletera(user._id, { balance: 1000, balanceReserved: 300 })
+    const wtx = await WalletTransaction.create({
+      walletId: w._id, userId: user._id, type: 'withdrawal', currency: 'BOB',
+      walletModel: 'WalletBOB', amount: 300, status: 'pending',
+      balanceBefore: 1000, balanceAfter: 1000, metadata: { method: 'bank' },
+    })
+
+    jest.spyOn(WalletTransaction, 'updateOne').mockResolvedValue({ modifiedCount: 0 })
+
+    const res = resStub()
+    await C.adminRejectWithdrawal(reqStub({ user: admin, body: { wtxId: wtx.wtxId } }), res)
+
+    expect(res.code).toBe(409)
+    jest.restoreAllMocks()
+    expect((await WalletBOB.findById(w._id)).balanceReserved).toBe(300)
+  })
+
+  it('adminFreezeWallet: si la auditoría falla, la wallet NO queda congelada', async () => {
+    // La auditoría va en la misma transacción a propósito: congelar sin registrar
+    // quién lo hizo y con qué oficio no es aceptable.
+    const user  = await crearUsuario()
+    const admin = await crearUsuario()
+    const w = await crearBilletera(user._id, { balance: 700 })
+
+    jest.spyOn(AdminAuditLog, 'create').mockRejectedValue(new Error('auditoría caída'))
+
+    const res = resStub()
+    await C.adminFreezeWallet(reqStub({
+      user: admin, params: { userId: String(user._id) },
+      body: { reason: 'oficio de compliance', regulatoryRef: 'ASFI-9' },
+    }), res)
+
+    expect(res.code).toBe(500)
+    jest.restoreAllMocks()
+    const f = await WalletBOB.findById(w._id)
+    expect(f.status).toBe('active')
+    expect(f.balance).toBe(700)
+    expect(await WalletTransaction.countDocuments({ type: 'freeze' })).toBe(0)
+  })
 })
 
 // ─── 1. sendP2P ───────────────────────────────────────────────────────────────
