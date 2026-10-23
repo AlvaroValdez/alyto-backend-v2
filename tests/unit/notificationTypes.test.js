@@ -37,10 +37,19 @@ function tiposDeclarados() {
     .replace(/\/\/[^\n]*/g, '');
   const desde  = src.indexOf('enum: [');
   const bloque = src.slice(desde, src.indexOf(']', desde));
-  return new Set([...bloque.matchAll(/'([a-z_]+)'/g)].map(m => m[1]));
+  return new Set([...bloque.matchAll(/'([a-z0-9_]+)'/g)].map(m => m[1]));
 }
 
-/** Tipos que el código pasa a notify()/notifyAdmins() vía `data: { type: '...' }`. */
+/**
+ * Tipos que el código pasa a notify()/notifyAdmins() vía `data: { type: '...' }`.
+ *
+ * ⚠️ La clase de caracteres incluye DÍGITOS. Con `[a-z_]+` el patrón cortaba en el
+ * primer número, así que todo tipo con cifra era invisible para esta prueba por los
+ * dos lados: ni lo veía emitido ni lo veía declarado, y por tanto nunca aparecía
+ * como huérfano. Los únicos tipos con dígito del sistema son los de P2P
+ * (`usdc_p2p_received`, `admin_usdc_p2p_transfer`), que son exactamente los dos
+ * que se escaparon a producción.
+ */
 function tiposEmitidos() {
   const encontrados = new Map();   // tipo → archivos que lo emiten
   const recorrer = (dir) => {
@@ -49,7 +58,7 @@ function tiposEmitidos() {
       if (entrada.isDirectory()) { recorrer(ruta); continue; }
       if (!entrada.name.endsWith('.js')) continue;
       const contenido = fs.readFileSync(ruta, 'utf8');
-      for (const m of contenido.matchAll(/data:\s*\{\s*type:\s*'([a-z_]+)'/g)) {
+      for (const m of contenido.matchAll(/data:\s*\{\s*type:\s*'([a-z0-9_]+)'/g)) {
         const rel = path.relative(raiz, ruta);
         encontrados.set(m[1], [...(encontrados.get(m[1]) ?? []), rel]);
       }

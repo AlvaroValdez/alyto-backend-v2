@@ -44,6 +44,13 @@ const notificationSchema = new mongoose.Schema(
         'usdc_deposit_received',
         'usdc_to_bob_confirmed',
         'usdc_to_bob_rejected',
+        // Transferencia USDC entre usuarios (alias y QR). Se emitían sin estar
+        // declarados: Mongoose rechazaba el documento, `notify` se tragaba el
+        // error de validación por diseño (para que un fallo de aviso no tumbe
+        // una transferencia de dinero) y el usuario que RECIBÍA no se enteraba
+        // de nada. Confirmado en producción el 2026-10-23 con el error literal
+        // "`usdc_p2p_received` is not a valid enum value for path `type`".
+        'usdc_p2p_received',
         'qr_payment',
         'kyc',
         // ⚠️ Estos cuatro se emitían desde el código SIN estar declarados aquí, así
@@ -75,6 +82,9 @@ const notificationSchema = new mongoose.Schema(
         'admin_kyb_submitted',
         'admin_payment_proof',
         'admin_p2p_transfer',
+        // Contraparte del P2P de USDC: sin esto, administración tampoco veía
+        // ninguna transferencia de USDC entre usuarios.
+        'admin_usdc_p2p_transfer',
         // Mismo agujero que arriba, auditado el 2026-10-03 comparando los tipos que
         // emite el código contra los declarados aquí. Los dos últimos son avisos
         // sobre dinero —un desembolso atascado y un fondeo de tesorería que no
