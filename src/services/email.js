@@ -13,6 +13,7 @@ import sgMail from '@sendgrid/mail';
 import Sentry  from './sentry.js';
 import { getDisplayRate } from '../utils/rateDisplay.js';
 import { isRealProductionEnv } from '../utils/environment.js';
+import { esCorreoDescartable } from '../utils/disposableEmail.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? '');
 
@@ -52,6 +53,17 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? '');
  * @returns {boolean}
  */
 function puedeEnviarCorreo(ctx = {}) {
+  // Primero el destinatario, y por encima de EMAIL_FORCE_SEND: a un buzón que no
+  // existe no hay motivo para escribirle en ningún entorno. Una sonda se da de
+  // alta en producción a ~1 por hora y cada alta dispara tres correos (código,
+  // bienvenida y baja); entre eso y las alertas internas el cupo quedó en 108/100
+  // el 2026-10-22, con UN solo correo de usuario real ese día. Bloquear la IP no
+  // alcanzó: rotó en horas. Ver src/utils/disposableEmail.js.
+  if (esCorreoDescartable(ctx.to)) {
+    console.warn('[Alyto Email] OMITIDO: dominio descartable, no gasta cupo', ctx);
+    return false;
+  }
+
   if (isRealProductionEnv()) return true;
   if (String(process.env.EMAIL_FORCE_SEND ?? '').trim().toLowerCase() === 'true') return true;
 
