@@ -90,13 +90,23 @@ export async function createContact(req, res) {
       effectiveCurrency = corridor.destinationCurrency ?? effectiveCurrency
     }
 
-    // Evitar duplicados por número de cuenta
+    // Evitar duplicados por el identificador de la cuenta de destino.
     // Vita usa beneficiary_account_number; Harbor/OwlPay usa account_number.
+    // En BR/PIX (Vita, vivo desde 2026-10-05) la "cuenta" ES la chave: el mismo
+    // beneficiario con la misma chave es el mismo contacto, da igual cuál de las
+    // cuatro variantes sea.
+    const PIX_KEYS = [
+      'account_bank__code_cpf', 'account_bank__code_cnpj',
+      'account_bank__phone_number', 'account_bank__email', 'account_bank__random_key',
+    ];
+    const pixKeyPresente = PIX_KEYS.find(k => beneficiaryData[k]);
+
     const dedupeAccountNumber =
       beneficiaryData.beneficiary_account_number ??
       beneficiaryData.account_number             ??
       beneficiaryData.mx_clabe                   ??   // MX SPEI
       beneficiaryData.iban                       ??   // EU SEPA/WIRE
+      (pixKeyPresente ? beneficiaryData[pixKeyPresente] : null) ??
       null;
 
     if (dedupeAccountNumber) {
@@ -109,6 +119,8 @@ export async function createContact(req, res) {
         orClauses.push({ 'beneficiaryData.mx_clabe': dedupeAccountNumber });
       if (beneficiaryData.iban)
         orClauses.push({ 'beneficiaryData.iban': dedupeAccountNumber });
+      if (pixKeyPresente)
+        orClauses.push({ [`beneficiaryData.${pixKeyPresente}`]: dedupeAccountNumber });
 
       const existing = await Contact.findOne({
         userId: req.user._id,
@@ -155,6 +167,28 @@ export async function updateContact(req, res) {
     allowed.forEach(k => {
       if (req.body[k] !== undefined) contact[k] = req.body[k]
     })
+
+    // ── Re-estampar el sello cuando se reescriben los datos del beneficiario ──
+    // El formulario de edición (VitaContactForm) renderiza SIEMPRE los campos del
+    // proveedor VIGENTE del destino, así que un beneficiaryData nuevo viene en ese
+    // formato — pero el formType guardado puede ser el del proveedor ANTERIOR si
+    // el corredor migró (EU pasó de Harbor a Vita; bo-br igual el 2026-10-05).
+    // Sin esto, el contacto queda con datos frescos y sello viejo, y el guard de
+    // prefill del paso 3 lo rechaza como "formato anterior" aunque el usuario lo
+    // acabe de actualizar. El sello se deriva del corredor, nunca del cliente —
+    // mismo criterio que createContact.
+    //
+    // Si el destino no tiene corredor activo se conserva el sello actual: editar
+    // el apodo de un contacto de un destino hoy inactivo no debe fallar, y sin
+    // corredor tampoco hay formulario nuevo del cual venga el formato.
+    const esCrossBorder = contact.formType === 'vita' || contact.formType === 'owlpay'
+    if (req.body.beneficiaryData !== undefined && esCrossBorder) {
+      const corridor = await findActiveCorridor(contact.destinationCountry, req.user?.legalEntity)
+      if (corridor) {
+        contact.formType            = formTypeForCorridor(corridor)
+        contact.destinationCurrency = corridor.destinationCurrency ?? contact.destinationCurrency
+      }
+    }
 
     await contact.save()
     return res.status(200).json({ contact })

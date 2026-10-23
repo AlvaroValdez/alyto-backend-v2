@@ -21,6 +21,7 @@
 import Sentry         from '../services/sentry.js';
 import { sendEmail, EMAILS } from '../services/email.js';
 import { notifyAdmins, notify, NOTIFICATIONS } from '../services/notifications.js';
+import { recordAdminAction } from '../services/adminAuditService.js';
 import BusinessProfile from '../models/BusinessProfile.js';
 import User            from '../models/User.js';
 import { analyzeKyb, isKybAnalysisEnabled } from '../services/kybAnalysisService.js';
@@ -535,6 +536,7 @@ export async function reviewKYBApplication(req, res) {
     }
 
     // ── Actualizar BusinessProfile ────────────────────────────────────────────
+    const kybStatusAnterior = profile.kybStatus;
     profile.kybStatus       = status;
     profile.kybReviewedBy   = admin._id;
     profile.kybReviewedAt   = new Date();
@@ -551,6 +553,21 @@ export async function reviewKYBApplication(req, res) {
     }
 
     await profile.save();
+
+    // Asiento de auditoría: aprobar un KYB abre una cuenta business con límites
+    // transaccionales propios — quién lo decidió y con qué nota queda registrado
+    // (Tier 2 del barrido 2026-10-05).
+    await recordAdminAction({
+      req,
+      action:     'kyb.review',
+      targetType: 'BusinessProfile',
+      targetId:   profile.businessId,
+      before:     { kybStatus: kybStatusAnterior },
+      after:      { kybStatus: status,
+                    ...(status === 'approved' && transactionLimits ? { transactionLimits } : {}) },
+      reason:     note ?? rejectionReason ?? '',
+      metadata:   { userId: String(profile.userId), legalName: profile.legalName },
+    });
 
     // ── Actualizar User ───────────────────────────────────────────────────────
     const userUpdate = { kybStatus: status };

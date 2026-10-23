@@ -16,8 +16,11 @@ import mongoose from 'mongoose';
 import bcrypt   from 'bcryptjs';
 import jwt      from 'jsonwebtoken';
 import sgMail   from '@sendgrid/mail';
-import User     from '../models/User.js';
+import User          from '../models/User.js';
+import RevokedToken  from '../models/RevokedToken.js';
 import { resolveDocumentNumberStorage } from '../utils/clientDocument.js';
+import { phoneTail }                    from '../services/clientIdentityIndex.js';
+import { revisarClienteDuplicado }      from '../services/clientDuplicateAlert.js';
 import {
   isLockedOut,
   registerFailedAttempt,
@@ -78,6 +81,11 @@ const ENTITY_DEFAULT_DOC = {
 
 /**
  * Genera un JWT firmado con id + tokenVersion (para revocación server-side).
+ *
+ * El claim `jti` identifica a ESTA sesión en concreto y es lo que permite
+ * cerrarla sin tocar las demás. `tokenVersion` sigue existiendo para lo que sí
+ * debe ser global: cambio de contraseña y suspensión administrativa.
+ *
  * @param {string|ObjectId} userId
  * @param {number}          tokenVersion — valor actual del contador del user
  * @param {string}          [expiresIn]  — sobreescribe JWT_EXPIRES_IN del entorno
@@ -88,6 +96,9 @@ function generateToken(userId, tokenVersion, expiresIn, amr) {
     {
       id: userId,
       tokenVersion: tokenVersion ?? 0,
+      // Identificador único de ESTA sesión. Sin él, la única forma de revocar
+      // era subir tokenVersion, que mata todas las del usuario a la vez.
+      jti: crypto.randomUUID(),
       // Métodos que acreditó la sesión. Sin segundo factor exigido queda sólo
       // 'pwd'; con él, la sesión lleva además la marca del factor que la
       // habilitó y `checkAdmin` la exige para entrar al panel.
@@ -110,9 +121,55 @@ function generateToken(userId, tokenVersion, expiresIn, amr) {
  * @param {boolean} [opts.rememberMe]
  * @param {string[]} [opts.amr]
  */
-export function issueSession(res, user, { rememberMe = false, amr } = {}) {
+export async function issueSession(res, user, { rememberMe = false, amr, unicaSesion = false } = {}) {
   const jwtExpiry = rememberMe ? '7d' : '24h';
   const token     = generateToken(user._id, user.tokenVersion, jwtExpiry, amr);
+  const nuevoJti  = jwt.decode(token)?.jti ?? null;
+
+  // UN SOLO DISPOSITIVO (gana el último). Sólo en los puntos de LOGIN, no en la
+  // reemisión tras cambiar el perfil: ahí el token nuevo sustituye al anterior
+  // en el MISMO equipo, y revocarlo echaría al usuario si su cliente no llega a
+  // guardar el token nuevo.
+  //
+  // Se eligió "gana el último" y no "gana el primero" por dos motivos. Con
+  // "gana el primero", quien reinstala la app o cambia de teléfono sin cerrar
+  // sesión queda encerrado hasta que el token caduque (24 h, o 7 días con
+  // "mantener sesión"). Y "gana el último" le da al titular una señal: si
+  // alguien usa sus credenciales, a él lo expulsan y se entera; con la variante
+  // contraria el intruso falla en silencio y el dueño nunca sabe que lo intentaron.
+  //
+  // ⚠️ Esto se ESPERA, no se dispara y olvida. Es un control de seguridad: si la
+  // revocación falla, la sesión anterior sigue viva y la garantía de un solo
+  // dispositivo deja de cumplirse en silencio. Por eso la función es async y el
+  // error se propaga en vez de quedar en un log.
+  //
+  // `activeSessionJti` se actualiza SIEMPRE, también en la reemisión. Si no, un
+  // login posterior revocaría un identificador viejo y dejaría viva justo la
+  // sesión que pretendía cerrar.
+  const anterior = user.activeSessionJti ?? null;
+
+  if (unicaSesion && anterior && anterior !== nuevoJti) {
+    await RevokedToken.updateOne(
+      { jti: anterior },
+      { $setOnInsert: {
+          jti:       anterior,
+          userId:    user._id,
+          // El token anterior podía ser de 7 días y aquí no conocemos su `exp`.
+          // Se usa el máximo: que el registro sobreviva de más es inocuo; que se
+          // borre antes de tiempo reviviría una sesión ya expulsada.
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          reason:    'nueva_sesion',
+        } },
+      { upsert: true },
+    );
+  }
+
+  if (nuevoJti) {
+    await User.updateOne({ _id: user._id }, { $set: { activeSessionJti: nuevoJti } });
+    // Sin esto, `protect` podría servir hasta 10 s con el usuario cacheado y el
+    // `activeSessionJti` viejo.
+    invalidateUserCache(String(user._id));
+  }
 
   if (!IS_HEADER_MODE) res.cookie(AUTH_COOKIE_NAME, token, authCookieOptions(rememberMe));
 
@@ -266,13 +323,17 @@ export async function registerUser(req, res) {
     const rawDoc   = (typeof documentNumber === 'string' && documentNumber.trim().length >= 4)
                        ? documentNumber.trim() : '';
     const docStore = await resolveDocumentNumberStorage(_id, rawDoc);
+    const rawPhone = typeof phone === 'string' ? phone.trim() : undefined;
 
     const user = await User.create({
       _id,
       firstName:        (typeof firstName === 'string' && firstName.trim()) || 'Usuario',
       lastName:         (typeof lastName === 'string' && lastName.trim())   || 'Alyto',
       email:            normalizedEmail,
-      phone:            typeof phone === 'string' ? phone.trim() : undefined,
+      phone:            rawPhone,
+      // Clave de búsqueda del teléfono — ver [clientIdentityIndex]. Sin ella, dos
+      // cuentas con el mismo número escrito distinto no se encuentran.
+      phoneTail:        phoneTail(rawPhone) ?? undefined,
       password:         passwordHash,
       legalEntity,
       kycStatus:        'pending',
@@ -285,10 +346,11 @@ export async function registerUser(req, res) {
       // Documento del cliente: si el onboarding ya lo declara, se guarda (cifrado
       // si el flag está activo); si no, queda 'PENDING_VERIFICATION' hasta el KYC.
       identityDocument: {
-        type:             ENTITY_DEFAULT_DOC[legalEntity],
-        number:           docStore.number,
-        numberCiphertext: docStore.numberCiphertext ?? undefined,
-        issuingCountry:   countryCode,
+        type:              ENTITY_DEFAULT_DOC[legalEntity],
+        number:            docStore.number,
+        numberCiphertext:  docStore.numberCiphertext ?? undefined,
+        numberFingerprint: docStore.numberFingerprint ?? undefined,
+        issuingCountry:    countryCode,
       },
       // Auditoría de aceptación legal — requerido GDPR / Ley 19.628 / ASFI
       tosAcceptance: {
@@ -302,6 +364,12 @@ export async function registerUser(req, res) {
     });
 
     const token = generateToken(user._id, user.tokenVersion);
+    // Usuario recien creado: no hay sesion anterior que revocar, pero su jti
+    // tiene que quedar anotado o el primer login posterior no sabria cual cerrar.
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { activeSessionJti: jwt.decode(token)?.jti ?? null } },
+    );
 
     console.info(`[Auth] Registro exitoso — userId: ${user._id} entity: ${legalEntity}`);
 
@@ -309,6 +377,14 @@ export async function registerUser(req, res) {
     setImmediate(() => {
       sendVerificationCodeEmail(user, emailCode, EMAIL_CODE_TTL_MS / 60000)
         .catch(err => console.error('[Auth] Error enviando código de verificación:', err.message));
+    });
+
+    // ¿Esta persona ya tiene cuenta? Fire-and-forget y **sin efecto en la respuesta**:
+    // el aviso va a administración, al usuario no se le dice nada. Ver
+    // [clientDuplicateAlert] para por qué no se bloquea ni se informa.
+    setImmediate(() => {
+      revisarClienteDuplicado(user, { documentNumber: rawDoc, phone: rawPhone, origen: 'registro' })
+        .catch(() => {});
     });
 
     // Welcome email — fire-and-forget (no bloquear respuesta de registro).
@@ -596,7 +672,7 @@ export async function loginUser(req, res) {
 
     console.info(`[Auth] Login exitoso — userId: ${user._id} | entity: ${user.legalEntity}`);
 
-    return res.json(issueSession(res, user, { rememberMe }));
+    return res.json(await issueSession(res, user, { rememberMe, unicaSesion: true }));
 
   } catch (err) {
     console.error('[Auth] Error en loginUser:', err.message);
@@ -787,20 +863,60 @@ export async function registerFcmToken(req, res) {
 
 /**
  * POST /api/v1/auth/logout
- * Incrementa tokenVersion (revocando todos los JWTs activos del usuario),
- * limpia el cache del middleware y la cookie HttpOnly.
+ *
+ * Cierra ÚNICAMENTE la sesión desde la que se llama. Anota su `jti` en la lista
+ * de revocación, limpia el cache del middleware y borra la cookie.
+ *
+ * ⚠️ Antes esto incrementaba `tokenVersion`, que es un contador POR USUARIO, así
+ * que cerrar sesión en el teléfono tumbaba también la del navegador, en silencio
+ * y sin que nadie hubiera decidido ese comportamiento. Era un efecto colateral
+ * de usar una revocación global para cerrar una sola sesión.
+ *
+ * Lo que sigue siendo global, y debe serlo, es el cambio de contraseña y la
+ * suspensión administrativa: esos siguen subiendo `tokenVersion`. La política de
+ * privacidad publicada promete exactamente eso ("revocamos todas las sesiones
+ * abiertas cuando cambias la contraseña") y no cambia.
+ *
+ * Compatibilidad: un token emitido antes de este cambio no lleva `jti`. En ese
+ * caso se mantiene el comportamiento anterior, porque no hay forma de
+ * identificar la sesión concreta. Esos tokens se agotan solos en 24 h, o 7 días
+ * con "mantener sesión".
  */
 export async function logoutUser(req, res) {
   try {
     const userId = req.user?.id ?? req.user?._id;
+    const jti    = req.authClaims?.jti ?? null;
+    const exp    = req.authClaims?.exp ?? null;
+
     if (userId) {
-      // Sólo incrementar tokenVersion en producción. En dev, logout/login
-      // repetidos generan drift en el contador y rompen tokens cacheados.
-      if (process.env.NODE_ENV === 'production') {
+      if (jti) {
+        // Caducidad real del token. Si falta `exp` (no debería), se usa el
+        // máximo de 7 días: es preferible que el registro sobreviva de más a
+        // que se borre antes de tiempo y el token revocado reviva.
+        const expiresAt = exp
+          ? new Date(exp * 1000)
+          : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+        await RevokedToken.updateOne(
+          { jti },
+          { $setOnInsert: { jti, userId, expiresAt, reason: 'logout' } },
+          { upsert: true },
+        );
+        // Dejar de apuntar a una sesion ya cerrada: si no, un login posterior
+        // intentaria revocar algo que ya esta en la lista.
+        await User.updateOne(
+          { _id: userId, activeSessionJti: jti },
+          { $set: { activeSessionJti: null } },
+        );
+      } else if (process.env.NODE_ENV === 'production') {
+        // Token antiguo sin `jti`: no se puede cerrar solo esta sesión, así que
+        // se conserva el comportamiento de antes. Ver la nota de compatibilidad.
+        console.warn('[Auth] logout de un token sin jti — revocación global por compatibilidad');
         await User.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
       }
       invalidateUserCache(String(userId));
     }
+
     if (!IS_HEADER_MODE) {
       const { maxAge: _ignored, ...clearOpts } = authCookieOptions(false);
       res.clearCookie(AUTH_COOKIE_NAME, clearOpts);

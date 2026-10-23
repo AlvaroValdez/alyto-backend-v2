@@ -62,10 +62,12 @@ import FundingRecord from '../models/FundingRecord.js';
 import { HARBOR_MIN_USD, HARBOR_MAX_USD } from '../routing/euAmountRouter.js';
 import {
   registerAuditTrail,
+  sendUSDCToHarbor,
   getStellarUSDCBalance,
 } from '../services/stellarService.js';
 import Sentry from '../services/sentry.js';
 import { mapHarborError }     from '../utils/harborErrorMapper.js';
+import { marcarCustomerInactivo, marcarCustomerActivo } from '../services/harborPreflight.js';
 import {
   mapVitaError,
   mapVitaIpnFailure,
@@ -73,7 +75,7 @@ import {
 }                             from '../utils/vitaErrorMapper.js';
 import { resolveClientDocument } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
-import { pickSupportedQuote } from '../utils/harborMethodSupport.js';
+import { selectHarborQuote } from '../utils/harborMethodSupport.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { sendEmail, sendRawEmail, EMAILS } from '../services/email.js';
@@ -81,11 +83,7 @@ import { generateOfficialReceipt }   from '../utils/pdfGenerator.js';
 import { generarNumeroCorrelativo }  from '../utils/correlativoService.js';
 import { uploadBuffer } from '../services/storageService.js';
 import { resolveQuoteRate, checkFxDrift } from '../services/exchangeRateService.js';
-import {
-  settleWalletPayinForTransaction,
-  sendPayoutUSDC,
-  getWalletPayinLiquidity,
-} from '../services/walletPaymentService.js';
+import { completePayinLeg, recordPayoutLeg } from '../utils/paymentLegs.js';
 import { recordSent }       from './contactsController.js';
 
 // ─── Helpers Internos ─────────────────────────────────────────────────────────
@@ -912,13 +910,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       return { provider: 'owlpay', status: 'payout_pending_usdc_send', transferId: transaction.harborTransfer.transferId };
     }
 
-    // El origen depende de cómo se financió el pago: tesorería, o la cuenta Stellar del
-    // propio usuario cuando lo pagó con su saldo (ver sendPayoutUSDC).
-    const stellarResult = await sendPayoutUSDC({
-      transaction,
+    const stellarResult = await sendUSDCToHarbor({
       destinationAddress: retryAddress,
       amount:             retryAmount,
       memo:               retryMemo,
+      transactionId:      transaction.alytoTransactionId,
     });
 
     transaction.stellarTxHash = stellarResult.hash;
@@ -935,13 +931,13 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
         memo:     retryMemo,
         existing: stellarResult.existing ?? false,
         retry:    true,
-        // Desde qué cuenta salió el USDC: 'treasury' o 'custodial' (la del usuario).
-        // Queda en el asiento porque es la evidencia de que un pago financiado con saldo
-        // se liquidó contra la cuenta segregada del usuario y no contra la tesorería.
-        from:     stellarResult.from ?? 'treasury',
-        ...(stellarResult.sourcePublicKey ? { source: stellarResult.sourcePublicKey } : {}),
       },
       receivedAt: new Date(),
+    });
+    recordPayoutLeg(transaction, {
+      provider:   'owlPay',
+      status:     'processing',
+      externalId: transaction.harborTransfer?.transferId,
     });
     await transaction.save();
 
@@ -975,79 +971,46 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
   // es un libro de trazabilidad de origen, NO una tranca de pago. Esta fórmula es
   // idéntica a la del panel de previsión (getUSDCForecast → availableNow), de modo
   // que lo que el admin ve disponible es exactamente lo que el motor autoriza.
-  //
-  // Pago financiado con saldo del usuario (`paymentSource:'walletUSDC'`): la fuente de
-  // fondos NO es la tesorería sino la cuenta Stellar propia del usuario, que es la que
-  // firma el envío. Por eso se mide SU saldo on-chain y no se descuentan los payouts en
-  // vuelo de la entidad, que son compromisos de la tesorería y no de esa cuenta. Medir
-  // la tesorería acá bloquearía un pago que el usuario sí puede cubrir, o peor,
-  // autorizaría uno que su cuenta no cubre.
-  //
-  // Tampoco se suma el +1 USDC de reserva: los fees de red se pagan en XLM y los cubre
-  // la channelAccount vía Fee Bump, así que exigirle al usuario 1 USDC extra le impediría
-  // gastar su saldo completo.
-  const isWalletPayin = transaction.paymentSource === 'walletUSDC';
-
-  let usdcBalance;
-  let needed;
-  if (isWalletPayin) {
-    const { sourcePublicKey, onChain } = await getWalletPayinLiquidity(transaction);
-    usdcBalance = onChain;
-    needed      = netAmountUSD;
-    console.log('[OwlPay] Pre-check liquidez sobre cuenta del usuario:',
-      { source: sourcePublicKey, onChain, needed, tx: transaction.alytoTransactionId });
-  } else {
-    const [onChainBalance, inflightAgg] = await Promise.all([
-      getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
-      Transaction.aggregate([
-        {
-          $match: {
-            legalEntity: entity,
-            status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
-          },
+  const [onChainBalance, inflightAgg] = await Promise.all([
+    getStellarUSDCBalance(process.env.STELLAR_SRL_PUBLIC_KEY),
+    Transaction.aggregate([
+      {
+        $match: {
+          legalEntity: entity,
+          status: { $in: ['payout_pending_usdc_send', 'payout_in_transit', 'payout_sent'] },
         },
-        { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
-      ]),
-    ]);
-    const inflight = inflightAgg[0]?.total ?? 0;
-    usdcBalance = Math.max(0, onChainBalance - inflight);
-    needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
-  }
+      },
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$digitalAssetAmount', 0] } } } },
+    ]),
+  ]);
+  const inflight    = inflightAgg[0]?.total ?? 0;
+  const usdcBalance = Math.max(0, onChainBalance - inflight);
+  const needed      = netAmountUSD + 1; // 1 USDC de reserva para fees de red
 
   if (usdcBalance < needed) {
     console.warn('[OwlPay] Insufficient USDC balance:',
       { usdcBalance, needed, tx: transaction.alytoTransactionId });
 
     transaction.status       = 'pending_funding';
-    transaction.statusReason = isWalletPayin
-      ? `Insufficient USDC en la cuenta del usuario: tiene ${usdcBalance}, necesita ${needed}`
-      : `Insufficient USDC: has ${usdcBalance}, needs ${needed}`;
+    transaction.statusReason =
+      `Insufficient USDC: has ${usdcBalance}, needs ${needed}`;
     await transaction.save();
 
     broadcastToAdmins('tx_manual_payout', {
       transactionId: transaction.alytoTransactionId,
-      reason:        isWalletPayin ? 'pending_funding_usdc_custodial' : 'pending_funding_usdc',
+      reason:        'pending_funding_usdc',
       required:      needed,
       available:     usdcBalance,
     });
 
     try {
-      // La cuenta a fondear es distinta según cómo se financió el pago. Decir "fondea la
-      // wallet SRL" cuando el que no tiene saldo es el usuario mandaría al operador a
-      // mover dinero al lugar equivocado.
-      const dondeFondear = isWalletPayin
-        ? `<p>El saldo del usuario está acreditado en el ledger pero el USDC no está en su ` +
-          `cuenta Stellar. Suele ser saldo convertido desde BOB, cuyo respaldo sigue en ` +
-          `tesorería: hay que trasladarlo a la cuenta del usuario y reintentar el payout. ` +
-          `La reserva del saldo queda retenida mientras tanto.</p>`
-        : `<p>Fondea la wallet Stellar SRL y vuelve a ejecutar el payout.</p>`;
       await sendRawEmail(
         process.env.SENDGRID_ADMIN_EMAIL ?? process.env.ADMIN_EMAIL ?? 'admin@alyto.app',
         `⚠️ USDC Liquidez Insuficiente — ${transaction.alytoTransactionId}`,
         `<p>Transaction <strong>${transaction.alytoTransactionId}</strong> requiere ` +
         `<strong>${needed.toFixed(2)} USDC</strong>, pero hay ` +
         `<strong>${usdcBalance.toFixed(2)} USDC</strong> disponibles.</p>` +
-        dondeFondear,
+        `<p>Fondea la wallet Stellar SRL y vuelve a ejecutar el payout.</p>`,
       );
     } catch (e) { console.error('[tryOwlPayV2] Error email admin (pending_funding):', e.message); }
 
@@ -1124,9 +1087,10 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       : null;
 
     if (!quoteData) {
-      // Fallback: usa pickSupportedQuote para evitar caer en métodos broken
-      // (ej. SEPA EU) cuando preferredMethod no está disponible.
-      const fallback = pickSupportedQuote(quotesList, corridor.destinationCountry);
+      // Fallback: usa la selección por preferencia para evitar caer en métodos
+      // broken (ej. SEPA EU) cuando preferredMethod no está disponible.
+      const seleccion = selectHarborQuote(quotesList, corridor.destinationCountry);
+      const fallback  = seleccion.quote;
       if (preferredMethod) {
         console.warn(
           '[tryOwlPayV2] Método preferido %s no disponible para %s — fallback a %s',
@@ -1134,6 +1098,30 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
           fallback?.payment_method ?? quotesList[0]?.payment_method,
         );
       }
+
+      // ⚠️ Acá el criterio se INVIERTE respecto de la cotización. En el quote, un
+      // riel degradado corta el flujo porque nadie pagó todavía. Acá el payin YA
+      // está cobrado: negarse dejaría la plata del usuario encerrada, que es peor
+      // que un payout caro. Así que se liquida y se grita, para que alguien mire.
+      if (seleccion.degraded) {
+        console.error('[tryOwlPayV2] riel preferido ausente CON PAYIN COBRADO — se liquida igual:', {
+          transactionId: transaction.transactionId,
+          corridorId:    corridor.corridorId,
+          preferido:     seleccion.preferredMethod,
+          elegido:       seleccion.method,
+          disponibles:   seleccion.available,
+        });
+        Sentry.captureMessage('Harbor: payout por riel caro con payin ya cobrado', {
+          level: 'error',
+          tags:  {
+            transactionId: transaction.transactionId,
+            corridorId:    corridor.corridorId,
+            preferido:     seleccion.preferredMethod,
+            elegido:       seleccion.method,
+          },
+        });
+      }
+
       quoteData = fallback ?? quotesList[0];
     }
     if (!quoteData) {
@@ -1192,6 +1180,11 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
     transfer_purpose:          beneficiaryPurpose ?? transaction.transferPurpose ?? 'FAMILY_MAINTENANCE',
     is_self_transfer:          isSelfTransfer,
   });
+
+  // Si Harbor aceptó el transfer, el customer de `on_behalf_of` está activo.
+  // Es mejor evidencia que cualquier sonda, y levanta el breaker sin que nadie
+  // tenga que acordarse de hacerlo a mano.
+  marcarCustomerActivo('LLC').catch(() => {});
 
   const transferData = transfer.data ?? transfer;
   const transferId   = transferData.uuid ?? transferData.id ?? transferData.transfer_id;
@@ -1347,18 +1340,21 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       `No es posible enviar USDC sin memo. Contactar OwlPay soporte.`,
     );
   }
-  // El origen depende de cómo se financió el pago: tesorería, o la cuenta Stellar del
-  // propio usuario cuando lo pagó con su saldo (ver sendPayoutUSDC).
-  const stellarResult  = await sendPayoutUSDC({
-    transaction,
+  const stellarResult  = await sendUSDCToHarbor({
     destinationAddress: instructionAddress,
     amount:             netAmountUSD,
     memo:               instructionMemo,
+    transactionId:      transaction.alytoTransactionId,
   });
 
   transaction.stellarTxHash = stellarResult.hash;
   transaction.status        = 'payout_sent';
   transaction.statusReason  = null;
+  recordPayoutLeg(transaction, {
+    provider:   'owlPay',
+    status:     'processing',
+    externalId: transferId,
+  });
   transaction.ipnLog.push({
     provider:   'stellar',
     eventType:  'usdc_sent_to_harbor',
@@ -1369,15 +1365,12 @@ export async function tryOwlPayV2(transaction, corridor, netAmountUSD) {
       amount:   netAmountUSD,
       memo:     instructionMemo,
       existing: stellarResult.existing ?? false,
-      // Desde qué cuenta salió el USDC: 'treasury' o 'custodial' (la del usuario).
-      from:     stellarResult.from ?? 'treasury',
-      ...(stellarResult.sourcePublicKey ? { source: stellarResult.sourcePublicKey } : {}),
     },
     receivedAt: new Date(),
   });
   await transaction.save();
 
-  console.log('[OwlPay] USDC sent:', stellarResult.hash, '| origen:', stellarResult.from ?? 'treasury');
+  console.log('[OwlPay] USDC sent:', stellarResult.hash);
   return {
     provider:     'owlpay',
     status:       'payout_sent',
@@ -1555,6 +1548,14 @@ export async function dispatchPayout(transaction) {
     } catch (err) {
       // Mapear el error de Harbor a mensajes admin + usuario accionables
       const mapped = mapHarborError(err);
+
+      // El customer inactivo no rompe esta operación: rompe el riel entero.
+      // Levantar la bandera hace que los próximos cobros de Harbor se bloqueen
+      // ANTES de tomar el dinero, en vez de repetir el mismo fallo con plata
+      // adentro. En junio de 2026 pasó dos veces por no tener esto.
+      if (mapped.rielCaido) {
+        await marcarCustomerInactivo('LLC', mapped.adminMessage).catch(() => {});
+      }
 
       console.error('[Alyto Payout] tryOwlPayV2 falló:', {
         transactionId: transaction.alytoTransactionId,
@@ -2050,6 +2051,14 @@ export async function dispatchPayout(transaction) {
     } else {
       // ── VITA PRODUCCIÓN: esperar segundo IPN de Vita para confirmar el payout ─
       transaction.status = 'payout_sent';
+      // El payout fue aceptado por Vita pero no acreditado: 'processing' hasta
+      // que llegue el IPN de liquidación. Antes esta etapa no se registraba y
+      // `providersUsed` listaba el payout que `paymentLegs` no mostraba.
+      recordPayoutLeg(transaction, {
+        provider:   providerUsed,
+        status:     'processing',
+        externalId: transaction.payoutReference,
+      });
 
       await appendIpnLog(transaction, 'payout_dispatched', providerUsed, 'payout_sent', {
         payoutReference: transaction.payoutReference,
@@ -2372,12 +2381,14 @@ export async function handleVitaIPN(req, res) {
 
       if (vitaStatus === 'completed') {
         transaction.status      = 'completed';
+        recordPayoutLeg(transaction, {
+          provider:    'vitaWallet',
+          status:      'completed',
+          externalId:  transaction.payoutReference,
+          completedAt: new Date(),
+        });
         transaction.completedAt = new Date();
         await transaction.save();
-
-        // walletUSDC: confirmar el débito del saldo reservado (idempotente, no-op si no aplica).
-        settleWalletPayinForTransaction(transaction)
-          .catch(err => console.error('[Alyto IPN/Vita] settleWalletPayin error:', err.message));
 
         if (transaction.contactId) {
           recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
@@ -2857,11 +2868,13 @@ export async function handleOwlPayIPN(req, res) {
       transaction.status      = 'completed';
       transaction.completedAt = new Date();
       if (transaction.harborTransfer) transaction.harborTransfer.status = 'completed';
+      recordPayoutLeg(transaction, {
+        provider:    'owlPay',
+        status:      'completed',
+        externalId:  transaction.harborTransfer?.transferId,
+        completedAt: new Date(),
+      });
       await transaction.save();
-
-      // walletUSDC: confirmar el débito del saldo reservado (idempotente, no-op si no aplica).
-      settleWalletPayinForTransaction(transaction)
-        .catch(err => console.error('[Alyto IPN/OwlPay] settleWalletPayin error:', err.message));
 
       if (transaction.contactId) {
         recordSent(transaction.contactId, transaction.destinationAmount, transaction.destinationCurrency).catch(() => {});
@@ -3076,7 +3089,18 @@ export function handleBankQrIPN(bankId) {
   return async function (req, res) {
     const OK = { responseCode: 0, message: '' };
 
-    const { payment } = req.body ?? {};
+    // La forma anidada `{ payment: {...} }` es la de BANECO. Un banco cuyo
+    // webhook manda otra cosa (Red Enlace lo manda plano) expone
+    // `normalizeIpn(req)` y traduce. Sin esta costura, sumar un banco obligaba a
+    // ramificar el handler completo.
+    let payment = req.body?.payment;
+    if (!payment?.qrId) {
+      try {
+        payment = getBankQrService(bankId).normalizeIpn?.(req) ?? payment;
+      } catch {
+        // Banco no registrado. Se resuelve más abajo, al no encontrar match.
+      }
+    }
 
     if (!payment?.qrId) {
       logger.warn(`[BankQr IPN ${bankId}] Payload sin payment.qrId`, { body: req.body });
@@ -3291,6 +3315,13 @@ export function handleBankQrIPN(bankId) {
     try {
       transaction.status         = 'payin_confirmed';
       transaction.bankQr.paidAt  = isNaN(bankPaidAt) ? new Date() : bankPaidAt;
+      // Cerrar la etapa de payin del desglose con la fecha del banco, no con
+      // `now`: el desglose tiene que coincidir con bankQr.paidAt y el ipnLog.
+      completePayinLeg(transaction, {
+        provider:    'bankQr',
+        externalId:  pagoTx.qrId ?? payment.qrId,
+        completedAt: isNaN(bankPaidAt) ? new Date() : bankPaidAt,
+      });
       transaction.bankQr.payment = pagoTx;
       transaction.payinReference = pagoTx.qrId ?? payment.qrId;
       transaction.ipnLog.push({
@@ -3331,73 +3362,112 @@ export function handleBankQrIPN(bankId) {
   };
 }
 
-// ─── handleBecDisbursementIPN ─────────────────────────────────────────────────
+// ─── handleBankDisbursementIPN ────────────────────────────────────────────────
 
 /**
- * IPN de confirmación de estado de dispersión bancaria (BANECO §9.2 notifyStatus).
+ * Factory del IPN de confirmación de dispersión bancaria, por proveedor.
  *
- * El banco hace POST a POST /api/v1/ipn/bec-disbursement por cada pago del detalle
- * de la planilla, con su estado final. Liquidamos el retiro asociado:
- *   ACEP → completa el retiro (debita saldo + libera reserva)
- *   RECH → rechaza el retiro (libera reserva, no debita)
+ * El proveedor hace POST a su endpoint (BANECO §9.2 notifyStatus →
+ * POST /api/v1/ipn/bec-disbursement) por cada pago del detalle, con su estado final.
+ * Liquidamos el retiro asociado:
+ *   aceptado  → completa el retiro (debita saldo + libera reserva)
+ *   rechazado → rechaza el retiro (libera reserva, no debita)
  *
- * Payload §9.2 (notifyStatus): {
+ * Payload BANECO §9.2 (notifyStatus): {
  *   bankBatchId, batchId, batchDetailId, status ('ACEP'|'RECH'),
  *   descriptionStatus, transactionIdDebit, transactionIdCredit
  * }
  * Mapeamos por batchDetailId/batchId == wtxId (lo enviamos como ID externo).
+ * La autenticación y el mapeo de estados los aporta el adapter del proveedor, no
+ * este handler: un proveedor nuevo es un endpoint con su `provider` y nada más.
  *
- * Responde 200 { responseCode: 0 } siempre, para evitar reintentos del banco ante
+ * Responde 200 { responseCode: 0 } siempre, para evitar reintentos del proveedor ante
  * errores internos nuestros (el job reconcileBecDisbursements es la red de seguridad).
+ *
+ * @param {string} provider — clave del adapter en `bankRegistry` (ej. 'baneco').
  */
-export async function handleBecDisbursementIPN(req, res) {
-  const OK = { responseCode: 0, message: '' };
-  const b  = req.body ?? {};
-  const wtxId = b.batchDetailId ?? b.batchId;
+export function handleBankDisbursementIPN(provider) {
+  const tag = `${provider} Disbursement IPN`;
 
-  logger.info('[BEC Disbursement IPN] Confirmación recibida', {
-    wtxId, status: b.status, bankBatchId: b.bankBatchId,
-  });
+  return async function bankDisbursementIPNHandler(req, res) {
+    const OK = { responseCode: 0, message: '' };
+    const b  = req.body ?? {};
 
-  if (!wtxId || !b.status) {
-    logger.warn('[BEC Disbursement IPN] Payload sin batchDetailId/status', { body: b });
-    return res.status(200).json(OK);
-  }
+    // El adapter se resuelve ANTES de leer el payload: los proveedores no
+    // comparten la forma del webhook y hace falta su traductor para saber
+    // siquiera de qué retiro habla.
+    let disbursement;
+    try {
+      const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js');
+      disbursement = getDisbursementAdapter(provider)?.disbursement;
+    } catch (err) {
+      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider } });
+      return res.status(200).json(OK);
+    }
+    if (!disbursement) {
+      logger.warn(`[${tag}] Sin adapter de dispersión — ignorando`);
+      return res.status(200).json(OK);
+    }
 
-  // ── Gate de autenticidad (HMAC opcional + validación estructural) ──
-  let verifyNotifyStatus, mapNotifyStatus;
-  try {
-    ({ verifyNotifyStatus, mapNotifyStatus } = await import('../services/bank/becDisbursementService.js'));
-  } catch (err) {
-    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' } });
-    return res.status(200).json(OK);
-  }
+    // `{ batchDetailId, status }` es la forma de BANECO. Un proveedor cuyo
+    // webhook manda otra cosa expone `normalizeNotify(req)` y traduce. Red
+    // Enlace manda `transaccionId` (un alias de 9 dígitos) y `estado`, así que
+    // además tiene que resolver el alias contra la base para saber el wtxId.
+    let norm = { wtxId: b.batchDetailId ?? b.batchId, status: b.status };
+    if ((!norm.wtxId || !norm.status) && typeof disbursement.normalizeNotify === 'function') {
+      try {
+        norm = (await disbursement.normalizeNotify(req)) ?? norm;
+      } catch (err) {
+        Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider } });
+        return res.status(200).json(OK);
+      }
+    }
+    const wtxId = norm.wtxId;
 
-  const auth = verifyNotifyStatus(req);
-  if (!auth.ok) {
-    logger.warn('[BEC Disbursement IPN] No autenticado — ignorando', { wtxId, reason: auth.reason });
-    Sentry.captureMessage(`BEC Disbursement IPN rejected: ${auth.reason}`, {
-      level: 'warning', extra: { wtxId, status: b.status },
+    logger.info(`[${tag}] Confirmación recibida`, {
+      wtxId, status: norm.status, bankBatchId: b.bankBatchId ?? b.nroLote,
     });
+
+    if (!wtxId || !norm.status) {
+      logger.warn(`[${tag}] Payload sin identificador de retiro o sin estado`, { body: b });
+      return res.status(200).json(OK);
+    }
+
+    const auth = disbursement.verifyNotifyStatus(req);
+    if (!auth.ok) {
+      logger.warn(`[${tag}] No autenticado — ignorando`, { wtxId, reason: auth.reason });
+      Sentry.captureMessage(`${tag} rejected: ${auth.reason}`, {
+        level: 'warning', extra: { wtxId, status: b.status, provider },
+      });
+      return res.status(200).json(OK);
+    }
+
+    const outcome = disbursement.mapNotifyStatus(norm.status);
+    if (outcome === 'unknown') {
+      // No es solo ruido. Acá caen los estados intermedios (sin acción) pero
+      // también `REVERTIDO` de Red Enlace, que significa que un retiro ya pagado
+      // volvió y necesita intervención humana. Por eso además de logear se avisa.
+      logger.warn(`[${tag}] Estado sin acción automática: ${norm.status}`, { wtxId });
+      Sentry.captureMessage(`${tag} estado sin manejar: ${norm.status}`, {
+        level: 'warning', extra: { wtxId, provider, body: b },
+      });
+      return res.status(200).json(OK);
+    }
+
+    try {
+      const result = await settleDispatchedWithdrawal(wtxId, {
+        accepted:      outcome === 'accepted',
+        bankReference: norm.bankReference ?? b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
+        reason:        norm.reason ?? b.descriptionStatus,
+      });
+      logger.info(`[${tag}] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
+    } catch (err) {
+      Sentry.captureException(err, { tags: { component: 'bankDisbursementIPN', provider }, extra: { wtxId } });
+    }
+
     return res.status(200).json(OK);
-  }
-
-  const outcome = mapNotifyStatus(b.status);
-  if (outcome === 'unknown') {
-    logger.warn(`[BEC Disbursement IPN] Status desconocido: ${b.status}`, { wtxId });
-    return res.status(200).json(OK);
-  }
-
-  try {
-    const result = await settleDispatchedWithdrawal(wtxId, {
-      accepted:      outcome === 'accepted',
-      bankReference: b.transactionIdCredit ?? b.transactionIdDebit ?? b.bankBatchId,
-      reason:        b.descriptionStatus,
-    });
-    logger.info(`[BEC Disbursement IPN] Retiro ${outcome} → ${result.status ?? result.reason}`, { wtxId });
-  } catch (err) {
-    Sentry.captureException(err, { tags: { component: 'becDisbursementIPN' }, extra: { wtxId } });
-  }
-
-  return res.status(200).json(OK);
+  };
 }
+
+/** Handler BANECO — alias estable del endpoint ya entregado al banco. */
+export const handleBecDisbursementIPN = handleBankDisbursementIPN('baneco');

@@ -566,6 +566,8 @@ const transactionSchema = new Schema(
         dueDate: { type: Date },                // Fecha de vencimiento del QR
         paidAt:  { type: Date },                // Timestamp de confirmación del banco
         payment: { type: Schema.Types.Mixed },  // Objeto PaymentQR completo del banco
+        /** Cuenta bancaria donde cayó el cobro. Ver el mismo campo en WalletTransaction. */
+        accountCredit: { type: String, trim: true },
         /**
          * Para qué entró la plata. Desde octubre de 2026 la cuenta BANECO que
          * recibe estos cobros es exclusiva de Alyto y hay que poder rendirla por
@@ -703,6 +705,30 @@ const transactionSchema = new Schema(
         by:       { type: Schema.Types.ObjectId, ref: 'User' },
         reason:   { type: String, trim: true },
         zone:     { type: String, enum: ['A', 'B'], trim: true },
+        /**
+         * Documento del débito en el banco. Es la evidencia equivalente a
+         * `wtxId` cuando la devolución se hizo por transferencia y no por
+         * billetera: ahí no hay movimiento interno que mostrar.
+         *
+         * Caso que lo motivó: los Bs 246 de ALY-C-1791067601018-KCU3DZ,
+         * devueltos el 2026-10-06 con el débito ACH QR 410375644, que el
+         * sistema seguía contando como pasivo por no tener dónde registrarlo.
+         */
+        bankReference: { type: String, trim: true },
+        /**
+         * Comprobante de la devolución. Misma forma que `withdrawalProof` del
+         * retiro: el archivo vive en la base, no en disco.
+         *
+         * No es decorativo. Ante ASFI, "se devolvió" sin respaldo documental es
+         * una afirmación, no un hecho; y el estado `refunded` ya demostró que se
+         * puede poner a mano sin que el dinero se haya movido.
+         */
+        proof: {
+          data:       { type: Buffer },
+          filename:   { type: String, trim: true },
+          mimetype:   { type: String, trim: true },
+          uploadedAt: { type: Date },
+        },
       }, { _id: false }),
     },
 

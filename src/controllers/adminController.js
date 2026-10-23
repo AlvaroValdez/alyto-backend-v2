@@ -19,11 +19,13 @@
 
 import mongoose          from 'mongoose';
 import User              from '../models/User.js';
+import { logger }        from '../utils/logger.js';
 import Transaction       from '../models/Transaction.js';
 import TransactionConfig from '../models/TransactionConfig.js';
 import WalletTransaction from '../models/WalletTransaction.js';
+import WalletBOB         from '../models/WalletBOB.js';
 import { dispatchPayout } from './ipnController.js';
-import { confirmBankQrDeposit } from './walletController.js';
+import { confirmBankQrDeposit, getOrCreateWallet, fireAuditTrail } from './walletController.js';
 import { notify, NOTIFICATIONS } from '../services/notifications.js';
 import { sendEmail, EMAILS }    from '../services/email.js';
 import {
@@ -38,6 +40,8 @@ import { getBOBRate, convertOriginToUSD } from '../services/exchangeRateService.
 import { calculateFintocFee } from '../utils/fintocFees.js';
 import { denyIfProduction }   from '../middlewares/sandboxOnly.js';
 import { recordAdminAction }  from '../services/adminAuditService.js';
+import { resolveComprobanteUrl } from '../services/storageService.js';
+import { completePayinLeg } from '../utils/paymentLegs.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -732,6 +736,8 @@ export async function updateTransactionStatus(req, res) {
       confirmationNote: note.trim(),
       bankReference:    bankReference?.trim() ?? null,
     };
+    // Cerrar la etapa de payin del desglose: el admin acaba de dar fe del cobro.
+    completePayinLeg(transaction, { externalId: bankReference?.trim() ?? null });
   }
 
   transaction.ipnLog.push({
@@ -1627,6 +1633,58 @@ export async function getTransactionComprobante(req, res) {
     filename:   transaction.paymentProof.filename,
     size:       transaction.paymentProof.size,
     uploadedAt: transaction.paymentProof.uploadedAt,
+  });
+}
+
+// ─── getTransactionComprobanteOficial ─────────────────────────────────────────
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/comprobante-oficial
+ *
+ * Devuelve una URL descargable del COMPROBANTE OFICIAL DE TRANSACCIÓN (el PDF
+ * BOL-… generado y guardado en S3 con Object Lock), distinto del comprobante que
+ * sube el usuario (ese lo sirve getTransactionComprobante). Hasta ahora admin no
+ * tenía forma de ver este documento — detectado el 2026-10-06.
+ *
+ * Resuelve `boliviaCompliance.comprobanteUrl` (s3key://…) a una presigned fresca
+ * de 1 h vía storageService. Las facturas B2B (serie SRV) tienen su propia ruta
+ * (business-invoice) y NO pasan por acá.
+ *
+ * Requiere: protect + checkAdmin
+ */
+export async function getTransactionComprobanteOficial(req, res) {
+  const { transactionId } = req.params;
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId })
+      .select('alytoTransactionId boliviaCompliance status')
+      .lean();
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({ error: 'Transacción no encontrada.' });
+  }
+
+  const stored = transaction.boliviaCompliance?.comprobanteUrl;
+  if (!stored) {
+    return res.status(404).json({
+      error: 'Esta transacción aún no tiene Comprobante Oficial. Se genera al completarse el pago (corredores SRL retail).',
+      code:  'NO_COMPROBANTE',
+    });
+  }
+
+  const url = await resolveComprobanteUrl(stored);
+  if (!url) {
+    return res.status(502).json({ error: 'No se pudo generar el enlace de descarga del comprobante.' });
+  }
+
+  return res.status(200).json({
+    url,
+    numeroComprobante: transaction.boliviaCompliance.numeroComprobante ?? null,
+    generatedAt:       transaction.boliviaCompliance.comprobanteGeneratedAt ?? null,
   });
 }
 
@@ -2600,5 +2658,344 @@ export async function listKycAttempts(req, res) {
   } catch (err) {
     console.error('[Admin listKycAttempts] Error:', err.message);
     return res.status(500).json({ error: 'Error al consultar los intentos de verificación.' });
+  }
+}
+
+// ─── Devolución de un pago transfronterizo ────────────────────────────────────
+
+/**
+ * POST /api/v1/admin/transactions/:transactionId/refund
+ *
+ * Registra que a un usuario se le devolvió el dinero de una operación que se
+ * cobró y no se ejecutó, con su evidencia.
+ *
+ * Existe porque `status:'refunded'` por sí solo no prueba nada: se puede fijar a
+ * mano desde el panel sin mover un centavo, y en producción pasó. Mientras no
+ * haya evidencia, `getBOBCommitted` sigue contando el monto como pasivo, que es
+ * lo correcto.
+ *
+ * Dos formas de evidencia, según cómo se devolvió:
+ *   - `walletBOB`    → exige `wtxId`, el movimiento que acreditó el saldo.
+ *   - `bankTransfer` → exige `bankReference`, el documento del débito en el banco.
+ *
+ * El comprobante (imagen o PDF) es opcional en el request pero muy recomendable:
+ * ante ASFI, "se devolvió" sin respaldo documental es una afirmación, no un hecho.
+ *
+ * Body (multipart/form-data):
+ *   method        'walletBOB' | 'bankTransfer' | 'external'
+ *   wtxId         requerido si method=walletBOB
+ *   bankReference requerido si method=bankTransfer
+ *   amount        opcional; por defecto el originalAmount de la transacción
+ *   reason        opcional
+ *   proof         archivo opcional (campo de multer)
+ */
+/**
+ * Devolución a la billetera en UN SOLO ACTO: acredita el saldo y registra la
+ * devolución dentro de la misma transacción de Mongo.
+ *
+ * Por qué existe. Antes `registrarDevolucion` exigía un `wtxId` que el admin tenía
+ * que conseguir desde otra pantalla, así que la devolución eran dos pasos manuales
+ * con una ventana en medio: si acreditabas y no registrabas, el monto quedaba
+ * contado como pasivo además de ya devuelto (deuda duplicada en el respaldo); si
+ * registrabas sin acreditar, el pasivo se liberaba sin que el usuario cobrara.
+ * Acá las dos mitades commitean juntas o no pasa ninguna.
+ *
+ * El `wtxId` ya no se pide: se genera y se devuelve. Y es la evidencia que
+ * `getBOBCommitted` necesita para dejar de contar el monto como pasivo, así que la
+ * deuda se cierra con el mismo movimiento que le paga al usuario.
+ *
+ * Frente a una transferencia bancaria esto es mejor en cuatro cosas: es inmediato,
+ * no pasa por las firmas del banco, la evidencia la produce el sistema (no una
+ * captura que alguien tiene que adjuntar), y el usuario decide si lo retira o lo
+ * vuelve a enviar.
+ */
+async function acreditarDevolucionEnBilletera({ req, res, transactionId, monto, reason }) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    // Se relee DENTRO de la sesión: la comprobación de más arriba corrió fuera y
+    // dos pedidos simultáneos podrían haberla pasado los dos. Acá los dos
+    // escribirían el mismo documento y Mongo aborta uno por conflicto.
+    const tx = await Transaction.findOne({ alytoTransactionId: transactionId }).session(session);
+    if (!tx) {
+      await session.abortTransaction();
+      return res.status(404).json({ error: 'Transacción no encontrada.' });
+    }
+    if (tx.refund?.wtxId || tx.refund?.bankReference) {
+      await session.abortTransaction();
+      return res.status(409).json({ error: 'Esta transacción ya tiene una devolución registrada con evidencia.' });
+    }
+
+    const estadoPrevio = tx.status;
+    const wallet       = await getOrCreateWallet(tx.userId, session);
+    const saldoPrevio  = wallet.balance;
+
+    await WalletBOB.updateOne(
+      { _id: wallet._id },
+      { $inc: { balance: monto } },
+      { session },
+    );
+
+    const [wtx] = await WalletTransaction.create([{
+      walletId:      wallet._id,
+      userId:        tx.userId,
+      type:          'refund',
+      currency:      'BOB',
+      amount:        monto,
+      balanceBefore: saldoPrevio,
+      balanceAfter:  saldoPrevio + monto,
+      status:        'completed',
+      description:   `Devolución de ${tx.alytoTransactionId}`,
+      reference:     tx.alytoTransactionId,
+      confirmedAt:   new Date(),
+    }], { session, ordered: true });
+
+    tx.status = 'refunded';
+    tx.refund = {
+      method:   'walletBOB',
+      wtxId:    wtx.wtxId,
+      amount:   monto,
+      currency: tx.originCurrency ?? 'BOB',
+      at:       new Date(),
+      by:       req.user?._id,
+      reason:   String(reason ?? 'Devolución acreditada en la billetera por admin').slice(0, 300),
+    };
+    await tx.save({ session });
+
+    // El asiento va DENTRO de la sesión: si la auditoría no se puede escribir, el
+    // dinero NO se mueve. Mismo criterio que las 9 acciones de Tier 1.
+    await recordAdminAction({
+      req, session,
+      action:     'transaction.refund.wallet',
+      targetType: 'Transaction',
+      targetId:   tx.alytoTransactionId,
+      before:     { status: estadoPrevio, saldoBilletera: saldoPrevio },
+      after:      { status: 'refunded',   saldoBilletera: saldoPrevio + monto },
+      reason:     String(reason ?? '').slice(0, 300),
+      metadata:   { userId: String(tx.userId), montoBOB: monto, wtxId: wtx.wtxId },
+    });
+
+    await session.commitTransaction();
+
+    logger.info('[Admin] Devolución acreditada en billetera', {
+      alytoTransactionId: tx.alytoTransactionId,
+      wtxId: wtx.wtxId, monto, by: req.user?.email,
+    });
+
+    // Sello en Stellar y aviso al usuario — fuera de la sesión y sin bloquear.
+    fireAuditTrail(wtx.wtxId, 'refund', monto, tx.alytoTransactionId);
+    notify(tx.userId, NOTIFICATIONS.refundCredited?.(monto, tx.originCurrency ?? 'BOB') ?? {
+      title: 'Devolución acreditada',
+      body:  `Te devolvimos Bs ${monto.toFixed(2)} a tu saldo de Alyto.`,
+      type:  'wallet',
+    }).catch(() => {});
+
+    return res.status(200).json({
+      message: 'Saldo acreditado y devolución registrada. El monto deja de contarse como pasivo.',
+      refund: {
+        method: 'walletBOB', amount: monto, wtxId: wtx.wtxId,
+        saldoAnterior: saldoPrevio, saldoNuevo: saldoPrevio + monto,
+        at: tx.refund.at,
+      },
+    });
+
+  } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    logger.error('[Admin] Falló la devolución a billetera — nada se movió', {
+      transactionId, error: err.message,
+    });
+    return res.status(500).json({ error: `No se pudo acreditar la devolución: ${err.message}` });
+  } finally {
+    session.endSession();
+  }
+}
+
+export async function registrarDevolucion(req, res) {
+  const { transactionId } = req.params;
+  const { method, wtxId, bankReference, amount, reason } = req.body ?? {};
+
+  if (!['walletBOB', 'bankTransfer', 'external'].includes(method)) {
+    return res.status(400).json({ error: 'method debe ser walletBOB, bankTransfer o external.' });
+  }
+  if (method === 'bankTransfer' && !String(bankReference ?? '').trim()) {
+    return res.status(400).json({ error: 'Una devolución por transferencia exige la referencia del banco.' });
+  }
+
+  let transaction;
+  try {
+    transaction = await Transaction.findOne({ alytoTransactionId: transactionId });
+  } catch {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+  if (!transaction) return res.status(404).json({ error: 'Transacción no encontrada.' });
+
+  // Idempotencia: no pisar una devolución ya registrada con evidencia.
+  if (transaction.refund?.wtxId || transaction.refund?.bankReference) {
+    return res.status(409).json({
+      error:  'Esta transacción ya tiene una devolución registrada con evidencia.',
+      refund: { method: transaction.refund.method, at: transaction.refund.at },
+    });
+  }
+
+  const monto = Number(amount ?? transaction.originalAmount);
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return res.status(400).json({ error: 'Monto de devolución inválido.' });
+  }
+
+  // Devolución a la billetera SIN wtxId = "acreditá vos y registralo", en un solo
+  // acto atómico. Con wtxId se interpreta que el crédito ya se hizo por otra vía y
+  // acá solo se asienta, que es el comportamiento original.
+  if (method === 'walletBOB' && !String(wtxId ?? '').trim()) {
+    return acreditarDevolucionEnBilletera({ req, res, transactionId, monto, reason });
+  }
+
+  transaction.status = 'refunded';
+  transaction.refund = {
+    method,
+    ...(wtxId         ? { wtxId:         String(wtxId).trim() }         : {}),
+    ...(bankReference ? { bankReference: String(bankReference).trim() } : {}),
+    amount:   monto,
+    currency: transaction.originCurrency ?? 'BOB',
+    at:       new Date(),
+    by:       req.user?._id,
+    reason:   String(reason ?? 'Devolución registrada por admin').slice(0, 300),
+    ...(req.file ? {
+      proof: {
+        data:       req.file.buffer,
+        filename:   req.file.originalname,
+        mimetype:   req.file.mimetype,
+        uploadedAt: new Date(),
+      },
+    } : {}),
+  };
+
+  try {
+    await transaction.save();
+  } catch (err) {
+    return res.status(500).json({ error: `No se pudo guardar la devolución: ${err.message}` });
+  }
+
+  logger.info('[Admin] Devolución registrada', {
+    alytoTransactionId: transaction.alytoTransactionId,
+    method, monto, conComprobante: !!req.file, by: req.user?.email,
+  });
+
+  return res.status(200).json({
+    message: 'Devolución registrada. El monto deja de contarse como pasivo.',
+    refund: {
+      method, amount: monto, wtxId: wtxId ?? null, bankReference: bankReference ?? null,
+      conComprobante: !!req.file, at: transaction.refund.at,
+    },
+  });
+}
+
+/**
+ * GET /api/v1/admin/transactions/:transactionId/refund-proof
+ * Devuelve el comprobante de la devolución, si se subió.
+ */
+export async function getComprobanteDevolucion(req, res) {
+  const { transactionId } = req.params;
+
+  let t;
+  try {
+    t = await Transaction.findOne({ alytoTransactionId: transactionId }).select('refund').lean();
+  } catch {
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+  if (!t) return res.status(404).json({ error: 'Transacción no encontrada.' });
+  if (!t.refund?.proof?.data) {
+    return res.status(404).json({ error: 'Esta devolución no tiene comprobante subido.' });
+  }
+
+  res.setHeader('Content-Type', t.refund.proof.mimetype ?? 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${t.refund.proof.filename ?? 'devolucion'}"`);
+  return res.send(t.refund.proof.data);
+}
+
+// ─── Diligencia reforzada (EDD) ───────────────────────────────────────────────
+//
+// El control de PEP no sirve de nada si nadie puede resolverlo: una cola que
+// solo crece es un hallazgo de auditoría, no un control. Esto es lo que permite
+// al Oficial de Cumplimiento cerrar cada caso dejando rastro de quién y cuándo.
+
+/**
+ * GET /api/v1/admin/edd?status=pending
+ *
+ * Cola de revisión. Por defecto solo lo pendiente, que es lo accionable.
+ */
+export async function listarEdd(req, res) {
+  try {
+    const estado = typeof req.query?.status === 'string' ? req.query.status : 'pending';
+    const validos = ['pending', 'approved', 'rejected', 'not_required'];
+    if (!validos.includes(estado)) {
+      return res.status(400).json({ error: `"status" debe ser uno de: ${validos.join(', ')}.` });
+    }
+
+    const usuarios = await User.find({ eddStatus: estado })
+      .select('firstName lastName email riskLevel eddStatus eddReviewedAt eddNotes pep sanctionsFlag createdAt')
+      .sort({ createdAt: 1 })   // lo más antiguo primero: es lo que lleva más tiempo esperando
+      .limit(200)
+      .lean();
+
+    return res.json({ total: usuarios.length, status: estado, usuarios });
+  } catch (err) {
+    console.error('[Admin] listarEdd error:', err.message);
+    return res.status(500).json({ error: 'No se pudo obtener la cola de revisión.' });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/users/:userId/edd
+ *   body: { decision: 'approved'|'rejected', notes: string }
+ *
+ * Resuelve una revisión. La nota es OBLIGATORIA: una decisión de cumplimiento
+ * sin motivo escrito no es auditable, y es justo lo que un revisor externo pide
+ * ver. Rechazar NO da de baja la cuenta — eso es una decisión aparte y más
+ * grave, que debe tomarse explícitamente.
+ */
+export async function resolverEdd(req, res) {
+  try {
+    const { decision, notes } = req.body ?? {};
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ error: '"decision" debe ser "approved" o "rejected".' });
+    }
+    if (typeof notes !== 'string' || notes.trim().length < 10) {
+      return res.status(400).json({
+        error: 'Se requiere "notes" con al menos 10 caracteres explicando la decisión.',
+      });
+    }
+
+    const usuario = await User.findById(req.params.userId).select('eddStatus').lean();
+    if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (usuario.eddStatus !== 'pending') {
+      return res.status(409).json({
+        error: `Esta revisión ya está en estado "${usuario.eddStatus}". Solo se resuelve lo pendiente.`,
+      });
+    }
+
+    await User.findByIdAndUpdate(req.params.userId, {
+      $set: {
+        eddStatus:     decision,
+        eddReviewedBy: req.user._id,
+        eddReviewedAt: new Date(),
+        eddNotes:      notes.trim().slice(0, 2000),
+      },
+    });
+    // Import perezoso, como el resto del archivo: `protect` cachea el usuario
+    // 2 minutos, y sin invalidar el estado de EDD seguiria viejo ese rato.
+    const { invalidateUserCache } = await import('../middlewares/authMiddleware.js');
+    invalidateUserCache(req.params.userId);
+
+    console.info('[EDD] Revisión resuelta:', {
+      userId:   req.params.userId,
+      decision,
+      por:      req.user._id?.toString(),
+    });
+
+    return res.json({ ok: true, eddStatus: decision });
+  } catch (err) {
+    console.error('[Admin] resolverEdd error:', err.message);
+    return res.status(500).json({ error: 'No se pudo resolver la revisión.' });
   }
 }

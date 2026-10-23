@@ -21,7 +21,7 @@
  */
 
 import { Router }                               from 'express';
-import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN, handleBecDisbursementIPN } from '../controllers/ipnController.js';
+import { handleVitaIPN, handleFintocIPN, handleOwlPayIPN, handleBankQrIPN, handleBecDisbursementIPN, handleBankDisbursementIPN } from '../controllers/ipnController.js';
 
 const router = Router();
 
@@ -130,6 +130,19 @@ router.post('/owlpay', captureRawBody, handleOwlPayIPN);
 router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
 
 /**
+ * POST /api/v1/ipn/redenlace
+ *
+ * Webhook de cobro por QR Simple de ATC S.A. (Red Enlace).
+ * Payload plano (`{ numeroReferencia, monto, clienteOrigen, bancoOrigen, ... }`),
+ * distinto del de BANECO: lo traduce `redenlaceQrService.normalizeIpn`.
+ *
+ * Esta URL es la que va en `REDENLACE_QR_WEBHOOK_URL` y se manda en cada
+ * generación de QR. ATC autentica con la cabecera que declaramos nosotros
+ * (`REDENLACE_QR_WEBHOOK_KEY` / `..._VALUE`), no con una firma del body.
+ */
+router.post('/redenlace', captureRawBody, handleBankQrIPN('redenlace'));
+
+/**
  * POST /api/v1/ipn/bec-disbursement
  *
  * IPN de confirmación de estado de dispersión BANECO (§9.2 notifyStatus).
@@ -139,6 +152,21 @@ router.post('/bec', captureRawBody, handleBankQrIPN('bec'));
  * Registrar esta URL como `notifyStatus` en el onboarding del webhook con BANECO.
  */
 router.post('/bec-disbursement', captureRawBody, handleBecDisbursementIPN);
+
+/**
+ * POST /api/v1/ipn/redenlace-disbursement
+ *
+ * Confirmación de dispersión de ATC (Pay Out Asíncrono). ATC hace POST por cada
+ * transacción del lote una vez procesada.
+ *
+ * ⚠️ La autenticación va en el **query string**: ATC llama a
+ * `…/redenlace-disbursement?token=<secreto>`. Eso convierte la URL registrada en
+ * un secreto completo — nunca logearla entera ni commitearla.
+ *
+ * El payload trae `transaccionId` (nuestro alias de 9 dígitos) y `estado`;
+ * `redenlaceDisbursementService.normalizeNotify` lo traduce y resuelve el alias.
+ */
+router.post('/redenlace-disbursement', captureRawBody, handleBankDisbursementIPN('redenlace'));
 
 export default router;
 

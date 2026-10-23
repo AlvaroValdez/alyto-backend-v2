@@ -165,6 +165,7 @@ RULES=(
   "alyto-cron-reconcile-stellar|rate(15 minutes)|reconcile-stellar"
   "alyto-cron-ros-monitor|rate(6 hours)|ros-monitor"
   "alyto-cron-ros-monitor-wallet|rate(6 hours)|ros-monitor-wallet"
+  "alyto-cron-reclamos-vencimientos|rate(6 hours)|reclamos-vencimientos"
   # 2 min y no 30: el webhook de BANECO no está llegando (verificado con un pago
   # real el 2026-09-07), así que este job es HOY el único camino de confirmación.
   # Cuesta 2 llamadas por corrida (paidQR de ayer + hoy) contra un endpoint que el
@@ -172,11 +173,26 @@ RULES=(
   # media hora a un par de minutos. Volver a 30 min cuando el IPN funcione.
   "alyto-cron-reconcile-bank-qr|rate(2 minutes)|reconcile-bank-qr"
   "alyto-cron-reconcile-bec-disbursements|rate(30 minutes)|reconcile-bec-disbursements"
+  "alyto-cron-alert-pending-withdrawals|rate(30 minutes)|alert-pending-withdrawals"
+  "alyto-cron-audit-wallet-reserves|rate(6 hours)|audit-wallet-reserves"
   "alyto-cron-refresh-rates|rate(30 minutes)|refresh-rates"
+  # Cada hora, no más seguido: la ventana que mira es de 24 h y el throttle del
+  # aviso es de 6 h por IP, así que correr más a menudo no adelanta nada.
+  "alyto-cron-auth-anomalies|rate(1 hour)|auth-anomalies"
+  # Semanal: OFAC y ONU publican cambios varias veces por semana, pero una
+  # recarga completa cuesta ~20 s y 18.500 upserts. Semanal es el equilibrio.
+  "alyto-cron-refresh-sanctions|rate(7 days)|refresh-sanctions"
   # Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
   # sin stellarTxId por un fallo transitorio de Horizon (garantía ASFI de sello por
   # operación completada). Ver src/jobs/resealAuditTrails.js.
   "alyto-cron-reseal-audit-trails|rate(30 minutes)|reseal-audit-trails"
+  # NOTA: `reconcile-custodial-accounts` NO lleva regla a propósito. Corre SIEMPRE
+  # in-process (fuera del gate JOBS_EXTERNAL_SCHEDULER, igual que monitorChannelXLM),
+  # porque crear reglas de EventBridge exige permisos `events:*` que la identidad del
+  # VPS no tiene por mínimo privilegio — y atar una red de seguridad a un permiso que
+  # nadie puede ejercer es dejarla apagada. Agregar la regla acá sería redundante: su
+  # guard de solapamiento la absorbería sin trabajo útil. Sigue en jobRegistry para
+  # poder dispararlo a mano. Ver src/jobs/reconcileCustodialAccounts.js.
 )
 
 for entry in "${RULES[@]}"; do

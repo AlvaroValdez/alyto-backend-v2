@@ -82,12 +82,46 @@ const srlConfigSchema = new Schema(
       type:    [qrImageSchema],
       default: [],
     },
-    /** Datos bancarios de AV Finance SRL — se usan en las instrucciones de pago */
+    /**
+     * Datos bancarios de AV Finance SRL — se usan en las instrucciones de pago.
+     *
+     * Sigue siendo el valor por defecto y la red de compatibilidad: cuando no hay
+     * una cuenta declarada para el propósito en `bankAccounts`, se usa esta.
+     */
     bankData: {
       bankName:      { type: String, default: '' },
       accountHolder: { type: String, default: '' },
       accountNumber: { type: String, default: '' },
       accountType:   { type: String, default: '' },
+    },
+    /**
+     * Una cuenta por destino de fondos (segregación, octubre 2026).
+     *
+     * Hasta septiembre la misma cuenta BANECO recibía la carga de billetera, los
+     * pagos transfronterizos y el gasto corriente de la empresa, y en un mes se
+     * drenó de Bs 39.987 a Bs 68. Mientras el dinero de clientes comparta cuenta
+     * con el gasto operativo no hay forma de rendir una cosa sin la otra, y la
+     * segregación de fondos de clientes es un control estructural ante ASFI.
+     *
+     * Las claves son los mismos valores de `bankQr.purpose`, para que la cuenta
+     * donde se cobra y la etiqueta con la que se registra el cobro no puedan
+     * divergir: salen de la misma decisión.
+     *
+     * Vacío = comportamiento anterior. Esto no cambia nada hasta que se cargue.
+     */
+    bankAccounts: {
+      wallet_deposit: {
+        bankName:      { type: String, default: '' },
+        accountHolder: { type: String, default: '' },
+        accountNumber: { type: String, default: '' },
+        accountType:   { type: String, default: '' },
+      },
+      crossborder_payin: {
+        bankName:      { type: String, default: '' },
+        accountHolder: { type: String, default: '' },
+        accountNumber: { type: String, default: '' },
+        accountType:   { type: String, default: '' },
+      },
     },
   },
   {

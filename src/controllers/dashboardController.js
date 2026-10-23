@@ -90,7 +90,7 @@ export async function getDashboard(req, res) {
         .find({ userId })
         .sort({ createdAt: -1 })
         .limit(3)
-        .select('alytoTransactionId status originalAmount originCurrency destinationAmount destinationCurrency beneficiary createdAt')
+        .select('alytoTransactionId status originalAmount originCurrency destinationAmount destinationCurrency destinationCountry beneficiary createdAt')
         .lean(),
 
       // Corredores activos filtrados por moneda de origen del usuario
@@ -144,6 +144,10 @@ export async function getDashboard(req, res) {
       originCurrency:      tx.originCurrency,
       destinationAmount:   tx.destinationAmount  ?? null,
       destinationCurrency: tx.destinationCurrency ?? null,
+      // El FE pinta la bandera del destino. Sin este campo lo deducía de la
+      // moneda, y como Venezuela, Ecuador, Panamá y El Salvador usan USD,
+      // un envío a Venezuela se mostraba como "Envío a USD 🇺🇸".
+      destinationCountry:  tx.destinationCountry ?? null,
       beneficiary: {
         fullName: buildBeneficiaryName(tx.beneficiary),
       },

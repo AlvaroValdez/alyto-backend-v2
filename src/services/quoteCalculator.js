@@ -17,7 +17,7 @@
  * and docs/CHANGELOG_FLOWS.md first.
  */
 
-import { tramoPublico } from '../utils/ecpTramos.js';
+import { resolvePlazoLiquidacion } from '../utils/plazoPublicado.js';
 
 const round2 = n => Math.round(n * 100) / 100;
 // FX rates necesitan 6 decimales: rates < 1 (ej. BOB→USD ≈ 0.107) pierden ~95% de la
@@ -67,7 +67,15 @@ export function getEffectiveSpreadPct(corridor, user) {
  *   digitalAsset:       string
  * }}
  */
-export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, providerFixedFee = null, accountType = 'personal' }) {
+export function calculateQuote({
+  amount, corridor, bobPerUsdc, providerRate, providerFixedFee = null, accountType = 'personal',
+  // Plazo REAL del proveedor, en días hábiles. Vita lo declara en
+  // `business_days_of_payment`; Harbor en `settlement_time_*` de la cotización, y
+  // ahí depende del RIEL y no del país, así que solo existe una vez elegido el
+  // método. null = no se conoce: cae al tramo del ECP, marcado sin verificar.
+  providerEtaMinBusinessDays = null,
+  providerEtaMaxBusinessDays = null,
+}) {
   if (!amount || amount <= 0) {
     throw new Error('calculateQuote: amount must be positive');
   }
@@ -137,10 +145,19 @@ export function calculateQuote({ amount, corridor, bobPerUsdc, providerRate, pro
   // plazo diferenciado que el consumidor descubre después de transferir no es
   // información previa, es una condición sobreviniente.
   //
+  // ⚠️ Manda el plazo REAL del proveedor, no el tramo. El tramo depende del MONTO y
+  // la velocidad real del CORREDOR y el RIEL, así que no coinciden: Bs 5.000 a
+  // EE.UU. por ACH Push cae en el tramo "mismo día hábil" y Harbor declara 2 a 5
+  // días. Publicar el tramo ahí seria una promesa incumplible. Ver plazoPublicado.
+  //
   // `null` cuando el importe cae fuera de los tramos declarados. No se acomoda al
   // tramo más cercano a propósito: un importe fuera de rango lo rechaza el control
   // de límites (`ecpLimits`), no lo absorbe el cálculo.
-  const tramo = tramoPublico(amount);
+  const tramo = resolvePlazoLiquidacion({
+    amountBOB:                amount,
+    payoutEtaMinBusinessDays: providerEtaMinBusinessDays,
+    payoutEtaMaxBusinessDays: providerEtaMaxBusinessDays,
+  });
 
   return {
     originAmount:      amount,

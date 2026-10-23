@@ -16,6 +16,7 @@ import Reclamo          from '../models/Reclamo.js'
 import Transaction      from '../models/Transaction.js'
 import User             from '../models/User.js'
 import { sendEmail }    from '../services/email.js'
+import { recordAdminAction } from '../services/adminAuditService.js'
 
 const TIPO_ENUM = ['cobro_indebido', 'transferencia_no_recibida', 'demora', 'error_monto', 'cuenta_bloqueada', 'otro']
 
@@ -399,6 +400,7 @@ export async function adminResponderReclamo(req, res) {
     }
 
     const now = new Date()
+    const statusAnterior = reclamo.status
     reclamo.status = status
     if (respuesta?.trim()) {
       reclamo.respuesta     = respuesta.trim()
@@ -412,6 +414,21 @@ export async function adminResponderReclamo(req, res) {
     if (status === 'cerrado')       reclamo.cerradoAt  = now
 
     await reclamo.save()
+
+    // Asiento de auditoría: la respuesta a un reclamo PRILI es un acto con plazo
+    // regulatorio (10 días hábiles, ASFI) — quién respondió, cuándo y qué
+    // transición de estado hizo queda registrado (Tier 2 del barrido 2026-10-05).
+    await recordAdminAction({
+      req,
+      action:     'reclamo.responder',
+      targetType: 'Reclamo',
+      targetId:   reclamo.reclamoId,
+      before:     { status: statusAnterior },
+      after:      { status, respondido: Boolean(respuesta?.trim()),
+                    ...(satisfecho !== undefined ? { satisfecho } : {}) },
+      reason:     respuesta?.trim() ?? '',
+      metadata:   { userId: String(reclamo.userId), plazoVence: reclamo.plazoVence },
+    })
 
     // Notificar al usuario si se resuelve o cierra con respuesta
     if (['resuelto', 'cerrado'].includes(status) && respuesta?.trim()) {

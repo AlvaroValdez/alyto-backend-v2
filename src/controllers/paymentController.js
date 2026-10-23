@@ -20,6 +20,7 @@
 
 import { logger }        from '../utils/logger.js';
 import { plazoLiquidacion } from '../utils/ecpTramos.js';
+import { extractVitaBusinessDays } from '../utils/vitaBusinessDays.js';
 import { evaluateCorridorAccess, corridorAccessDenialBody } from '../utils/corridorAccess.js';
 import User              from '../models/User.js';
 import Transaction       from '../models/Transaction.js';
@@ -43,6 +44,8 @@ import {
 import SRLConfig            from '../models/SRLConfig.js';
 import { getSrlBankData }   from '../services/srlBankData.js';
 import { verificarPayoutEjecutable } from '../services/payoutPreflight.js';
+import { verificarRielHarbor } from '../services/harborPreflight.js';
+import { checkBeneficiaryExecutable } from '../services/beneficiaryValidation.js';
 import multer               from 'multer';
 import { calculateQuote, toPublicFees, getEffectiveSpreadPct, round6 } from '../services/quoteCalculator.js';
 import { resolveVitaRail, applyVitaRail } from '../services/vitaRailResolver.js';
@@ -85,7 +88,7 @@ import { getBOBRate, resolveMinAmountOrigin, resolveQuoteRate } from '../service
 import { resolveEffectiveMinimum } from '../services/corridorMinimums.js';
 import { formatOriginAmount } from '../utils/currencyDisplay.js';
 import { calculateFintocFee } from '../utils/fintocFees.js';
-import { pickSupportedQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
+import { selectHarborQuote, HARBOR_FORM_FIELDS } from '../utils/harborMethodSupport.js';
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js';
 import { broadcastToAdmins } from '../routes/adminSSE.js';
 import { resolveEuCorridor, isEuSepaDestination } from '../routing/euAmountRouter.js';
@@ -555,8 +558,27 @@ const FALLBACK_WITHDRAWAL_RULES = {
   ],
 };
 
-/** Normaliza un campo de la respuesta de Vita al formato canónico del frontend */
-function transformVitaField(f) {
+/**
+ * Normaliza un campo de la respuesta de Vita al formato canónico del frontend.
+ *
+ * ⚠️ `pattern` y `hint` salen de `regex_validate` y `regex_message`, que Vita
+ * envía emparejados en 89 de sus 363 campos. Antes se descartaban aquí, y como
+ * el frontend valida contra `field.pattern`, esa comprobación NUNCA se disparaba
+ * para ningún destino de Vita: la validación de formato llevaba muerta desde
+ * siempre en los 27 destinos, no solo en los que dieron problemas.
+ *
+ * Se descubrió con los envíos a Venezuela que Vita rechazó por `account_bank`.
+ * Su propia expresión es
+ *     ^(0102|0156|0172|…|0116)\d{16}$
+ * o sea, código de banco válido más 16 dígitos, con la lista de bancos
+ * mantenida por ellos. Copiarla es mejor que escribirla a mano, porque la
+ * actualizan en origen y a nosotros se nos quedaría vieja.
+ *
+ * `regex_message` es el texto legible que acompaña a cada expresión. El frontend
+ * lo muestra como ayuda bajo el campo ANTES de escribir, no solo como error
+ * después de fallar.
+ */
+export function transformVitaField(f) {
   if (!f?.key) return null;
   let type = (f.type ?? 'text').toLowerCase();
   if (!['text', 'select', 'email', 'phone'].includes(type)) type = 'text';
@@ -570,6 +592,8 @@ function transformVitaField(f) {
     min:         f.min  ?? null,
     max:         f.max  ?? null,
     placeholder: f.placeholder ?? placeholder,
+    pattern:     f.regex_validate ?? null,
+    hint:        f.regex_message  ?? null,
     when:        f.when ?? null,
   };
 }
@@ -1378,6 +1402,26 @@ export async function initCrossBorderPayment(req, res) {
   // Nace de las 7 operaciones por Bs 3.506 que se cobraron y nunca se
   // ejecutaron: dos murieron porque la wallet maestra de Vita estaba sin saldo,
   // y se supo recién al intentar el payout, con la plata ya adentro.
+  // Riel Harbor: si un payout anterior murió por customer inactivo, el breaker
+  // está levantado y NINGUNA operación del riel puede ejecutarse hasta que se
+  // resuelva con OwlPay. Bloquear acá evita repetir el mismo fallo con el dinero
+  // del usuario ya cobrado, que es lo que pasó dos veces en junio de 2026.
+  const rielHarbor = await verificarRielHarbor({ corridor });
+  if (!rielHarbor.ok) {
+    logger.error('[CrossBorder] Payin bloqueado: el riel Harbor no está ejecutable', {
+      corridorId, motivo: rielHarbor.motivo, ...rielHarbor.detalle,
+    });
+    Sentry.captureMessage(`Payin bloqueado por preflight: ${rielHarbor.motivo}`, {
+      level: 'error',
+      extra: { corridorId, ...rielHarbor.detalle },
+    });
+    return res.status(503).json({
+      error:  'Este destino no está disponible en este momento. Por favor intenta nuevamente más tarde.',
+      code:   'PAYOUT_NOT_EXECUTABLE',
+      reason: rielHarbor.motivo,
+    });
+  }
+
   const preflight = await verificarPayoutEjecutable({
     corridor,
     usdAmount: digitalAssetAmountFinal ?? serverUsdcTransit,
@@ -1396,6 +1440,34 @@ export async function initCrossBorderPayment(req, res) {
       error:  'Este corredor no está disponible en este momento. Por favor intenta nuevamente en unos minutos.',
       code:   'PAYOUT_NOT_EXECUTABLE',
       reason: preflight.motivo,
+    });
+  }
+
+  // ── Pre-check: no cobrar lo que el proveedor va a RECHAZAR ─────────────────
+  //
+  // El gemelo del preflight de arriba: aquel cubre el SALDO, este cubre los
+  // DATOS del beneficiario. Reproducido e2e el 2026-10-05 (ALY-C-…-BNBIXN):
+  // un pix_key_type fuera del enum pasó el create, generó el QR real de BANECO
+  // y murió en Vita con code 305 — con un pago real, dinero cobrado contra un
+  // payout imposible. Mismo patrón que la operación de junio con el número de
+  // cuenta inválido (Bs 3.506 regularizados el 2026-10-01).
+  //
+  // 400 y no 503: a diferencia del saldo, esto SÍ es corregible por el usuario
+  // — el mensaje dice exactamente qué campo está mal y qué valores se aceptan.
+  const beneficiarioCheck = await checkBeneficiaryExecutable({
+    corridor,
+    beneficiaryData: beneficiaryData ?? legacyBeneficiary ?? {},
+    owlPayMethod:    owlPayMethod ?? null,
+  });
+  if (!beneficiarioCheck.ok) {
+    logger.warn('[CrossBorder] Payin bloqueado: datos del beneficiario no ejecutables', {
+      corridorId, errores: beneficiarioCheck.errores,
+    });
+    return res.status(400).json({
+      error:    'Los datos del beneficiario no son válidos para este destino. ' +
+                'Corrige los campos indicados e intenta de nuevo.',
+      code:     'BENEFICIARY_INVALID',
+      detalles: beneficiarioCheck.errores,
     });
   }
 
@@ -1518,6 +1590,12 @@ export async function initCrossBorderPayment(req, res) {
     dueExpiresAt.setHours(23, 59, 59, 999);
 
     let becResult;
+    // Se resuelve una sola vez: la misma cuenta que se le manda al banco es la
+    // que queda registrada en la transacción. Si se resolvieran por separado
+    // podrían divergir, y el registro diría una cuenta distinta de la real.
+    const cuentaCobro = (await getSrlBankData('crossborder_payin')).accountNumber
+      || process.env.BEC_ACCOUNT_CREDIT || null;
+
     try {
       const { getBankQrService } = await import('../services/bankQr/bankQrRegistry.js');
       const svc = getBankQrService(bankId);
@@ -1532,6 +1610,9 @@ export async function initCrossBorderPayment(req, res) {
         // rendir el extracto sin cruzarlo contra la base.
         description:   `Alyto envio ${alytoTransactionId}`.slice(0, 100),
         dueDate,
+        // El pago transfronterizo cobra en la cuenta de ese destino de fondos.
+        // Si no hay una declarada, cae en la de siempre (comportamiento previo).
+        accountCredit: cuentaCobro || undefined,
       });
     } catch (err) {
       logger.error('[CrossBorder] Error generando QR bancario:', {
@@ -1556,6 +1637,7 @@ export async function initCrossBorderPayment(req, res) {
       dueDate,                       // string 'yyyy-MM-dd' — mismo valor enviado al banco
       expiresAt: dueExpiresAt,       // Date — fin del día de vencimiento (TTL de la tx)
       qrImage: becResult.qrImage,    // almacenado temporalmente para pasarlo a la response
+      accountCredit: cuentaCobro,    // dónde cae el cobro, para poder rendirlo por cuenta
     };
 
     logger.info('[CrossBorder] QR bancario generado', {
@@ -1573,7 +1655,7 @@ export async function initCrossBorderPayment(req, res) {
     payinUrl         = null;
 
     manualPaymentInstructions = {
-      ...(await getSrlBankData()),
+      ...(await getSrlBankData('crossborder_payin')),
       currency:      corridor.originCurrency,
       amount,
       reference:     alytoTransactionId,
@@ -1754,7 +1836,11 @@ export async function initCrossBorderPayment(req, res) {
       payinReference:      payinProviderRef ? String(payinProviderRef) : undefined,
       paymentInstructions: manualPaymentInstructions ?? undefined,
       // bankQr: solo los metadatos de reconciliación (qrImage va en paymentQR)
-      ...(bankQrMeta ? { bankQr: { bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate, purpose: 'crossborder_payin' } } : {}),
+      ...(bankQrMeta ? { bankQr: {
+        bankId: bankQrMeta.bankId, qrId: bankQrMeta.qrId, dueDate: bankQrMeta.dueDate,
+        purpose: 'crossborder_payin',
+        accountCredit: bankQrMeta.accountCredit ?? undefined,
+      } } : {}),
       // bankQr: TTL de la tx = fin del día de vencimiento del QR (no el default +24h),
       // para que el barrido de expiración reconcilie/cancele en el momento correcto.
       ...(bankQrMeta?.expiresAt ? { paymentInstructionsExpiresAt: bankQrMeta.expiresAt } : {}),
@@ -2001,13 +2087,14 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     const sentAttrs = vitaPricesResponse?.usd?.vita_sent?.prices?.attributes;
     const sentRate  = Number(sentAttrs?.usd_sell?.[countryKey] ?? NaN);
     if (isFinite(sentRate) && sentRate > 0) {
-      const fixedCost  = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
-      const validUntil = sentAttrs?.valid_until ?? null;
+      const fixedCost    = Number(sentAttrs?.fixed_cost?.[countryKey] ?? 0);
+      const validUntil   = sentAttrs?.valid_until ?? null;
+      const businessDays = extractVitaBusinessDays(sentAttrs, countryKey);
       if (origin === 'BOB') {
         const BOB_USD_RATE = await getBOBRate();
-        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil };
+        return { rate: sentRate / BOB_USD_RATE, fixedCost, validUntil, businessDays };
       }
-      return { rate: sentRate, fixedCost, validUntil };
+      return { rate: sentRate, fixedCost, validUntil, businessDays };
     }
   }
 
@@ -2047,7 +2134,7 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     console.info('[Alyto Quote] Cotización ' + origin + '→BOB via BOB_USD_RATE:', {
       BOB_USD_RATE, clpToUsd, rate,
     });
-    return { rate, fixedCost: 0, validUntil };
+    return { rate, fixedCost: 0, validUntil, businessDays: extractVitaBusinessDays(attrs, countryKey) };
   }
 
   if (origin === 'CLP') {
@@ -2062,9 +2149,10 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
     const directRate = Number(usdAttrs?.usd_sell?.[countryKey] ?? NaN);
     if (isFinite(directRate) && directRate > 0) {
       return {
-        rate:       directRate,
-        fixedCost:  Number(usdAttrs?.fixed_cost?.[countryKey] ?? 0),
-        validUntil: usdAttrs?.valid_until ?? null,
+        rate:         directRate,
+        fixedCost:    Number(usdAttrs?.fixed_cost?.[countryKey] ?? 0),
+        validUntil:   usdAttrs?.valid_until ?? null,
+        businessDays: extractVitaBusinessDays(usdAttrs, countryKey),
       };
     }
     const clpToDest = Number(attrs.clp_sell?.[countryKey] ?? NaN);
@@ -2102,7 +2190,7 @@ async function extractVitaPricing(vitaPricesResponse, originCurrency, destinatio
   const fixedCost  = Number(attrs.fixed_cost?.[countryKey] ?? 0);
   const validUntil = attrs.valid_until ?? null;
 
-  return { rate, fixedCost, validUntil };
+  return { rate, fixedCost, validUntil, businessDays: extractVitaBusinessDays(attrs, countryKey) };
 }
 
 /**
@@ -2139,6 +2227,10 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
     rateSource:      'vita',
     rateExpiresAt:   null,
     rateConfidence:  'estimated',
+    // Se marca aparte y NO se lanza: el catch de abajo convierte cualquier
+    // excepción en `vita_fallback`, que es justamente lo que esconderia el
+    // problema. El llamador corta la cotización al verla.
+    railDegraded:    false,
   };
 
   if (corridor.payoutMethod !== 'owlPay') return meta;
@@ -2167,9 +2259,24 @@ async function resolveProviderQuote({ quote, corridor, requestedMethod }) {
 
     // Filtra a métodos soportados (ver utils/harborMethodSupport.js).
     // Evita cotizar con SEPA si el sistema no puede ejecutar SEPA.
-    const selected = pickSupportedQuote(harborQuotes, corridor.destinationCountry, requestedMethod);
+    const seleccion = selectHarborQuote(harborQuotes, corridor.destinationCountry, requestedMethod);
+    const selected  = seleccion.quote;
 
     if (!selected) throw new Error('Harbor devolvió 0 quotes');
+
+    if (seleccion.degraded) {
+      meta.railDegraded = true;
+      console.error('[Quote] riel preferido ausente en Harbor:', {
+        corridorId:  corridor.corridorId,
+        preferido:   seleccion.preferredMethod,
+        elegido:     seleccion.method,
+        disponibles: seleccion.available,
+      });
+      Sentry.captureMessage('Harbor: riel preferido ausente en cotización', {
+        level: 'error',
+        tags:  { corridorId: corridor.corridorId, preferido: seleccion.preferredMethod, elegido: seleccion.method },
+      });
+    }
 
     quote.destinationAmount = selected.destinationAmount;
     quote.effectiveRate     = round6(selected.destinationAmount / quote.originAmount);
@@ -2245,7 +2352,29 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
     const requestedMethod = req.query.method ?? null;
     // Filtra a métodos soportados (utils/harborMethodSupport.js) — evita SEPA EU bug.
     const quotesArr = Array.isArray(harborQuotes) ? harborQuotes : [harborQuotes];
-    const selected = pickSupportedQuote(quotesArr, corridor.destinationCountry, requestedMethod) ?? quotesArr[0];
+    const seleccion = selectHarborQuote(quotesArr, corridor.destinationCountry, requestedMethod);
+    const selected  = seleccion.quote ?? quotesArr[0];
+
+    // Riel barato ausente ANTES del cobro → no cotizamos. Nadie pagó todavía, así que
+    // negarse acá es gratis; cotizar sería ofrecer una operación que entrega ~la mitad
+    // y cuyo mínimo se validó contra el piso del riel que ya no está (ver
+    // RIELES_CON_FIJO_ALTO en harborMethodSupport.js).
+    if (seleccion.degraded) {
+      console.error('[Quote BOB Harbor] riel preferido ausente — no se cotiza:', {
+        corridorId: corridor.corridorId,
+        preferido:  seleccion.preferredMethod,
+        elegido:    seleccion.method,
+        disponibles: seleccion.available,
+      });
+      Sentry.captureMessage('Harbor: riel preferido ausente en cotización', {
+        level: 'error',
+        tags:  { corridorId: corridor.corridorId, preferido: seleccion.preferredMethod, elegido: seleccion.method },
+      });
+      return res.status(503).json({
+        error: 'Este destino no está disponible en este momento. Intenta más tarde.',
+        code:  'HARBOR_RAIL_DEGRADED',
+      });
+    }
 
     if (!selected?.exchangeRate) {
       return res.status(503).json({ error: 'Harbor no devolvió tasa válida.' });
@@ -2319,10 +2448,14 @@ async function calculateBOBQuote(req, res, corridor, amount, dest) {
   }
 
   // ── Vita / anchorBolivia ──────────────────────────────────────────────────
-  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta;
+  // vitaResponse se declara ACÁ y no dentro del bloque de abajo: applyVitaRail lo
+  // consume fuera del bloque. Con el `let` adentro el archivo cargaba igual y
+  // reventaba recién en runtime — "vitaResponse is not defined" — tumbando la
+  // cotización REST de los 17 corredores Vita BOB (2026-10-05). Ningún test lo
+  // vio porque la suite solo cubría quotes de origen CL (la rama genérica).
+  let usdToDestRate, vitaFixedCost = 0, validUntil, providerMeta, vitaResponse;
 
   {
-    let vitaResponse;
     try {
       vitaResponse = await getPrices();
     } catch (err) {
@@ -2786,6 +2919,14 @@ export async function getQuote(req, res) {
       corridor,
       requestedMethod: req.query.method ?? null,
     });
+
+    // Mismo criterio que en calculateBOBQuote: antes del cobro, no se cotiza.
+    if (providerMeta.railDegraded) {
+      return res.status(503).json({
+        error: 'Este destino no está disponible en este momento. Intenta más tarde.',
+        code:  'HARBOR_RAIL_DEGRADED',
+      });
+    }
 
     const alytoProfitUSDC = round2(
       // Ganancia = solo fees de Alyto (spread + fijo + retención). payinFee es
@@ -3438,7 +3579,7 @@ export async function getSRLPayinInstructions(req, res) {
   }
 
   return res.status(200).json({
-    ...(await getSrlBankData()),
+    ...(await getSrlBankData('crossborder_payin')),
     currency:      'BOB',
     qrImages,
   });

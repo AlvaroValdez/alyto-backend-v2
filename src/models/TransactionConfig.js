@@ -316,11 +316,79 @@ const transactionConfigSchema = new Schema(
       default: null,
     },
     /**
+     * Piso REAL del proveedor para ESTA ruta, en USD, medido sobre el monto NETO
+     * que Alyto le envía (después de fees) — no sobre lo que teclea el usuario.
+     *
+     * Existe porque el piso del proveedor no siempre es global. `providerFloorUSD()`
+     * deriva uno genérico (Harbor → HARBOR_MIN_USD, hoy 31; Vita → min_amount del
+     * país), pero Harbor publica además mínimos POR RUTA que ese genérico no ve:
+     * bo-jp exige `source.amount >= 75.02` contra los 31 que asumíamos. Como el
+     * mínimo configurado (40 USD ≈ 481 BOB) ya quedaba por encima del piso derivado
+     * (≈407 BOB), el guard nunca se disparaba: el usuario cotizaba $50, pagaba en
+     * BOB y el payout moría en Harbor con el cobro ya tomado.
+     *
+     * Sólo SUBE el piso: `providerFloorUSD()` toma el máximo entre el derivado y
+     * este valor, así un override desactualizado nunca desprotege si el proveedor
+     * sube su mínimo por su cuenta.
+     *
+     * ⚠️ Es un valor VIVO, no una constante. El 75,02 de JP tiene toda la pinta de
+     * ser un mínimo denominado en moneda destino convertido a USD a la tasa del
+     * día, así que se mueve con el FX. Re-descubrirlo con
+     * `scripts/harbor-route-floors.mjs` en vez de confiar en que lo escrito hace
+     * meses sigue valiendo.
+     *
+     * Null = sin piso propio conocido; se usa el derivado del proveedor.
+     */
+    providerFloorUSD: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    /**
      * Monto máximo permitido por transacción, en moneda de origen.
      * Null = sin límite superior (sujeto a KYC del usuario).
      */
     maxAmountOrigin: {
       type:    Number,
+      default: null,
+    },
+
+    /**
+     * Plazo REAL de liquidación del proveedor de payout, como RANGO en días
+     * hábiles. 0 = sub-diario ("pocas horas").
+     *
+     * Es un rango y no un número único a propósito: un plazo de liquidación no es
+     * determinista —depende del banco destino, del riel y de la hora de corte— y
+     * publicar un número cerrado ("1 día hábil") lo convierte en una promesa que
+     * no se puede sostener. El lenguaje que ya usan los Términos §7 es
+     * precisamente aproximado: "pocas horas a 1 día hábil", "1 a 3 días hábiles".
+     *
+     * Por qué es un campo por corredor y no una constante: el plazo lo fija el
+     * riel del payout, no el monto. Vita liquida en horas; Harbor por WIRE o
+     * BANK-TRANSFER puede tardar días. Antes esto se resolvía con un ternario
+     * sobre `payinMethod` —el método de COBRO, que no tiene relación con la
+     * velocidad del PAGO— y ninguno de los dos proveedores publica un ETA en su
+     * cotización, así que no se puede derivar de la API: hay que configurarlo.
+     *
+     * Decisión de Alvaro (2026-10-10): manda el plazo del proveedor, que es el
+     * real, y se expresa aproximado. El tramo del Entorno Controlado de Pruebas
+     * solo cubre el hueco cuando el corredor no tiene estos datos.
+     *
+     * ⚠️ El MÁXIMO es el que se usa para la fecha límite interna contra la que se
+     * mide el cumplimiento, así que debe ser una cota superior realista, no un
+     * optimismo. El mínimo solo afecta cómo se redacta el rango.
+     *
+     * Null en ambos = sin configurar. El resolver cae al tramo del ECP y marca el
+     * dato como no verificado, en vez de inventar un número.
+     */
+    payoutEtaMinBusinessDays: {
+      type:    Number,
+      min:     0,
+      default: null,
+    },
+    payoutEtaMaxBusinessDays: {
+      type:    Number,
+      min:     0,
       default: null,
     },
 

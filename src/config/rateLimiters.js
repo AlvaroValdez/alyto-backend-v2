@@ -47,11 +47,16 @@ function skip(req) {
 
 // ─── Factory helper ───────────────────────────────────────────────────────────
 
-function makeLimiter({ windowMs, max, maxPermissive, message }) {
+function makeLimiter({ windowMs, max, maxPermissive, message, soloFallos = false }) {
   return rateLimit({
     windowMs,
     max: IS_STRICT ? max : (maxPermissive ?? max * 10),
     skip,
+    // soloFallos: no gastar cupo con las peticiones que salieron bien (<400).
+    // Un limitador contra fuerza bruta tiene que contar INTENTOS FALLIDOS; si
+    // cuenta tambien los aciertos, castiga al usuario legitimo que entra varias
+    // veces y no frena mejor al atacante, que falla igual.
+    skipSuccessfulRequests: soloFallos,
     standardHeaders: true,
     legacyHeaders:   false,
     message:         { error: message },
@@ -73,12 +78,36 @@ export const generalLimiter = makeLimiter({
   message:       'Demasiadas solicitudes. Intenta de nuevo más tarde.',
 });
 
+// ─── Limiter: endpoint interno de jobs ────────────────────────────────────────
+
+// `/api/v1/internal/jobs/*` es alcanzable desde internet (nginx no lo bloquea) y su
+// única defensa es un token compartido entre los 15 jobs. Si ese token se filtra,
+// cualquiera podría disparar trabajos que mueven dinero o gastan XLM. Esto acota el
+// daño y frena el sondeo.
+//
+// 60/15min es holgado a propósito. El llamador legítimo es la Lambda, y el job más
+// frecuente (reconcile-bank-qr) corre cada 2 min: ~8 disparos por ventana, más los de
+// 15 min y los de 6 h, da ~15 en el peor caso. Apretarlo arriesgaría 429 silenciosos
+// que apagarían los jobs sin que nadie se enterara, que es peor que el abuso que
+// previene. Contra el token en sí el límite es irrelevante: son 64 caracteres.
+export const internalJobsLimiter = makeLimiter({
+  windowMs:      15 * 60 * 1000,
+  max:           60,
+  maxPermissive: 300,
+  message:       'Not found',
+});
+
 // ─── Limiters: Auth ───────────────────────────────────────────────────────────
 
 export const loginLimiter = makeLimiter({
   windowMs:      15 * 60 * 1000,
   max:           5,
   maxPermissive: 50,
+  // Solo cuentan los fallos. Antes contaba todo: entrar cinco veces bien en
+  // quince minutos dejaba al usuario bloqueado sin haber equivocado nunca la
+  // contraseña. Con operadores moviles bolivianos compartiendo IP por CGNAT,
+  // varios probadores agotaban el cupo entre ellos.
+  soloFallos:    true,
   message:       'Demasiados intentos de inicio de sesión. Espera 15 minutos e intenta de nuevo.',
 });
 
@@ -96,6 +125,7 @@ export const twoFactorLimiter = makeLimiter({
   windowMs:      15 * 60 * 1000,
   max:           5,
   maxPermissive: 50,
+  soloFallos:    true,
   message:       'Demasiados intentos de verificación. Espera 15 minutos e intenta de nuevo.',
 });
 
@@ -165,6 +195,16 @@ export const supportChatLimiter = makeLimiter({
   max:           10,
   maxPermissive: 60,
   message:       'Demasiados mensajes al asistente. Espera un momento e intenta de nuevo.',
+});
+
+// ─── Limiter: Denuncia de contenido generado por la IA ────────────────────────
+// Mas holgado que el chat porque no cuesta tokens, pero acotado: es un endpoint
+// que escribe en base y manda correo, y el correo tiene cuota diaria.
+export const supportReportLimiter = makeLimiter({
+  windowMs:      60 * 60 * 1000,
+  max:           20,
+  maxPermissive: 100,
+  message:       'Demasiadas denuncias seguidas. Intenta de nuevo mas tarde.',
 });
 
 // ─── Limiter: Lista de espera del lanzamiento (endpoint público sin auth) ──────

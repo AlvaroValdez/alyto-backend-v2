@@ -7,6 +7,10 @@
  *      y (recomendado) verifyIpn(req) → autentica el IPN entrante antes de acreditar.
  *      Si un banco no implementa verifyIpn, el handler de IPN debe rechazar por
  *      seguridad (no acreditar sin verificación).
+ *      Opcional: normalizeIpn(req) → traduce el body del webhook a la forma
+ *      `{ qrId, amount, ... }`. Solo hace falta si el banco NO manda el payload
+ *      anidado bajo `payment` (la forma de BANECO, que el handler asume por
+ *      defecto). Red Enlace manda un objeto plano y por eso la implementa.
  *   2. Importar y registrar aquí con un bankId único (ej. 'bnb', 'union')
  *   3. Configurar las variables de entorno del banco nuevo
  *
@@ -14,13 +18,14 @@
  * procesó el pago de esa transacción.
  */
 
-import * as becQrService from './banks/becQrService.js';
+import * as becQrService       from './banks/becQrService.js';
+import * as redenlaceQrService from './banks/redenlaceQrService.js';
 
 /** @type {Map<string, IBankQrService>} */
 const REGISTRY = new Map([
-  ['bec', becQrService],   // Banco Económico Bolivia
+  ['bec',       becQrService],        // Banco Económico Bolivia
+  ['redenlace', redenlaceQrService],  // ATC S.A. — Red Enlace (QR Simple)
   // ['bnb', bnbQrService],  // Banco Nacional de Bolivia (futuro)
-  // ['bnb',  bnbQrService],   // Banco Nacional de Bolivia (futuro)
 ]);
 
 /**

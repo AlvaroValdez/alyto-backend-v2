@@ -46,8 +46,19 @@ const JOBS = {
   // Registrarlo permitiría dispararlo por Lambda → doble ejecución. Ver server.js.
   'ros-monitor': () =>
     import('./rosMonitor.js').then((m) => m.rosMonitor),
+  // Plazo regulatorio PRILI (10 días hábiles): alerta vencidos y por vencer.
+  // Solo avisa — el escalamiento a ASFI es decisión del operador.
+  'reclamos-vencimientos': () =>
+    import('./reclamosVencimientosMonitor.js').then((m) => m.reclamosVencimientosMonitor),
   'ros-monitor-wallet': () =>
     import('./rosMonitorWallet.js').then((m) => m.rosMonitorWallet),
+  // Reconocimiento contra el acceso: una IP tocando muchas cuentas distintas a lo
+  // largo de horas. Ni el límite por cuenta (`failedStreak`) ni el por IP
+  // (`loginLimiter`) lo ven, porque el patrón no es volumen sino dispersión. Solo
+  // AVISA: bloquear por IP rompería a los usuarios detrás de un CGNAT, que es el
+  // bug que se arregló en el PR #36. Ver jobs/monitorAuthAnomalies.js.
+  'auth-anomalies': () =>
+    import('./monitorAuthAnomalies.js').then((m) => m.monitorAuthAnomalies),
   // Red de seguridad del QR bancario boliviano (BEC/BANECO) ante IPN perdidos, y
   // alerta de retiros 'dispatched' sin confirmar. Ambos se programan dentro del gate
   // `if (!externalScheduler)` de app.js: sin esta entrada quedaban HUÉRFANOS en
@@ -57,14 +68,44 @@ const JOBS = {
     import('./reconcileBankQrPayments.js').then((m) => m.reconcileBankQrPayments),
   'reconcile-bec-disbursements': () =>
     import('./reconcileBecDisbursements.js').then((m) => m.reconcileBecDisbursements),
+  // Avisa de retiros que llevan demasiado en 'pending'. El job hermano de arriba
+  // cubre 'dispatched'; este cubre el estado ANTERIOR, donde el paso que falta es
+  // humano y por eso nada lo destrababa solo.
+  'alert-pending-withdrawals': () =>
+    import('./alertPendingWithdrawals.js').then((m) => m.alertPendingWithdrawals),
+  // Vigila el saldo reservado: operaciones paradas que lo retienen y descuadres
+  // entre lo reservado y lo realmente comprometido.
+  'audit-wallet-reserves': () =>
+    import('./auditWalletReserves.js').then((m) => m.auditWalletReserves),
   'refresh-rates': () =>
     import('./refreshExchangeRates.js').then((m) => m.refreshExchangeRates),
+  // Recarga semanal de OFAC y ONU. Sin esto la lista envejece en silencio: la
+  // coleccion sigue pareciendo poblada mientras deja de reflejar el origen, que
+  // es el estado del que se venia (2 entradas sin tocar desde marzo).
+  'refresh-sanctions': () =>
+    import('./refreshSanctionsLists.js').then((m) => m.refreshSanctionsLists),
   // Red de seguridad del sello on-chain: re-sella operaciones completadas que quedaron
   // sin `stellarTxId` (Horizon caído al completar). Sin esta entrada quedaría huérfano
   // en producción (setInterval apagado por JOBS_EXTERNAL_SCHEDULER + Lambda respondería
   // 'unknown_job'). Ver resealAuditTrails.js.
   'reseal-audit-trails': () =>
     import('./resealAuditTrails.js').then((m) => m.resealAuditTrails),
+  // Red de seguridad de la provisión custodial: completa las cuentas que quedaron con
+  // publicKey en MongoDB pero sin existir on-chain (createAccount fallido y tragado).
+  //
+  // ⚠️ EXCEPCIÓN a la regla de arriba: este job corre SIEMPRE in-process (ver app.js) y
+  // sin embargo SÍ se registra. Lo que lo hace seguro es que tiene guard de solapamiento
+  // propio (`_isRunning`), así que un disparo por Lambda encima de una corrida en curso
+  // devuelve `skipped` en vez de duplicar el trabajo — que es justo lo que la regla de
+  // monitorChannelXLM previene por omisión. Se registra a propósito: poder dispararlo a
+  // mano es lo que permite reparar una cuenta sin esperar los 30 min del intervalo.
+  // Por eso NO tiene regla de EventBridge en scripts/aws/setup-lambda-jobs.sh.
+  //
+  // Su setInterval lo dispara a través de `runJob` (trigger 'interval'), no llamando a
+  // la función pelada como el resto de este archivo. Así sus corridas automáticas SÍ
+  // quedan en `job_runs`: sin eso, un job caído no produce ningún síntoma.
+  'reconcile-custodial-accounts': () =>
+    import('./reconcileCustodialAccounts.js').then((m) => m.reconcileCustodialAccounts),
 };
 
 export function jobNames() {

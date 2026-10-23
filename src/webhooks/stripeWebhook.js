@@ -210,13 +210,24 @@ async function _approveKyc(session) {
   // PSAV permite custodia (DS 5384, Cap. XI, Art. 4° literal l inciso 4). La secretKey
   // se cifra en AWS KMS (USER_KEYPAIR_KMS_KEY_ID); nunca se almacena en MongoDB ni logs.
   // Es fire-and-forget: si KMS falla, el KYC NO se bloquea (se reintenta vía custody/provision).
-  provisionUserKeypair(user._id)
-    .then(({ publicKey }) => {
-      console.info(`[KYC Webhook] 🔑 Keypair custodial provisionado — userId: ${user._id} | publicKey: ${publicKey}`);
-    })
-    .catch(err => {
-      console.error(`[KYC Webhook] ⚠️ Provisión de keypair falló — userId: ${user._id} | err: ${err.message}`);
-    });
+  //
+  // Acotado a SRL (decisión 2026-10-08). La cuenta custodial solo la consume superficie
+  // de Bolivia: WalletUSDC es exclusiva de SRL, el P2P exige SRL en ambas puntas y los
+  // payouts de Fase 43 son corredores SRL. Provisionar a las demás entidades creaba
+  // cuentas fondeadas en mainnet (~1,5 XLM cada una) que ningún flujo podía usar — había
+  // una SpA así en producción. Para no-SRL queda la vía perezosa de
+  // ensureCustodialDepositAddress, que provisiona en el primer uso que lo necesite.
+  if (user.legalEntity === 'SRL') {
+    provisionUserKeypair(user._id)
+      .then(({ publicKey }) => {
+        console.info(`[KYC Webhook] 🔑 Keypair custodial provisionado — userId: ${user._id} | publicKey: ${publicKey}`);
+      })
+      .catch(err => {
+        console.error(`[KYC Webhook] ⚠️ Provisión de keypair falló — userId: ${user._id} | err: ${err.message}`);
+      });
+  } else {
+    console.info(`[KYC Webhook] Keypair custodial omitido — entidad ${user.legalEntity} no usa wallet USDC | userId: ${user._id}`);
+  }
 
   console.info(
     `[KYC Webhook] ✅ APROBADO — userId: ${user._id} | email: ${user.email} | entity: ${user.legalEntity} | prevStatus: ${prevStatus} → approved`

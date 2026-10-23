@@ -11,24 +11,43 @@
  * → SUPPORTED_HARBOR_METHODS.
  */
 
+/**
+ * ⚠️ **EL ORDEN IMPORTA Y ES DE BARATO A CARO.** `selectHarborQuote` elige el primero
+ * de esta lista que Harbor haya devuelto, y marca `degraded` si el primero no vino y
+ * hubo que caer a un riel con fijo alto. Antes se devolvía el primero que respondiera
+ * la API, así que este orden existía pero no se usaba.
+ *
+ * ⚠️ **Tiene que reflejar lo que Harbor OFRECE, no lo que nos gustaría.** Declarar un
+ * riel que la API nunca devuelve hace que el guard grite para siempre y termine
+ * apagando un corredor que funciona. Medido con quotes reales a $120, $500 y $2.000
+ * el 2026-10-05: CIPS, FPS, FTS y AANI **no se ofrecen a nuestro customer** en ninguna
+ * de las tres, aunque estaban declarados. Re-medir antes de agregar un riel.
+ */
 const SUPPORTED_METHODS_BY_COUNTRY = {
-  CN: ['CIPS', 'WIRE'],
+  // CN: CIPS estaba declarado como preferido pero Harbor sólo devuelve WIRE (medido a
+  // $120/$500/$2.000). Dejarlo primero marcaba `cl-cn`/`us-cn` como degradados siempre.
+  CN: ['WIRE'],
   // SEPA deshabilitado — Harbor requiere swift_code en SEPA también (2026-06-07); reactivar post e2e real
   EU: ['WIRE'],
   DE: ['WIRE'], FR: ['WIRE'], ES: ['WIRE'], IT: ['WIRE'],
   NL: ['WIRE'], BE: ['WIRE'], PT: ['WIRE'], AT: ['WIRE'],
   PL: ['WIRE'], SE: ['WIRE'], CH: ['WIRE'], NO: ['WIRE'],
   DK: ['WIRE'], FI: ['WIRE'], IE: ['WIRE'],
-  GB: ['FPS', 'WIRE'],  // FPS=GBP (sort_code), WIRE=USD (swift_code) — confirmado Jolin 2026-06-09
+  // GB: lo que llega es BANK-TRANSFER, no FPS ni WIRE. Con el mapa viejo el filtro se
+  // vaciaba en CADA cotización y caía al pass-through dejando un warning.
+  GB: ['BANK-TRANSFER', 'FPS', 'WIRE'],
   NG: ['BANK-TRANSFER'],
   BR: ['PIX'],
   MX: ['SPEI'],
-  AE: ['FTS', 'AANI', 'BANK-TRANSFER'],
+  // AE: FTS y AANI no se ofrecen; el real es BANK-TRANSFER y va primero.
+  AE: ['BANK-TRANSFER', 'FTS', 'AANI'],
   HK: ['CHATS', 'WIRE'],
   JP: ['BANK-TRANSFER', 'WIRE'],
   SG: ['BANK-TRANSFER'],
   IN: ['IMPS'],
-  US: ['ACH_PUSH', 'DOMESTIC_WIRE', 'FEDWIRE'],
+  // AU no estaba mapeado y cl-au/us-au están activos: caían al pass-through.
+  AU: ['BANK-TRANSFER'],
+  US: ['ACH_PUSH', 'DOMESTIC_WIRE', 'FEDWIRE', 'WIRE'],
 };
 
 /**
@@ -61,22 +80,93 @@ export function filterSupportedQuotes(quotes, destCountry) {
   return filtered;
 }
 
-/**
- * Picks the best supported quote (filtra + retorna primero).
- * Si requestedMethod (preferred user choice) está dentro de supported, lo prefiere.
- */
-export function pickSupportedQuote(quotes, destCountry, requestedMethod = null) {
-  const filtered = filterSupportedQuotes(quotes, destCountry);
-  if (!Array.isArray(filtered) || filtered.length === 0) return null;
+const metodoDe = q => (q?.paymentMethod ?? q?.payment_method ?? '').toUpperCase();
 
+/**
+ * Rieles de Harbor con fee FIJO alto (~$25 por operación, medido contra la API en
+ * producción el 2026-10-05). El fijo no se nota en montos grandes y es demoledor en
+ * los chicos: en `bo-jp`, WIRE sobre $75,05 de neto entregaba $49,65 — 34% de pérdida.
+ *
+ * Son además los rieles con el piso más alto de Harbor ($75,02 contra $50,11 de
+ * ACH_PUSH o ~$21 de los locales), así que caer en uno sin darse cuenta rompe DOS
+ * cosas a la vez: la economía de la operación y el piso con el que se validó el
+ * mínimo (`TransactionConfig.providerFloorUSD`, medido para el riel barato).
+ */
+const RIELES_CON_FIJO_ALTO = new Set(['WIRE', 'DOMESTIC_WIRE', 'FEDWIRE']);
+
+/**
+ * Elige el quote de Harbor y además DICE cómo lo eligió.
+ *
+ * Dos cosas que la selección anterior hacía mal o no hacía:
+ *
+ * 1. **Elegía por el orden de Harbor, no por el nuestro.** Devolvía `filtered[0]`,
+ *    o sea el primero que respondiera la API. `SUPPORTED_METHODS_BY_COUNTRY` ya está
+ *    escrito de barato a caro (`US: ['ACH_PUSH', 'DOMESTIC_WIRE', 'FEDWIRE']`), pero
+ *    ese orden no se usaba: funcionaba de casualidad porque Harbor manda ACH_PUSH
+ *    primero. El día que invierta el orden de su respuesta, `bo-us` pasa a liquidar
+ *    por WIRE sin que haya cambiado nada de nuestro lado.
+ *
+ * 2. **No avisaba cuando el riel barato no venía.** Si Harbor deja de devolver
+ *    ACH_PUSH, la ruta sigue cotizando por WIRE y la pérdida salta de 0,5% a ~50%
+ *    en el mínimo, en silencio.
+ *
+ * `degraded` marca exactamente eso: el país tiene un riel preferido, no vino, y el
+ * que quedó cobra fijo alto. Quien lo consume decide qué hacer, y la decisión NO es
+ * la misma antes y después del cobro:
+ *   - **Antes del payin (cotización):** no cotizar. Nadie pagó todavía.
+ *   - **Después del payin (dispatch):** liquidar igual y alertar. Bloquear ahí
+ *     dejaría la plata del usuario encerrada, que es peor que un payout caro.
+ *
+ * @param {Array} quotes                respuesta de getHarborQuote({returnAll:true})
+ * @param {string} destCountry          ISO alpha-2
+ * @param {string|null} requestedMethod elección explícita del usuario (gana siempre)
+ * @returns {{quote: object|null, method: string|null, preferredMethod: string|null,
+ *            degraded: boolean, available: string[]}}
+ */
+export function selectHarborQuote(quotes, destCountry, requestedMethod = null) {
+  const filtered = filterSupportedQuotes(quotes, destCountry);
+  const vacio = { quote: null, method: null, preferredMethod: null, degraded: false, available: [] };
+  if (!Array.isArray(filtered) || filtered.length === 0) return vacio;
+
+  const supported = SUPPORTED_METHODS_BY_COUNTRY[(destCountry ?? '').toUpperCase()] ?? null;
+  const available = filtered.map(metodoDe).filter(Boolean);
+  const preferido = supported?.[0] ?? null;
+
+  // La elección explícita del usuario manda: ya vio la tasa de ese método en el
+  // selector. Si eligió el caro a sabiendas, no es una degradación.
   if (requestedMethod) {
-    const match = filtered.find(q => (q.paymentMethod ?? q.payment_method) === requestedMethod);
-    if (match) return match;
+    const pedido = filtered.find(q => metodoDe(q) === requestedMethod.toUpperCase());
+    if (pedido) {
+      return { quote: pedido, method: metodoDe(pedido), preferredMethod: preferido, degraded: false, available };
+    }
   }
-  return filtered[0];
+
+  // Nuestro orden de preferencia, no el de Harbor.
+  let elegido = null;
+  if (supported) {
+    for (const m of supported) {
+      const hit = filtered.find(q => metodoDe(q) === m);
+      if (hit) { elegido = hit; break; }
+    }
+  }
+  elegido ??= filtered[0];
+
+  const metodo = metodoDe(elegido);
+  // País sin preferencia declarada → no hay con qué comparar, no se degrada.
+  const degraded = Boolean(preferido) && metodo !== preferido && RIELES_CON_FIJO_ALTO.has(metodo);
+
+  return { quote: elegido, method: metodo, preferredMethod: preferido, degraded, available };
 }
 
-export { SUPPORTED_METHODS_BY_COUNTRY };
+/**
+ * Elige el quote soportado. Envoltorio fino sobre `selectHarborQuote` para los
+ * sitios a los que sólo les interesa el quote y no el diagnóstico.
+ */
+export function pickSupportedQuote(quotes, destCountry, requestedMethod = null) {
+  return selectHarborQuote(quotes, destCountry, requestedMethod).quote;
+}
+
+export { SUPPORTED_METHODS_BY_COUNTRY, RIELES_CON_FIJO_ALTO };
 
 /**
  * HARBOR_FORM_FIELDS — campos del formulario de beneficiario por país Harbor.

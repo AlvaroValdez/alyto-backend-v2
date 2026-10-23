@@ -52,6 +52,24 @@ export function handleStellarError(context, error, metadata = {}) {
 }
 
 /**
+ * ¿Este error de Horizon significa "la cuenta no existe en el ledger"?
+ *
+ * Horizon responde 404 tanto para una cuenta que nunca se creó como para una que se
+ * quedó sin la reserva mínima de XLM. En el modelo custodial ese estado NO es una
+ * anomalía: una cuenta provisionada a medias (publicKey ya en MongoDB, `createAccount`
+ * fallido) vive exactamente ahí hasta que alguien la repara.
+ *
+ * Distinguirlo de un fallo de red es lo importante: tragarse un timeout como si fuera
+ * "cuenta vacía" haría que el caller asuma un saldo 0 falso.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isAccountNotFound(error) {
+  return error?.response?.status === 404 || error?.name === 'NotFoundError';
+}
+
+/**
  * Elimina cualquier campo que pudiera contener una llave privada antes de loguear.
  *
  * @param {Record<string, unknown>} metadata

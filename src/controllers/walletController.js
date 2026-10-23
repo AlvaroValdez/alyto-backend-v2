@@ -37,6 +37,8 @@ import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.j
 import { registerAuditTrail, freezeUserTrustline, unfreezeUserTrustline } from '../services/stellarService.js'
 import { getBankQrService } from '../services/bankQr/bankQrRegistry.js'
 import { getSrlBankData }   from '../services/srlBankData.js'
+import { logger }          from '../utils/logger.js'
+import { verificarLiquidezRetiro } from '../services/withdrawalLiquidity.js'
 import { recordAdminAction } from '../services/adminAuditService.js'
 
 // ─── Config: payin bankQr para carga de Wallet BOB ────────────────────────────
@@ -324,14 +326,28 @@ export async function initiateDeposit(req, res) {
       })
 
       let qr
+      // ⚠️ Se declara FUERA del try a propósito: la cuenta se usa dos veces, al
+      // pedirle el QR al banco y al estampar `bankQr.accountCredit` más abajo, y
+      // ese segundo uso queda después del catch. Declararla dentro del try la
+      // dejaba fuera de alcance y rompía TODO depósito con un 500
+      // (`cuenta is not defined`), que es lo que pasó entre el 2026-10-10 y el 14.
+      let cuenta = {}
       try {
         const svc = getBankQrService(bankQrCfg.bankId)
+        // La carga de billetera cobra en la cuenta de ese destino de fondos.
+        // Si no hay una declarada, cae en la de siempre (comportamiento previo).
+        cuenta = await getSrlBankData('wallet_deposit')
         qr = await svc.generateQR({
           transactionId: wtx.wtxId,
           amount,
           currency:      'BOB',
           description:   `Alyto deposito ${wtx.wtxId}`.slice(0, 100),
           dueDate,
+          accountCredit: cuenta.accountNumber || undefined,
+          // Para los bancos que traducen nuestro identificador a un alias propio
+          // (Red Enlace exige referencias numéricas), indica a qué colección
+          // apunta ese alias. BEC lo ignora.
+          targetModel:   'WalletTransaction',
         })
       } catch (err) {
         await WalletTransaction.updateOne({ _id: wtx._id }, {
@@ -343,12 +359,31 @@ export async function initiateDeposit(req, res) {
         return res.status(502).json({ error: 'No se pudo generar el QR bancario. Intenta nuevamente en unos minutos.' })
       }
 
+      // El vencimiento que informa el banco MANDA sobre BANK_QR_DUE_DAYS.
+      //
+      // Con BANECO los dos coincidían, porque el QR se emite con una fecha de
+      // vencimiento que nosotros elegimos. Red Enlace no funciona así: el QR
+      // vive los segundos de `vigencia` y expira del lado de ATC. Quedarnos con
+      // nuestro cálculo le mostraría al usuario un plazo de un día para un QR
+      // que muere en diez minutos, y además retrasaría el barrido de
+      // vencimiento, que dejaría el depósito colgado hasta el día siguiente.
+      const expiresAt = qr.expiresAt instanceof Date && !isNaN(qr.expiresAt)
+        ? qr.expiresAt
+        : dueExpiresAt
+
       // QR válido recibido → recién ahora el depósito existe como 'pending'
       // (a la espera de la confirmación automática del banco vía IPN).
       await WalletTransaction.updateOne({ _id: wtx._id }, {
         status:    'pending',
         reference: wtx.wtxId,
-        bankQr:    { bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate, purpose: 'wallet_deposit' },
+        expiresAt,
+        bankQr:    {
+          bankId: bankQrCfg.bankId, qrId: qr.qrId, dueDate,
+          purpose: 'wallet_deposit',
+          // Dónde cayó realmente. Hoy es la cuenta única; cuando haya varias,
+          // este campo es lo que permite rendir cada cobro por cuenta.
+          accountCredit: cuenta.accountNumber || process.env.BEC_ACCOUNT_CREDIT || undefined,
+        },
       })
 
       return res.status(201).json({
@@ -357,10 +392,13 @@ export async function initiateDeposit(req, res) {
         amount,
         currency:     'BOB',
         paymentQR:    qr.qrImage,
+        // El tipo de imagen depende del banco: BANECO devuelve SVG y Red Enlace
+        // PNG. El frontend NO puede asumir uno fijo — armar el data URL con esto.
+        paymentQRMime: qr.qrImageMime ?? 'image/svg+xml',
         bankQrId:     qr.qrId,
         reference:    wtx.wtxId,
         instructions: 'Escanea el QR con tu app bancaria. El saldo se acredita automáticamente al confirmarse el pago.',
-        expiresAt:    dueExpiresAt,
+        expiresAt,
       })
     }
 
@@ -390,7 +428,7 @@ export async function initiateDeposit(req, res) {
       method:        'manual',
       amount,
       currency:      'BOB',
-      ...(await getSrlBankData()),
+      ...(await getSrlBankData('wallet_deposit')),
       reference:     wtx.wtxId,
       instructions:  'Transfiere el monto exacto e incluye el número de referencia en el concepto.',
       expiresAt,
@@ -616,6 +654,29 @@ export async function requestWithdrawal(req, res) {
       return res.status(400).json({ error: `Saldo insuficiente. Disponible: Bs. ${balanceAvailable.toFixed(2)}.` })
     }
 
+    // ── Liquidez de tesorería ────────────────────────────────────────────────
+    //
+    // Tener saldo en la billetera no significa que el banco pueda pagarlo. Al
+    // 2026-10-10 el pasivo era de Bs 4.227 contra Bs 1.047,61 en la cuenta, así
+    // que un retiro grande se aceptaba y reservaba para descubrir al ir a
+    // transferir que no había con qué. Es el mismo patrón que corregimos en el
+    // payin —comprometerse sin verificar que se puede ejecutar— del lado de la
+    // salida.
+    const liquidez = await verificarLiquidezRetiro({ amount, currency: 'BOB' })
+    if (!liquidez.ok) {
+      await session.abortTransaction()
+      logger.error('[Wallet] Retiro bloqueado por liquidez de tesorería', {
+        userId: String(user._id), ...liquidez.detalle,
+      })
+      // 503, no 400: el pedido del usuario es válido y su saldo existe. Lo que
+      // falta es liquidez en la cuenta, y eso se resuelve fondeando.
+      return res.status(503).json({
+        error:  'En este momento no podemos procesar retiros de este monto. Por favor intenta más tarde o con un monto menor.',
+        code:   'TREASURY_INSUFFICIENT',
+        reason: liquidez.motivo,
+      })
+    }
+
     // ── Límite diario de retiro (mismo cálculo que getDailyLimits) ──────────
     const WITHDRAW_LIMIT = parseFloat(process.env.WALLET_DAILY_WITHDRAW_LIMIT ?? '10000')
     if (WITHDRAW_LIMIT > 0) {
@@ -792,6 +853,21 @@ export async function adminConfirmDeposit(req, res) {
       reference:     bankReference,
       metadata:      { ...(wtx.metadata ?? {}), bankReference, note: note ?? '' },
     }, { session })
+
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.deposit.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balance: prevBalance },
+      after:      { status: 'completed', balance: newBalance },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, bankReference },
+    })
 
     await session.commitTransaction()
 
@@ -1158,6 +1234,18 @@ export async function adminAttachWithdrawalComprobante(req, res) {
       size:       req.file.size,
       uploadedAt: new Date(),
     }
+
+    // Adjuntar un comprobante RETROACTIVO es excepcional: queda asentado quién
+    // lo adjuntó y a qué retiro, antes de escribirlo.
+    await recordAdminAction({
+      req,
+      action:     'wallet.withdrawal.attach_comprobante',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { teniaComprobante: Boolean(wtx.metadata?.withdrawalProof) },
+      after:      { filename: withdrawalProof.filename, size: withdrawalProof.size },
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, status: wtx.status },
+    })
 
     await WalletTransaction.updateOne({ _id: wtx._id }, {
       $set: {
@@ -1855,6 +1943,22 @@ export async function adminConfirmWithdrawal(req, res) {
       },
     }, { session })
 
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.withdrawal.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balance: prevBalance },
+      after:      { status: 'completed', balance: newBalance },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount, bankReference,
+                    comprobanteAdjunto: Boolean(withdrawalProof) },
+    })
+
     await session.commitTransaction()
 
     // Audit trail Stellar — fire and forget (Dual-Ledger ASFI). El retiro también
@@ -1929,6 +2033,21 @@ export async function adminRejectWithdrawal(req, res) {
       { session },
     )
 
+    // Asiento de auditoría DENTRO de la sesión: la acreditación y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.withdrawal.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', balanceReserved: wtx.amount },
+      after:      { status: 'failed', reservaLiberada: wtx.amount },
+      reason:     reason ?? '',
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount },
+    })
+
     await session.commitTransaction()
 
     notify(wtx.userId, {
@@ -1949,21 +2068,32 @@ export async function adminRejectWithdrawal(req, res) {
   }
 }
 
-// ─── DISPERSIÓN BANCARIA BANECO (§9 Planillas de pagos) ──────────────────────
-// Automatiza el retiro BOB → cuenta del usuario vía el servicio de dispersión.
+// ─── DISPERSIÓN BANCARIA (salida de dinero a cuenta del usuario) ─────────────
+// Automatiza el retiro BOB → cuenta del usuario vía el proveedor de dispersión.
 // Disparo admin-triggered (checkpoint humano). El saldo sigue reservado hasta que
-// el banco confirme por webhook (notifyStatus → settleDispatchedWithdrawal).
+// el proveedor confirme por webhook (→ settleDispatchedWithdrawal).
+//
+// Bank-agnostic: el proveedor se resuelve en `bankRegistry` (WALLET_DISBURSEMENT_PROVIDER,
+// default 'baneco'). Este controlador no debe volver a importar un servicio de banco
+// concreto — sumar un proveedor es un adapter con bloque `disbursement` + una línea
+// en el registro.
 
 /**
  * POST /api/v1/admin/wallet/withdrawal/dispatch
  * Admin dispara la dispersión de un retiro 'pending' (solo method='bank').
- * Body: { wtxId, bankCode?, amlSource?, amlDestination?, beneficiaryDocId? }
+ * Body: { wtxId, bankCode?, amlSource?, amlDestination?, beneficiaryDocId?, provider? }
  */
 export async function adminDispatchWithdrawal(req, res) {
   try {
     const admin = req.user
-    const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId } = req.body
+    const { wtxId, bankCode, amlSource, amlDestination, beneficiaryDocId, provider } = req.body
     if (!wtxId) return res.status(400).json({ error: 'wtxId es requerido.' })
+
+    const { getDisbursementAdapter } = await import('../services/bank/bankRegistry.js')
+    const resolved = getDisbursementAdapter(provider)
+    if (!resolved) {
+      return res.status(501).json({ error: `Sin proveedor de dispersión para '${provider ?? 'default'}'.` })
+    }
 
     const wtx = await WalletTransaction.findOne({ wtxId })
     if (!wtx || wtx.type !== 'withdrawal' || wtx.status !== 'pending') {
@@ -1979,13 +2109,15 @@ export async function adminDispatchWithdrawal(req, res) {
       return res.status(400).json({ error: 'bankCode (código ASFI de la entidad financiera destino) es requerido para dispersar.' })
     }
 
-    // Pre-check de liquidez en BANECO (gated). Solo bloquea si la consulta responde
-    // y el saldo es insuficiente; un error del banco no bloquea (fail-open).
-    if (process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true') {
-      const { tryGetAvailableBalance } = await import('../services/bank/becAccountService.js')
-      const { available, ok } = await tryGetAvailableBalance()
+    // Pre-check de liquidez en la cuenta de origen (gated). Solo bloquea si la consulta
+    // responde y el saldo es insuficiente; un error del proveedor no bloquea (fail-open).
+    // WALLET_BANECO_LIQUIDITY_CHECK se mantiene por compatibilidad con lo provisionado.
+    const liquidityCheckOn = process.env.WALLET_BANK_LIQUIDITY_CHECK === 'true'
+      || process.env.WALLET_BANECO_LIQUIDITY_CHECK === 'true'
+    if (liquidityCheckOn && typeof resolved.adapter.tryGetAvailableBalance === 'function') {
+      const { available, ok } = await resolved.adapter.tryGetAvailableBalance()
       if (ok && available != null && available < wtx.amount) {
-        return res.status(409).json({ error: `Liquidez BOB insuficiente en BANECO. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
+        return res.status(409).json({ error: `Liquidez BOB insuficiente en ${resolved.provider}. Disponible: Bs. ${available.toFixed(2)}, requerido: Bs. ${wtx.amount.toFixed(2)}.` })
       }
     }
 
@@ -1993,16 +2125,29 @@ export async function adminDispatchWithdrawal(req, res) {
     // doble dispersión si dos admins disparan a la vez.
     const claim = await WalletTransaction.updateOne(
       { _id: wtx._id, status: 'pending' },
-      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, dispatchedBy: admin._id, dispatchedAt: new Date() } },
+      { status: 'dispatched', metadata: { ...meta, bankCode: destBankCode, disbursementProvider: resolved.provider, dispatchedBy: admin._id, dispatchedAt: new Date() } },
     )
     if (claim.modifiedCount === 0) return res.status(409).json({ error: 'El retiro ya fue procesado.' })
 
+    // Asiento ANTES de llamar al banco: si la dispersión llega a salir, su orden
+    // quedó registrada con actor y destino. Sin sesión (no hay transacción acá):
+    // el servicio alerta a Sentry si el asiento falla, sin frenar la dispersión.
+    await recordAdminAction({
+      req,
+      action:     'wallet.withdrawal.dispatch',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending' },
+      after:      { status: 'dispatched', provider: resolved.provider },
+      metadata:   { userId: String(wtx.userId), amountBOB: wtx.amount,
+                    bankCode: destBankCode, accountHolder: meta.accountHolder ?? '' },
+    })
+
     const user = await User.findById(wtx.userId).lean()
-    const { transfer } = await import('../services/bank/becDisbursementService.js')
 
     let result
     try {
-      result = await transfer({
+      result = await resolved.disbursement.transfer({
         batchId:       wtx.wtxId,
         batchDetailId: wtx.wtxId,
         amount:        wtx.amount,
@@ -2040,7 +2185,7 @@ export async function adminDispatchWithdrawal(req, res) {
       type:  'wallet',
     }).catch(() => {})
 
-    return res.json({ wtxId, status: 'dispatched', bankBatchId: result.bankBatchId, mock: !!result._mock })
+    return res.json({ wtxId, status: 'dispatched', provider: resolved.provider, bankBatchId: result.bankBatchId, mock: !!result._mock })
 
   } catch (err) {
     Sentry.captureException(err, { tags: { controller: 'walletController', fn: 'adminDispatchWithdrawal' } })

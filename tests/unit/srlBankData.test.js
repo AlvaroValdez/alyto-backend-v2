@@ -87,3 +87,54 @@ describe('getSrlBankData', () => {
     await expect(getSrlBankData()).resolves.toMatchObject({ accountNumber: '2111088816' });
   });
 });
+
+describe('segregación por destino de fondos', () => {
+  const CUENTA_WALLET = {
+    bankName: 'Banco Económico', accountHolder: 'AV FINANCE SRL',
+    accountNumber: '1111111111', accountType: 'Caja de Ahorro',
+  };
+  const CUENTA_XB = {
+    bankName: 'Banco Económico', accountHolder: 'AV FINANCE SRL',
+    accountNumber: '2222222222', accountType: 'Caja de Ahorro',
+  };
+
+  test('cada propósito cobra en su propia cuenta', async () => {
+    mockLean.mockResolvedValue({
+      bankData: BANK_DATA_DB,
+      bankAccounts: { wallet_deposit: CUENTA_WALLET, crossborder_payin: CUENTA_XB },
+    });
+
+    await expect(getSrlBankData('wallet_deposit')).resolves.toMatchObject({ accountNumber: '1111111111' });
+    await expect(getSrlBankData('crossborder_payin')).resolves.toMatchObject({ accountNumber: '2222222222' });
+  });
+
+  test('sin bankAccounts el comportamiento es el de antes', async () => {
+    // Es lo que permite desplegar esto antes de tener las cuentas nuevas.
+    mockLean.mockResolvedValue({ bankData: BANK_DATA_DB });
+
+    await expect(getSrlBankData('wallet_deposit')).resolves.toEqual(BANK_DATA_DB);
+    await expect(getSrlBankData('crossborder_payin')).resolves.toEqual(BANK_DATA_DB);
+    await expect(getSrlBankData()).resolves.toEqual(BANK_DATA_DB);
+  });
+
+  test('una cuenta a medio cargar completa con bankData, no deja campos vacíos', async () => {
+    mockLean.mockResolvedValue({
+      bankData: BANK_DATA_DB,
+      bankAccounts: { wallet_deposit: { accountNumber: '1111111111' } },
+    });
+
+    const d = await getSrlBankData('wallet_deposit');
+    expect(d.accountNumber).toBe('1111111111');       // de la cuenta del propósito
+    expect(d.accountType).toBe('Caja de Ahorro');     // completado con bankData
+    expect(d.bankName).toBe('Banco Económico');
+  });
+
+  test('un propósito desconocido no toma una cuenta ajena', async () => {
+    mockLean.mockResolvedValue({
+      bankData: BANK_DATA_DB,
+      bankAccounts: { wallet_deposit: CUENTA_WALLET },
+    });
+
+    await expect(getSrlBankData('gasto_empresa')).resolves.toEqual(BANK_DATA_DB);
+  });
+});

@@ -15,8 +15,14 @@ import bcrypt from 'bcryptjs';
 import User   from '../models/User.js';
 import { ENTITY_CURRENCY_MAP } from '../utils/entityMaps.js';
 import { invalidateUserCache } from '../middlewares/authMiddleware.js';
+// Se reutiliza el armado de sesión del login en vez de duplicarlo: firma el JWT con la
+// tokenVersion vigente Y re-setea la cookie HttpOnly, que es la que `protect` lee primero.
+import { issueSession } from './authController.js';
 import { isRealDocumentNumber, readDocumentNumber, applyDocumentNumberToSet } from '../utils/clientDocument.js';
 import { ensureDek, isPiiEncryptionEnabled } from '../services/piiCrypto.js';
+import { phoneTail } from '../services/clientIdentityIndex.js';
+import { revisarClienteDuplicado } from '../services/clientDuplicateAlert.js';
+import { clasificarRiesgo, RELACIONES_PEP } from '../services/pepService.js';
 
 // select:false → hay que pedir explícitamente el ciphertext del CI para poder descifrarlo.
 const DOC_CIPHERTEXT_SELECT = '+identityDocument.numberCiphertext';
@@ -257,9 +263,13 @@ export async function updateKycProfile(req, res) {
       address:               { street, city, state, zip, country },
       kycProfileCompletedAt: new Date(),
     };
-    if (phone) $set.phone = phone;
+    if (phone) {
+      $set.phone     = phone;
+      $set.phoneTail = phoneTail(phone);
+    }
     // El CI declarado reemplaza el placeholder 'PENDING_VERIFICATION' del registro.
-    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo.
+    // Se cifra (numberCiphertext) cuando PII_ENCRYPTION_ENABLED está activo, y deja
+    // su huella en numberFingerprint para poder detectar duplicados.
     if (documentNumber) await applyDocumentNumberToSet($set, req.user._id, documentNumber);
 
     const updated = await User.findByIdAndUpdate(
@@ -270,6 +280,18 @@ export async function updateKycProfile(req, res) {
 
     if (!updated) return res.status(404).json({ error: 'Usuario no encontrado.' });
     invalidateUserCache(req.user._id); // refrescar el gate kycProfileCompletedAt en protect()
+
+    // Acá es donde de verdad se sabe quién es la persona: en el registro el CI es
+    // opcional y casi nunca viene, en este formulario es obligatorio. La coincidencia
+    // por documento —la señal fuerte— normalmente aparece recién en esta llamada.
+    // Fire-and-forget, sin efecto en la respuesta (ver [clientDuplicateAlert]).
+    setImmediate(() => {
+      revisarClienteDuplicado(updated, {
+        documentNumber,
+        phone:  phone || current?.phone,
+        origen: 'perfil de cumplimiento',
+      }).catch(() => {});
+    });
 
     return sendProfile(res, updated);
   } catch (err) {
@@ -288,9 +310,15 @@ export async function changePassword(req, res) {
   try {
     const { currentPassword, newPassword, confirmPassword } = req.body ?? {};
 
-    if (!currentPassword || !newPassword || !confirmPassword) {
+    // `confirmPassword` NO se exige. La doble escritura es un control de la interfaz,
+    // y el servidor no puede verificarla: solo compara dos cadenas que el mismo cliente
+    // envía y controla. Exigirla no aportaba seguridad y sí podía romper el flujo
+    // entero, que es lo que pasó — el frontend nunca la mandaba, así que este endpoint
+    // devolvía 400 a todo el mundo desde el commit inicial (2026-03-23) y el cambio de
+    // contraseña jamás funcionó. Si llega, se valida (abajo); si no llega, no estorba.
+    if (!currentPassword || !newPassword) {
       return res.status(400).json({
-        error: 'Se requieren currentPassword, newPassword y confirmPassword.',
+        error: 'Se requieren currentPassword y newPassword.',
       });
     }
 
@@ -304,8 +332,9 @@ export async function changePassword(req, res) {
       return res.status(400).json({ error: 'La contraseña actual es incorrecta.' });
     }
 
-    // 3. Verificar confirmación
-    if (newPassword !== confirmPassword) {
+    // 3. Verificar confirmación SOLO si el cliente la envió. Así un cliente que la
+    //    manda mal sigue siendo atajado, y uno que no la manda no queda bloqueado.
+    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
       return res.status(400).json({ error: 'La nueva contraseña y su confirmación no coinciden.' });
     }
 
@@ -316,11 +345,53 @@ export async function changePassword(req, res) {
       });
     }
 
-    // 5. Hashear y guardar
-    const hashed = await bcrypt.hash(newPassword, 12);
-    await User.findByIdAndUpdate(req.user._id, { $set: { password: hashed } });
+    // 5. Hashear, guardar y REVOCAR las sesiones existentes.
+    //
+    // El `$inc` de tokenVersion es el punto: sin él, cambiar la contraseña no cerraba
+    // ninguna sesión. Quien cambia su contraseña porque sospecha que se la robaron
+    // esperaba justamente eso, y la sesión del atacante sobrevivía al cambio.
+    // `authMiddleware` compara la tokenVersion del JWT contra la del usuario, así que
+    // incrementarla invalida de golpe todos los JWT emitidos antes.
+    const hashed  = await bcrypt.hash(newPassword, 12);
+    const updated = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { password: hashed }, $inc: { tokenVersion: 1 } },
+      { new: true },
+    );
 
-    return res.status(200).json({ message: 'Contraseña actualizada.' });
+    // Obligatorio, no una optimización: `protect` cachea el usuario 2 minutos. Con el
+    // caché sucio, la tokenVersion vieja seguiría autorizando los JWT anteriores Y
+    // rechazando el que se emite abajo, que es peor — dejaría fuera justo al usuario
+    // que acaba de cambiar su contraseña.
+    invalidateUserCache(req.user._id);
+
+    // Sesión nueva para ESTE dispositivo, para no expulsar a quien hizo el cambio.
+    // Se reusa `issueSession` (y no un jwt.sign a mano) porque además de firmar
+    // re-setea la cookie HttpOnly: `protect` lee la cookie ANTES del header Bearer,
+    // así que una cookie sin actualizar invalidaría la sesión igual.
+    //
+    // Se preservan dos cosas de la sesión actual:
+    //   - `amr`: sin él, un admin con segundo factor perdería el claim `otp` y
+    //     `checkAdmin` le respondería 403 en toda la superficie de administración.
+    //   - la duración: se deduce de la vigencia del token actual para no degradar
+    //     a 24 h una sesión que el usuario había pedido recordar por 7 días.
+    const claims     = req.authClaims ?? {};
+    const vigenciaS  = (claims.exp ?? 0) - (claims.iat ?? 0);
+    const rememberMe = vigenciaS > 24 * 60 * 60;   // 7d vs 24h
+
+    // Sin `unicaSesion`: esto es una REEMISION en el mismo equipo tras cambiar
+    // el perfil, no un login. Revocar aqui echaria al usuario si su cliente no
+    // llega a guardar el token nuevo.
+    const { token, user: publicUser } = await issueSession(res, updated, {
+      rememberMe,
+      amr: claims.amr,
+    });
+
+    return res.status(200).json({
+      message: 'Contraseña actualizada. Se cerraron las sesiones en otros dispositivos.',
+      token,
+      user: publicUser,
+    });
   } catch (err) {
     console.error('[UserCtrl] changePassword error:', err.message);
     return res.status(500).json({ error: 'Error interno al cambiar la contraseña.' });
@@ -514,5 +585,73 @@ export async function processKyc(req, res) {
     return res.status(500).json({
       error: 'Error interno al procesar la verificación de identidad.',
     });
+  }
+}
+
+/**
+ * POST /api/v1/users/pep-declaration  (protect)
+ *   body: { esPep: boolean, relacion?: 'self'|'family'|'associate', cargo?: string }
+ *
+ * Declaración de Persona Expuesta Políticamente.
+ *
+ * Es el control PRIMARIO de identificación de PEP, no un complemento: no existe
+ * lista pública fiable de PEPs bolivianos, y construir el control sobre una lista
+ * vacía sería declarar algo que no funciona.
+ *
+ * Declararse PEP NO bloquea nada. Clasifica el riesgo como alto y abre una
+ * revisión de diligencia reforzada. Ser PEP no es ilegal; excluirlos seria tan
+ * incorrecto como ignorarlos.
+ */
+export async function declararPep(req, res) {
+  try {
+    const { esPep, relacion, cargo } = req.body ?? {};
+
+    if (typeof esPep !== 'boolean') {
+      return res.status(400).json({ error: 'Se requiere "esPep" (true o false).' });
+    }
+    if (esPep && !RELACIONES_PEP.includes(relacion)) {
+      return res.status(400).json({
+        error: `Si declaras ser PEP, "relacion" debe ser uno de: ${RELACIONES_PEP.join(', ')}.`,
+      });
+    }
+
+    const clasificacion = clasificarRiesgo({
+      declarado: esPep,
+      relacion:  esPep ? relacion : null,
+      // El cruce contra la lista se hace al aprobar el KYC, con el documento ya
+      // verificado. Aquí solo pesa lo declarado.
+      enLista:   false,
+    });
+
+    await User.findByIdAndUpdate(req.user._id, {
+      $set: {
+        'pep.declared':     esPep,
+        'pep.relationship': esPep ? relacion : null,
+        'pep.position':     esPep ? (typeof cargo === 'string' ? cargo.trim().slice(0, 300) : null) : null,
+        'pep.declaredAt':   new Date(),
+        riskLevel:          clasificacion.riskLevel,
+        eddStatus:          clasificacion.eddStatus,
+      },
+    });
+    invalidateUserCache(req.user._id);
+
+    if (clasificacion.eddStatus === 'pending') {
+      console.info('[PEP] Declaración recibida — abre diligencia reforzada:', {
+        userId: req.user._id?.toString(), relacion,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      riskLevel: clasificacion.riskLevel,
+      eddStatus: clasificacion.eddStatus,
+      // Se le dice al usuario qué significa, para que declarar no se sienta un castigo.
+      mensaje: esPep
+        ? 'Gracias. Tu declaración queda registrada. Puedes seguir operando con normalidad; nuestro equipo de cumplimiento revisará tu caso.'
+        : 'Gracias, tu declaración queda registrada.',
+    });
+  } catch (err) {
+    Sentry.captureException(err, { tags: { controller: 'userController', fn: 'declararPep' } });
+    return res.status(500).json({ error: 'No se pudo registrar la declaración.' });
   }
 }

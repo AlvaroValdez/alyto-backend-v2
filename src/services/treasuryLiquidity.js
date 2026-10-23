@@ -148,14 +148,29 @@ export async function getBOBCommitted(entity = 'SRL') {
         legalEntity:    entity,
         originCurrency: 'BOB',
         status:         { $nin: BOB_RELEASED_STATUSES },
-        // 'refunded' solo sale del pasivo si hay un movimiento de wallet que lo pruebe.
+        // 'refunded' solo sale del pasivo con evidencia de que el dinero volvió.
+        //
+        // Hay dos formas válidas, y durante un tiempo se aceptó solo la primera:
+        //   - `refund.wtxId`         → el movimiento de billetera que acreditó el saldo
+        //   - `refund.bankReference` → el documento del débito en el banco
+        //
+        // La segunda hubo que agregarla por un caso real: los Bs 246 de
+        // ALY-C-1791067601018-KCU3DZ se devolvieron el 2026-10-06 por
+        // transferencia (débito ACH QR, documento 410375644) y el sistema los
+        // seguía contando como pasivo, porque una devolución bancaria no deja
+        // movimiento de billetera. Exigir solo `wtxId` convertía una devolución
+        // real en una deuda eterna.
         $and: [
           payinSettled,
           {
             $or: [
               { status: { $ne: 'refunded' } },
-              { 'refund.wtxId': { $in: [null, ''] } },
-              { 'refund.wtxId': { $exists: false } },
+              {
+                $and: [
+                  { $or: [{ 'refund.wtxId': { $in: [null, ''] } }, { 'refund.wtxId': { $exists: false } }] },
+                  { $or: [{ 'refund.bankReference': { $in: [null, ''] } }, { 'refund.bankReference': { $exists: false } }] },
+                ],
+              },
             ],
           },
         ],

@@ -28,6 +28,7 @@ import User              from '../models/User.js'
 import Sentry            from '../services/sentry.js'
 import { registerAuditTrail } from '../services/stellarService.js'
 import { notify, notifyAdmins, NOTIFICATIONS } from '../services/notifications.js'
+import { recordAdminAction } from '../services/adminAuditService.js'
 import { normalizeAlias } from './aliasController.js'
 
 // Comisión P2P USDC — configurable desde WalletFeeConfig (P3). Arranca en 0
@@ -83,13 +84,25 @@ export async function getOrCreateWalletUSDC(userId, session) {
   const opts = session ? { session } : {}
   let wallet = await WalletUSDC.findOne({ userId }, null, opts)
   if (!wallet) {
+    // Fail-closed por entidad. La WalletUSDC es EXCLUSIVA de SRL y todos los endpoints
+    // que llegan hasta acá ya responden 403 fuera de esa entidad, pero el alta vive en
+    // esta función: sin el guard, un camino nuevo que la llame sin filtrar crearía un
+    // registro que contradice el invariante del modelo (y que el usuario ni puede ver,
+    // porque getUSDCBalance le responde 403). Es lo que pasaba por SEP-24.
+    const owner = await User.findById(userId, 'legalEntity stellarAccount.publicKey', opts).lean()
+
+    if (owner?.legalEntity !== 'SRL') {
+      const err = new Error(`La wallet USDC es exclusiva de usuarios Bolivia (SRL); el usuario ${userId} es ${owner?.legalEntity ?? 'desconocido'}.`)
+      err.status = 403
+      throw err
+    }
+
     // Camino A: la dirección de depósito es la cuenta custodial del PROPIO usuario
     // (Fase 38), NO la wallet de tesorería SRL compartida. Sin memo. Si el usuario
     // ya tiene keypair custodial se usa de inmediato; si no, se provisiona en el
     // flujo de instrucciones de depósito (ver getDepositInstructions).
     // ⚠️ No se provisiona aquí: esta función puede ejecutarse dentro de una sesión
     //    transaccional (convert-bob) y la provisión hace llamadas a Horizon.
-    const owner            = await User.findById(userId, 'stellarAccount.publicKey', opts).lean()
     const custodialAddress = owner?.stellarAccount?.publicKey ?? null
 
     wallet = await WalletUSDC.create([{
@@ -619,6 +632,22 @@ export async function adminConfirmBOBtoUSDC(req, res) {
       )
     }
 
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.bob_usdc.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', bobReservado: bobAmount },
+      after:      { status: 'completed', usdcAcreditado: usdcAmount, newBalanceBOB, newBalanceUSDC },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount, usdcAmount,
+                    bobPerUsdc: wtx.metadata?.bobPerUsdc ?? null },
+    })
+
     await session.commitTransaction()
 
     // 5. Audit trail Stellar — fire and forget
@@ -745,6 +774,21 @@ export async function adminRejectBOBtoUSDC(req, res) {
     await WalletBOB.updateOne({ _id: walletBOB._id }, {
       $inc: { balanceReserved: -bobAmount },
     }, { session })
+
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.bob_usdc.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', bobReservado: bobAmount },
+      after:      { status: 'failed', reservaLiberada: bobAmount },
+      reason:     rejectReason ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount },
+    })
 
     await session.commitTransaction()
 
@@ -1084,6 +1128,22 @@ export async function adminConfirmUSDCtoBOB(req, res) {
       )
     }
 
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.usdc_bob.confirm',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', usdcReservado: usdcAmount },
+      after:      { status: 'completed', bobAcreditado: bobAmount, newBalanceBOB, newBalanceUSDC },
+      reason:     note ?? '',
+      metadata:   { userId: String(wtx.userId), bobAmount, usdcAmount,
+                    bobPerUsdc: wtx.metadata?.bobPerUsdc ?? null },
+    })
+
     await session.commitTransaction()
 
     // 4. Audit trail + notificación — fire and forget
@@ -1177,6 +1237,21 @@ export async function adminRejectUSDCtoBOB(req, res) {
     await WalletUSDC.updateOne({ _id: walletUSDC._id }, {
       $inc: { balanceReserved: -usdcAmount },
     }, { session })
+
+    // Asiento de auditoría DENTRO de la sesión: la conversión y su registro
+    // commitean juntos o abortan juntos (regla de agosto, versión fuerte — el
+    // mismo patrón que freeze/unfreeze). Sin esto, quién movió el dinero de qué
+    // usuario no quedaba en ningún lado (barrido 2026-10-05).
+    await recordAdminAction({
+      req, session,
+      action:     'wallet.conversion.usdc_bob.reject',
+      targetType: 'WalletTransaction',
+      targetId:   wtxId,
+      before:     { status: 'pending', usdcReservado: usdcAmount },
+      after:      { status: 'failed', reservaLiberada: usdcAmount },
+      reason:     rejectReason ?? '',
+      metadata:   { userId: String(wtx.userId), usdcAmount },
+    })
 
     await session.commitTransaction()
 

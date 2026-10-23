@@ -812,7 +812,7 @@ async function startServer() {
     // AWS-2A — Si un scheduler externo (EventBridge→Lambda) dispara los jobs vía
     // POST /api/v1/internal/jobs/:name, NO arrancar los setInterval in-process para
     // evitar doble ejecución. JOBS_EXTERNAL_SCHEDULER!=true → comportamiento histórico.
-    const { isExternalScheduler } = await import('./jobs/jobRegistry.js');
+    const { isExternalScheduler, runJob } = await import('./jobs/jobRegistry.js');
     const externalScheduler = isExternalScheduler();
     if (externalScheduler) {
       console.info('[Server] JOBS_EXTERNAL_SCHEDULER=true — jobs cron los dispara EventBridge→Lambda (setInterval in-process desactivado)');
@@ -860,7 +860,22 @@ async function startServer() {
       const { rosMonitorWallet } = await import('./jobs/rosMonitorWallet.js');
       setTimeout(rosMonitorWallet, 4 * 60 * 1000);              // primera corrida 4 min post-start
       setInterval(rosMonitorWallet, 6 * 60 * 60 * 1000);        // cada 6h
+
+      // Plazo regulatorio PRILI — vencidos y por vencer (solo alerta; escalar
+      // a ASFI es decisión humana). Ver jobs/reclamosVencimientosMonitor.js.
+      const { reclamosVencimientosMonitor } = await import('./jobs/reclamosVencimientosMonitor.js');
+      setTimeout(reclamosVencimientosMonitor, 3 * 60 * 1000);           // primera corrida 3 min post-start
+      setInterval(reclamosVencimientosMonitor, 6 * 60 * 60 * 1000);     // cada 6h
+      console.info('[Server] Reclamos vencimientos monitor programado cada 6h');
       console.info('[Server] ROS/UIF wallet monitor (P4) programado cada 6h');
+
+      // Reconocimiento contra el acceso — una IP tocando muchas cuentas distintas.
+      // Solo avisa; bloquear por IP rompería a los usuarios detrás de un CGNAT.
+      // Ver jobs/monitorAuthAnomalies.js.
+      const { monitorAuthAnomalies } = await import('./jobs/monitorAuthAnomalies.js');
+      setTimeout(monitorAuthAnomalies, 6 * 60 * 1000);            // primera corrida 6 min post-start
+      setInterval(monitorAuthAnomalies, 60 * 60 * 1000);          // cada 1h
+      console.info('[Server] Monitor de anomalías de acceso programado cada 1h');
 
       // Reconciliación QR bancario boliviano — safety net para IPN perdidos
       const { reconcileBankQrPayments } = await import('./jobs/reconcileBankQrPayments.js');
@@ -874,11 +889,40 @@ async function startServer() {
       setInterval(reconcileBecDisbursements, 30 * 60 * 1000);          // cada 30 min
       console.info('[Server] Reconcile BEC disbursements programado cada 30 min');
 
+      // Aviso de retiros parados en 'pending'. El de arriba cubre 'dispatched';
+      // este cubre el estado anterior, donde el paso que falta es humano. Se
+      // agenda AQUI ademas de registrarlo en jobRegistry: registrar sin agendar
+      // deja el job huerfano, que es lo que ya le paso a reconcile-bank-qr.
+      const { alertPendingWithdrawals } = await import('./jobs/alertPendingWithdrawals.js');
+      setTimeout(alertPendingWithdrawals, 8 * 60 * 1000);              // primera corrida 8 min post-start
+      setInterval(alertPendingWithdrawals, 30 * 60 * 1000);            // cada 30 min
+      console.info('[Server] Alerta de retiros pendientes programada cada 30 min');
+
+      // Auditoria del saldo reservado: conversiones detenidas y descuadres.
+      const { auditWalletReserves } = await import('./jobs/auditWalletReserves.js');
+      setTimeout(auditWalletReserves, 9 * 60 * 1000);
+      setInterval(auditWalletReserves, 6 * 60 * 60 * 1000);
+      console.info('[Server] Auditoria de reservas programada cada 6 h');
+
       // Job de actualización automática de tasas BOB/USDT desde Binance P2P
       const { refreshExchangeRates } = await import('./jobs/refreshExchangeRates.js');
       setTimeout(refreshExchangeRates, 90 * 1000);                        // primera corrida 90s post-start
       setInterval(refreshExchangeRates, 30 * 60 * 1000);                  // cada 30 min
       console.info('[Server] Refresh exchange rates job programado cada 30 min');
+
+      // Recarga semanal de las listas de sanciones (OFAC y ONU).
+      //
+      // Se agenda aqui ADEMAS de registrarlo en jobRegistry: sin esto quedaria
+      // huerfano en produccion cuando JOBS_EXTERNAL_SCHEDULER=true apaga los
+      // setInterval y la regla de EventBridge aun no existe. Es el fallo que ya
+      // dejo sin correr a reconcile-bank-qr.
+      //
+      // La primera corrida va a los 5 min para no competir con el arranque, y
+      // es idempotente: si EventBridge tambien la dispara, no pasa nada.
+      const { refreshSanctionsLists } = await import('./jobs/refreshSanctionsLists.js');
+      setTimeout(refreshSanctionsLists, 5 * 60 * 1000);
+      setInterval(refreshSanctionsLists, 7 * 24 * 60 * 60 * 1000);
+      console.info('[Server] Refresh sanctions lists job programado cada 7 dias');
 
       // Red de seguridad del sello on-chain — re-sella operaciones completadas que
       // quedaron sin stellarTxId por un fallo transitorio de Horizon. Garantiza que
@@ -887,7 +931,39 @@ async function startServer() {
       setTimeout(resealAuditTrails, 6 * 60 * 1000);                       // primera corrida 6 min post-start
       setInterval(resealAuditTrails, 30 * 60 * 1000);                     // cada 30 min
       console.info('[Server] Reseal audit trails job programado cada 30 min');
+
     }
+
+    // Red de seguridad de la provisión custodial — completa las cuentas que quedaron con
+    // publicKey en MongoDB pero sin existir on-chain, porque provisionUserKeypair
+    // persiste antes de fondear y se traga el fallo. Sin esto nada las reintenta.
+    //
+    // Corre SIEMPRE in-process, fuera del gate JOBS_EXTERNAL_SCHEDULER, igual que
+    // monitorChannelXLM y por la misma razón: es infraestructura core. De hecho son dos
+    // caras de lo mismo — monitorChannelXLM vigila el XLM del canal y este lo gasta.
+    // Dejarlo dentro del gate lo volvía inalcanzable en producción: el setInterval queda
+    // apagado y crear la regla de EventBridge exige permisos `events:*` que la identidad
+    // del VPS no tiene (por mínimo privilegio, deliberadamente).
+    //
+    // Sigue registrado en jobRegistry para poder dispararlo a mano, y tiene guard de
+    // solapamiento, así que un disparo manual encima de una corrida en curso es inocuo.
+    // Si algún día se agrega la regla de EventBridge, el guard evita el doble trabajo.
+    // Se dispara VÍA runJob y no llamando a la función directo, por dos razones:
+    //
+    //   - Deja constancia en `job_runs`. El resto de los setInterval de este archivo
+    //     invocan la función pelada, así que sus corridas automáticas no se registran
+    //     y un job caído no produce ningún síntoma: los descuadres simplemente dejan
+    //     de detectarse, en silencio. El trigger 'interval' ya existía en el enum del
+    //     modelo y en la firma de runJob, o sea que el diseño lo contemplaba.
+    //
+    //   - runJob NUNCA lanza. Un `setInterval` sobre una función async que rechaza
+    //     (por ejemplo si el `User.find` falla) produce un unhandled rejection; acá
+    //     queda capturado y anotado como corrida fallida.
+    // El módulo lo carga runJob de forma perezosa, igual que los otros 15 registrados.
+    const dispararReconCustodia = () => runJob('reconcile-custodial-accounts', { trigger: 'interval' });
+    setTimeout(dispararReconCustodia, 8 * 60 * 1000);                   // primera corrida 8 min post-start
+    setInterval(dispararReconCustodia, 30 * 60 * 1000);                 // cada 30 min
+    console.info('[Server] Reconcile custodial accounts job programado cada 30 min (siempre in-process)');
 
     // Monitoreo XLM channel account + cuentas corporativas — CRÍTICO
     // Alerta al admin si el saldo XLM cae bajo el umbral. Corre siempre in-process

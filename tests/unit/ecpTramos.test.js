@@ -139,7 +139,29 @@ describe('integración con la cotización canónica', () => {
       providerRate: 1,
     });
     expect(q.tramo).toBe('corporativo');
-    expect(q.plazoLiquidacion).toBe('Hasta 2 días hábiles');
+    // SIN plazo de proveedor en esta llamada, así que cae al tramo del ECP y se
+    // redacta en banda. El texto lo arma ahora plazoPublicado.plazoTexto: el piso
+    // de granularidad visible es el día hábil y nunca es un número desnudo.
+    expect(q.plazoLiquidacion).toBe('hasta 2 días hábiles');
+    expect(q.etaProveedorVerificada).toBe(false);
+  });
+
+  it('el plazo del PROVEEDOR manda sobre el tramo cuando se lo pasa', async () => {
+    // Mismo importe (tramo Corporativo = 2 días hábiles) pero con el plazo real de
+    // Harbor ACH Push (2–5 DAYS, sondeado 2026-10-10): se publica el del proveedor.
+    const { calculateQuote } = await import('../../src/services/quoteCalculator.js');
+    const q = calculateQuote({
+      amount: 90_000,
+      corridor: { alytoCSpread: 6.5, fixedFee: 6 },
+      bobPerUsdc: 11.8626,
+      providerRate: 1,
+      providerEtaMinBusinessDays: 2,
+      providerEtaMaxBusinessDays: 5,
+    });
+    expect(q.plazoLiquidacion).toBe('entre 2 y 5 días hábiles');
+    expect(q.origen).toBe('proveedor');
+    expect(q.excedeTramoEcp).toBe(true);
+    expect(q.etaProveedorVerificada).toBe(true);
   });
 
   it('un importe fuera de tramo no agrega plazo al quote', async () => {

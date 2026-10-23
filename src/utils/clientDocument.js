@@ -20,6 +20,14 @@
  * `ENCRYPTED`. `readDocumentNumber()` es el ÚNICO punto que descifra para lectura;
  * `resolveDocumentNumberStorage()` es el ÚNICO punto que cifra para escritura. Las
  * consultas deben incluir `+identityDocument.numberCiphertext` (es select:false).
+ *
+ * Índice ciego para duplicados: como el ciphertext lleva IV aleatorio y AAD atado al
+ * usuario, dos cuentas con el mismo CI se ven distintas en la base y no hay consulta
+ * que las empareje. Por eso cada escritura deja también
+ * `identityDocument.numberFingerprint`, un HMAC determinista del valor normalizado
+ * (ver [clientIdentityIndex]). Que los dos puntos de escritura ya fueran únicos es
+ * lo que permite añadirlo acá y que lo hereden los cuatro llamadores (registro,
+ * perfil de cumplimiento, webhook de Stripe y SEP-12) sin tocar ninguno.
  */
 
 import {
@@ -30,6 +38,7 @@ import {
   isPiiEncryptionEnabled,
   PII_ENCRYPTED_MARKER,
 } from '../services/piiCrypto.js';
+import { documentFingerprint } from '../services/clientIdentityIndex.js';
 
 const PLACEHOLDER_RE = /pending|verification/i;
 
@@ -83,26 +92,36 @@ export function hasRealDocumentNumber(user) {
  * Construye los campos a persistir para un número de documento entrante, cifrando
  * los valores REALES cuando el cifrado está activo. Único punto de escritura.
  *
- * Devuelve `{ number, numberCiphertext }`:
+ * Devuelve `{ number, numberCiphertext, numberFingerprint }`:
  *   - valor real + flag ON  → `{ number: 'ENCRYPTED', numberCiphertext: 'v1:...' }`
  *   - valor real + flag OFF → `{ number: <valor>, numberCiphertext: null }` (legacy)
  *   - sentinel/vacío        → `{ number: 'PENDING_VERIFICATION', numberCiphertext: null }`
  *
- * Async: hace `ensureDek()` cuando corresponde cifrar.
+ * La huella se calcula para todo valor real, **con el cifrado encendido o apagado**:
+ * no tiene que ver con cómo se guarda el número sino con poder encontrar duplicados.
+ * Queda en `null` si no hay DEK de la que derivar la clave, y en ese caso la
+ * detección de duplicados por documento simplemente no opera (ver [clientIdentityIndex]).
+ *
+ * Async: hace `ensureDek()` cuando corresponde cifrar o calcular la huella.
  * @param {any} userId
  * @param {string} rawValue
- * @returns {Promise<{ number: string, numberCiphertext: string|null }>}
+ * @returns {Promise<{ number: string, numberCiphertext: string|null, numberFingerprint: string|null }>}
  */
 export async function resolveDocumentNumberStorage(userId, rawValue) {
   const v = typeof rawValue === 'string' ? rawValue.trim() : '';
   if (!(v && isRealDocumentNumber(v))) {
-    return { number: v || 'PENDING_VERIFICATION', numberCiphertext: null };
+    return { number: v || 'PENDING_VERIFICATION', numberCiphertext: null, numberFingerprint: null };
   }
+  const numberFingerprint = await documentFingerprint(v);
   if (!isPiiEncryptionEnabled()) {
-    return { number: v, numberCiphertext: null };
+    return { number: v, numberCiphertext: null, numberFingerprint };
   }
   await ensureDek();
-  return { number: PII_ENCRYPTED_MARKER, numberCiphertext: encryptField(v, aadForDocumentNumber(userId)) };
+  return {
+    number:           PII_ENCRYPTED_MARKER,
+    numberCiphertext: encryptField(v, aadForDocumentNumber(userId)),
+    numberFingerprint,
+  };
 }
 
 /**
@@ -114,9 +133,11 @@ export async function resolveDocumentNumberStorage(userId, rawValue) {
  * @returns {Promise<Record<string, any>>}
  */
 export async function applyDocumentNumberToSet($set, userId, rawValue) {
-  const { number, numberCiphertext } = await resolveDocumentNumberStorage(userId, rawValue);
+  const { number, numberCiphertext, numberFingerprint } =
+    await resolveDocumentNumberStorage(userId, rawValue);
   $set['identityDocument.number'] = number;
   $set['identityDocument.numberCiphertext'] = numberCiphertext;
+  $set['identityDocument.numberFingerprint'] = numberFingerprint;
   return $set;
 }
 

@@ -53,8 +53,12 @@ describe('resolveDocumentNumberStorage — escritura', () => {
     expect(isEncrypted(s.numberCiphertext)).toBe(true);
   });
 
-  test('vacío / placeholder → sentinel sin ciphertext', async () => {
-    expect(await resolveDocumentNumberStorage(UID, '')).toEqual({ number: 'PENDING_VERIFICATION', numberCiphertext: null });
+  test('vacío / placeholder → sentinel sin ciphertext ni huella', async () => {
+    // Sin huella a propósito: un sentinel es el mismo texto para medio padrón, así
+    // que su huella agruparía como "mismo documento" a todos los que aún no lo declararon.
+    expect(await resolveDocumentNumberStorage(UID, '')).toEqual({
+      number: 'PENDING_VERIFICATION', numberCiphertext: null, numberFingerprint: null,
+    });
     expect((await resolveDocumentNumberStorage(UID, 'PENDING_VERIFICATION')).numberCiphertext).toBeNull();
   });
 
